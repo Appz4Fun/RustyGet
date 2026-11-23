@@ -6007,6 +6007,135 @@ fn emit_fleet_result(
     1
 }
 
+/// Logs what a fleet checked in the background replied (see [`fleet_append_rpc`]).
+struct FleetLogReply {
+    key: Vec<u8>,
+}
+
+impl RpcEmit for FleetLogReply {
+    fn fleet_result(
+        &mut self,
+        chosen: c_int,
+        complete: bool,
+        reason: &CStr,
+        members: &[NzbgetRsRpcFleetMember<'_>],
+    ) {
+        let mut msg = b"Fleet ".to_vec();
+        msg.extend_from_slice(&self.key);
+        msg.extend_from_slice(format!(" checked in the background: chosen #{chosen}, complete {complete}").as_bytes());
+        if !reason.to_bytes().is_empty() {
+            msg.extend_from_slice(b", ");
+            msg.extend_from_slice(reason.to_bytes());
+        }
+        for m in members {
+            msg.extend_from_slice(b"; ");
+            msg.extend_from_slice(m.name.to_bytes());
+            msg.extend_from_slice(b" ");
+            msg.extend_from_slice(m.status.to_bytes());
+        }
+        host_log(std::ptr::null_mut(), native_dupe_host, MK_INFO, &msg);
+    }
+}
+
+/// `appendfleet` over RPC. A fleet of copies grouped by name (a `dupes:`
+/// key, from the web UI's Add dialog) answers at once with every member
+/// `PROBING` and is checked and added in the background: its check budget is
+/// per copy (a minute each), far longer than a web request may wait. Any
+/// other fleet (a client's key) is checked within the call, as before.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn fleet_append_rpc(
+    host_ctx: *mut c_void,
+    host_cb: DupeHostFn,
+    dupe_key_ptr: *const c_char,
+    category_ptr: *const c_char,
+    priority: c_int,
+    timeout_sec_in: c_int,
+    req_members: *const NzbgetRsRpcFleetReqMember,
+    req_members_len: usize,
+    out: &mut dyn RpcEmit,
+) -> c_int {
+    let key = unsafe { cstr::owned(dupe_key_ptr) };
+    if !is_group_key(&key) || req_members.is_null() || req_members_len == 0 {
+        return unsafe {
+            fleet_append(
+                host_ctx,
+                host_cb,
+                dupe_key_ptr,
+                category_ptr,
+                priority,
+                timeout_sec_in,
+                req_members,
+                req_members_len,
+                out,
+            )
+        };
+    }
+    let category = unsafe { cstr::owned(category_ptr) };
+    let raw = unsafe { std::slice::from_raw_parts(req_members, req_members_len) };
+    // (name, is_url, payload), owned for the background thread
+    let owned: Vec<(std::ffi::CString, c_int, Vec<u8>)> = raw
+        .iter()
+        .map(|m| {
+            let name = crate::cstr::to_cstring(&unsafe { cstr::owned(m.name) });
+            let data = if m.data.is_null() || m.data_len == 0 {
+                Vec::new()
+            } else {
+                unsafe { std::slice::from_raw_parts(m.data as *const u8, m.data_len).to_vec() }
+            };
+            (name, m.is_url, data)
+        })
+        .collect();
+    let entries: Vec<FleetOutEntry> = owned
+        .iter()
+        .enumerate()
+        .map(|(i, (name, _, _))| FleetOutEntry {
+            nzb_id: 0,
+            name: name.to_bytes().to_vec(),
+            rank: 0,
+            alive: -1,
+            status: b"PROBING".to_vec(),
+            same_as: 0,
+            same_as_rank: 0,
+            member_idx: i as i32,
+            reason: Vec::new(),
+        })
+        .collect();
+    let ctx_addr = host_ctx as usize;
+    let spawned = std::thread::Builder::new()
+        .name("fleet-check".to_owned())
+        .spawn(move || {
+            let key_c = crate::cstr::to_cstring(&key);
+            let cat_c = crate::cstr::to_cstring(&category);
+            let req: Vec<NzbgetRsRpcFleetReqMember> = owned
+                .iter()
+                .map(|(name, is_url, data)| NzbgetRsRpcFleetReqMember {
+                    name: name.as_ptr(),
+                    is_url: *is_url,
+                    data: data.as_ptr().cast(),
+                    data_len: data.len(),
+                })
+                .collect();
+            let mut log = FleetLogReply { key: key.clone() };
+            unsafe {
+                fleet_append(
+                    ctx_addr as *mut c_void,
+                    host_cb,
+                    key_c.as_ptr(),
+                    cat_c.as_ptr(),
+                    priority,
+                    timeout_sec_in,
+                    req.as_ptr(),
+                    req.len(),
+                    &mut log,
+                );
+            }
+        });
+    if spawned.is_err() {
+        return emit_fleet_result(out, 0, false, b"SHUTDOWN", &[]);
+    }
+    emit_fleet_result(out, 0, false, b"PROBING", &entries)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn fleet_append(
     host_ctx: *mut c_void,
@@ -6926,7 +7055,9 @@ pub unsafe fn fleet_append(
             let rank_str = rank.to_string().into_bytes();
             let alive_str = if cand.alive >= 0 {
                 Some(
-                    (if cand.dead { 0 } else { cand.alive })
+                    // the share the check measured, also for a copy ranked dead for
+                    // too few alive: any alive article makes a donor, and only 0 is dead
+                    cand.alive
                         .to_string()
                         .into_bytes(),
                 )

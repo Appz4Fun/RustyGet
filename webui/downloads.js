@@ -280,7 +280,7 @@ var Downloads = (new function($)
 
 		var category = group.Category !== '' ? Util.textToHtml(group.Category) : '<span class="none-category">' + I18n.translate('label_none') + '</span>';
 		var backup = DownloadsUI.buildBackupLabel(group);
-		var dupeScore = DownloadsUI.buildDupeScoreLabel(group.DupeScore, DownloadsUI.shownHealth(group));
+		var dupeScore = DownloadsUI.buildDupeScoreLabel(group.DupeScore, DownloadsUI.shownHealth(group), group.Parameters);
 
 		if (!UISettings.miniTheme)
 		{
@@ -1020,6 +1020,9 @@ var DownloadsUI = (new function($)
 	// The health a download was judged on: the projection over the articles tried
 	// (DupeProjected, or DupeParked once it was kept as a donor) when it was judged
 	// from a sample, else its Health, which counts every untried article as good.
+	// The one health every list, dialog and panel shows (permille). For a copy
+	// that has not fetched an article yet, the health check's sample (DupeHealth,
+	// DupeAlive: the better of the two, as any alive article makes a donor).
 	this.shownHealth = function(item)
 	{
 		var projected = DownloadsUI.parameterValue(item.Parameters, 'DupeProjected') ||
@@ -1028,7 +1031,27 @@ var DownloadsUI = (new function($)
 		{
 			return Math.round(parseFloat(projected) * 10);
 		}
-		return item.Health;
+		if ((item.SuccessArticles || 0) + (item.FailedArticles || 0) > 0)
+		{
+			return item.Health;
+		}
+		var best = DownloadsUI.probedAlive(item.Parameters);
+		return best >= 0 ? best : item.Health;
+	}
+
+	// The alive share the health check measured (permille), or -1 when none.
+	this.probedAlive = function(parameters)
+	{
+		var best = -1;
+		['DupeHealth', 'DupeAlive'].forEach(function(name)
+		{
+			var percent = parseFloat(DownloadsUI.parameterValue(parameters, name));
+			if (!isNaN(percent))
+			{
+				best = Math.max(best, Math.round(Math.min(Math.max(percent, 0), 100) * 10));
+			}
+		});
+		return best;
 	}
 
 	this.healthText = function(item)
@@ -1044,23 +1067,34 @@ var DownloadsUI = (new function($)
 	// after its health check (DupeParked); dead when nothing of it is alive.
 	this.buildDonorLabel = function(parameters)
 	{
-		var parked = DownloadsUI.parameterValue(parameters, 'DupeParked') ||
-			DownloadsUI.parameterValue(parameters, 'DupeAlive');
-		if (parked === '' || isNaN(parseFloat(parked)))
+		var parked = parseFloat(DownloadsUI.parameterValue(parameters, 'DupeParked'));
+		var probed = DownloadsUI.probedAlive(parameters);
+		if (isNaN(parked) && probed < 0)
 		{
 			return '';
 		}
-		var alive = parseFloat(parked);
+		// any alive article makes a donor: dead only when nothing measured is alive
+		var alive = Math.max(isNaN(parked) ? -1 : parked, probed / 10);
 		return alive > 0 ?
 			' <span class="label label-warning">' + Util.textToHtml(I18n.translate('label_donor_alive', alive.toFixed(1))) + '</span>' :
 			' <span class="label label-important">' + Util.textToHtml(I18n.translate('label_donor_dead')) + '</span>';
 	}
 
-	this.buildDupeScoreLabel = function(dupeScore, health)
+	this.buildDupeScoreLabel = function(dupeScore, health, parameters)
 	{
 		if (!dupeScore)
 		{
 			return '';
+		}
+		var rank = DownloadsUI.parameterValue(parameters, 'DupeFleet');
+		if (rank !== '')
+		{
+			// a fleet member: its place in the fleet and the health it was judged
+			// on, not a score that only orders the copies
+			var shown = Math.floor(health) / 10;
+			var fcls = shown >= 95 ? 'label-success' : shown >= 50 ? 'label-warning' : 'label-important';
+			return ' <span class="label ' + fcls + '" title="' + Util.textToAttr(I18n.translate('desc_fleet_rank')) + '">' +
+				Util.textToHtml(I18n.translate('label_fleet_rank', rank, shown.toFixed(1))) + '</span>';
 		}
 		var percent = Math.floor(health) / 10;
 		var cls = percent >= 95 ? 'label-success' : percent >= 85 ? 'label-warning' : 'label-important';

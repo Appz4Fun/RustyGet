@@ -981,11 +981,20 @@ pub fn next_group_score(scores: &[i32]) -> i32 {
 /// them gets the DupeKey `dupes:<normalized name>` and a DupeScore in the order
 /// they came, so the duplicate check below keeps one downloading and the rest
 /// as backups, and TwinCheck labels each backup a twin or an alt.
+///
+/// Strict, so it never stops or deletes another release: the names must give
+/// the same strict group name (resolution, source, edition and group kept,
+/// see [`crate::releasename::group_name`]), and a copy joins only copies in
+/// the same category and the same DupeMode that carry no DupeKey of their own
+/// (a user's or a client's key is never replaced). The queued copies move to
+/// the front only when `move_to_top` and a real fleet forms (another copy of
+/// it queued).
 #[cfg(unix)]
 pub(crate) fn join_copy_group_host(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     dq_ptr: usize,
     nzb: &mut crate::queuesubsys_host::NzbSnap,
+    move_to_top: bool,
 ) {
     if !nzb.dupe_key.is_empty() || !joins_copy_group(host, nzb) {
         return;
@@ -996,8 +1005,13 @@ pub(crate) fn join_copy_group_host(
     }
     // (item, already in the group)
     let mut siblings: Vec<(crate::queuesubsys_host::NzbSnap, bool)> = Vec::new();
+    let (category, mode) = (nzb.category.clone(), nzb.dupe_mode);
     let mut consider = |item: crate::queuesubsys_host::NzbSnap| {
-        if item.ptr == nzb.ptr || !joins_copy_group(host, &item) {
+        if item.ptr == nzb.ptr
+            || !joins_copy_group(host, &item)
+            || item.category != category
+            || item.dupe_mode != mode
+        {
             return;
         }
         if item.dupe_key.eq_ignore_ascii_case(&key) {
@@ -1052,11 +1066,19 @@ pub(crate) fn join_copy_group_host(
             nzb.dupe_score,
         );
     }
-    // the group goes to the front of the queue: the copy that downloads first
-    for (sib, _) in &siblings {
-        let queued = (0..host.queue_len(dq_ptr)).any(|i| host.queue_at(dq_ptr, i) == sib.ptr);
-        if queued && !sib.deleting && sib.delete_status == DeleteStatus::None {
-            host.dq_edit_entry(dq_ptr, sib.id, crate::queuesubsys_host::EA_GROUP_MOVE_TOP, None);
+    // a real fleet (another copy of it queued) goes to the front of the queue
+    let queued_ids: Vec<i32> = siblings
+        .iter()
+        .filter(|(sib, _)| {
+            !sib.deleting
+                && sib.delete_status == DeleteStatus::None
+                && (0..host.queue_len(dq_ptr)).any(|i| host.queue_at(dq_ptr, i) == sib.ptr)
+        })
+        .map(|(sib, _)| sib.id)
+        .collect();
+    if move_to_top {
+        for id in &queued_ids {
+            host.dq_edit_entry(dq_ptr, *id, crate::queuesubsys_host::EA_GROUP_MOVE_TOP, None);
         }
     }
     let mut msg = b"Grouping ".to_vec();
@@ -1090,21 +1112,23 @@ pub(crate) fn join_queued_copy_groups_host(
     if dq_ptr == 0 || !host.opts().dupe_check {
         return;
     }
-    // from the end: the last copy joins the earlier ones, which are scored in
-    // queue order, so the copy queued first keeps the top score
-    let mut i = host.queue_len(dq_ptr);
-    while i > 0 {
-        i -= 1;
-        if i >= host.queue_len(dq_ptr) {
-            continue;
-        }
-        let qp = host.queue_at(dq_ptr, i);
+    // by id, from the end: the last copy joins the earlier ones, which are
+    // scored in queue order, so the copy queued first keeps the top score; the
+    // queue is never reordered after a restart
+    let ids: Vec<i32> = (0..host.queue_len(dq_ptr))
+        .rev()
+        .map(|i| host.queue_at(dq_ptr, i))
+        .filter(|p| p.is_some())
+        .map(|p| host.nzb_snap(p, false).id)
+        .collect();
+    for id in ids {
+        let qp = host.queue_find_by_id(dq_ptr, id);
         if qp.is_none() {
             continue;
         }
         let mut item = host.nzb_snap(qp, false);
         if item.dupe_key.is_empty() && !item.deleting && item.delete_status == DeleteStatus::None {
-            join_copy_group_host(host, dq_ptr, &mut item);
+            join_copy_group_host(host, dq_ptr, &mut item, false);
         }
     }
 }
@@ -1125,7 +1149,7 @@ pub(crate) fn nzb_found_host(
     dbg.extend_from_slice(&nzb.name);
     host.log(crate::queuesubsys_host::MK_DEBUG, &dbg);
 
-    join_copy_group_host(host, dq_ptr, &mut nzb);
+    join_copy_group_host(host, dq_ptr, &mut nzb, true);
 
     if nzb.kind == crate::queuesubsys_host::NK_NZB && nzb.dupe_mode != DupeMode::Force {
         if let Some(downloaded) = downloaded_on_disk_host(host, &opts, dq_ptr, &nzb) {
@@ -1609,6 +1633,63 @@ pub(crate) fn tried_delete_status(
     }
 }
 
+/// Whether a download belongs to a fleet: copies grouped by name (a `dupes:`
+/// key) or sent together (`appendfleet`, the `DupeFleet` rank). A plain key a
+/// user or client set makes no fleet: a failed download of it stays FAILURE.
+#[cfg(unix)]
+pub(crate) fn is_fleet_member(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb: &crate::queuesubsys_host::NzbSnap,
+) -> bool {
+    !nzb.dupe_key.is_empty()
+        && (crate::dupesearch_coord::is_group_key(&nzb.dupe_key)
+            || host.nzb_get_param(nzb.ptr, b"DupeFleet").is_some())
+}
+
+/// The other copies of a download's fleet that can still complete it: queued
+/// ones, and backups in history not yet tried (DUPE, not kept as a parked
+/// donor, not found dead). None left means the fleet failed: its last copy
+/// stays FAILURE/HEALTH instead of being kept as a donor.
+#[cfg(unix)]
+pub(crate) fn live_fleet_copies(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    dq_ptr: usize,
+    nzb: &crate::queuesubsys_host::NzbSnap,
+) -> usize {
+    let mut live = 0usize;
+    for i in 0..host.queue_len(dq_ptr) {
+        let qp = host.queue_at(dq_ptr, i);
+        if qp.is_none() || qp == nzb.ptr {
+            continue;
+        }
+        let q = host.nzb_snap(qp, false);
+        if q.kind == crate::queuesubsys_host::NK_NZB
+            && !q.deleting
+            && q.delete_status == DeleteStatus::None
+            && q.dupe_key.eq_ignore_ascii_case(&nzb.dupe_key)
+        {
+            live += 1;
+        }
+    }
+    for i in 0..host.history_len(dq_ptr) {
+        let hi = host.history_at(dq_ptr, i);
+        if hi.kind != crate::queuesubsys_host::HK_NZB || hi.nzb().is_none() || hi.nzb() == nzb.ptr {
+            continue;
+        }
+        let h = host.nzb_snap(hi.nzb(), false);
+        if !h.dupe_key.eq_ignore_ascii_case(&nzb.dupe_key) {
+            continue;
+        }
+        if h.is_dupe_success && h.delete_status == DeleteStatus::None {
+            return 0; // the fleet is done
+        }
+        if tried_delete_status(host, &h) == DeleteStatus::Dupe && alive_permille_host(host, h.ptr) != 0 {
+            live += 1;
+        }
+    }
+    live
+}
+
 /// The share of tried articles that arrived, in percent with one decimal.
 pub fn arrived_percent(success: i32, failed: i32) -> f64 {
     let tried = i64::from(success.max(0)) + i64::from(failed.max(0));
@@ -1639,39 +1720,13 @@ pub(crate) fn keep_as_donor_host(
     if nzb.kind != crate::queuesubsys_host::NK_NZB
         || nzb.is_dupe_success
         || nzb.delete_status != DeleteStatus::Health
-        || nzb.dupe_key.is_empty()
+        || !is_fleet_member(host, &nzb)
     {
         return;
     }
-    let mut others = 0usize;
-    for i in 0..host.queue_len(dq_ptr) {
-        let qp = host.queue_at(dq_ptr, i);
-        if qp.is_none() || qp == nzb.ptr {
-            continue;
-        }
-        let q = host.nzb_snap(qp, false);
-        if q.kind == crate::queuesubsys_host::NK_NZB
-            && !q.deleting
-            && q.dupe_key.eq_ignore_ascii_case(&nzb.dupe_key)
-        {
-            others += 1;
-        }
-    }
-    for i in 0..host.history_len(dq_ptr) {
-        let hi = host.history_at(dq_ptr, i);
-        if hi.kind != crate::queuesubsys_host::HK_NZB || hi.nzb().is_none() || hi.nzb() == nzb.ptr {
-            continue;
-        }
-        let h = host.nzb_snap(hi.nzb(), false);
-        if !h.dupe_key.eq_ignore_ascii_case(&nzb.dupe_key) {
-            continue;
-        }
-        if h.is_dupe_success && h.delete_status == DeleteStatus::None {
-            return; // the fleet is done
-        }
-        others += 1;
-    }
+    let others = live_fleet_copies(host, dq_ptr, &nzb);
     if others == 0 {
+        // the last copy standing: the fleet failed, and shows it
         return;
     }
     let alive = host
@@ -1681,7 +1736,12 @@ pub(crate) fn keep_as_donor_host(
             arrived_percent(nzb.current_success_articles, nzb.current_failed_articles)
         })
         .clamp(0.0, 100.0);
-    let alive_text = format!("{alive:.1}");
+    // "0" as the fleet writes a dead copy, so every reader of DupeAlive agrees
+    let alive_text = if alive <= 0.0 {
+        "0".to_string()
+    } else {
+        format!("{alive:.1}")
+    };
     host.nzb_set_delete_status(nzb.ptr, DeleteStatus::Dupe);
     host.nzb_set_param(nzb.ptr, PARKED_PARAM, Some(alive_text.as_bytes()));
     host.nzb_set_param(nzb.ptr, b"DupeAlive", Some(alive_text.as_bytes()));

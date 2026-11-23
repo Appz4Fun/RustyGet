@@ -1021,6 +1021,13 @@ impl crate::xmlrpc_format::RpcEmit for FleetReply {
     }
 }
 
+/// Whether a fleet call from NzbDir did nothing with its copies, so they go
+/// back for the next scan: nothing was added and the reply says the key was
+/// busy, the program stops, or no member came through.
+pub fn fleet_never_ran(reason: &[u8], any_added: bool) -> bool {
+    !any_added && matches!(reason, b"KEY_BUSY" | b"SHUTDOWN" | b"NO_MEMBERS" | b"")
+}
+
 /// Sends copies dropped into NzbDir to `appendfleet` on a thread of its own
 /// (it adds each copy back through this scanner, which must not wait for
 /// itself). The file of each copy that was added is removed afterwards: the
@@ -1028,9 +1035,12 @@ impl crate::xmlrpc_format::RpcEmit for FleetReply {
 fn spawn_nzbdir_fleet(
     key: Vec<u8>,
     category: Vec<u8>,
-    copies: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
+    copies: Vec<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)>,
     env: NzbgetRsScannerEnv,
 ) {
+    // (renamed .queued file, original name): put back for the next scan when
+    // the fleet never ran, so no copy is stranded
+    let restore: Vec<(Vec<u8>, Vec<u8>)> = copies.iter().map(|c| (c.2.clone(), c.3.clone())).collect();
     let spawned = std::thread::Builder::new()
         .name("nzbdir-fleet".to_owned())
         .spawn(move || {
@@ -1070,6 +1080,13 @@ fn spawn_nzbdir_fleet(
                         }
                     }
                 }
+                if fleet_never_ran(&reply.reason, reply.added.iter().any(|(_, id, _)| *id > 0)) {
+                    // the key was busy or the program stops: the next scan
+                    // sends these copies again
+                    for c in &copies {
+                        let _ = std::fs::rename(crate::fsops::path(&c.2), crate::fsops::path(&c.3));
+                    }
+                }
                 let mut msg = b"Fleet ".to_vec();
                 msg.extend_from_slice(&key);
                 msg.extend_from_slice(b" from NzbDir: ");
@@ -1094,7 +1111,9 @@ fn spawn_nzbdir_fleet(
             }
         });
     if spawned.is_err() {
-        // the copies keep their .queued files and can be added again by hand
+        for (queued, original) in restore {
+            let _ = std::fs::rename(crate::fsops::path(&queued), crate::fsops::path(&original));
+        }
     }
 }
 
@@ -1548,7 +1567,7 @@ impl NzbgetRsScanner {
         for members in fleets {
             let first = &pending[members[0]];
             let (category, key) = (first.category.clone(), first.key.clone());
-            let mut copies: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = Vec::new();
+            let mut copies: Vec<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)> = Vec::new();
             for &i in &members {
                 let p = &pending[i];
                 let Ok(data) = std::fs::read(crate::fsops::path(&p.full_filename)) else {
@@ -1567,7 +1586,7 @@ impl NzbgetRsScanner {
                 if !renamed {
                     continue;
                 }
-                copies.push((p.base_filename.clone(), data, queued_name));
+                copies.push((p.base_filename.clone(), data, queued_name, p.full_filename.clone()));
             }
             if copies.is_empty() {
                 continue;
@@ -2404,6 +2423,12 @@ mod tests {
         assert_eq!(fleets, vec![vec![0]]);
         assert!(single.is_empty());
         assert_eq!(fleet_key_for(b"X.nzb", b".zip"), None);
+        // finding 8: a busy key or a stop puts the copies back for the next scan
+        assert!(fleet_never_ran(b"KEY_BUSY", false));
+        assert!(fleet_never_ran(b"SHUTDOWN", false));
+        assert!(fleet_never_ran(b"", false));
+        assert!(!fleet_never_ran(b"KEY_BUSY", true));
+        assert!(!fleet_never_ran(b"ALL_DEAD", false));
     }
 
     #[test]

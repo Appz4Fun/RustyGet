@@ -245,7 +245,7 @@ var History = (new function($)
 			(hist.Category !== '' ? Util.textToHtml(hist.Category) : '<span class="none-category">' + I18n.translate('label_none') + '</span>')
 			: '';
 		var backup = hist.Kind === 'NZB' ? DownloadsUI.buildBackupLabel(hist) : '';
-		var dupeScore = hist.Kind === 'NZB' ? DownloadsUI.buildDupeScoreLabel(hist.DupeScore, DownloadsUI.shownHealth(hist)) +
+		var dupeScore = hist.Kind === 'NZB' ? DownloadsUI.buildDupeScoreLabel(hist.DupeScore, DownloadsUI.shownHealth(hist), hist.Parameters) +
 			DownloadsUI.buildTwinGroupLabel(hist.Parameters, hist.Status.indexOf('DELETED/') !== 0) +
 			(hist.Status === 'DELETED/DUPE' ? DownloadsUI.buildDonorLabel(hist.Parameters) : '') : '';
 

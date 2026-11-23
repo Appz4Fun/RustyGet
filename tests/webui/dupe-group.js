@@ -34,15 +34,19 @@ check('normalize matches the daemon (releasename.rs vectors)', () => {
 
 check('copy suffixes are stripped', () => {
   assert.equal(DupeGroup.groupName(BASE), WANT);
-  for (const suffix of ['.nzb', ' (1).nzb', '(12).nzb', '_1.nzb', '_14.nzb', '-3.nzb', '.2.nzb',
-    '.nzb.queued', '.nzb.2.queued', '_5.nzb.2.queued', '_1 (1).nzb', '.nzb.nzb']) {
+  for (const suffix of ['.nzb', ' (1).nzb', '(12).nzb', '_1.nzb', '_14.nzb', '_3434.nzb', '-3.nzb', '.2.nzb',
+    '.nzb.queued', '.nzb.2.queued', '_5.nzb.2.queued', '_1 (1).nzb', '.nzb.nzb', ' (12)', '_1.nzb.2.queued']) {
     assert.equal(DupeGroup.groupName(BASE + suffix), WANT, suffix);
   }
   assert.equal(DupeGroup.groupKey('X.2024.1080p-GRP_2.nzb'), 'dupes:x.2024.1080p.grp');
 });
 
-check('digits that may be the name itself stay', () => {
+check('numbers that are part of a title stay (the same cases as releasename.rs)', () => {
   for (const [name, kept] of [
+    ['Iron-Man-3', 'Iron-Man-3'],
+    ['Iron-Man-3.nzb', 'Iron-Man-3'],
+    ['Spider-Man.2', 'Spider-Man.2'],
+    ['Toy-Story-3', 'Toy-Story-3'],
     ['Movie.Part.2', 'Movie.Part.2'],
     ['Movie.2024.1080p.DDP5.1', 'Movie.2024.1080p.DDP5.1'],
     ['Show.S01E01-02', 'Show.S01E01-02'],
@@ -52,12 +56,36 @@ check('digits that may be the name itself stay', () => {
     ['Movie.2024.1080p-EPSiLON2.nzb', 'Movie.2024.1080p-EPSiLON2'],
     ['Movie_2', 'Movie_2'],
     ['Movie.2024', 'Movie.2024'],
+    ['Some-Group_2', 'Some-Group_2'],
     ['Movie.2024.1080p-GRP_2', 'Movie.2024.1080p-GRP'],
     ['Movie.2024.1080p-GRP_2 (3)', 'Movie.2024.1080p-GRP'],
-    ['Movie.2024.1080p-GRP.1234', 'Movie.2024.1080p-GRP.1234'],
+    ['Movie.2024.1080p-GRP.1234', 'Movie.2024.1080p-GRP'],
+    ['Movie.2024.1080p-GRP-2', 'Movie.2024.1080p-GRP'],
+    ['[Erai-raws] Show - 01 [1080p] (1)', '[Erai-raws] Show - 01 [1080p]'],
   ]) assert.equal(DupeGroup.stripCopySuffix(name), kept, name);
   assert.equal(DupeGroup.groupKey(''), '');
   assert.equal(DupeGroup.groupKey('(1).nzb'), '');
+});
+
+check('different releases never share a group', () => {
+  for (const [a, b] of [
+    ['Dune.2021.BluRay.1080p.TrueHD.Atmos.7.1.AVC.REMUX-FraMeSToR.nzb', 'Dune.Part.Two.2024.BluRay.1080p.TrueHD.Atmos.7.1.AVC.REMUX-FraMeSToR.nzb'],
+    ['[Erai-raws] Show - 01 [1080p].nzb', '[Erai-raws] Show - 01 [720p].nzb'],
+    ['Movie.2024.1080p.WEB-DL.x264-GRP.nzb', 'Movie.2024.REPACK.1080p.WEB-DL.x264-GRP.nzb'],
+    ['Movie.2024.1080p.WEB-DL.x264-GRP.nzb', 'Movie.2024.1080p.WEB-DL.x264-OTHER.nzb'],
+    ['Iron-Man-3.nzb', 'Iron-Man.nzb'],
+    ['Spider-Man.2.nzb', 'Spider-Man.nzb'],
+    ['Toy-Story-3.nzb', 'Toy-Story.nzb'],
+  ]) assert.notEqual(DupeGroup.groupKey(a), DupeGroup.groupKey(b), a + ' vs ' + b);
+});
+
+check('only nzb-files are grouped', () => {
+  const plan = DupeGroup.plan([
+    { name: `${BASE}.zip`, content: 'a', dupekey: '' },
+    { name: `${BASE}_1.zip`, content: 'b', dupekey: '' },
+  ], { enabled: true, force: false });
+  assert.deepEqual(plan.fleets, []);
+  assert.deepEqual(plan.singles, [0, 1]);
 });
 
 const ON = { enabled: true, force: false };

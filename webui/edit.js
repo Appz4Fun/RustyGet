@@ -100,28 +100,8 @@ var DetailsPanel = (new function($)
 	// in rust/src/dupecoord.rs reads them).
 	function healthPermille(item)
 	{
-		// judged on a sample (DupeProjected, or DupeParked once kept as a donor):
-		// that, not a Health that counts every untried article as good
-		var shown = DownloadsUI.shownHealth(item);
-		if (shown !== item.Health)
-		{
-			return shown;
-		}
-		if (item.SuccessArticles + item.FailedArticles > 0)
-		{
-			return item.Health;
-		}
-		var best = -1;
-		var keys = ['DupeHealth', 'DupeAlive'];
-		for (var i = 0; i < keys.length; i++)
-		{
-			var percent = parseFloat(param(item, keys[i]));
-			if (!isNaN(percent))
-			{
-				best = Math.max(best, Math.round(Math.min(Math.max(percent, 0), 100) * 10));
-			}
-		}
-		return best >= 0 ? best : item.Health;
+		// the one health every view shows (DownloadsUI.shownHealth)
+		return DownloadsUI.shownHealth(item);
 	}
 
 	// below the critical health a copy cannot be repaired, whatever its value
@@ -186,8 +166,9 @@ var DetailsPanel = (new function($)
 			html += tile(I18n.translate('details_files'), String(item.FileCount),
 				I18n.translate('details_files_left', String(item.RemainingFileCount), String(item.RemainingParCount)));
 		}
-		html += tile(I18n.translate('details_health'), formatPercent(item.Health),
-			I18n.translate('details_critical', formatPercent(item.CriticalHealth)), healthClass(item.Health, item.CriticalHealth));
+		var shownHealth = DownloadsUI.shownHealth(item);
+		html += tile(I18n.translate('details_health'), formatPercent(shownHealth),
+			I18n.translate('details_critical', formatPercent(item.CriticalHealth)), healthClass(shownHealth, item.CriticalHealth));
 		html += tile(I18n.translate('details_articles'), String(item.TotalArticles),
 			I18n.translate('details_complete', completion(item)), '',
 			item.ServerStats.length > 0 ? { id: prefix + '_ServStats', tab: prefix + '_ServStatsTab',
@@ -2138,8 +2119,8 @@ var HistoryEditDialog = (new function($)
 			if (hist.DeleteStatus === '' || hist.DeleteStatus === 'HEALTH')
 			{
 				status = '<span class="label label-status ' +
-					(hist.Health === 1000 ? 'label-success' : hist.Health >= hist.CriticalHealth ? 'label-warning' : 'label-important') +
-					'">' + I18n.translate('status_health', Math.floor(hist.Health / 10)) + '</span>';
+					(DownloadsUI.shownHealth(hist) === 1000 ? 'label-success' : DownloadsUI.shownHealth(hist) >= hist.CriticalHealth ? 'label-warning' : 'label-important') +
+					'">' + DownloadsUI.healthText(hist) + '</span>';
 			}
 
 			if (hist.MarkStatus !== 'NONE')

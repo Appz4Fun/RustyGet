@@ -211,6 +211,8 @@ var DupeGroup = (new function()
 		return out;
 	};
 
+	// releasename.rs ends_in_group_tag: the last word ends in "-" and a word of
+	// letters and digits with a letter
 	function endsInGroupTag(text)
 	{
 		var word = text;
@@ -224,10 +226,19 @@ var DupeGroup = (new function()
 		}
 		var dash = word.lastIndexOf('-');
 		if (dash < 0) return false;
-		var tail = word.substr(dash + 1);
-		for (var k = 0; k < tail.length; k++)
+		var tag = word.substr(dash + 1);
+		return tag.length > 0 && /^[A-Za-z0-9]+$/.test(tag) && /[A-Za-z]/.test(tag);
+	}
+
+	// releasename.rs has_release_markers: a year, a resolution or SxxEyy as a word
+	function hasReleaseMarkers(text)
+	{
+		var words = String(text).split(/[^A-Za-z0-9]+/);
+		for (var i = 0; i < words.length; i++)
 		{
-			if (isAlpha(tail[k])) return true;
+			var w = lower(words[i]);
+			if (/^(19|20)\d\d$/.test(w) || /^\d{3,4}[pi]$/.test(w) || /^(4k|8k|uhd)$/.test(w) ||
+				/^s\d{1,3}(e\d{1,4})+$/.test(w)) return true;
 		}
 		return false;
 	}
@@ -242,7 +253,7 @@ var DupeGroup = (new function()
 			before = s.length;
 			if (endsIcase(s, '.queued')) s = s.substr(0, s.length - 7);
 			d = trailingDigits(s);
-			if (d > 0 && d <= 3 && s.length > d + 1 && s[s.length - d - 1] === '.')
+			if (d > 0 && s.length > d + 1 && s[s.length - d - 1] === '.')
 			{
 				var head = s.substr(0, s.length - d - 1);
 				if (endsIcase(head, '.nzb')) s = head;
@@ -257,32 +268,54 @@ var DupeGroup = (new function()
 			{
 				var inner = s.substr(0, s.length - 1);
 				d = trailingDigits(inner);
-				if (d > 0 && d <= 3 && inner.length > d && inner[inner.length - d - 1] === '(')
+				if (d > 0 && inner.length > d && inner[inner.length - d - 1] === '(')
 				{
 					s = inner.substr(0, inner.length - d - 1);
 					while (s.length && isSpace(s[s.length - 1])) s = s.substr(0, s.length - 1);
 				}
 			}
 			d = trailingDigits(s);
-			if (d > 0 && d <= 3 && s.length > d + 1)
+			if (d > 0 && s.length > d + 1)
 			{
-				var restLen = s.length - d - 1;
-				if ('_-.'.indexOf(s[restLen]) > -1 && endsInGroupTag(s.substr(0, restLen))) s = s.substr(0, restLen);
+				var rest = s.substr(0, s.length - d - 1);
+				if ('_-.'.indexOf(s[rest.length]) > -1 && endsInGroupTag(rest) && hasReleaseMarkers(rest)) s = rest;
 			}
 			if (s.length === before || !s.length) break;
 		}
 		return s;
 	};
 
+	// releasename.rs group_name: lowercase, every run of separators one dot,
+	// nothing else dropped (resolution and bracketed tags stay)
 	this.groupName = function(name)
 	{
-		return this.normalize(this.stripCopySuffix(name));
+		var text = this.stripCopySuffix(name);
+		var out = '', separator = false;
+		for (var i = 0; i < text.length; i++)
+		{
+			var ch = text[i];
+			if (isSpace(ch) || "._-()[]{}+,'".indexOf(ch) > -1)
+			{
+				separator = true;
+				continue;
+			}
+			if (separator && out.length) out += '.';
+			separator = false;
+			out += lower(ch);
+		}
+		return out;
 	};
 
 	this.groupKey = function(name)
 	{
 		var g = this.groupName(name);
 		return g ? GROUP_KEY_PREFIX + g : '';
+	};
+
+	// only nzb-files are grouped (as the NzbDir scanner): archives go the plain way
+	this.isNzbName = function(name)
+	{
+		return /\.nzb(\.\d+)?(\.queued)?$/i.test(String(name));
 	};
 
 	/*
@@ -351,7 +384,7 @@ var DupeGroup = (new function()
 		for (i = 0; i < kept.length; i++)
 		{
 			var idx = kept[i];
-			var g = this.groupName(files[idx].name);
+			var g = this.isNzbName(files[idx].name) ? this.groupName(files[idx].name) : '';
 			if (!g)
 			{
 				groups.push({ name: '', members: [idx] });

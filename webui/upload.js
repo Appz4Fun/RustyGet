@@ -47,6 +47,7 @@ var Upload = (new function($)
 	// one fleet per group of copies of a release (docs/DROP_AS_FLEET.md)
 	var jobs = [];
 	var jobIndex = 0;
+	var droppedCount = 0;
 	var contents = [];
 
 	this.init = function()
@@ -110,7 +111,7 @@ var Upload = (new function($)
 			inp.addEventListener("change", fileSelectHandler, false);
 		}
 		$('#AddDialog_Scan').click(scan);
-		$('#AddDialog_Fleet, #AddDialog_DupeForce').change(updateFleetPlan);
+		$('#AddDialog_Fleet, #AddDialog_DupeForce, #AddDialog_Paused, #AddDialog_AutoCategory').change(updateFleetPlan);
 		
 		AddParamDialog.init();
 	}
@@ -241,7 +242,10 @@ var Upload = (new function($)
 
 	function fleetMode()
 	{
-		return { enabled: $('#AddDialog_Fleet').is(':checked'), force: $('#AddDialog_DupeForce').is(':checked') };
+		// a fleet has no per-copy options: with Add paused or Auto-category the
+		// files go in on their own, honouring them, as before
+		var plain = $('#AddDialog_Paused').is(':checked') || $('#AddDialog_AutoCategory').is(':checked');
+		return { enabled: $('#AddDialog_Fleet').is(':checked') && !plain, force: $('#AddDialog_DupeForce').is(':checked') };
 	}
 
 	function planFiles(withContents)
@@ -263,7 +267,8 @@ var Upload = (new function($)
 			var fleet = plan.fleets[f];
 			fleet.members = fleet.members.filter(function(m)
 			{
-				if (infos[m].password === '') return true;
+				// a password or a DupeScore of its own: the file goes in on its own
+				if (infos[m].password === '' && !infos[m].dupescore) return true;
 				plan.singles.push(m);
 				return false;
 			});
@@ -420,6 +425,7 @@ var Upload = (new function($)
 			return;
 		}
 		contents = [];
+		droppedCount = 0;
 		readAll(0);
 	}
 
@@ -452,10 +458,14 @@ var Upload = (new function($)
 		jobIndex = 0;
 		for (var d = 0; d < plan.dropped.length; d++)
 		{
-			// an exact copy of another file: nothing to send
+			// an exact copy of another file: nothing to send, and the dialog says so
 			var no = plan.dropped[d].index;
+			var same = plan.dropped[d].sameAs;
 			filesSuccess.push(files[no]);
 			setFileIcon(no, 'success');
+			$('#AddDialog_File' + no).append(' <span class="add-dialog-dropped">' +
+				Util.textToHtml(I18n.translate('add_dialog_exact_copy', infos[same].name + infos[same].ext)) + '</span>');
+			droppedCount++;
 		}
 		var fleetStart = {};
 		for (var f = 0; f < plan.fleets.length; f++)
@@ -749,7 +759,12 @@ var Upload = (new function($)
 		else
 		{
 			$AddDialog.modal('hide');
-			if (index > 0)
+			if (droppedCount > 0)
+			{
+				// exact copies of another file were not sent: say so
+				PopupNotification.show('#Notif_AddFilesDropped');
+			}
+			else if (index > 0)
 			{
 				PopupNotification.show('#Notif_AddFiles');
 			}

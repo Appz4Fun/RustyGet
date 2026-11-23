@@ -35,27 +35,30 @@ flowchart LR
 
 ### The name rule
 
-One normalizer, in Rust and mirrored exactly in JavaScript:
-`releasename::group_name` (`rust/src/releasename.rs`) is `releasename::normalize`
-of the name without its copy suffix (`releasename::strip_copy_suffix`), and
-`DupeGroup.groupName` (`webui/dupegroup.js`) is the same code. The same cases run
-in the Rust unit test `copy_suffixes_strip_only_after_a_group_tag` and in
-`tests/webui/dupe-group.js`.
+One strict rule, in Rust and mirrored exactly in JavaScript:
+`releasename::group_name` (`rust/src/releasename.rs`) and
+`DupeGroup.groupName` (`webui/dupegroup.js`) take the name without its copy
+suffix (`strip_copy_suffix`), lowercase it and make every run of separators
+(spaces and `. _ - ( ) [ ] { } + , '`) one dot. Nothing else is dropped: the
+resolution, source, codec, edition and group stay, bracketed ones too
+(`[1080p]`), so the 1080p and the 720p, the REPACK and the original, two groups
+and the first film and its sequel never share a name. The same cases run in the
+Rust unit tests `copy_suffixes_strip_only_after_a_group_tag` and
+`copy_suffix_never_hides_the_group` and in `tests/webui/dupe-group.js`.
 
 `strip_copy_suffix` removes:
 
-- the scanner's `.queued`, `.N.queued` and repeated `.nzb` endings;
-- a trailing ` (N)` (browsers), always: it is never part of a release name;
-- a trailing `_N`, `-N` or `.N` of one to three digits, only when what is left
-  still ends in a group tag, a last dot-separated word holding a `-` followed by
-  a letter (`…REMUX-FraMeSToR_5`, `…1080p-GRP_2`).
+- the scanner's `.queued`, `.N.queued`, `.nzb.N` and repeated `.nzb` endings;
+- a trailing ` (N)` (browsers), always;
+- a trailing `_N`, `.N` or `-N` (any number of digits) only when what is left
+  ends in a scene group tag (a last word with a `-` and a word of letters and
+  digits holding a letter) AND the name carries release markers (a year, a
+  resolution or SxxEyy): `…REMUX-FraMeSToR_3434`, `…1080p-GRP_2`.
 
-Without such a tag the digits may be the name itself, so they stay:
-`Movie.Part.2`, `DDP5.1`, `Show.S01E01-02`, `H-264`. A group that ends in a digit
-without a separator (`-D3FiL3D`, `-EPSiLON2`) is never touched. The one case the
-rule can't tell apart is a group whose own tag ends in a separator and digits
-(`-GRP_2` against a copy of `-GRP`); such groups are rare, and the two copies of
-it would still group with each other.
+`Iron-Man-3`, `Spider-Man.2`, `Toy-Story-3`, `Movie.Part.2`, `DDP5.1` and
+`Show.S01E01-02` keep their numbers. The release parser (`releasename::parse`,
+`webui/releasename.js`) strips a copy suffix the same way first, so
+`…-FraMeSToR_3434` parses with the group FraMeSToR.
 
 The DupeKey of a group is `dupes:<group name>`, for example
 `dupes:dune.part.two.2024.uhd.bluray.2160p.truehd.atmos.7.1.dv.hevc.remux.framestor`.
@@ -208,6 +211,41 @@ Open item (F2a): par-rs #87 is merged (b2ba9e5) but not pinned here yet; the 1 M
 Incomplete; probed slices that match the same IFSC are twin evidence). It is
 marked `OPEN ITEM (par-rs)` at `GROUP_PROBE_BYTES`.
 
+### Review fixes (4f9955b4 review)
+
+- **Only fleet members are kept as donors.** A download that fails its health
+  check is kept as a donor only when it belongs to a fleet (a `dupes:` key or
+  `DupeFleet`, `dupecoord::is_fleet_member`). A plain user or client key keeps
+  FAILURE/HEALTH, as before.
+- **The last copy standing fails visibly.** It is kept as a donor only while
+  another copy can still complete the release (queued, or an untried backup in
+  history that is not dead: `dupecoord::live_fleet_copies`); otherwise it ends
+  FAILURE/HEALTH.
+- **The daemon join is strict.** Only the strict group name above, the same
+  category and the same DupeMode, and never a copy with a DupeKey of its own;
+  the queued copies move to the front only when a real fleet forms (another copy
+  queued). After a restart the keyless copies are grouped by id without
+  reordering the queue.
+- **appendfleet for a `dupes:` key answers at once** with every member
+  `PROBING`, then checks and adds the copies in the background
+  (`dupesearch_coord::fleet_append_rpc`), so the Add dialog closes at once. Other
+  keys (clients) are checked within the call as before.
+- **NzbDir copies are never stranded.** When the fleet call did nothing (the key
+  busy, the program stopping, no member through) or could not start, the copies
+  get their names back and the next scan sends them again
+  (`scanner::fleet_never_ran`).
+- **The Add dialog** groups only `.nzb` files; with Add paused or Auto-category,
+  or a file with a password or a DupeScore of its own, the files go in on their
+  own, honouring those options; exact copies are reported in the file list and
+  by the notification.
+- **One health everywhere.** `DownloadsUI.shownHealth` is the health the lists,
+  the details dialogs and the fleet panel show: `DupeProjected`/`DupeParked`, or
+  for a copy that fetched nothing yet the health check's `DupeAlive`/`DupeHealth`
+  (the better one). A fleet member's pill shows its place and alive share
+  (`#2 · 97.0% alive`), never 100% beside dead. `DupeAlive` keeps the measured
+  share also for a copy ranked dead for too few alive articles, so only 0% is
+  "dead donor".
+
 ## Done when (acceptance tests)
 
 | Done when | Test |
@@ -231,6 +269,13 @@ marked `OPEN ITEM (par-rs)` at `GROUP_PROBE_BYTES`.
 | F11: alt identity without par2; a header-sized difference is a likely alt, never other. | Rust `twinfields::tests` (same_inner_key: an 11,245-byte shorter video gives no verdict, a difference over 1 MiB is another file), `dupeintake::tests` (inner keys); functional `dropdune` (the shorter bare mkv stays a container) |
 | F12: borrowed alt bytes pass a structural check before use. | Rust `streamrepair` test `borrowed_ranges_pass_the_validator_hook` (the hook answers Unknown until zipfast's validator lands) |
 | F10: the primary is the healthy copy easiest to borrow into. | Rust `donorkind::tests::primary_ease_orders_bare_stored_compressed_encrypted`, `dupesearch_nzb::tests::the_primary_is_the_healthy_copy_easiest_to_borrow_into`; functional `fleetprimaryease`; functional `dropdune` (the Dune drop in small: stored RAR primary over a healthy header-encrypted RAR5 with the nzb password, twins, repacked and shorter copies as unverified containers, dead copies kept with their nzb, the 1080p release apart) |
+| Review 1-2: plain keys keep FAILURE; the last copy standing fails visibly. | functional `dupefailover`, `dupehopeless` (FAILURE/HEALTH again), `dropallfail` |
+| Review 3-5: strict joins, no reorder after a restart. | functional `dropjoinstrict`, `dropjoinrestart`; Rust `releasename::tests::copy_suffixes_strip_only_after_a_group_tag`; web UI `dupe-group.js` |
+| Review 6-7: the dialog honours paused, auto-category, password, DupeScore; archives are not grouped. | Playwright `drop-fleet.js` ("Add paused", "archives are not grouped"); web UI `dupe-group.js` ("only nzb-files are grouped") |
+| Review 8: NzbDir copies are never stranded. | Rust `scanner::tests::nzbdir_copies_of_one_release_form_one_fleet` (`fleet_never_ran`) |
+| Review 9: appendfleet returns at once for grouped copies, labels come after. | functional `dropfleetasync`; Playwright `drop-fleet.js` ("13 copies: the dialog closes within 3 s") |
+| Review 10 / F15: honest, consistent health; dead only at 0%. | Playwright `drop-fleet.js` (the 17% copy is a donor, "#6 · 17.0% alive", the list and the detail agree) |
+| The release parser finds the group behind a copy suffix. | Rust `releasename::tests::copy_suffix_never_hides_the_group`; Playwright `release-names.js` |
 | The name rule strips only a copy suffix. | Rust `releasename::tests::copy_suffixes_strip_only_after_a_group_tag`; web UI `dupe-group.js` (the same cases) |
 
 Run the web UI test with `node tests/webui/dupe-group.js` (plain Node, no

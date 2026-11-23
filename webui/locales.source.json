@@ -2666,6 +2666,14 @@
     "message": "Add copies of the same release as one fleet",
     "description": "Checkbox label. Add dialog text: files whose names differ only by a copy suffix go in as one fleet"
   },
+  "add_dialog_exact_copy": {
+    "message": "(the same file as $1: not sent)",
+    "description": "Add dialog note beside a file whose content is exactly another file's. $1 is that file's name."
+  },
+  "notif_add_files_dropped": {
+    "message": "Files submitted; exact copies of another file were not sent",
+    "description": "Notification after adding files when some were exact copies of another file and were skipped."
+  },
   "add_dialog_fleet_plan": {
     "message": "$1 files → 1 fleet: $2",
     "description": "Add dialog text: $1 is how many files go in as one fleet, $2 the release name"
@@ -2677,6 +2685,14 @@
   "label_donor_dead": {
     "message": "dead donor",
     "description": "Label of a copy kept in its fleet although none of its tried articles arrived."
+  },
+  "label_fleet_rank": {
+    "message": "#$1 · $2% alive",
+    "description": "Fleet member pill: $1 its place in the fleet's order, $2 the alive share its health check measured."
+  },
+  "desc_fleet_rank": {
+    "message": "Place in the fleet (1 downloads first) and the share of its articles the check found alive",
+    "description": "Tooltip of the fleet member pill."
   },
   "status_projected_health": {
     "message": "projected health: $1%",

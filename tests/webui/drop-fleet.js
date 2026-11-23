@@ -61,6 +61,10 @@ function fleetHistory(history, primaryDone) {
       Parameters: params({ DupeFiles: 'c07be15a99d2f310-36', DupeKind: 'alt', DupeCopyKind: 'borrowable', DupeAlive: '48', DupeFleet: '3' }) })),
     item(base, 63, REL + '_2', Object.assign({}, dupe, { DupeScore: 97, Health: 1000,
       Parameters: params({ DupeFiles: 'd11be15a99d2f310-36', DupeKind: 'container', DupeCopyKind: 'unknown', DupeAlive: '65', DupeFleet: '4' }) })),
+    // m5air row 41: DupeHealth 17 with DupeAlive 0 and a Health of 100%: a donor 17% alive
+    item(base, 65, REL + '_4', Object.assign({}, dupe, { DupeScore: 95, Health: 1000,
+      Parameters: params({ DupeFleet: '6', DupeCopyKind: 'unknown', DupeFiles: 'lost', DupeSampled: 'none',
+        DupeHealth: '17', DupeAlive: '0' }) })),
     // tried, parked on a sample (Health 99%, nothing arrived): kept as a donor
     item(base, 64, REL + '_3', Object.assign({}, dupe, { DupeScore: 96, Health: 990, FailedArticles: 200,
       Parameters: params({ DupeParked: '0.0', DupeAlive: '0.0', DupeProjected: '0.0', DupeFleet: '5' }) }))
@@ -156,6 +160,41 @@ function nzbFile(name, seed) {
         assert.deepEqual(appends.map(w => w.params[0]), ['Lone.Documentary.2023.2160p.WEB-DL-NOGRP.nzb'], 'a single file is a plain append');
       });
 
+      await check('13 copies: the dialog closes within 3 s', async () => {
+        await page.evaluate(() => Upload.addClick());
+        await page.locator('#AddDialog').waitFor({ state: 'visible' });
+        const many = Array.from({ length: 13 }, (_, i) => nzbFile(`${REL}${i ? '_' + i : ''}.nzb`, 'm' + i));
+        await page.setInputFiles('#AddDialog_Input', many);
+        await page.locator('#AddDialog_Files table').nth(12).waitFor();
+        assert.match(await page.locator('#AddDialog_FleetPlan').innerText(), /^13 files → 1 fleet/);
+        const start = Date.now();
+        await page.locator('#AddDialog_Submit').click();
+        await page.locator('#AddDialog').waitFor({ state: 'hidden', timeout: 3000 });
+        assert(Date.now() - start < 3000, 'closed in ' + (Date.now() - start) + ' ms');
+      });
+
+      await check('Add paused: plain appends, paused', async () => {
+        await openWith();
+        await page.locator('#AddDialog_Paused').check();
+        assert.equal(await page.locator('#AddDialog_FleetPlan').isVisible(), false);
+        const sent = await submit();
+        assert.equal(sent.filter(w => w.method === 'appendfleet').length, 0);
+        assert(sent.filter(w => w.method === 'append').every(w => w.params[5] === true));
+      });
+
+      await check('archives are not grouped', async () => {
+        await page.evaluate(() => Upload.addClick());
+        await page.locator('#AddDialog').waitFor({ state: 'visible' });
+        await page.setInputFiles('#AddDialog_Input', [
+          { name: `${REL}.zip`, mimeType: 'application/zip', buffer: Buffer.from('PK a') },
+          { name: `${REL}_1.zip`, mimeType: 'application/zip', buffer: Buffer.from('PK b') }]);
+        await page.locator('#AddDialog_Files table').nth(1).waitFor();
+        assert.equal(await page.locator('#AddDialog_FleetPlan').isVisible(), false);
+        const sent = await submit();
+        assert.equal(sent.filter(w => w.method === 'appendfleet').length, 0);
+        assert.equal(sent.filter(w => w.method === 'append').length, 2);
+      });
+
       await check('box off: plain appends, kept out of the daemon join', async () => {
         await openWith();
         await page.locator('#AddDialog_Fleet').uncheck();
@@ -223,7 +262,7 @@ function nzbFile(name, seed) {
 
       await check('history: donors labelled, never FAILURE/HEALTH', async () => {
         const rows = await historyRows();
-        for (const id of ['61', '62', '63', '64']) {
+        for (const id of ['61', '62', '63', '64', '65']) {
           assert(rows[id], 'history row ' + id);
           assert.doesNotMatch(rows[id], /failure/i, 'row ' + id + ' is no failure: ' + rows[id]);
         }
@@ -232,7 +271,23 @@ function nzbFile(name, seed) {
         assert.match(rows['62'], /donor · 48\.0% alive/);
         assert.match(rows['63'], /unverified/i);
         assert.match(rows['64'], /dead donor/);
+        assert.match(rows['65'], /donor · 17\.0% alive/);
+        assert.doesNotMatch(rows['65'], /dead/);
+        // the pill shows the place in the fleet and the measured alive share, never 100% beside dead
+        assert.match(rows['65'], /#6 · 17\.0% alive/);
+        assert.doesNotMatch(rows['64'], /100\.0%/);
         await shot('history');
+      });
+
+      await check('history: the list and the detail show the same health', async () => {
+        const row = page.locator('#HistoryTable tbody tr', { hasText: 'GRP 4' }).first();
+        await row.locator('a[data-nzbid]').first().click();
+        await page.locator('#HistoryEditDialog').waitFor({ state: 'visible' });
+        const tile = await page.locator('#HistoryEdit_Summary').innerText();
+        assert.match(tile, /17(\.0)?%/, 'the detail shows the probed 17%: ' + tile);
+        assert.doesNotMatch(tile, /HEALTH\s*100%/i);
+        await page.keyboard.press('Escape');
+        await page.locator('#HistoryEditDialog').waitFor({ state: 'hidden' });
       });
 
       await check('history: after the primary succeeds the others stay DELETED/DUPE', async () => {

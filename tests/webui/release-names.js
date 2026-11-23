@@ -26,6 +26,10 @@ const PARSE_CASES = [
   // a trailing episode range is not a release group
   ['Show.Name.S01E01-E02', 'Show Name', 'S01E01-E02', '', ''],
   ['Show.Name.S01E01-E02.720p.HDTV.x264-GRP', 'Show Name', 'S01E01-E02', '', '720p HDTV x264 GRP'],
+  // a copy suffix after the group never hides it
+  ['Dune.Part.Two.2024.2160p.BluRay.REMUX-FraMeSToR_3434', 'Dune Part Two', '', '2024', '2160p Remux FraMeSToR'],
+  ['Dune.Part.Two.2024.2160p.BluRay.REMUX-FraMeSToR (12)', 'Dune Part Two', '', '2024', '2160p Remux FraMeSToR'],
+  ['Dune.Part.Two.2024.2160p.BluRay.REMUX-FraMeSToR_1.nzb.2.queued', 'Dune Part Two', '', '2024', '2160p Remux FraMeSToR'],
 ];
 
 (async () => {

@@ -4982,7 +4982,7 @@ def scenario_retrykeepsjobs(daemon, t):
     volume (not downloaded again) was never repaired."""
     parked, h2, intact = _retry_parked_release(daemon, t)
     repaired = _grep_log(t, 'of Rel.part01.rar from duplicate DonRK')
-    ok = _failed_or_kept(parked) and repaired >= 1 and intact('Rel.part01.rar')
+    ok = parked.startswith('FAILURE') and repaired >= 1 and intact('Rel.part01.rar')
     return ('retrykeepsjobs', ok, 'parked=%s status=%s repaired_logs=%d intact=%s'
             % (parked, h2['Status'], repaired, intact('Rel.part01.rar')))
 
@@ -4995,7 +4995,7 @@ def scenario_retryparkedname(daemon, t):
     byte-identical and the release succeeds."""
     parked, h2, intact = _retry_parked_release(daemon, t)
     temp_named = _grep_log(t, '.out.tmp (no article available)') + _grep_log(t, 'Stream repair of 5.out.tmp')
-    ok = (_failed_or_kept(parked) and 'SUCCESS' in h2['Status'] and intact('Rel.part01.rar') and
+    ok = (parked.startswith('FAILURE') and 'SUCCESS' in h2['Status'] and intact('Rel.part01.rar') and
           intact('Rel.part02.rar') and temp_named == 0)
     return ('retryparkedname', ok, 'parked=%s status=%s part01=%s part02=%s temp_named_logs=%d'
             % (parked, h2['Status'], intact('Rel.part01.rar'), intact('Rel.part02.rar'), temp_named))
@@ -5019,7 +5019,7 @@ def scenario_healthlastarticle(daemon, t):
         [('hlA/x.part01.rar', 'Rel.part01.rar', len(payload), seg_primary, {9, 10})]), False, 'hl-key', 100)
     h = daemon.wait_history(daemon_api, 'RelHL')
     queued = _grep_log(t, 'Queueing stream repair of Rel.part01.rar')
-    return ('healthlastarticle', _failed_or_kept(h['Status']) and queued >= 1,
+    return ('healthlastarticle', h['Status'].startswith('FAILURE') and queued >= 1,
             'status=%s health=%d queued_logs=%d' % (h['Status'], h['Health'], queued))
 
 
@@ -7455,7 +7455,7 @@ def scenario_watchrescue(daemon, t):
         time.sleep(0.5)
         hb = daemon.wait_history(api, 'Backup')
     rescued = _grep_log(t, 'Rescue: Primary failed its health check with nothing of its key queued: returning backup Backup')
-    ok = _failed_or_kept(hp['Status']) and rescued == 1 and hb['Status'].startswith('SUCCESS') and _verify_output(t, data)
+    ok = hp['Status'] == 'FAILURE/HEALTH' and rescued == 1 and hb['Status'].startswith('SUCCESS') and _verify_output(t, data)
     return ('watchrescue', ok, 'primary=%s backup=%s rescue_logs=%d' % (hp['Status'], hb['Status'], rescued))
 
 
@@ -7892,7 +7892,7 @@ def scenario_deadbackupsonly(daemon, t):
     time.sleep(3)
     back = _grep_log(t, 'Found duplicate Backup') + _grep_log(t, 'Failing over Primary')
     hb = daemon.wait_history(api, 'Backup')
-    ok = back == 0 and hb['Status'] == 'DELETED/DUPE' and _failed_or_kept(hp['Status'])
+    ok = back == 0 and hb['Status'] == 'DELETED/DUPE' and hp['Status'].startswith('FAILURE')
     return ('deadbackupsonly', ok, 'primary=%s backup=%s returned_logs=%d' % (hp['Status'], hb['Status'], back))
 
 
@@ -8143,7 +8143,7 @@ def scenario_restartfailover(daemon, t):
             break
         time.sleep(0.5)
     integ = _verify_output(t, data)
-    ok = (hist.get('BackA', '').startswith('SUCCESS') and _failed_or_kept(hist.get('Pick', '')) and
+    ok = (hist.get('BackA', '').startswith('SUCCESS') and hist.get('Pick', '').startswith('FAILURE') and
           hist.get('BackB') == 'DELETED/DUPE' and integ)
     return ('restartfailover', ok, 'pick=%s backupA=%s backupB=%s integrity=%s'
             % (hist.get('Pick'), hist.get('BackA'), hist.get('BackB'), integ))
@@ -8399,7 +8399,7 @@ def scenario_repairlast(daemon, t):
     # (with no par2 nothing is borrowed either, so the download may fail over
     # before the repair decision that logs the skip: no repair is what counts)
     repaired = _grep_log(t, 'Stream repair of rlA') + _grep_log(t, 'Recovered') 
-    ok = (skipped >= 1 or repaired == 0) and _failed_or_kept(hist.get('DamagedRl', '')) and \
+    ok = (skipped >= 1 or repaired == 0) and hist.get('DamagedRl', '').startswith('FAILURE') and \
         hist.get('BackRl', '').startswith('SUCCESS')
     return ('repairlast', ok, 'damaged=%s backup=%s skip_logs=%d repair_logs=%d' % (
         hist.get('DamagedRl'), hist.get('BackRl'), skipped, repaired))
@@ -11372,13 +11372,6 @@ DROP_OTHER = 'Drop.Show.S01E02.720p.HDTV.x264-GRP'
 DROP_OTHER_KEY = 'dupes:drop.show.s01e02.720p.hdtv.x264.grp'
 
 
-def _failed_or_kept(status):
-    """A tried copy that failed: FAILURE, or, while other copies of its key
-    are left (its fleet is open), kept in it as a donor (DELETED/DUPE with
-    DupeParked, docs/DROP_AS_FLEET.md F3) instead of a failure."""
-    return status.startswith('FAILURE') or status == 'DELETED/DUPE'
-
-
 def _drop_copy(t, tag, data, missing, seg=100_000, dead_par=False):
     """One posting of ``data`` with a par2 index (article borrowing checks
     borrowed bytes against it); ``missing`` parts are gone from the server, and
@@ -11581,6 +11574,101 @@ def scenario_dropjoinrestart(daemon, t):
     return ('dropjoinrestart', ok, 'before=%s after=%s' % (before, keys))
 
 
+def _dead_release(t, tag, seed):
+    seg, vol = 10_000, 2_900_000
+    n = vol // seg
+    dead = [('%s/d%d.bin' % (tag, i), 'Dead%d.bin' % i, vol, seg, set(range(1, n + 1))) for i in range(6)]
+    for i, m in enumerate(dead):
+        t.write_file(os.path.join('data', m[0]), _payload(vol, seed + i))
+    return build_multi_nzb(dead)
+
+
+def scenario_dropallfail(daemon, t):
+    """Review finding 2: when every copy of a fleet fails, the last copy
+    standing ends FAILURE/HEALTH (the group visibly failed); only a copy that
+    failed while another could still complete it is kept as a donor."""
+    rel = 'Allfail.Movie.2024.1080p.WEB-DL.x264-GRP'
+    api = daemon.wait_ready()
+    _ds_append(api, rel, _dead_release(t, 'afA', 15401), '', 0, paused=True)
+    _ds_append(api, rel + '_1', _dead_release(t, 'afB', 15411), '', 0, paused=False)
+    daemon.wait_history(api, rel + '_1', timeout=60)
+    api.editqueue('GroupResume', 0, '', [g['NZBID'] for g in api.listgroups() if g['NZBName'] == rel])
+    deadline = time.time() + 300
+    statuses = {}
+    while time.time() < deadline:
+        statuses = {h['NZBName']: h['Status'] for h in api.history() if h['NZBName'] in (rel, rel + '_1')}
+        if not any(g['NZBName'] in (rel, rel + '_1') for g in api.listgroups()) and \
+                statuses.get(rel + '_1', '').startswith('FAILURE'):
+            break
+        time.sleep(1)
+    ok = statuses.get(rel) == 'DELETED/DUPE' and statuses.get(rel + '_1', '').startswith('FAILURE/HEALTH')
+    return ('dropallfail', ok, 'statuses=%s' % statuses)
+
+
+def scenario_dropjoinstrict(daemon, t):
+    """Review findings 3 and 4: the daemon-side join never touches another
+    release, a copy in another category or DupeMode, or a download with a key
+    of its own. Iron-Man-3 and Iron-Man, the 1080p and 720p, the REPACK and
+    the original, two groups and the first film and its sequel all stay
+    apart; only true copies (X and X_1, same category) join."""
+    data = _payload(400_000, 15501)
+    api = daemon.wait_ready()
+
+    def add(name, category='test', key='', mode='SCORE', i=[0]):
+        i[0] += 1
+        content = base64.standard_b64encode(_drop_copy(t, 'js%d' % i[0], data, set()).encode()).decode()
+        return api.append(name, content, category, 0, False, True, key, 0, mode, [])
+    add('Iron-Man-3')
+    add('Iron-Man')
+    add('Strict.Movie.2024.1080p.WEB-DL.x264-GRP')
+    add('Strict.Movie.2024.720p.WEB-DL.x264-GRP')
+    add('Strict.Movie.2024.REPACK.1080p.WEB-DL.x264-GRP')
+    add('Strict.Movie.2024.1080p.WEB-DL.x264-OTHER')
+    add('Dune.2021.BluRay.1080p.TrueHD.Atmos.7.1.AVC.REMUX-FraMeSToR')
+    add('Dune.Part.Two.2024.BluRay.1080p.TrueHD.Atmos.7.1.AVC.REMUX-FraMeSToR')
+    add('Strict.Movie.2024.1080p.WEB-DL.x264-GRP_1', category='other')
+    add('Strict.Movie.2024.1080p.WEB-DL.x264-GRP_2', key='user-key')
+    add('Strict.Movie.2024.1080p.WEB-DL.x264-GRP_3', mode='ALL')
+    add('Real.Copy.2024.1080p.WEB-DL.x264-GRP')
+    add('Real.Copy.2024.1080p.WEB-DL.x264-GRP_1')
+    time.sleep(1)
+    items = {g['NZBName']: g.get('DupeKey') for g in api.listgroups() + api.history()}
+    joined = {n: k for n, k in items.items() if k and k.startswith('dupes:')}
+    ok = (set(joined) == {'Real.Copy.2024.1080p.WEB-DL.x264-GRP', 'Real.Copy.2024.1080p.WEB-DL.x264-GRP_1'}
+          and items.get('Strict.Movie.2024.1080p.WEB-DL.x264-GRP_2') == 'user-key'
+          and all(not items.get(n) for n in ('Iron-Man-3', 'Iron-Man', 'Strict.Movie.2024.1080p.WEB-DL.x264-GRP',
+                                              'Strict.Movie.2024.1080p.WEB-DL.x264-GRP_1',
+                                              'Strict.Movie.2024.1080p.WEB-DL.x264-GRP_3')))
+    return ('dropjoinstrict', ok, 'keys=%s' % items)
+
+
+def scenario_dropfleetasync(daemon, t):
+    """Review finding 9: appendfleet for copies grouped by name (the web UI's
+    dupes: key) answers at once (PROBING) and checks and adds the copies in
+    the background; their labels come afterwards."""
+    daemon.fake_nntp.alive = set()
+    api = daemon.wait_ready()
+    members = [('Async.Movie.2024.1080p.WEB-DL.x264-GRP%s.nzb' % s,
+                _fleet_copy(daemon, 'as%d' % i, 'c.mkv', 400_000, None, _payload(400_000, 15600))) for i, s in
+               enumerate(['', '_1', ' (2)', '_3', '_4', '_5', '_6', '_7', '_8', '_9', '_10', '_11', '_12'])]
+    daemon.fake_nntp.delays.update({'as': 0.3})
+    key = 'dupes:async.movie.2024.1080p.web.dl.x264.grp'
+    start = time.time()
+    reply = _fleet(daemon, members, key=key, timeout=60)
+    took = time.time() - start
+    deadline = time.time() + 300
+    kinds = {}
+    while time.time() < deadline:
+        kinds = {i['NZBName']: _params(i).get('DupeCopyKind') for i in _items_of_key(api, key)}
+        if len(kinds) >= 13 and all(kinds.values()):
+            break
+        time.sleep(1)
+    ok = took < 3 and reply['Reason'] == 'PROBING' and all(m['Status'] == 'PROBING' for m in reply['Members']) \
+        and len(kinds) == 13 and all(kinds.values())
+    return ('dropfleetasync', ok, 'took=%.1f reason=%s labelled=%d of %d' % (
+        took, reply['Reason'], sum(1 for v in kinds.values() if v), len(kinds)))
+
+
 def scenario_dropkeepdonor(daemon, t):
     """A copy that fails its health check while its fleet is open stays in it as
     a donor, not a failure, and its shown health is the one it was judged on.
@@ -11628,6 +11716,9 @@ SCENARIOS = {
     'fleetnzbpassword': scenario_fleetnzbpassword,
     'fleettimeoutunverified': scenario_fleettimeoutunverified,
     'dropjoin': scenario_dropjoin,
+    'dropallfail': scenario_dropallfail,
+    'dropjoinstrict': scenario_dropjoinstrict,
+    'dropfleetasync': scenario_dropfleetasync,
     'dropjoinrestart': scenario_dropjoinrestart,
     'dropkeepdonor': scenario_dropkeepdonor,
     'complementary': scenario_complementary,
@@ -12004,8 +12095,7 @@ EXPECTED_HISTORY_STATUS = {
     'xdecomp_enc7z': 'SUCCESS/HEALTH', 'xdecomp_neg': 'FAILURE/HEALTH',
     'xdecomp_symlink': 'FAILURE/HEALTH', 'xdecomp_off': 'FAILURE/HEALTH',
     'wholefile': 'SUCCESS/HEALTH',
-    # a failed copy whose key still has backups is kept as a donor (F3)
-    'dupefailover': 'DELETED/DUPE', 'dupehopeless': 'DELETED/DUPE',
+    'dupefailover': 'FAILURE/HEALTH', 'dupehopeless': 'FAILURE/HEALTH',
     'dupedeadstart': 'FAILURE/HEALTH',
 }
 
@@ -12034,6 +12124,9 @@ SCENARIO_OPTIONS = {
     'fleettimeoutunverified': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'dropnzbdir': ['NzbDirInterval=1', 'NzbDirFileAge=2', 'HealthCheck=dupe', 'DupeArticleFallback=article'],
     'dropjoin': ['HealthCheck=dupe'],
+    'dropallfail': ['HealthCheck=dupe', 'DupeArticleFallback=article'],
+    'dropjoinstrict': ['HealthCheck=dupe'],
+    'dropfleetasync': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'dropjoinrestart': ['HealthCheck=dupe', 'DupeCheck=no'],
     'dropkeepdonor': ['HealthCheck=dupe', 'DupeArticleFallback=article'],
     'allheadspar': PROD_OPTIONS,
@@ -12459,7 +12552,7 @@ SCENARIO_FIRST_FAIL_PROXY = {'recheckfailed': ((b'?5=', b'?10=', b'?15='),),
 # scenarios with a FakeNewznab indexer (DupeSearchUrl points to it)
 
 # scenarios with a FakeNntp news server in place of nserv
-SCENARIO_FAKE_NNTP = {'fleetprimaryease', 'dropdune', 'fleetnzbpassword', 'fleettimeoutunverified', 'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchborrow', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetkindsingle', 'fleetkindlater', 'fleetintake', 'fleetintakelater', 'fleetencryptedlast', 'fleetencryptedheadless', 'fleetlockedlast', 'fleetencryptedpassword', 'fleetkindslowcheck', 'fleettwinvolumes', 'fleetalldead', 'fleetshutdown'}
+SCENARIO_FAKE_NNTP = {'fleetprimaryease', 'dropfleetasync', 'dropdune', 'fleetnzbpassword', 'fleettimeoutunverified', 'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchborrow', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetkindsingle', 'fleetkindlater', 'fleetintake', 'fleetintakelater', 'fleetencryptedlast', 'fleetencryptedheadless', 'fleetlockedlast', 'fleetencryptedpassword', 'fleetkindslowcheck', 'fleettwinvolumes', 'fleetalldead', 'fleetshutdown'}
 
 
 # --------------------------------------------------------------------------- #

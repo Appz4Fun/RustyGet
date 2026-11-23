@@ -269,17 +269,18 @@ var Downloads = (new function($)
 		}
 
 		var health = '';
-		if (group.Health < 1000 && (!group.postprocess ||
+		var shownHealth = DownloadsUI.shownHealth(group);
+		if (shownHealth < 1000 && (!group.postprocess ||
 			(group.Status === 'PP_QUEUED' && group.PostTotalTimeSec === 0)))
 		{
 			health = ' <span class="label ' +
-				(group.Health >= group.CriticalHealth ? 'label-warning' : 'label-important') +
-				'">' + I18n.translate('status_health', Math.floor(group.Health / 10)) + '</span> ';
+				(shownHealth >= group.CriticalHealth ? 'label-warning' : 'label-important') +
+				'">' + DownloadsUI.healthText(group) + '</span> ';
 		}
 
 		var category = group.Category !== '' ? Util.textToHtml(group.Category) : '<span class="none-category">' + I18n.translate('label_none') + '</span>';
 		var backup = DownloadsUI.buildBackupLabel(group);
-		var dupeScore = DownloadsUI.buildDupeScoreLabel(group.DupeScore, group.Health);
+		var dupeScore = DownloadsUI.buildDupeScoreLabel(group.DupeScore, DownloadsUI.shownHealth(group));
 
 		if (!UISettings.miniTheme)
 		{
@@ -1016,6 +1017,45 @@ var DownloadsUI = (new function($)
 	}
 
 	// "dupe score: N | H%", coloured by the health: green 95-100%, yellow 85-95%, red below
+	// The health a download was judged on: the projection over the articles tried
+	// (DupeProjected, or DupeParked once it was kept as a donor) when it was judged
+	// from a sample, else its Health, which counts every untried article as good.
+	this.shownHealth = function(item)
+	{
+		var projected = DownloadsUI.parameterValue(item.Parameters, 'DupeProjected') ||
+			DownloadsUI.parameterValue(item.Parameters, 'DupeParked');
+		if (projected !== '' && !isNaN(parseFloat(projected)))
+		{
+			return Math.round(parseFloat(projected) * 10);
+		}
+		return item.Health;
+	}
+
+	this.healthText = function(item)
+	{
+		var shown = DownloadsUI.shownHealth(item);
+		return shown !== item.Health ?
+			I18n.translate('status_projected_health', (Math.floor(shown) / 10).toFixed(1)) :
+			I18n.translate('status_health', Math.floor(item.Health / 10));
+	}
+
+	// A backup of a fleet waiting in history: its alive share, measured by the
+	// fleet's check (DupeAlive) or by its own download when it was kept as a donor
+	// after its health check (DupeParked); dead when nothing of it is alive.
+	this.buildDonorLabel = function(parameters)
+	{
+		var parked = DownloadsUI.parameterValue(parameters, 'DupeParked') ||
+			DownloadsUI.parameterValue(parameters, 'DupeAlive');
+		if (parked === '' || isNaN(parseFloat(parked)))
+		{
+			return '';
+		}
+		var alive = parseFloat(parked);
+		return alive > 0 ?
+			' <span class="label label-warning">' + Util.textToHtml(I18n.translate('label_donor_alive', alive.toFixed(1))) + '</span>' :
+			' <span class="label label-important">' + Util.textToHtml(I18n.translate('label_donor_dead')) + '</span>';
+	}
+
 	this.buildDupeScoreLabel = function(dupeScore, health)
 	{
 		if (!dupeScore)

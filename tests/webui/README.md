@@ -1,3 +1,8 @@
+The Add dialog's grouping of copies of one release (`webui/dupegroup.js`, see
+`docs/DROP_AS_FLEET.md`) is checked in plain Node, without a browser or daemon:
+`node tests/webui/dupe-group.js`. Its name cases are the ones the Rust unit
+test `releasename::tests::copy_suffixes_strip_only_after_a_group_tag` checks.
+
 The WebUI density regression check uses Playwright and Chrome against an isolated,
 loopback NZBGet instance serving the current WebUI. The fixture should start with
 one configured news server. Never use a production instance: the check changes

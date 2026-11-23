@@ -368,6 +368,61 @@ struct ScannerInner {
     queue_list: Vec<ScanQueueData>,
     pass: i32,
     scan_script: bool,
+    /// `.nzb` files dropped into NzbDir this pass, held until the pass ends
+    /// so copies of one release go in together as one fleet.
+    fleet_pending: Vec<PendingCopy>,
+    /// Fleets started from NzbDir lately, by (category, DupeKey), with the
+    /// time: a copy of the release that lands within [`FLEET_WINDOW_SEC`]
+    /// joins its fleet.
+    recent_fleets: Vec<(Vec<u8>, Vec<u8>, i64)>,
+}
+
+/// A copy of a release dropped into NzbDir, waiting for the end of the pass.
+struct PendingCopy {
+    base_filename: Vec<u8>,
+    full_filename: Vec<u8>,
+    category: Vec<u8>,
+    key: Vec<u8>,
+}
+
+/// Copies of one release that land in NzbDir within this many seconds of a
+/// fleet started from there join that fleet.
+pub const FLEET_WINDOW_SEC: i64 = 10;
+/// The time `appendfleet` may take to check the copies of a fleet from NzbDir.
+const FLEET_TIMEOUT_SEC: c_int = 60;
+
+/// The copies of `pending` that go in as one fleet, by index, grouped by
+/// category and DupeKey (`dupes:<normalized name>`), in the order they were
+/// found: groups of two or more, and any copy whose (category, key) is in
+/// `recent`. The others are added on their own.
+pub fn plan_fleets(
+    pending: &[(Vec<u8>, Vec<u8>)],
+    recent: &[(Vec<u8>, Vec<u8>)],
+) -> (Vec<Vec<usize>>, Vec<usize>) {
+    let mut groups: Vec<((Vec<u8>, Vec<u8>), Vec<usize>)> = Vec::new();
+    for (i, (cat, key)) in pending.iter().enumerate() {
+        match groups
+            .iter_mut()
+            .find(|((c, k), _)| c == cat && k.eq_ignore_ascii_case(key))
+        {
+            Some((_, members)) => members.push(i),
+            None => groups.push(((cat.clone(), key.clone()), vec![i])),
+        }
+    }
+    let mut fleets = Vec::new();
+    let mut single = Vec::new();
+    for ((cat, key), members) in groups {
+        let joins_recent = recent
+            .iter()
+            .any(|(c, k)| *c == cat && k.eq_ignore_ascii_case(&key));
+        if members.len() >= 2 || joins_recent {
+            fleets.push(members);
+        } else {
+            single.extend(members);
+        }
+    }
+    single.sort_unstable();
+    (fleets, single)
 }
 
 pub struct NzbgetRsScanner {
@@ -926,6 +981,123 @@ fn add_file_to_queue(
     (ok, nzb_id)
 }
 
+/// The DupeKey a file dropped into NzbDir is grouped by, when the duplicate
+/// check is on and the file is a plain `.nzb` whose name names a release.
+fn fleet_key_for(base_filename: &[u8], extension: &[u8]) -> Option<Vec<u8>> {
+    if !extension.eq_ignore_ascii_case(b".nzb") {
+        return None;
+    }
+    let dupe_check =
+        crate::options::active_options().is_some_and(|o| o.scalars().dupe_check != 0);
+    if !dupe_check {
+        return None;
+    }
+    let key = crate::releasename::group_key(base_filename);
+    (!key.is_empty()).then_some(key)
+}
+
+/// Collects what `appendfleet` replies, for the log.
+#[derive(Default)]
+struct FleetReply {
+    chosen: c_int,
+    reason: Vec<u8>,
+    added: Vec<(Vec<u8>, c_int, Vec<u8>)>,
+}
+
+impl crate::xmlrpc_format::RpcEmit for FleetReply {
+    fn fleet_result(
+        &mut self,
+        chosen: c_int,
+        _complete: bool,
+        reason: &CStr,
+        members: &[crate::xmlrpc_format::NzbgetRsRpcFleetMember<'_>],
+    ) {
+        self.chosen = chosen;
+        self.reason = reason.to_bytes().to_vec();
+        self.added = members
+            .iter()
+            .map(|m| (m.name.to_bytes().to_vec(), m.nzb_id, m.status.to_bytes().to_vec()))
+            .collect();
+    }
+}
+
+/// Sends copies dropped into NzbDir to `appendfleet` on a thread of its own
+/// (it adds each copy back through this scanner, which must not wait for
+/// itself). The file of each copy that was added is removed afterwards: the
+/// fleet wrote its own copy into NzbDir.
+fn spawn_nzbdir_fleet(
+    key: Vec<u8>,
+    category: Vec<u8>,
+    copies: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
+    env: NzbgetRsScannerEnv,
+) {
+    let spawned = std::thread::Builder::new()
+        .name("nzbdir-fleet".to_owned())
+        .spawn(move || {
+            #[cfg(unix)]
+            {
+                let key_c = to_cstr_sanitized(&key);
+                let cat_c = to_cstr_sanitized(&category);
+                let names: Vec<CString> = copies.iter().map(|c| to_cstr_sanitized(&c.0)).collect();
+                let req: Vec<crate::xmlrpc_format::NzbgetRsRpcFleetReqMember> = copies
+                    .iter()
+                    .zip(&names)
+                    .map(|(c, n)| crate::xmlrpc_format::NzbgetRsRpcFleetReqMember {
+                        name: n.as_ptr(),
+                        is_url: 0,
+                        data: c.1.as_ptr().cast(),
+                        data_len: c.1.len(),
+                    })
+                    .collect();
+                let mut reply = FleetReply::default();
+                unsafe {
+                    crate::dupesearch_coord::fleet_append(
+                        std::ptr::null_mut(),
+                        crate::dupesearch_coord::native_dupe_host,
+                        key_c.as_ptr(),
+                        cat_c.as_ptr(),
+                        0,
+                        FLEET_TIMEOUT_SEC,
+                        req.as_ptr(),
+                        req.len(),
+                        &mut reply,
+                    );
+                }
+                for (name, id, _) in &reply.added {
+                    if *id > 0 {
+                        if let Some(c) = copies.iter().find(|c| c.0 == *name) {
+                            let _ = std::fs::remove_file(crate::fsops::path(&c.2));
+                        }
+                    }
+                }
+                let mut msg = b"Fleet ".to_vec();
+                msg.extend_from_slice(&key);
+                msg.extend_from_slice(b" from NzbDir: ");
+                msg.extend_from_slice(&reply.reason);
+                if reply.chosen > 0 {
+                    msg.extend_from_slice(format!(", downloading #{}", reply.chosen).as_bytes());
+                }
+                for (name, id, status) in &reply.added {
+                    msg.extend_from_slice(b"; ");
+                    msg.extend_from_slice(name);
+                    msg.extend_from_slice(b" ");
+                    msg.extend_from_slice(status);
+                    if *id > 0 {
+                        msg.extend_from_slice(format!(" #{id}").as_bytes());
+                    }
+                }
+                emit_log(&env, LOG_INFO, &msg);
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (key, category, copies, env);
+            }
+        });
+    if spawned.is_err() {
+        // the copies keep their .queued files and can be added again by hand
+    }
+}
+
 impl NzbgetRsScanner {
     pub fn new() -> Self {
         Self {
@@ -934,6 +1106,8 @@ impl NzbgetRsScanner {
                 queue_list: Vec::new(),
                 pass: 0,
                 scan_script: false,
+                fleet_pending: Vec::new(),
+                recent_fleets: Vec::new(),
             }),
             host_env: Mutex::new(None),
             requested_nzb_dir_scan: AtomicBool::new(false),
@@ -1079,6 +1253,8 @@ impl NzbgetRsScanner {
             );
         }
 
+        Self::flush_fleet_pending(&mut inner, env);
+
         self.scanning.store(false, Ordering::SeqCst);
 
         let (next_iv, next_p) = next_pass(
@@ -1149,6 +1325,7 @@ impl NzbgetRsScanner {
                     &full_filename,
                     category,
                     env,
+                    true,
                 );
             }
         }
@@ -1160,6 +1337,7 @@ impl NzbgetRsScanner {
         full_filename: &[u8],
         category: &[u8],
         env: &NzbgetRsScannerEnv,
+        defer_fleet: bool,
     ) {
         let Some(dot_pos) = base_filename.iter().rposition(|&b| b == b'.') else {
             return;
@@ -1179,14 +1357,30 @@ impl NzbgetRsScanner {
         let mut nzb_id: c_int = 0;
         let mut url_info_usize: usize = 0;
 
-        if let Some(host) = &env.host {
-            host.clear_work_params();
-        }
-
         let matched_idx = inner
             .queue_list
             .iter()
             .rposition(|q| q.filename == full_filename);
+
+        // A file dropped into NzbDir (not one the API wrote there) waits for the
+        // end of the pass, so copies of one release go in together as a fleet.
+        if defer_fleet && matched_idx.is_none() && !inner.scan_script {
+            if let Some(key) = fleet_key_for(base_filename, extension) {
+                if !inner.fleet_pending.iter().any(|p| p.full_filename == full_filename) {
+                    inner.fleet_pending.push(PendingCopy {
+                        base_filename: base_filename.to_vec(),
+                        full_filename: full_filename.to_vec(),
+                        category: category.to_vec(),
+                        key,
+                    });
+                }
+                return;
+            }
+        }
+
+        if let Some(host) = &env.host {
+            host.clear_work_params();
+        }
         if let Some(idx) = matched_idx {
             let q = &inner.queue_list[idx];
             nzb_name = q.nzb_name.clone();
@@ -1313,6 +1507,80 @@ impl NzbgetRsScanner {
                 let mut g = slot.lock().unwrap_or_else(|e| e.into_inner());
                 *g = (add_status, Some(nzb_id));
             }
+        }
+    }
+
+    /// Adds the files dropped into NzbDir this pass ([`ScannerInner::fleet_pending`]):
+    /// copies of one release (the same category and normalized name, see
+    /// [`plan_fleets`]) go in as one fleet through `appendfleet`, which checks
+    /// every copy, queues the best and keeps the rest as labelled backups; the
+    /// others are added on their own as before.
+    fn flush_fleet_pending(inner: &mut ScannerInner, env: &NzbgetRsScannerEnv) {
+        let now = now_unix_secs();
+        inner
+            .recent_fleets
+            .retain(|(_, _, t)| now - *t <= FLEET_WINDOW_SEC && *t <= now);
+        let pending = std::mem::take(&mut inner.fleet_pending);
+        if pending.is_empty() {
+            return;
+        }
+        let keys: Vec<(Vec<u8>, Vec<u8>)> = pending
+            .iter()
+            .map(|p| (p.category.clone(), p.key.clone()))
+            .collect();
+        let recent: Vec<(Vec<u8>, Vec<u8>)> = inner
+            .recent_fleets
+            .iter()
+            .map(|(c, k, _)| (c.clone(), k.clone()))
+            .collect();
+        let (fleets, single) = plan_fleets(&keys, &recent);
+        for i in single {
+            let p = &pending[i];
+            Self::process_incoming_file(
+                inner,
+                &p.base_filename,
+                &p.full_filename,
+                &p.category,
+                env,
+                false,
+            );
+        }
+        for members in fleets {
+            let first = &pending[members[0]];
+            let (category, key) = (first.category.clone(), first.key.clone());
+            let mut copies: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = Vec::new();
+            for &i in &members {
+                let p = &pending[i];
+                let Ok(data) = std::fs::read(crate::fsops::path(&p.full_filename)) else {
+                    continue;
+                };
+                // renamed as any file it adds is, so the next pass leaves it be
+                let mut queued_name = Vec::new();
+                let renamed = crate::fsdelete::rename_bak(
+                    &mut crate::fsops::PosixFsOps,
+                    &p.full_filename,
+                    b"queued",
+                    false,
+                    &mut queued_name,
+                )
+                .unwrap_or(false);
+                if !renamed {
+                    continue;
+                }
+                copies.push((p.base_filename.clone(), data, queued_name));
+            }
+            if copies.is_empty() {
+                continue;
+            }
+            inner.recent_fleets.retain(|(c, k, _)| !(*c == category && k.eq_ignore_ascii_case(&key)));
+            inner.recent_fleets.push((category.clone(), key.clone(), now));
+            let mut msg = format!("Adding {} cop(ies) of ", copies.len()).into_bytes();
+            msg.extend_from_slice(&key[crate::releasename::GROUP_KEY_PREFIX.len().min(key.len())..]);
+            msg.extend_from_slice(b" from NzbDir as one fleet under DupeKey ");
+            msg.extend_from_slice(&key);
+            emit_log(env, LOG_INFO, &msg);
+            let use_cat = resolve_category(env, &category, &copies[0].0);
+            spawn_nzbdir_fleet(key, use_cat, copies, env.clone());
         }
     }
 
@@ -2114,6 +2382,29 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn nzbdir_copies_of_one_release_form_one_fleet() {
+        let k = |c: &str, n: &str| (c.as_bytes().to_vec(), crate::releasename::group_key(n.as_bytes()));
+        let base = "Dune.Part.Two.2024.UHD.BluRay.2160p.TrueHD.Atmos.7.1.DV.HEVC.REMUX-FraMeSToR";
+        let other = "Other.Show.S01E01.1080p.WEB-GRP";
+        let pending = vec![
+            k("", &format!("{base}.nzb")),
+            k("", &format!("{other}.nzb")),
+            k("", &format!("{base} (1).nzb")),
+            k("", &format!("{base}_3.nzb")),
+            k("movies", &format!("{base}_4.nzb")),
+        ];
+        let (fleets, single) = plan_fleets(&pending, &[]);
+        assert_eq!(fleets, vec![vec![0, 2, 3]]);
+        assert_eq!(single, vec![1, 4]);
+        // a copy that lands within the window joins the fleet started before
+        let recent = vec![k("movies", &format!("{base}.nzb"))];
+        let (fleets, single) = plan_fleets(&pending[4..], &recent);
+        assert_eq!(fleets, vec![vec![0]]);
+        assert!(single.is_empty());
+        assert_eq!(fleet_key_for(b"X.nzb", b".zip"), None);
+    }
 
     #[test]
     fn test_scanner_next_pass_and_extensions() {

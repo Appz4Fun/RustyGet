@@ -4863,6 +4863,20 @@ impl NzbgetRsQueueCoordinator {
             )
         {
             let tried = nzb.current_success_articles + nzb.current_failed_articles;
+            host.nzb_set_param(
+                nzb.ptr,
+                crate::dupecoord::PROJECTED_PARAM,
+                Some(
+                    format!(
+                        "{:.1}",
+                        crate::dupecoord::arrived_percent(
+                            nzb.current_success_articles,
+                            nzb.current_failed_articles
+                        )
+                    )
+                    .as_bytes(),
+                ),
+            );
             let reason = crate::dupecoord::no_backup_reason_host(host, opts, dq_ptr, nzb);
             let mut msg = b"Parking ".to_vec();
             msg.extend_from_slice(&nzb.name);
@@ -4880,6 +4894,7 @@ impl NzbgetRsQueueCoordinator {
             );
             msg.extend_from_slice(&reason);
             msg.push(b')');
+            crate::dupecoord::push_queued_copies_note(host, dq_ptr, nzb, &mut msg);
             host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
             host.nzb_set_delete_status(nzb.ptr, DeleteStatus::Health);
             host.dq_edit_entry(
@@ -4985,6 +5000,15 @@ impl NzbgetRsQueueCoordinator {
         if (!dead && !doomed) || (probing >= 0 && !hopeless) {
             return;
         }
+        // Judged on the articles tried so far: the health shown is the projection, not
+        // the download's own health, which counts every untried article as good.
+        if eval.tried > 0 {
+            host.nzb_set_param(
+                nzb.ptr,
+                crate::dupecoord::PROJECTED_PARAM,
+                Some(format!("{:.1}", f64::from(eval.projected.clamp(0, 1000)) / 10.0).as_bytes()),
+            );
+        }
 
         // A copy whose archive needs a password nobody has can never be extracted: failing over
         // to it would throw this download away for nothing. The selector only picks a locked copy
@@ -5034,6 +5058,7 @@ impl NzbgetRsQueueCoordinator {
                 );
                 msg.extend_from_slice(&reason);
                 msg.push(b')');
+                crate::dupecoord::push_queued_copies_note(host, dq_ptr, &nzb, &mut msg);
                 host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
                 host.nzb_set_delete_status(nzb.ptr, DeleteStatus::Health);
                 host.dq_edit_entry(

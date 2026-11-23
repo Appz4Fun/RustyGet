@@ -22,6 +22,7 @@ RustyGet treats two downloads as the same title when they share a duplicate key.
 - **Other feeds** get keys from your filter rules.
 - **Clients** such as media managers and the Kodi add-on send a key with each download.
 - **Everything else**, such as files added in the web interface or dropped into `NzbDir`, falls back to matching titles.
+- **Copies of one release** whose names differ only by a suffix a download manager added (`Movie.2024.1080p-GRP_5.nzb`, `Movie.2024.1080p-GRP (1).nzb`) get the shared key `dupes:` plus the normalized name. Several dropped together, in the web interface's **Add** dialog or into `NzbDir` in one scan, go in as one [fleet](duplicate-fleets.md#fleet-submission); one added later joins them. A trailing `_N`, `-N` or `.N` counts as a copy suffix only after a release group tag (`-GRP`), so `Movie.Part.2` stays as it is. The **Add** dialog's "Add copies of the same release as one fleet" box, on by default, turns this off for the files it adds.
 - **The same NZB file twice** is always caught, by comparing content.
 
 You can also edit any download's key, score, and mode by hand.

@@ -2662,6 +2662,26 @@
     "message": "Disable duplicate check",
     "description": "Checkbox label. Add dialog text"
   },
+  "add_dialog_fleet": {
+    "message": "Add copies of the same release as one fleet",
+    "description": "Checkbox label. Add dialog text: files whose names differ only by a copy suffix go in as one fleet"
+  },
+  "add_dialog_fleet_plan": {
+    "message": "$1 files → 1 fleet: $2",
+    "description": "Add dialog text: $1 is how many files go in as one fleet, $2 the release name"
+  },
+  "label_donor_alive": {
+    "message": "donor · $1% alive",
+    "description": "Label of a copy kept in its fleet as a donor after its health check. $1 is the share of its tried articles that arrived."
+  },
+  "label_donor_dead": {
+    "message": "dead donor",
+    "description": "Label of a copy kept in its fleet although none of its tried articles arrived."
+  },
+  "status_projected_health": {
+    "message": "projected health: $1%",
+    "description": "Status label. Health judged from the articles tried so far. $1 is the projected health percentage."
+  },
   "add_dialog_scan_label": {
     "message": "Add from NzbDir",
     "description": "Input label. Form or field label | Add dialog text"

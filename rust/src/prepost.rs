@@ -1722,6 +1722,9 @@ impl NzbgetRsPrePostProcessor {
             crate::dupecoord::nzb_completed_host(host, dq_ptr, nzb_ptr);
         }
         crate::dupecoord::rescue_on_health_failure_host(host, dq_ptr, nzb_ptr);
+        if add_to_history {
+            crate::dupecoord::keep_as_donor_host(host, dq_ptr, nzb_ptr);
+        }
         if !add_to_history {
             crate::postproc::live_par_time_settle(host, nzb_ptr, false);
             host.history_delete_disk_files(nzb_ptr);

@@ -11781,8 +11781,19 @@ def scenario_dropkeepdonor(daemon, t):
           float(parked) < 10 and params.get('DupeAlive') == parked and nzb_kept and
           _grep_log(t, 'Keeping ' + rel + ' in its fleet') + _grep_log(t, 'Keeping ' + rel + ' as a donor') == 1 and
           _verify_output(t, data))
-    return ('dropkeepdonor', ok, 'done=%s primary=%s health=%d projected=%s parked=%s nzb_kept=%s' % (
-        done and (done['NZBName'], done['Status']), hp.get('Status'), health, projected, parked, nzb_kept))
+    # downloaded again by hand: the earlier try's projection and donor mark go
+    api.editqueue('HistoryRedownload', 0, '', [hp['NZBID']])
+    deadline = time.time() + 30
+    again = {}
+    while time.time() < deadline:
+        again = next((_params(g) for g in api.listgroups() if g['NZBName'] == rel), {})
+        if again:
+            break
+        time.sleep(0.5)
+    cleared = bool(again) and 'DupeParked' not in again and 'DupeProjected' not in again
+    ok = ok and cleared
+    return ('dropkeepdonor', ok, 'done=%s primary=%s health=%d projected=%s parked=%s nzb_kept=%s cleared=%s' % (
+        done and (done['NZBName'], done['Status']), hp.get('Status'), health, projected, parked, nzb_kept, cleared))
 
 
 SCENARIOS = {

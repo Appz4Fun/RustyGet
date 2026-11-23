@@ -1119,6 +1119,13 @@ impl HistoryCoord<'_> {
             self.log(HcLevel::Error, &em);
             return;
         }
+        // downloaded again: the health it was judged on, and its keeping as a
+        // donor, belong to the earlier try
+        #[cfg(unix)]
+        if let Some(qh) = crate::ffi::queue_host() {
+            qh.nzb_set_param(nzb_ptr, crate::dupecoord::PROJECTED_PARAM, None);
+            qh.nzb_set_param(nzb_ptr, crate::dupecoord::PARKED_PARAM, None);
+        }
 
         let names = self.host.nzb_names(nzb_ptr);
         let paused = restore_pause_state && names.delete_paused;

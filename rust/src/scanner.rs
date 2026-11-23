@@ -1569,7 +1569,13 @@ impl NzbgetRsScanner {
                 false,
             );
         }
-        for members in fleets {
+        for mut members in fleets {
+            // the shortest name first (the copy without a suffix), then by name:
+            // the order a directory lists its files in differs between systems
+            members.sort_by(|&a, &b| {
+                let (x, y) = (&pending[a].base_filename, &pending[b].base_filename);
+                x.len().cmp(&y.len()).then_with(|| x.cmp(y))
+            });
             let first = &pending[members[0]];
             let (category, key) = (first.category.clone(), first.key.clone());
             let mut copies: Vec<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)> = Vec::new();

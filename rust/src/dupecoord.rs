@@ -1142,11 +1142,14 @@ fn scrub_password_keys_host(host: &crate::queuesubsys_host::QueueSubsysHost, dq_
 pub(crate) fn join_queued_copy_groups_host(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     dq_ptr: usize,
+    checked: &mut std::collections::BTreeSet<i32>,
 ) {
     if dq_ptr == 0 || !host.opts().dupe_check {
         return;
     }
-    scrub_password_keys_host(host, dq_ptr);
+    if checked.is_empty() {
+        scrub_password_keys_host(host, dq_ptr);
+    }
     // by id, from the end: the last copy joins the earlier ones, which are
     // scored in queue order, so the copy queued first keeps the top score; the
     // queue is never reordered after a restart
@@ -1155,7 +1158,15 @@ pub(crate) fn join_queued_copy_groups_host(
         .map(|i| host.queue_at(dq_ptr, i))
         .filter(|p| p.is_some())
         .map(|p| host.nzb_snap(p, false).id)
+        .filter(|id| !checked.contains(id))
         .collect();
+    if checked.is_empty() && ids.is_empty() {
+        // an empty queue: look again next round (a queue loading later)
+        return;
+    }
+    checked.extend(ids.iter().copied());
+    // the marker that the first look ran, even before anything was queued
+    checked.insert(0);
     for id in ids {
         let qp = host.queue_find_by_id(dq_ptr, id);
         if qp.is_none() {

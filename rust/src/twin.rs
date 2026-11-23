@@ -974,9 +974,10 @@ static NEXT_TWIN_JOB_TOKEN: std::sync::atomic::AtomicUsize = std::sync::atomic::
 static TWIN_JOB_COUNT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 #[cfg(unix)]
 static TWIN_NUDGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// Whether the queue's keyless copies were grouped once after start.
+/// The queued downloads whose copy group was looked up once already (see
+/// [`crate::dupecoord::join_queued_copy_groups_host`]).
 #[cfg(unix)]
-static STARTUP_JOIN_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static JOIN_CHECKED: Mutex<std::collections::BTreeSet<i32>> = Mutex::new(std::collections::BTreeSet::new());
 #[cfg(unix)]
 static TWIN_LAST_PRUNE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
@@ -1520,10 +1521,13 @@ pub(crate) fn service_work_active() {
         jobs: Vec::new(),
     };
     qh.with_locked_queue(|dq_ptr| {
-        // once after start: downloads queued without a DupeKey before the
-        // copy grouping existed (or while it was off) join their copies now
-        if !STARTUP_JOIN_DONE.swap(true, std::sync::atomic::Ordering::SeqCst) {
-            crate::dupecoord::join_queued_copy_groups_host(&qh, dq_ptr);
+        // downloads queued without a DupeKey before the copy grouping existed
+        // (an earlier run, or while it was off) join their copies, each once,
+        // whenever the queue holds them (also after a reload, and when the
+        // queue loads after the first round)
+        if qh.dq_is_loaded() {
+            let mut checked = JOIN_CHECKED.lock().unwrap_or_else(|e| e.into_inner());
+            crate::dupecoord::join_queued_copy_groups_host(&qh, dq_ptr, &mut checked);
         }
         run_service_work_locked(&qh, &mut work_ctx, dq_ptr);
     });

@@ -864,6 +864,32 @@ fn check_placement_available(
     )
 }
 
+/// The bytes of articles a fleet of copies grouped by name reads from each copy
+/// while it ranks them (BODY checks); STATs cost nothing and are not counted.
+pub const GROUP_PROBE_BYTES: i64 = 1024 * 1024;
+
+/// Is `key` the DupeKey of copies grouped by name (`dupes:<normalized name>`)?
+pub fn is_group_key(key: &[u8]) -> bool {
+    let prefix = crate::releasename::GROUP_KEY_PREFIX;
+    key.len() > prefix.len() && key[..prefix.len()].eq_ignore_ascii_case(prefix)
+}
+
+/// Articles the kind probe reads of each copy before the BODY checks: its
+/// par2 file list and the head of its largest file.
+const GROUP_PROBE_KIND_ARTICLES: i64 = 2;
+
+/// The BODY checks a grouped fleet may make of each copy: as many as
+/// [`GROUP_PROBE_BYTES`] holds of its largest articles after the kind probe's
+/// two, at least one, and never more than option DupeBodyChecks asks for.
+pub fn group_probe_body_checks(body_checks: i32, largest_article: i64) -> i32 {
+    if largest_article <= 0 {
+        return body_checks;
+    }
+    let fit = (GROUP_PROBE_BYTES / largest_article - GROUP_PROBE_KIND_ARTICLES)
+        .clamp(1, i64::from(i32::MAX)) as i32;
+    body_checks.min(fit)
+}
+
 fn scanner_add_external(
     _host_ctx: *mut c_void,
     _host_cb: DupeHostFn,
@@ -874,12 +900,13 @@ fn scanner_add_external(
     score: i32,
     params: &[(&[u8], &[u8])],
     data: &[u8],
+    add_top: bool,
 ) -> i32 {
     let Some(sc) = crate::scanner::active_scanner() else {
         return 0;
     };
     let (st, out_id) = sc.add_external_bytes_active(
-        name, category, false, priority, dupe_key, score, 0, params, false, false, data,
+        name, category, false, priority, dupe_key, score, 0, params, add_top, false, data,
     );
     if st == crate::scanner::AS_SUCCESS && out_id != 0 {
         out_id
@@ -5120,6 +5147,7 @@ impl NzbgetRsDupeSearch {
             score,
             &params,
             &posting.data,
+            false,
         );
         if nzb_id == 0 {
             let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -5978,6 +6006,10 @@ pub unsafe fn fleet_append(
         dupe_key = make_dupe_key(&members[0].name);
     }
 
+    // Copies grouped by their name (a drop in the web UI or into NzbDir, or the
+    // daemon's join: DupeKey dupes:<normalized name>) are probed with about
+    // GROUP_PROBE_BYTES of articles each, and go to the front of the queue.
+    let grouped = is_group_key(&dupe_key);
     let deadline_ms = donor_now_ms() + i64::from(timeout_sec) * 1000;
     let key_lock = fleet_key_lock(&dupe_key);
     let key_wait_ms = (deadline_ms - donor_now_ms() - FINISH_RESERVE_MS).max(0);
@@ -6345,11 +6377,14 @@ pub unsafe fn fleet_append(
     // Intake: every copy opened down to its video; a copy carrying another
     // video is not part of this fleet. Like the kinds, it runs before the
     // health check with its own share of the time (half of what is left).
+    // Copies grouped by name skip it: mapping a set of volumes reads an article
+    // of each, far over their probe budget, and copies of one release name are
+    // matched by TwinCheck's par2 lists instead (an unverified copy stays).
     {
         let usable: Vec<usize> = (0..candidates.len())
             .filter(|&i| {
                 let c = &candidates[i];
-                c.error.is_empty() && c.same_as < 0
+                !grouped && c.error.is_empty() && c.same_as < 0
             })
             .collect();
         // A backup sent on its own after the fleet's first submission is opened
@@ -6465,13 +6500,26 @@ pub unsafe fn fleet_append(
         let cur = read_host_opts(host_ctx, host_cb);
         let check_start = donor_now_ms();
         let budget_ms = 1000i64.max(deadline_ms - check_start - FINISH_RESERVE_MS) as i32;
+        // STATs cost no bytes and spread over the whole posting, so a dead tail
+        // shows; the BODY checks of a group stay within its probe budget
+        let max_body = if grouped {
+            let largest_article = candidates
+                .iter()
+                .filter(|c| c.error.is_empty() && !c.summary.message_ids.is_empty())
+                .map(|c| c.summary.total_bytes / c.summary.message_ids.len() as i64)
+                .max()
+                .unwrap_or(0);
+            group_probe_body_checks(cur.body_checks, largest_article)
+        } else {
+            cur.body_checks
+        };
         let options = DonorOptions {
             sample: DonorSampleOptions {
                 percent: cur.health_percent,
                 minimum: cur.health_min,
                 maximum: cur.health_max.min(FLEET_SAMPLE_MAX),
                 body_percent: cur.body_percent,
-                max_body: cur.body_checks,
+                max_body,
                 seed: 0,
             },
             probe: 10,
@@ -6789,6 +6837,7 @@ pub unsafe fn fleet_append(
                 member_score,
                 &params,
                 &member.data,
+                grouped,
             );
             added[cand.index] = entry.nzb_id;
             any_added |= entry.nzb_id != 0;
@@ -6960,6 +7009,20 @@ mod tests {
         servers[1].usable = false;
         assert_eq!(backbone_order(&servers)[&1], vec![1]);
     }
+    #[test]
+    fn grouped_fleets_probe_about_a_megabyte_per_copy() {
+        assert!(is_group_key(b"dupes:x.2024.1080p.grp"));
+        assert!(is_group_key(b"DUPES:x"));
+        assert!(!is_group_key(b"dupes:"));
+        assert!(!is_group_key(b"imdb=1"));
+        // 100 KB articles: 10 fit, 2 go to the kind probe
+        assert_eq!(group_probe_body_checks(20, 100 * 1024), 8);
+        // 700 KB articles: one BODY check
+        assert_eq!(group_probe_body_checks(20, 700 * 1024), 1);
+        assert_eq!(group_probe_body_checks(5, 10 * 1024), 5);
+        assert_eq!(group_probe_body_checks(20, 0), 20);
+    }
+
     #[test]
     fn kind_probe_keeps_a_third_of_the_fleet_time() {
         // the add-on's 45 s minus the 2 s reserve: 14 s for the probe

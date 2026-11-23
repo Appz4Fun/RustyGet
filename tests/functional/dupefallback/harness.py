@@ -11258,7 +11258,7 @@ def scenario_dropnzbdir(daemon, t):
     DupeKey dupes:<normalized name>: one copy downloads, the rest wait as
     labelled backups with a DupeScore. The best copy (28 of 30 articles) is the
     primary and borrows its two missing articles from the partly alive copy
-    (14 of 30), which stays a low-priority donor; the dead copies are labelled
+    (19 of 30), which stays a low-priority donor labelled a twin; the dead copies are labelled
     dead and keep their nzb-file; the exact copy of the primary's nzb-file is
     the same posting and is not added. After the primary succeeds every other
     copy is in history as DELETED/DUPE: nothing is marked FAILURE and nothing
@@ -11267,28 +11267,48 @@ def scenario_dropnzbdir(daemon, t):
     data = _payload(3_000_000, 15001)
     every = set(range(1, n + 1))
     primary = _drop_copy(t, 'dnA', data, {5, 6})
-    # holds 5 and 6, which the primary lacks: 14 of 30 alive
-    partial_alive = {1, 3, 5, 6, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25}
-    partial = _drop_copy(t, 'dnB', data, every - partial_alive)
+    # holds 5 and 6, which the primary lacks: 19 of 30 alive
+    partial = _drop_copy(t, 'dnB', data, {2, 4, 8, 10, 12, 14, 16, 18, 20, 22, 24})
     dead1 = _drop_copy(t, 'dnC', data, every, dead_par=True)
     dead2 = _drop_copy(t, 'dnD', data, every, dead_par=True)
     other_data = _payload(1_000_000, 15002)
     other1 = _drop_copy(t, 'doA', other_data, set())
     other2 = _drop_copy(t, 'doB', other_data, set())
     api = daemon.wait_ready()
+    # something queued before the drop, and downloads paused (the fleet still
+    # probes): the copy picked to download goes in front of it
+    blocker = _drop_copy(t, 'dnZ', _payload(500_000, 15003), set())
+    _ds_append(api, 'Queued.Before.2023.720p.HDTV.x264-OTHER', blocker, 'other-key', 0, paused=True)
+    api.pausedownload()
     files = [(DROP_REL + '.nzb', primary), (DROP_REL + ' (1).nzb', partial), (DROP_REL + '_1.nzb', dead1),
              (DROP_REL + '_2.nzb', dead2), (DROP_REL + '_3.nzb', primary),
              (DROP_OTHER + '.nzb', other1), (DROP_OTHER + '_1.nzb', other2)]
     for name, text in files:
         t.write_file(os.path.join('main', 'nzb', name), text.encode())
+    deadline = time.time() + 90
+    order = []
+    while time.time() < deadline:
+        order = [g['NZBName'] for g in api.listgroups()]
+        if DROP_REL in order and DROP_OTHER in order and \
+                _grep_log(t, 'Fleet dupes:drop.movie') + _grep_log(t, 'Fleet dupes:drop.show') == 2:
+            break
+        time.sleep(0.5)
+    order = [g['NZBName'] for g in api.listgroups()]
+    in_front = order[-1:] == ['Queued.Before.2023.720p.HDTV.x264-OTHER'] and DROP_REL in order[:2]
+    api.resumedownload()
     done = _wait_key_success(api, DROP_KEY)
     other_done = _wait_key_success(api, DROP_OTHER_KEY)
+    # TwinCheck labels the backups on its next round (every 15 s)
+    deadline = time.time() + 45
+    while time.time() < deadline and not any(
+            _params(i).get('DupeKind') for i in _items_of_key(api, DROP_KEY) if i['NZBName'] == DROP_REL + ' (1)'):
+        time.sleep(1)
     items = _items_of_key(api, DROP_KEY)
     byname = {i['NZBName']: i for i in items}
     succeeded = [i['NZBName'] for i in items if i['Status'].startswith('SUCCESS')]
     failures = [i['NZBName'] for i in items if i['Status'].startswith('FAILURE')]
     others = [i for i in items if i['NZBName'] != (done or {}).get('NZBName')]
-    labelled = {i['NZBName']: (i['Status'], i.get('DupeScore'), _params(i).get('DupeCopyKind'), _params(i).get('DupeAlive'))
+    labelled = {i['NZBName']: (i['Status'], i.get('DupeScore'), _params(i).get('DupeKind'), _params(i).get('DupeAlive'))
                 for i in others}
     part = byname.get(DROP_REL + ' (1)', {})
     deads = [byname.get(DROP_REL + '_1', {}), byname.get(DROP_REL + '_2', {})]
@@ -11297,16 +11317,27 @@ def scenario_dropnzbdir(daemon, t):
     recovered = int((done or {}).get('DupeRecoveredArticles', 0))
     tried_backups = sum(int(i.get('SuccessArticles', 0)) + int(i.get('FailedArticles', 0)) for i in others)
     other_items = _items_of_key(api, DROP_OTHER_KEY)
-    ok = (done is not None and done['NZBName'] == DROP_REL and succeeded == [DROP_REL] and not failures and
+    # bytes each backup sent (articles served whole; a missing one costs nothing):
+    # the probe reads about 1 MB of each, borrowing takes the primary's 2 articles
+    time.sleep(0.5)
+    requests = re.findall(r'Received: (?:BODY|ARTICLE) <([^>]*)>', t.read_file('nserv.log').decode(errors='replace'))
+    sent = {}
+    for mid in requests:
+        m = re.match(r'(dn[A-Z])/[^?]*\?\d+=\d+:(\d+)$', mid)
+        if m:
+            sent[m.group(1)] = sent.get(m.group(1), 0) + int(m.group(2))
+    probe_ok = all(sent.get(tag, 0) <= 2 * 1024 * 1024 for tag in ('dnB', 'dnC', 'dnD'))
+    ok = (in_front and probe_ok and
+          done is not None and done['NZBName'] == DROP_REL and succeeded == [DROP_REL] and not failures and
           len(others) == 3 and all(i['Status'] == 'DELETED/DUPE' and int(i.get('DupeScore', 0)) > 0 for i in others) and
-          _params(part).get('DupeCopyKind') == 'twin' and _params(part).get('DupeAlive') not in (None, '0') and
+          _params(part).get('DupeKind') == 'twin' and _params(part).get('DupeAlive') not in (None, '0') and
           all(_params(d).get('DupeAlive') == '0' for d in deads) and dead_nzbs_kept and
           recovered == 2 and tried_backups == 0 and _verify_output(t, data, dirs=(('main', 'dst', DROP_REL),)) and
           other_done is not None and len(other_items) == 2 and
           sorted(i['Status'][:7] for i in other_items) == ['DELETED', 'SUCCESS'] and
           _grep_log(t, 'from NzbDir as one fleet under DupeKey') == 2)
-    return ('dropnzbdir', ok, 'done=%s recovered=%d labelled=%s failures=%s dead_nzbs_kept=%s tried_backups=%d other=%s' % (
-        done and done['Status'], recovered, labelled, failures, dead_nzbs_kept, tried_backups,
+    return ('dropnzbdir', ok, 'queue=%s bytes_sent=%s done=%s recovered=%d labelled=%s failures=%s dead_nzbs_kept=%s tried_backups=%d other=%s' % (
+        order, sent, done and done['Status'], recovered, labelled, failures, dead_nzbs_kept, tried_backups,
         [(i['NZBName'], i['Status']) for i in other_items]))
 
 
@@ -11322,6 +11353,9 @@ def scenario_dropjoin(daemon, t):
     rel = 'Join.Movie.2024.1080p.WEB-DL.x264-GRP'
     key = 'dupes:join.movie.2024.1080p.web.dl.x264.grp'
     api = daemon.wait_ready()
+    # queued before the release: the group goes in front of it
+    _ds_append(api, 'Queued.Before.2023.720p.HDTV.x264-OTHER', _drop_copy(t, 'jnZ', data, set()), 'blocker-key', 0,
+               paused=True)
     # the first stays paused until its copies came, so it is the one queued
     _ds_append(api, rel, _drop_copy(t, 'jnA', data, set()), '', 0, paused=True)
     _ds_append(api, rel + '_1', _drop_copy(t, 'jnB', data, set()), '', 0, paused=False)
@@ -11349,7 +11383,7 @@ def scenario_dropjoin(daemon, t):
             time.sleep(0.5)
             h = daemon.wait_history(api, name, timeout=60)
         apart[name] = (h['Status'], h.get('DupeKey'), h.get('DupeScore'))
-    ok = (done is not None and done['NZBName'] == rel and
+    ok = (done is not None and done['NZBName'] == rel and [q[0] for q in queued][:1] == [rel] and
           scores == {rel: 100, rel + '_1': 99, rel + ' (2)': 98} and
           statuses.get(rel + '_1') == 'DELETED/DUPE' and statuses.get(rel + ' (2)') == 'DELETED/DUPE' and
           _grep_log(t, 'with 1 other copy(ies) of the same release: DupeKey ' + key) == 1 and
@@ -11362,9 +11396,9 @@ def scenario_dropkeepdonor(daemon, t):
     """A copy that fails its health check while its fleet is open stays in it as
     a donor, not a failure, and its shown health is the one it was judged on.
     The first of two copies (grouped by name: ``X`` and ``X_1``) is a dead
-    posting of 1,740 articles; it fails over to the second once about 70 of its
-    own articles failed. Its Health (which counts every untried article as good)
-    is still above 90%, but it was judged dead from what it tried: it is filed
+    posting of 1,740 articles; it fails over to the second as soon as a sample of
+    its articles shows it dead. Its Health (which counts every untried article as
+    good) is still above 90%, but it was judged dead from the sample: it is filed
     DELETED/DUPE with DupeParked/DupeProjected near 0 (shown as projected health
     and "dead donor"), keeps its nzb-file, and is never failed over to again;
     the second copy completes."""
@@ -12167,7 +12201,7 @@ def _promote_fallback(options, mode):
 # finished job is rightly not redone
 FALLBACK_MODE_BOUND = {'livegate', 'streamrestartcredit', 'wholefilerestart', 'wholefilestale'}
 # scenarios that read nserv's request log (nserv.log)
-CAPTURE_REQUESTS = {'repost', 'wholefileproofcost'}
+CAPTURE_REQUESTS = {'repost', 'wholefileproofcost', 'dropnzbdir'}
 # extra nserv arguments per scenario (-w: response latency in ms)
 SCENARIO_NSERV_ARGS = {'finaldeletemidway': ['-w', '300'], 'finaldeleterestart': ['-w', '300'], 'restartmidway': ['-w', '300'], 'xpacklatency': ['-w', '1000'], 'deadpickprobe': ['-w', '500'], 'deadpickafterreload': ['-w', '500'],
                        'deadpickpartial': ['-w', '100'], 'deadpickstray': ['-w', '500'], 'forcefailover': ['-w', '500'], 'copybackup': ['-w', '500'], 'copyoffailed': ['-w', '500'], 'deaddownloadstray2': ['-w', '300'], 'deaddownloadrestart': ['-w', '300'], 'deadbackupsonly': ['-w', '500'], 'backuporder': ['-w', '500'], 'deaddownloadlate': ['-w', '300'], 'deadpickservers': ['-w', '200'],

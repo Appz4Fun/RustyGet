@@ -1052,6 +1052,13 @@ pub(crate) fn join_copy_group_host(
             nzb.dupe_score,
         );
     }
+    // the group goes to the front of the queue: the copy that downloads first
+    for (sib, _) in &siblings {
+        let queued = (0..host.queue_len(dq_ptr)).any(|i| host.queue_at(dq_ptr, i) == sib.ptr);
+        if queued && !sib.deleting && sib.delete_status == DeleteStatus::None {
+            host.dq_edit_entry(dq_ptr, sib.id, crate::queuesubsys_host::EA_GROUP_MOVE_TOP, None);
+        }
+    }
     let mut msg = b"Grouping ".to_vec();
     msg.extend_from_slice(&nzb.name);
     msg.extend_from_slice(

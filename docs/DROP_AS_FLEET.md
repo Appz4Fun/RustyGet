@@ -106,6 +106,29 @@ NzbGet's DupeMode SCORE always did: the copy that came first downloads, the
 rest wait in history as backups, and TwinCheck labels each one (it only looks at
 downloads with a DupeKey).
 
+### To the front, probed with about 1 MB each
+
+A group goes to the front of the queue at once: a fleet with a `dupes:` key adds
+its copies at the top (`dupesearch_coord.rs` `scanner_add_external`, `add_top`),
+and the daemon-side join moves the queued copies of the group to the top.
+
+Each copy is scored from a probe of about 1 MB of articles
+(`dupesearch_coord.rs` `GROUP_PROBE_BYTES`), never by downloading it:
+
+- the STAT checks spread over the whole posting cost no bytes, so a dead tail
+  shows in the alive share;
+- the kind probe reads two articles (the par2 file list and the head of the
+  largest file: twin by par2 list, encrypted or locked headers);
+- the BODY checks get what is left of the 1 MB (`group_probe_body_checks`, at
+  least one, never more than `DupeBodyChecks`);
+- the payload intake, which reads an article of every volume to map the video
+  inside, is skipped for such a group: copies of one release name are matched
+  by TwinCheck's par2 lists instead, and an unverified copy stays in the fleet.
+
+After the probe only the best copy downloads. The others stay as scored,
+labelled backups that lend articles when the primary misses them; no backup is
+downloaded in full while the primary can still finish.
+
 ### Imperfect copies stay donors
 
 Only the best copy downloads. Every other copy stays in the fleet as a backup
@@ -135,16 +158,17 @@ badge, and shows a kept donor's `DupeParked` the same way.
 
 | Done when | Test |
 |---|---|
-| Dropping 3+ copies of one release creates a single fleet: one item downloading, the others labelled TWIN / borrowable alt / non-borrowable alt in Downloads. | functional `dropnzbdir` (NzbDir drop of 5 copies plus an exact copy: one primary, every other copy DupeKey `dupes:…`, DupeScore > 0, the partly alive copy `DupeCopyKind=twin`, the dead ones `DupeAlive=0`); web UI `tests/webui/dupe-group.js` "suffixed copies form one fleet" |
+| Dropping 3+ copies of one release creates a single fleet: one item downloading, the others labelled TWIN / borrowable alt / non-borrowable alt in Downloads. | functional `dropnzbdir` (NzbDir drop of 5 copies plus an exact copy: one primary, every other copy DupeKey `dupes:…`, DupeScore > 0, the partly alive copy `DupeKind=twin`, the dead ones `DupeAlive=0`); web UI `tests/webui/dupe-group.js` "suffixed copies form one fleet" |
 | After the primary succeeds, the other copies go to history as DELETED/DUPE, and nothing re-downloads. | functional `dropnzbdir` (one SUCCESS, the other copies DELETED/DUPE, no article tried by any backup), `dropjoin` |
 | Dropping copies of two different releases at once creates two fleets. | functional `dropnzbdir` (second release, its own key and one SUCCESS); web UI `dupe-group.js` "two releases form two fleets"; Rust `scanner::tests::nzbdir_copies_of_one_release_form_one_fleet` |
-| A partially alive copy (for example 19 of 40 sampled articles) stays queued as a low-priority donor with its alive % shown. It is not marked FAILURE/HEALTH, and the primary borrows from it. | functional `dropnzbdir` (14 of 30 alive: DELETED/DUPE with its DupeAlive, the primary recovers its 2 missing articles from it); `dropkeepdonor` (a tried copy that fails its health check is kept as a donor, DELETED/DUPE, not FAILURE/HEALTH) |
+| A partially alive copy (for example 19 of 40 sampled articles) stays queued as a low-priority donor with its alive % shown. It is not marked FAILURE/HEALTH, and the primary borrows from it. | functional `dropnzbdir` (19 of 30 alive: DELETED/DUPE with its DupeAlive, labelled a twin by TwinCheck, the primary recovers its 2 missing articles from it); `dropkeepdonor` (a tried copy that fails its health check is kept as a donor, DELETED/DUPE, not FAILURE/HEALTH) |
 | A copy with nothing alive is labelled dead, stays in history with its nzb, and is never deleted. | functional `dropnzbdir` (`DupeAlive=0`, nzb-file still in NzbDir), `dropkeepdonor` (`DupeParked` near 0, nzb-file kept) |
 | Exact duplicate files are dropped before upload. | web UI `dupe-group.js` "exact duplicate files are dropped before upload"; functional `dropnzbdir` (the exact copy in NzbDir is SAME_POSTING, not added) |
 | With the checkbox off, or with Force on, behaviour is exactly as today. | web UI `dupe-group.js` "box off or Force on: every file on its own, as before"; functional `dropjoin` (`DupeJoin=no` and DupeMode FORCE copies keep no DupeKey and each downloads) |
 | Web UI tests cover the grouping (suffix stripping, two releases, a single file, a user-supplied DupeKey). | `tests/webui/dupe-group.js` |
 | The NzbDir scanner treats files of one release in one scan pass as one fleet. | functional `dropnzbdir`; Rust `scanner::tests::nzbdir_copies_of_one_release_form_one_fleet` |
 | Items with no DupeKey and the same normalized name join one group, whatever added them. | functional `dropjoin`; Rust `dupecoord::tests::group_scores_follow_the_order_copies_came` |
+| A group goes to the front of the queue, and each backup sends at most about 1 to 2 MB during intake. | functional `dropnzbdir` (queue order with an item queued before the drop; nserv request log: bytes served per backup copy at most 2 MB, borrowed articles included), `dropjoin` (the joined copy moves in front of an item queued before it); Rust `dupesearch_coord::tests::grouped_fleets_probe_about_a_megabyte_per_copy` |
 | The shown health is the one a copy was judged on. | functional `dropkeepdonor` (Health above 90%, DupeProjected under 10%) |
 | The name rule strips only a copy suffix. | Rust `releasename::tests::copy_suffixes_strip_only_after_a_group_tag`; web UI `dupe-group.js` (the same cases) |
 

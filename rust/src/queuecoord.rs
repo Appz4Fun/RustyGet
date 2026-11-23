@@ -2068,6 +2068,8 @@ impl NzbgetRsQueueCoordinator {
             .as_bytes(),
         );
         host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
+        // judged dead from the sample, whatever its Health says
+        host.nzb_set_param(nzb.ptr, crate::dupecoord::PROJECTED_PARAM, Some(b"0.0"));
         host.nzb_set_delete_status(nzb.ptr, DeleteStatus::Health);
         host.dq_edit_entry(
             dq_ptr,
@@ -4844,6 +4846,7 @@ impl NzbgetRsQueueCoordinator {
                     .as_bytes(),
                 );
                 host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
+                set_projected_from_tried(host, nzb);
                 host.nzb_set_delete_status(nzb.ptr, DeleteStatus::Health);
                 host.dq_edit_entry(
                     dq_ptr,
@@ -4863,20 +4866,7 @@ impl NzbgetRsQueueCoordinator {
             )
         {
             let tried = nzb.current_success_articles + nzb.current_failed_articles;
-            host.nzb_set_param(
-                nzb.ptr,
-                crate::dupecoord::PROJECTED_PARAM,
-                Some(
-                    format!(
-                        "{:.1}",
-                        crate::dupecoord::arrived_percent(
-                            nzb.current_success_articles,
-                            nzb.current_failed_articles
-                        )
-                    )
-                    .as_bytes(),
-                ),
-            );
+            set_projected_from_tried(host, nzb);
             let reason = crate::dupecoord::no_backup_reason_host(host, opts, dq_ptr, nzb);
             let mut msg = b"Parking ".to_vec();
             msg.extend_from_slice(&nzb.name);
@@ -6939,4 +6929,21 @@ mod tests {
         assert!(!st.saw_non_null_strs_on_running_snap);
         assert_eq!(st.cancelled, vec![0xAD02]);
     }
+}
+
+/// Stores the share of a download's tried articles that arrived as the health it
+/// was judged on ([`crate::dupecoord::PROJECTED_PARAM`]): its own Health counts
+/// every untried article as good.
+#[cfg(unix)]
+fn set_projected_from_tried(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb: &crate::queuesubsys_host::NzbSnap,
+) {
+    let projected =
+        crate::dupecoord::arrived_percent(nzb.current_success_articles, nzb.current_failed_articles);
+    host.nzb_set_param(
+        nzb.ptr,
+        crate::dupecoord::PROJECTED_PARAM,
+        Some(format!("{projected:.1}").as_bytes()),
+    );
 }

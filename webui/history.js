@@ -675,8 +675,10 @@ var HistoryUI = (new function($)
 				{
 					// a twin or an alt of the primary of its dupe key (TwinCheck)
 					var kind = hist.Kind === 'NZB' ? DownloadsUI.parameterValue(hist.Parameters, 'DupeKind') : '';
-					return kind.indexOf('twin') === 0 ? I18n.translate('status_twin') :
-						kind === 'alt' ? I18n.translate('status_alt') : I18n.translate('status_dupe');
+					var label = DupeGroup.kindLabel(kind);
+					return label === 'twin' ? I18n.translate('status_twin') :
+						label === 'alt' ? I18n.translate('status_alt') :
+						label === 'unverified' ? I18n.translate('status_unverified') : I18n.translate('status_dupe');
 				}
 				if (detail === 'GOOD') return I18n.translate('status_good');
 				if (detail === 'SUCCESS') return I18n.translate('status_success');

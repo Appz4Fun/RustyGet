@@ -6771,6 +6771,48 @@ def _fleet_kinds(api, key):
             for g in api.listgroups() + api.history() if g.get('DupeKey') == key}
 
 
+def scenario_fleetprimaryease(daemon, t):
+    """F10: among healthy copies the primary is the one easiest to borrow
+    into: a bare copy before a stored rar before a compressed one, whatever
+    order the client sent them in. Health still gates: a weak bare copy (30
+    of 40 alive) never leads the healthy ones."""
+    daemon.fake_nntp.alive = set()
+    api = daemon.wait_ready()
+    reply = _fleet(daemon, [
+        ('Show.S01E01.compressed', _fleet_copy(daemon, 'ec', 'a.rar', 420_000, _rar4_head(0x33), _payload(420_000, 7801))),
+        ('Show.S01E01.store', _fleet_copy(daemon, 'es', 'b.rar', 410_000, _rar4_head(0x30), _payload(410_000, 7802))),
+        ('Show.S01E01.weakbare', _fleet_copy(daemon, 'ew', 'd.mkv', 400_000, None, _payload(400_000, 7803), 30)),
+        ('Show.S01E01.bare', _fleet_copy(daemon, 'eb', 'c.mkv', 400_000, None, _payload(400_000, 7804)))],
+        key='fleet:ease')
+    order = [m['Name'] for m in sorted(reply['Members'], key=lambda m: m['Rank'])]
+    chosen = next((m['Name'] for m in reply['Members'] if m['NZBID'] == reply['Chosen']), None)
+    ok = chosen == 'Show.S01E01.bare' and order[0] == 'Show.S01E01.bare' and \
+        order.index('Show.S01E01.store') < order.index('Show.S01E01.compressed')
+    return ('fleetprimaryease', ok, 'order=%s chosen=%s' % (order, chosen))
+
+
+def scenario_fleettimeoutunverified(daemon, t):
+    """F6: timeouts are never evidence. A copy whose every check fails with a
+    temporary error (451, as a server or proxy that times out answers) is
+    unverified: Alive -1, a backup, never DEAD; a copy the server says it
+    lacks is dead."""
+    daemon.fake_nntp.alive = set()
+    api = daemon.wait_ready()
+    whole = _fleet_copy(daemon, 'tw', 'a.mkv', 400_000, None, _payload(400_000, 7901))
+    flaky = _fleet_copy(daemon, 'tf', 'b.mkv', 400_000, None, _payload(400_000, 7902))
+    daemon.fake_nntp.reply451 |= set(_fleet_ids('tf')) | {'tf-par@x'}
+    dead = _fleet_copy(daemon, 'td', 'c.mkv', 400_000, None, _payload(400_000, 7903), 0)
+    reply = _fleet(daemon, [('Show.S01E01.whole', whole), ('Show.S01E01.flaky', flaky),
+                            ('Show.S01E01.dead', dead)], key='fleet:timeout')
+    byname = {m['Name']: (m['Status'], m['Alive']) for m in reply['Members']}
+    items = {g['NZBName']: {p['Name']: p['Value'] for p in g.get('Parameters', [])}
+             for g in api.listgroups() + api.history() if g.get('DupeKey') == 'fleet:timeout'}
+    ok = (byname.get('Show.S01E01.flaky', ('', 0))[1] == -1 and byname['Show.S01E01.flaky'][0] in ('BACKUP', 'QUEUED')
+          and byname.get('Show.S01E01.dead', ('', 0))[0] == 'DEAD'
+          and items.get('Show.S01E01.flaky', {}).get('DupeAlive') is None)
+    return ('fleettimeoutunverified', ok, 'members=%s params=%s' % (byname, items.get('Show.S01E01.flaky')))
+
+
 def scenario_fleetkindsingle(daemon, t):
     """appendfleet with one copy (store-mode rar): it is probed too, so it
     gets its kind (borrowable) instead of none."""
@@ -11434,6 +11476,8 @@ def scenario_dropkeepdonor(daemon, t):
 
 SCENARIOS = {
     'dropnzbdir': scenario_dropnzbdir,
+    'fleetprimaryease': scenario_fleetprimaryease,
+    'fleettimeoutunverified': scenario_fleettimeoutunverified,
     'dropjoin': scenario_dropjoin,
     'dropkeepdonor': scenario_dropkeepdonor,
     'complementary': scenario_complementary,
@@ -11833,6 +11877,8 @@ SCENARIO_ENV = {
 SCENARIO_ENV_KEYS = sorted({k for env in SCENARIO_ENV.values() for k in env})
 
 SCENARIO_OPTIONS = {
+    'fleetprimaryease': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
+    'fleettimeoutunverified': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'dropnzbdir': ['NzbDirInterval=1', 'NzbDirFileAge=2', 'HealthCheck=dupe', 'DupeArticleFallback=article'],
     'dropjoin': ['HealthCheck=dupe'],
     'dropkeepdonor': ['HealthCheck=dupe', 'DupeArticleFallback=article'],
@@ -12259,7 +12305,7 @@ SCENARIO_FIRST_FAIL_PROXY = {'recheckfailed': ((b'?5=', b'?10=', b'?15='),),
 # scenarios with a FakeNewznab indexer (DupeSearchUrl points to it)
 
 # scenarios with a FakeNntp news server in place of nserv
-SCENARIO_FAKE_NNTP = {'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchborrow', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetkindsingle', 'fleetkindlater', 'fleetintake', 'fleetintakelater', 'fleetencryptedlast', 'fleetencryptedheadless', 'fleetlockedlast', 'fleetencryptedpassword', 'fleetkindslowcheck', 'fleettwinvolumes', 'fleetalldead', 'fleetshutdown'}
+SCENARIO_FAKE_NNTP = {'fleetprimaryease', 'fleettimeoutunverified', 'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchborrow', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetkindsingle', 'fleetkindlater', 'fleetintake', 'fleetintakelater', 'fleetencryptedlast', 'fleetencryptedheadless', 'fleetlockedlast', 'fleetencryptedpassword', 'fleetkindslowcheck', 'fleettwinvolumes', 'fleetalldead', 'fleetshutdown'}
 
 
 # --------------------------------------------------------------------------- #

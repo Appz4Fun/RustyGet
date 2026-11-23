@@ -3897,6 +3897,7 @@ a.details-tile-link:hover {
 .fleet-role-borrowable-encrypted,
 .fleet-role-alt { background: var(--cyan-soft); color: var(--cyan-text); }
 .fleet-role-unborrowable { background: var(--yellow-soft); color: var(--yellow-text); }
+.fleet-role-container { background: var(--fill-tertiary); color: var(--label-secondary); }
 
 .fleet-copy {
 	font-size: 12px;

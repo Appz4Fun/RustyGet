@@ -4847,6 +4847,14 @@
     "message": "alt",
     "description": "Fleet role tag: the same video file in another container."
   },
+  "fleet_role_unverified": {
+    "message": "unverified",
+    "description": "Fleet role tag: another container (different packing), the video inside not checked yet. Not 'another encode'."
+  },
+  "status_unverified": {
+    "message": "unverified",
+    "description": "History status of a duplicate in another container whose video inside is not verified yet (par2 checksums differ, which only shows other packing)."
+  },
   "fleet_role_copy": {
     "message": "copy",
     "description": "Fleet role tag for a copy whose role has not been worked out yet."

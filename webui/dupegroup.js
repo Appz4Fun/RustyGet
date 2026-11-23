@@ -286,6 +286,24 @@ var DupeGroup = (new function()
 	};
 
 	/*
+	 * What a backup's TwinCheck label (DupeKind) says, for the web UI:
+	 * 'twin' (the same post: twin, twin:N/M), 'alt' (the same video in another
+	 * container, verified inside), 'unverified' (another container: par2
+	 * checksums or sampled articles differ, which shows only other packing; the
+	 * video inside not read yet), 'other' (the video inside read and different),
+	 * or '' (not labelled). Other par2 checksums alone never make 'other'.
+	 */
+	this.kindLabel = function(dupeKind)
+	{
+		var kind = String(dupeKind || '');
+		if (kind === 'twin' || /^twin:\d+\/\d+$/.test(kind)) return 'twin';
+		if (kind === 'alt') return 'alt';
+		if (kind === 'container') return 'unverified';
+		if (kind === 'other') return 'other';
+		return '';
+	};
+
+	/*
 	 * Plans how the Add dialog sends its files.
 	 *   files: [{ name, content, dupekey }], content compared for exact copies
 	 *     (may be undefined when not read yet), dupekey typed by the user.

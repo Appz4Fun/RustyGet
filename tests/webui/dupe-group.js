@@ -133,6 +133,18 @@ check('box off or Force on: every file on its own, as before', () => {
   }
 });
 
+check('F9: another container is unverified, never another video', () => {
+  assert.equal(DupeGroup.kindLabel('twin'), 'twin');
+  assert.equal(DupeGroup.kindLabel('twin:3/4'), 'twin');
+  assert.equal(DupeGroup.kindLabel('alt'), 'alt');
+  // par2 checksums differ: other packing only
+  assert.equal(DupeGroup.kindLabel('container'), 'unverified');
+  // the video inside read and different
+  assert.equal(DupeGroup.kindLabel('other'), 'other');
+  assert.equal(DupeGroup.kindLabel(''), '');
+  assert.equal(DupeGroup.kindLabel(undefined), '');
+});
+
 if (failures.length) {
   console.error(failures.join('\n'));
   console.error(`dupe-group: ${failures.length} failed, ${passed} passed`);

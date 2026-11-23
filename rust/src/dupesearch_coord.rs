@@ -866,12 +866,28 @@ fn check_placement_available(
 
 /// The bytes of articles a fleet of copies grouped by name reads from each copy
 /// while it ranks them (BODY checks); STATs cost nothing and are not counted.
+// OPEN ITEM (par-rs): switch to par_rs::probe once #87 merges
+// (plan_probe for the spread articles within this budget, check_probe for
+// slice-verified Match/Mismatch/Incomplete; probed slices matching the same
+// IFSC are twin evidence). Until then the fleet's own STAT/BODY sampling runs.
 pub const GROUP_PROBE_BYTES: i64 = 1024 * 1024;
 
 /// Is `key` the DupeKey of copies grouped by name (`dupes:<normalized name>`)?
 pub fn is_group_key(key: &[u8]) -> bool {
     let prefix = crate::releasename::GROUP_KEY_PREFIX;
     key.len() > prefix.len() && key[..prefix.len()].eq_ignore_ascii_case(prefix)
+}
+
+/// Seconds a fleet of copies grouped by name may spend checking each copy:
+/// the budget is per copy (the user's rule, 2026-11-23), so a slow server or
+/// proxy doesn't run a fleet of fifteen out of one window.
+pub const GROUP_CHECK_SEC_PER_COPY: i32 = 60;
+
+/// The time limit of a grouped fleet of `copies` copies: [`GROUP_CHECK_SEC_PER_COPY`]
+/// for each, or `requested` when that is more.
+pub fn group_check_timeout_sec(requested: i32, copies: usize) -> i32 {
+    let per_copy = i64::from(GROUP_CHECK_SEC_PER_COPY) * copies.max(1) as i64;
+    i64::from(requested).max(per_copy).min(i64::from(i32::MAX)) as i32
 }
 
 /// Articles the kind probe reads of each copy before the BODY checks: its
@@ -5965,7 +5981,12 @@ pub unsafe fn fleet_append(
     const FINISH_RESERVE_MS: i64 = 2000;
     const MAX_TIMEOUT_SEC: i32 = 120;
 
-    let timeout_sec = fleet_clamp_timeout_sec(timeout_sec_in, MAX_TIMEOUT_SEC);
+    let mut timeout_sec = fleet_clamp_timeout_sec(timeout_sec_in, MAX_TIMEOUT_SEC);
+    if !dupe_key_ptr.is_null() && is_group_key(unsafe { CStr::from_ptr(dupe_key_ptr) }.to_bytes()) {
+        // copies grouped by name: the check budget is per copy, not one
+        // window for the whole fleet
+        timeout_sec = group_check_timeout_sec(timeout_sec, req_members_len);
+    }
     if req_members.is_null() || req_members_len == 0 {
         return emit_fleet_result(out, 0, true, b"NO_MEMBERS", &[]);
     }
@@ -6351,8 +6372,16 @@ pub unsafe fn fleet_append(
             })
             .collect();
         if !usable.is_empty() {
-            let probe_deadline = now_unix_sec()
-                + fleet_kind_probe_secs(deadline_ms - donor_now_ms() - FINISH_RESERVE_MS);
+            let left_ms = deadline_ms - donor_now_ms() - FINISH_RESERVE_MS;
+            // a grouped fleet probes each copy for up to its own minute (the
+            // copies run FLEET_KIND_PROBE_PARALLEL at a time)
+            let probe_secs = if grouped {
+                let rounds = (usable.len() + earlier.len()).div_ceil(FLEET_KIND_PROBE_PARALLEL).max(1);
+                fleet_phase_secs(left_ms, 2, i64::from(GROUP_CHECK_SEC_PER_COPY) * rounds as i64)
+            } else {
+                fleet_kind_probe_secs(left_ms)
+            };
+            let probe_deadline = now_unix_sec() + probe_secs;
             let mut summaries: Vec<&NzbSummaryData> =
                 usable.iter().map(|&i| &candidates[i].summary).collect();
             summaries.extend(earlier.iter().map(|(_, s)| s));
@@ -6700,6 +6729,41 @@ pub unsafe fn fleet_append(
         &mut ranked_idx,
     );
     ranked_idx.truncate(ranked_count);
+    // the primary: the healthy copy easiest to borrow into (bare or split,
+    // stored, compressed, encrypted), never a compressed or encrypted one
+    // while a healthy plain copy is there
+    {
+        let healthy: Vec<bool> = (0..candidates.len())
+            .map(|i| {
+                cand_err[i] == 0
+                    && cand_same_as[i] < 0
+                    && cand_dead[i] == 0
+                    && cand_locked[i] == 0
+                    && cand_alive[i] >= 0
+                    && cand_alive[i].saturating_mul(10) >= crate::dupesearch_nzb::FLEET_HEALTHY_ALIVE_PERMILLE
+            })
+            .collect();
+        let ease: Vec<u8> = (0..candidates.len())
+            .map(|i| match &probed[i] {
+                Some((_, packing)) => {
+                    let head = candidates[i]
+                        .summary
+                        .heads
+                        .iter()
+                        .max_by_key(|h| h.bytes)
+                        .map(|h| h.name.as_slice())
+                        .unwrap_or(&[]);
+                    crate::donorkind::primary_ease(
+                        *packing,
+                        head,
+                        summary_password_known(&candidates[i].summary),
+                    )
+                }
+                None => 2,
+            })
+            .collect();
+        crate::dupesearch_nzb::lead_easiest_healthy(&mut ranked_idx, &healthy, &ease);
+    }
 
     let mut any_alive = false;
     let mut any_usable = false;
@@ -7021,6 +7085,35 @@ mod tests {
         assert_eq!(group_probe_body_checks(20, 700 * 1024), 1);
         assert_eq!(group_probe_body_checks(5, 10 * 1024), 5);
         assert_eq!(group_probe_body_checks(20, 0), 20);
+    }
+
+    /// F8: the classification reads encrypted headers with the nzb's password,
+    /// from its `<meta type="password">` or a `{{password}}` in its name.
+    #[test]
+    fn fleet_copies_carry_the_nzb_password() {
+        let xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb"><head><meta type="password">meta-pw</meta></head>
+<file poster="p" date="1" subject="&quot;a.rar&quot; yEnc (1/1)"><groups><group>a.b</group></groups>
+<segments><segment bytes="100" number="1">a@x</segment></segments></file></nzb>"#;
+        let mut summary = parse_nzb_summary(xml).expect("parses");
+        summary_take_name_password(&mut summary, b"Movie.2024.1080p-GRP{{name-pw}}.nzb");
+        assert_eq!(summary_password(&summary), Some(b"meta-pw".as_slice()));
+        let plain = String::from_utf8_lossy(xml)
+            .replace(r#"<head><meta type="password">meta-pw</meta></head>"#, "")
+            .into_bytes();
+        let mut summary = parse_nzb_summary(&plain).expect("parses");
+        assert_eq!(summary_password(&summary), None);
+        summary_take_name_password(&mut summary, b"Movie.2024.1080p-GRP{{name-pw}}.nzb");
+        assert_eq!(summary_password(&summary), Some(b"name-pw".as_slice()));
+    }
+
+    /// F7: a grouped fleet's check budget is per copy (60 s each).
+    #[test]
+    fn grouped_fleets_check_each_copy_for_a_minute() {
+        assert_eq!(group_check_timeout_sec(60, 15), 15 * 60);
+        assert_eq!(group_check_timeout_sec(60, 1), 60);
+        assert_eq!(group_check_timeout_sec(120, 1), 120);
+        assert_eq!(group_check_timeout_sec(30, 0), 60);
     }
 
     #[test]

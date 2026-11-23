@@ -42,8 +42,8 @@ var DetailsPanel = (new function($)
 	// donor priority, lower first: the primary, twins, then borrowable alts,
 	// encrypted alts borrowable with their nzb password, alts whose packaging
 	// is unknown, and alts that cannot be borrowed from
-	var ROLE_ORDER = { primary: 0, twin: 1, borrowable: 2, 'borrowable-encrypted': 3, alt: 4,
-		unborrowable: 5, '': 6 };
+	var ROLE_ORDER = { primary: 0, twin: 1, borrowable: 2, 'borrowable-encrypted': 3, alt: 4, container: 5,
+		unborrowable: 6, '': 7 };
 
 	function param(item, name)
 	{
@@ -73,9 +73,15 @@ var DetailsPanel = (new function($)
 				copy === 'unborrowable' ? copy : 'alt',
 				label: I18n.translate('fleet_role_alt'), copy: copyLabel };
 		}
-		// another container whose video inside is not verified yet, or another
-		// video: a plain copy, never the primary
-		if (kind === 'container' || kind === 'other')
+		// another container whose video inside is not verified yet: shown as
+		// unverified (other par2 checksums only mean other packing), it becomes
+		// an alt once the video inside matches
+		if (DupeGroup.kindLabel(kind) === 'unverified')
+		{
+			return { kind: 'container', label: I18n.translate('fleet_role_unverified'), copy: copyLabel };
+		}
+		// another video: a plain copy, never the primary
+		if (kind === 'other')
 		{
 			return null;
 		}

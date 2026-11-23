@@ -154,6 +154,39 @@ a copy projected at 0% showed 98.8% before. The web UI shows "projected health:
 N%" instead of the health label for such a download, uses it in the score
 badge, and shows a kept donor's `DupeParked` the same way.
 
+### Classification rules (F6 to F10)
+
+- **Timeouts are never evidence (F6).** The fleet's health check counts only
+  articles a server said it has or lacks (`dupesearch_nzb.rs`
+  `eval_fleet_member_health`); a check that timed out or failed with a
+  temporary error leaves the copy unknown: Alive -1, no `DupeAlive`, never
+  DEAD and never 0% alive. The intake already leaves a copy it ran out of time
+  for unverified, and TwinCheck retries a sample that read too little.
+- **The check budget is per copy (F7).** A grouped fleet's time limit is 60 s
+  for each copy (`group_check_timeout_sec`), and its kind probe gets up to 60 s
+  for each round of 16 copies, instead of one window for the whole fleet.
+- **The nzb's password reads encrypted headers (F8).** The kind probe reads a
+  copy's first archive article with the password from its `<meta
+  type="password">` or a `{{password}}` in its name (`summary_password`,
+  `summary_take_name_password`); `donorkind::rar_packing` opens encrypted RAR
+  headers with it (zipfast). A 7-Zip keeps its headers at its end, so a
+  passworded 7-Zip is classed encrypted from the password alone.
+- **Other par2 checksums are other packing, not another video (F9).** TwinCheck
+  labels such a copy `container` until the video inside both copies matches
+  (`DupeInner`), which makes it an `alt`. The web UI shows `container` as
+  "unverified" (`DupeGroup.kindLabel`), never as another encode.
+- **The primary is the healthy copy easiest to borrow into (F10).** After
+  ranking, the healthy copy (at least 97.5% alive, not locked) with the easiest
+  packing leads (`donorkind::primary_ease`, `dupesearch_nzb::lead_easiest_healthy`):
+  bare or split media, then a stored archive, then a compressed archive or a
+  7-Zip, then an encrypted one. Health still gates: a weak plain copy never
+  leads a healthy one. The backups keep their order (twins first).
+
+Open item (F2a): once par-rs #87 merges, the 1 MB probe switches to
+`par_rs::probe::{plan_probe, check_probe}` (slice-verified Match, Mismatch or
+Incomplete; probed slices that match the same IFSC are twin evidence). It is
+marked `OPEN ITEM (par-rs)` at `GROUP_PROBE_BYTES`.
+
 ## Done when (acceptance tests)
 
 | Done when | Test |
@@ -170,6 +203,11 @@ badge, and shows a kept donor's `DupeParked` the same way.
 | Items with no DupeKey and the same normalized name join one group, whatever added them. | functional `dropjoin`; Rust `dupecoord::tests::group_scores_follow_the_order_copies_came` |
 | A group goes to the front of the queue, and each backup sends at most about 1 to 2 MB during intake. | functional `dropnzbdir` (queue order with an item queued before the drop; nserv request log: bytes served per backup copy at most 2 MB, borrowed articles included), `dropjoin` (the joined copy moves in front of an item queued before it); Rust `dupesearch_coord::tests::grouped_fleets_probe_about_a_megabyte_per_copy` |
 | The shown health is the one a copy was judged on. | functional `dropkeepdonor` (Health above 90%, DupeProjected under 10%) |
+| F6: a copy whose checks timed out is unverified, never dead. | Rust `dupesearch_nzb::tests::timeouts_leave_a_fleet_copy_unverified`; functional `fleettimeoutunverified` |
+| F7: the check budget is per copy. | Rust `dupesearch_coord::tests::grouped_fleets_check_each_copy_for_a_minute` |
+| F8: encrypted headers are read with the nzb's password. | Rust `dupesearch_coord::tests::fleet_copies_carry_the_nzb_password`, `donorkind::tests::header_encrypted_rar_with_its_password_is_borrowable_encrypted`; functional `fleetencryptedpassword` (needs `rar`) |
+| F9: another container shows unverified until the video inside matches. | Rust `twin::tests::par2_differences_alone_never_make_an_alt`; web UI `dupe-group.js` "F9: another container is unverified" |
+| F10: the primary is the healthy copy easiest to borrow into. | Rust `donorkind::tests::primary_ease_orders_bare_stored_compressed_encrypted`, `dupesearch_nzb::tests::the_primary_is_the_healthy_copy_easiest_to_borrow_into`; functional `fleetprimaryease` |
 | The name rule strips only a copy suffix. | Rust `releasename::tests::copy_suffixes_strip_only_after_a_group_tag`; web UI `dupe-group.js` (the same cases) |
 
 Run the web UI test with `node tests/webui/dupe-group.js` (plain Node, no

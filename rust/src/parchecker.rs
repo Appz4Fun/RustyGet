@@ -189,6 +189,10 @@ struct ActiveStreamingSession {
     /// Where each file's bytes are written and the articles that wait for theirs to get
     /// there; see [`CommittedSources`].
     committed: Mutex<CommittedSources>,
+    /// Rises with every step a live repair helper takes before par-rs's repair call (the
+    /// cache fence passed, a target opened, an article folded by the drain), so a helper
+    /// that is busy admitting its repair is not taken for a stuck one.
+    admission_progress: AtomicU64,
     // Drop last, after the session, queue and all owned metadata. Grows with
     // the syndrome slots as damage appears (see `grow_for_damage`).
     budget: Mutex<SessionBudgetLease>,
@@ -550,6 +554,7 @@ fn build_streaming_session_with(
         refusals: Mutex::new(Vec::new()),
         stop_logged: AtomicBool::new(false),
         committed: Mutex::new(CommittedSources::default()),
+        admission_progress: AtomicU64::new(0),
     }))
 }
 
@@ -607,6 +612,10 @@ fn ensure_registry_generation(
 }
 
 impl ActiveStreamingSession {
+    fn note_admission_progress(&self) {
+        self.admission_progress.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// File `id`'s bytes are written into `path` now. Only noted (callers may hold the
     /// queue lock); [`Self::apply_target_paths`] tells par-rs.
     fn note_written(&self, id: FileId, path: &Path) {
@@ -1406,6 +1415,7 @@ fn drain_live_articles_locked(
             let outcome = result?;
             ensure_current_generation(nzb_id, entry)?;
             entry.unpause(outcome.unpause.as_ref());
+            entry.note_admission_progress();
             count += 1;
         }
     })())
@@ -2861,6 +2871,15 @@ pub(crate) fn streaming_session_repair_progress(nzb_id: i32) -> Option<LiveRepai
     Some(active_streaming_session(nzb_id)?.session.repair_progress())
 }
 
+/// Job `nzb_id`'s live repair admission counter (see `admission_progress`).
+pub(crate) fn streaming_session_admission_progress(nzb_id: i32) -> Option<u64> {
+    Some(
+        active_streaming_session(nzb_id)?
+            .admission_progress
+            .load(Ordering::Relaxed),
+    )
+}
+
 /// The name of a live repair step, for the RPC and the log; empty when idle.
 pub(crate) fn live_repair_step_name(step: LiveRepairStep) -> &'static str {
     match step {
@@ -2933,31 +2952,42 @@ pub(crate) fn streaming_session_can_schedule_repair(nzb_id: i32) -> bool {
     unknown as u64 <= (status.ready_recovery as u64).saturating_add(queued_upper_bound)
 }
 
-/// The repair targets one admission created, removed again (each only while its name is
-/// still the file created) unless the admission succeeds.
+/// Missing repair targets one admission created, each under a temporary name until the
+/// admission succeeds. Only temporary names are ever removed: a target's own name is never
+/// unlinked, so a file the direct renamer moves there meanwhile cannot be lost.
 struct CreatedTargets<'a> {
     writers: &'a WriteCoordinator,
-    created: Vec<(PathBuf, std::fs::File)>,
+    /// (temporary name, target path)
+    created: Vec<(std::ffi::CString, PathBuf)>,
 }
 
 impl CreatedTargets<'_> {
-    fn keep(mut self) {
-        self.created.clear();
+    /// Gives every created file its target name (`linkat`, never replacing a file that has
+    /// the name), dropping the temporary names.
+    fn link_all(mut self) -> Result<(), RepairError> {
+        let unproven = || live_error("live target admission", "target ownership unproven");
+        while let Some((temp, path)) = self.created.first().cloned() {
+            crate::parlive::link_repair_temp(self.writers, &temp, &path).map_err(|_| unproven())?;
+            self.created.remove(0);
+        }
+        Ok(())
     }
 }
 
 impl Drop for CreatedTargets<'_> {
     fn drop(&mut self) {
-        for (path, file) in self.created.drain(..) {
-            let _ = crate::parlive::remove_created_repair_target(self.writers, &path, &file);
+        for (temp, path) in self.created.drain(..) {
+            let _ = crate::parlive::unlink_repair_temp(self.writers, &temp, &path);
         }
     }
 }
 
 /// Opens the repair targets under the write barrier. An existing file is opened as it is;
-/// a missing one is created (exclusively) only while the session is current. On any error,
-/// cancellation included, every target this call created is removed again, so a cancelled
-/// or refused repair leaves no empty file in a folder that is going away.
+/// a missing one is created under a temporary name, and named as the target only once every
+/// target is open and the session is still current (before the targets are checked or
+/// published). On any error, cancellation included, only the temporary names are removed,
+/// so a cancelled or refused repair leaves no empty file behind and never removes a file
+/// that has a target's name.
 fn open_live_repair_targets(
     entry: &ActiveStreamingSession,
     targets: &[(PathBuf, FileId)],
@@ -2976,14 +3006,14 @@ fn open_live_repair_targets(
         let file = match crate::parlive::open_repair_target(&entry.writers, path) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let file = crate::parlive::create_repair_target(&entry.writers, path)
+                let (file, temp) = crate::parlive::create_repair_temp(&entry.writers, path)
                     .map_err(|_| unproven())?;
-                let handle = file.try_clone().map_err(|_| unproven())?;
-                created.created.push((path.clone(), handle));
+                created.created.push((temp, path.clone()));
                 file
             }
             Err(_) => return Err(unproven()),
         };
+        entry.note_admission_progress();
         files.push(par_rs::RepairTargetFile {
             file_id: *file_id,
             file,
@@ -2992,7 +3022,7 @@ fn open_live_repair_targets(
     if cancelled() {
         return Err(RepairError::Cancelled);
     }
-    created.keep();
+    created.link_all()?;
     Ok(files)
 }
 
@@ -3130,6 +3160,7 @@ impl LiveRepairRequest {
         })
         .ok_or(RepairError::Cancelled)?
         .map_err(|_| RepairError::Cancelled)?;
+        self.entry.note_admission_progress();
         // Writers are drained: bind the actual target inodes under the barrier.
         let targets: Vec<(PathBuf, FileId)> = paths
             .iter()

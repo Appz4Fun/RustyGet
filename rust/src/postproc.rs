@@ -3504,12 +3504,14 @@ const END_REPAIR_SYNC_STALL: Duration = Duration::from_secs(1800);
 const END_REPAIR_IDLE: Duration = Duration::from_secs(120);
 
 /// A running end repair's progress: par-rs's work counter, when it last rose (or the repair
-/// waited for another one), and since when the helper has been outside a repair call.
+/// waited for another one), the helper's admission counter, and since when the helper has
+/// been outside a repair call with neither rising.
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct EndRepairClock {
     work: u64,
     progressed_at: std::time::Instant,
+    admission: u64,
     idle_since: Option<std::time::Instant>,
 }
 
@@ -3519,16 +3521,20 @@ impl EndRepairClock {
         Self {
             work,
             progressed_at: now,
+            admission: 0,
             idle_since: None,
         }
     }
 
-    /// Advances the clock with a fresh progress sample; true when the repair has stalled:
-    /// no work in a working step for longer than that step allows, or idle (outside a
-    /// repair call) for [`END_REPAIR_IDLE`]. Waiting for another repair never stalls.
+    /// Advances the clock with a fresh progress sample and the helper's admission counter;
+    /// true when the repair has stalled: no work in a working step for longer than that step
+    /// allows, or idle (outside a repair call: passing the cache fence, draining writers,
+    /// opening targets, folding queued articles) with nothing advancing for
+    /// [`END_REPAIR_IDLE`]. Waiting for another repair never stalls.
     fn update(
         &mut self,
         progress: Option<crate::parchecker::LiveRepairProgress>,
+        admission: Option<u64>,
         now: std::time::Instant,
     ) -> bool {
         use crate::parchecker::LiveRepairStep;
@@ -3536,6 +3542,11 @@ impl EndRepairClock {
             return false;
         };
         if progress.step == LiveRepairStep::Idle {
+            let admission = admission.unwrap_or(self.admission);
+            if admission != self.admission || progress.work != self.work {
+                self.idle_since = None;
+            }
+            self.admission = admission;
             let since = *self.idle_since.get_or_insert(now);
             self.work = progress.work;
             self.progressed_at = now;
@@ -3583,8 +3594,11 @@ fn live_end_repair_defers_post(nzb_id: i32) -> Option<bool> {
     let mut map = LIVE_END_REPAIRS.lock().unwrap_or_else(|e| e.into_inner());
     match map.get_mut(&nzb_id) {
         Some(EndRepair::Running(clock)) => {
-            let stalled =
-                clock.update(crate::parchecker::streaming_session_repair_progress(nzb_id), now);
+            let stalled = clock.update(
+                crate::parchecker::streaming_session_repair_progress(nzb_id),
+                crate::parchecker::streaming_session_admission_progress(nzb_id),
+                now,
+            );
             if stalled {
                 drop(map);
                 crate::parchecker::streaming_session_cancel(nzb_id);
@@ -3707,7 +3721,10 @@ fn live_par_repair_at_download_end(
         }
         let work = crate::parchecker::streaming_session_repair_progress(nzb_id)
             .map_or(0, |progress| progress.work);
-        map.insert(nzb_id, EndRepair::Running(EndRepairClock::start(work, now)));
+        let mut clock = EndRepairClock::start(work, now);
+        clock.admission =
+            crate::parchecker::streaming_session_admission_progress(nzb_id).unwrap_or(0);
+        map.insert(nzb_id, EndRepair::Running(clock));
         drop(map);
         drop(holds);
     }
@@ -3804,10 +3821,17 @@ static LIVE_END_HELPERS: LiveHelpers =
 /// helper until it has ended (its running state clears on exit).
 #[track_caller]
 pub(crate) fn direct_unpack_join_live_par_repair(nzb_id: i32) {
-    // Whether this call cancels a running end repair: only then is its Failed state (set by
-    // the cancel) cleared afterwards; a genuine failure stays Failed.
+    // Whether this call cancels a running end repair, decided together with the cancel
+    // under the end-repair lock (no repair can start or end in between): only then is its
+    // Failed state (set by the cancel) cleared afterwards; a genuine failure stays Failed.
     #[cfg(unix)]
-    let cancels_end_repair = live_end_repair_running(nzb_id);
+    let cancels_end_repair = {
+        let map = LIVE_END_REPAIRS.lock().unwrap_or_else(|e| e.into_inner());
+        let running = matches!(map.get(&nzb_id), Some(EndRepair::Running(_)));
+        crate::parchecker::streaming_session_cancel(nzb_id);
+        running
+    };
+    #[cfg(not(unix))]
     crate::parchecker::streaming_session_cancel(nzb_id);
     #[cfg(unix)]
     {
@@ -6276,6 +6300,35 @@ mod locked_archive_tests {
 mod live_end_repair_tests {
     use super::*;
 
+    impl EndRepairClock {
+        /// `update` with an unchanged admission counter.
+        fn update_test(
+            &mut self,
+            progress: Option<crate::parchecker::LiveRepairProgress>,
+            now: std::time::Instant,
+        ) -> bool {
+            let admission = self.admission;
+            self.update(progress, Some(admission), now)
+        }
+    }
+
+    #[test]
+    fn an_idle_helper_that_admits_targets_or_folds_articles_is_not_stuck() {
+        use crate::parchecker::{LiveRepairProgress, LiveRepairStep};
+        let mut idle = LiveRepairProgress::default();
+        idle.step = LiveRepairStep::Idle;
+        let start = std::time::Instant::now();
+        let later = |secs| start + Duration::from_secs(secs);
+        let mut c = EndRepairClock::start(0, start);
+        // Idle for 10 minutes, but the drain folds an article every minute: not stuck.
+        for minute in 1..=10u64 {
+            assert!(!c.update(Some(idle), Some(minute), later(minute * 60)));
+        }
+        // Then nothing advances: stuck 120 s after the last step.
+        assert!(!c.update(Some(idle), Some(10), later(600 + 119)));
+        assert!(c.update(Some(idle), Some(10), later(600 + 120)));
+    }
+
     #[test]
     fn an_end_repair_stalls_only_without_work_in_a_working_step() {
         use crate::parchecker::{LiveRepairProgress, LiveRepairStep};
@@ -6290,29 +6343,29 @@ mod live_end_repair_tests {
         let clock = || EndRepairClock::start(10, start);
         // The work counter rising is progress, in any working step, however long it runs.
         let mut c = clock();
-        assert!(!c.update(progress(LiveRepairStep::Matrix, 11), later(400)));
+        assert!(!c.update_test(progress(LiveRepairStep::Matrix, 11), later(400)));
         assert_eq!((c.work, c.progressed_at), (11, later(400)));
         // Flat in the matrix step: stalled after 300 s, not before.
-        assert!(!clock().update(progress(LiveRepairStep::Matrix, 10), later(299)));
-        assert!(clock().update(progress(LiveRepairStep::Matrix, 10), later(300)));
+        assert!(!clock().update_test(progress(LiveRepairStep::Matrix, 10), later(299)));
+        assert!(clock().update_test(progress(LiveRepairStep::Matrix, 10), later(300)));
         // Waiting for another repair never stalls.
-        assert!(!clock().update(progress(LiveRepairStep::PayloadWait, 10), later(5000)));
+        assert!(!clock().update_test(progress(LiveRepairStep::PayloadWait, 10), later(5000)));
         // Idle (outside a repair call, still admitting targets): given up after 120 s.
         let mut c = clock();
-        assert!(!c.update(progress(LiveRepairStep::Idle, 10), later(10)));
-        assert!(!c.update(progress(LiveRepairStep::Idle, 10), later(129)));
-        assert!(c.update(progress(LiveRepairStep::Idle, 10), later(130)));
+        assert!(!c.update_test(progress(LiveRepairStep::Idle, 10), later(10)));
+        assert!(!c.update_test(progress(LiveRepairStep::Idle, 10), later(129)));
+        assert!(c.update_test(progress(LiveRepairStep::Idle, 10), later(130)));
         // Leaving idle resets that clock.
         let mut c = clock();
-        assert!(!c.update(progress(LiveRepairStep::Idle, 10), later(10)));
-        assert!(!c.update(progress(LiveRepairStep::Decode, 11), later(100)));
-        assert!(!c.update(progress(LiveRepairStep::Idle, 11), later(200)));
-        assert!(!c.update(progress(LiveRepairStep::Idle, 11), later(319)));
+        assert!(!c.update_test(progress(LiveRepairStep::Idle, 10), later(10)));
+        assert!(!c.update_test(progress(LiveRepairStep::Decode, 11), later(100)));
+        assert!(!c.update_test(progress(LiveRepairStep::Idle, 11), later(200)));
+        assert!(!c.update_test(progress(LiveRepairStep::Idle, 11), later(319)));
         // Syncing one large file may stay flat much longer.
-        assert!(!clock().update(progress(LiveRepairStep::Sync, 10), later(1799)));
-        assert!(clock().update(progress(LiveRepairStep::Sync, 10), later(1800)));
+        assert!(!clock().update_test(progress(LiveRepairStep::Sync, 10), later(1799)));
+        assert!(clock().update_test(progress(LiveRepairStep::Sync, 10), later(1800)));
         // No session to ask: no verdict.
-        assert!(!clock().update(None, later(100_000)));
+        assert!(!clock().update_test(None, later(100_000)));
     }
 
     #[test]

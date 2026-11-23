@@ -487,29 +487,45 @@ pub(crate) fn open_repair_target(
     root.open_leaf(path.file_name().ok_or_else(refused)?, true, false)
 }
 
-/// Creates a missing repair target; fails when anything already has its name.
-pub(crate) fn create_repair_target(
+fn repair_root(
     coordinator: &WriteCoordinator,
     path: &Path,
-) -> std::io::Result<std::fs::File> {
+) -> std::io::Result<std::sync::Arc<super::source_identity::SourceRoot>> {
     let root = coordinator.physical_root().ok_or_else(refused)?;
     if path.parent() != Some(root.spelling.as_path()) {
         return Err(refused());
     }
-    root.create_leaf_exclusive(path.file_name().ok_or_else(refused)?)
+    Ok(root)
 }
 
-/// Removes a target `create_repair_target` made, only while its name still is `file`.
-pub(crate) fn remove_created_repair_target(
+/// Creates a new empty file for missing repair target `path` under a temporary name in
+/// the same folder; [`link_repair_temp`] gives it the target's name later.
+pub(crate) fn create_repair_temp(
     coordinator: &WriteCoordinator,
     path: &Path,
-    file: &std::fs::File,
-) -> std::io::Result<bool> {
-    let root = coordinator.physical_root().ok_or_else(refused)?;
-    if path.parent() != Some(root.spelling.as_path()) {
-        return Err(refused());
-    }
-    root.unlink_leaf_if_same(path.file_name().ok_or_else(refused)?, file)
+) -> std::io::Result<(std::fs::File, std::ffi::CString)> {
+    repair_root(coordinator, path)?.create_temp_exclusive()
+}
+
+/// Gives the temporary file the name of `path` (never replacing anything), then drops its
+/// temporary name.
+pub(crate) fn link_repair_temp(
+    coordinator: &WriteCoordinator,
+    temp: &std::ffi::CStr,
+    path: &Path,
+) -> std::io::Result<()> {
+    let root = repair_root(coordinator, path)?;
+    root.link_temp(temp, path.file_name().ok_or_else(refused)?)?;
+    root.unlink_temp(temp)
+}
+
+/// Removes a temporary repair file by its temporary name only.
+pub(crate) fn unlink_repair_temp(
+    coordinator: &WriteCoordinator,
+    temp: &std::ffi::CStr,
+    path: &Path,
+) -> std::io::Result<()> {
+    repair_root(coordinator, path)?.unlink_temp(temp)
 }
 
 /// The target path must still name the descriptor admitted for repair.

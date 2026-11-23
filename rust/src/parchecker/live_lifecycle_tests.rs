@@ -1413,8 +1413,18 @@ fn defer_uncached(
     }
 }
 
+/// The repair's temporary files left in `dir`.
+fn repair_temps(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(".rustyget-repair-"))
+        .collect()
+}
+
 #[test]
-fn a_failed_target_admission_removes_every_target_it_created_and_nothing_else() {
+fn a_failed_target_admission_removes_only_its_temporary_files() {
     let fx = Fixture::new();
     let set = fx.set();
     let id = -1900184;
@@ -1434,7 +1444,7 @@ fn a_failed_target_admission_removes_every_target_it_created_and_nothing_else() 
         (existing.clone(), ids[0]),
         (second.clone(), ids[0]),
     ];
-    // Cancelled after the last target opened: both created files go, the existing stays.
+    // Cancelled after the last target opened: no target name was given, no temp is left.
     let calls = std::cell::Cell::new(0);
     let cancel_at_end = || {
         calls.set(calls.get() + 1);
@@ -1445,30 +1455,40 @@ fn a_failed_target_admission_removes_every_target_it_created_and_nothing_else() 
         Err(RepairError::Cancelled)
     ));
     assert!(!first.exists() && !second.exists());
+    assert!(repair_temps(&fx.0).is_empty());
     assert_eq!(std::fs::read(&existing).unwrap(), before);
-    // Refused part way (a target outside the root): what was created before goes too.
+    // Refused part way (a target outside the root): its temps go too.
     let outside = std::env::temp_dir().join("rustyget-outside-root.bin");
     let refused = vec![(first.clone(), ids[0]), (outside.clone(), ids[0])];
     assert!(open_live_repair_targets(&entry, &refused, || false).is_err());
     assert!(!first.exists() && !outside.exists());
-    // A name taken over by another file after the create is never removed.
+    assert!(repair_temps(&fx.0).is_empty());
+    // The direct renamer moves a completed file to a target's name while the admission
+    // runs: it is never replaced or removed, the admission fails, and its temp goes.
     let swap = vec![(first.clone(), ids[0])];
-    let swapped = std::cell::Cell::new(false);
-    let replace_then_cancel = || {
-        if first.exists() && !swapped.get() {
-            std::fs::remove_file(&first).unwrap();
-            std::fs::write(&first, b"someone else").unwrap();
-            swapped.set(true);
+    let moved = std::cell::Cell::new(false);
+    let move_in = || {
+        if !moved.get() && !repair_temps(&fx.0).is_empty() {
+            std::fs::write(&first, b"the real movie").unwrap();
+            moved.set(true);
         }
-        swapped.get()
+        false
     };
-    assert!(open_live_repair_targets(&entry, &swap, replace_then_cancel).is_err());
-    assert_eq!(std::fs::read(&first).unwrap(), b"someone else");
+    assert!(open_live_repair_targets(&entry, &swap, move_in).is_err());
+    assert_eq!(std::fs::read(&first).unwrap(), b"the real movie");
+    assert!(repair_temps(&fx.0).is_empty());
     std::fs::remove_file(&first).unwrap();
-    // Current: all open, the missing ones created and kept.
+    // Current: all open; the missing ones get their names (the same files), no temps stay.
     let files = open_live_repair_targets(&entry, &targets, || false).unwrap();
     assert_eq!(files.len(), 3);
     assert!(first.exists() && second.exists());
+    assert!(repair_temps(&fx.0).is_empty());
+    use std::os::unix::fs::MetadataExt;
+    assert_eq!(
+        files[0].file.metadata().unwrap().ino(),
+        std::fs::metadata(&first).unwrap().ino()
+    );
+    assert_eq!(files[0].file.metadata().unwrap().nlink(), 1);
     drop(files);
     drop(entry);
     drop(context);

@@ -123,59 +123,78 @@ impl SourceRoot {
 }
 
 impl SourceRoot {
-    /// Creates `leaf` in the root directory, failing if anything already has that name
-    /// (`O_CREAT | O_EXCL` through the directory handle, never following a link).
-    pub fn create_leaf_exclusive(&self, leaf: &std::ffi::OsStr) -> io::Result<File> {
-        let leaf = checked_leaf(leaf)?;
+    /// Creates a new empty file under a unique temporary name in the root directory
+    /// (`O_CREAT | O_EXCL | O_NOFOLLOW` through the directory handle) and returns it with
+    /// that name. A file that turns out not to be a plain single-link file is unlinked by
+    /// its temporary name again.
+    pub fn create_temp_exclusive(&self) -> io::Result<(File, CString)> {
+        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         self.is_current()?;
-        let fd = unsafe {
-            libc::openat(
-                self.directory.as_raw_fd(),
-                leaf.as_ptr(),
-                libc::O_CLOEXEC
-                    | libc::O_NOFOLLOW
-                    | libc::O_NONBLOCK
-                    | libc::O_RDWR
-                    | libc::O_CREAT
-                    | libc::O_EXCL,
-                0o666 as libc::c_uint,
-            )
-        };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
+        for _ in 0..16 {
+            let n = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let temp = CString::new(format!(".rustyget-repair-{}-{n}.tmp", std::process::id()))
+                .map_err(|_| refused())?;
+            let fd = unsafe {
+                libc::openat(
+                    self.directory.as_raw_fd(),
+                    temp.as_ptr(),
+                    libc::O_CLOEXEC
+                        | libc::O_NOFOLLOW
+                        | libc::O_NONBLOCK
+                        | libc::O_RDWR
+                        | libc::O_CREAT
+                        | libc::O_EXCL,
+                    0o666 as libc::c_uint,
+                )
+            };
+            if fd < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::AlreadyExists {
+                    continue;
+                }
+                return Err(error);
+            }
+            let file = unsafe { File::from_raw_fd(fd) };
+            if let Err(error) = FileIdentity::of(&file) {
+                drop(file);
+                let _ = self.unlink_temp(&temp);
+                return Err(error);
+            }
+            return Ok((file, temp));
         }
-        let file = unsafe { File::from_raw_fd(fd) };
-        FileIdentity::of(&file)?;
-        Ok(file)
+        Err(io::Error::from(io::ErrorKind::AlreadyExists))
     }
 
-    /// Removes `leaf` from the root directory only while that name still is `file` (same
-    /// device and inode, by `fstatat` without following links), through the directory
-    /// handle (`unlinkat`). Anything else under the name is left alone. True when removed.
-    pub fn unlink_leaf_if_same(&self, leaf: &std::ffi::OsStr, file: &File) -> io::Result<bool> {
-        use std::os::unix::fs::MetadataExt;
+    /// Gives the file at temporary name `temp` the name `leaf` too (`linkat`), failing when
+    /// anything already has that name: nothing is ever replaced.
+    pub fn link_temp(&self, temp: &std::ffi::CStr, leaf: &std::ffi::OsStr) -> io::Result<()> {
         let leaf = checked_leaf(leaf)?;
-        let ours = file.metadata()?;
-        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
         let rc = unsafe {
-            libc::fstatat(
+            libc::linkat(
+                self.directory.as_raw_fd(),
+                temp.as_ptr(),
                 self.directory.as_raw_fd(),
                 leaf.as_ptr(),
-                &mut stat,
-                libc::AT_SYMLINK_NOFOLLOW,
+                0,
             )
         };
         if rc != 0 {
             return Err(io::Error::last_os_error());
         }
-        if stat.st_dev as u64 != ours.dev() || stat.st_ino as u64 != ours.ino() {
-            return Ok(false);
+        Ok(())
+    }
+
+    /// Removes the temporary name `temp` (`unlinkat`); only names `create_temp_exclusive`
+    /// made are ever passed here.
+    pub fn unlink_temp(&self, temp: &std::ffi::CStr) -> io::Result<()> {
+        if !temp.to_bytes().starts_with(b".rustyget-repair-") {
+            return Err(refused());
         }
-        let rc = unsafe { libc::unlinkat(self.directory.as_raw_fd(), leaf.as_ptr(), 0) };
+        let rc = unsafe { libc::unlinkat(self.directory.as_raw_fd(), temp.as_ptr(), 0) };
         if rc != 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(true)
+        Ok(())
     }
 }
 

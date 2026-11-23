@@ -367,11 +367,20 @@ pub fn cpu_count() -> usize {
     }
 }
 
+/// Logical CPUs this process may run on: the online CPUs, limited by
+/// `std::thread::available_parallelism` (CPU affinity and cgroup quotas, as in a
+/// container). At least 1.
+pub fn usable_cpu_count() -> usize {
+    let allowed = std::thread::available_parallelism().map_or(usize::MAX, usize::from);
+    cpu_count().min(allowed).max(1)
+}
+
 /// Number of physical CPU cores (hyper-threads of one core count once), never more than
-/// [`cpu_count`] and at least 1. Falls back to the logical count when the topology is unknown.
+/// [`usable_cpu_count`] and at least 1. Falls back to the usable count when the topology is
+/// unknown.
 pub fn physical_cpu_count() -> usize {
-    let logical = cpu_count().max(1);
-    platform::physical_cores().map_or(logical, |n| n.clamp(1, logical))
+    let usable = usable_cpu_count();
+    platform::physical_cores().map_or(usable, |n| n.clamp(1, usable))
 }
 
 /// Distinct (`physical id`, `core id`) pairs of a Linux `/proc/cpuinfo`; `None` when it lists
@@ -1168,7 +1177,10 @@ mod tests {
         // No core ids (ARM): unknown.
         assert_eq!(parse_cpuinfo_physical_cores("processor : 0\nBogoMIPS : 50\n"), None);
         let n = physical_cpu_count();
-        assert!(n >= 1 && n <= cpu_count());
+        assert!(n >= 1 && n <= usable_cpu_count());
+        let usable = usable_cpu_count();
+        assert!(usable >= 1 && usable <= cpu_count());
+        assert!(usable <= std::thread::available_parallelism().map_or(usize::MAX, usize::from));
     }
 
     #[test]

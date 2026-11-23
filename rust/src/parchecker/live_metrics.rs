@@ -143,6 +143,8 @@ impl LiveMetricCounters {
 
 impl Drop for ActiveStreamingSession {
     fn drop(&mut self) {
+        // No registry lookup (the registry lock may be held): match by generation.
+        forget_live_poll(self.metrics.report_nzb_id(), self.generation);
         // No writer-gate lookup here: replacement can drop an entry under that
         // gate. Only installed/reported cohorts produce a disposal footer.
         if self.metrics.report_sequence.load(Ordering::Acquire) != 0 {

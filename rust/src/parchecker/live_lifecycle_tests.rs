@@ -1369,6 +1369,18 @@ fn live_busy_completion_ticket_survives_until_later_tick() {
     streaming_session_forget(id);
 }
 
+/// Drains the captured articles, then runs the committed-slice replay on this thread
+/// (the daemon runs it on a worker, `streaming_session_kick_replay`).
+fn drain_and_replay(id: i32) {
+    streaming_session_drain_articles(id).unwrap().unwrap();
+    let entry = active_streaming_session(id).unwrap();
+    while entry.committed_replay_due() {
+        if replay_committed_slices(id, &entry).unwrap() == 0 {
+            break;
+        }
+    }
+}
+
 /// Copies each source of the fixture to `<n>.out.tmp` (a DirectWrite file under another
 /// name than its par2 name) and returns `(par2 name, written path, bytes)` per file.
 fn written_copies(fx: &Fixture, set: &PacketSet) -> Vec<(Vec<u8>, PathBuf, Vec<u8>)> {
@@ -1429,7 +1441,7 @@ fn live_cache_miss_parks_slices_and_reads_them_back_once_complete() {
         streaming_session_last_error(id).is_none(),
         "a cache miss must not be a refusal"
     );
-    streaming_session_drain_articles(id).unwrap().unwrap();
+    drain_and_replay(id);
     let half = streaming_session_status(id).unwrap();
     assert!(half.verified < half.total);
     assert_eq!(half.damaged, 0, "slices not complete on disk stay parked, never damaged");
@@ -1441,7 +1453,7 @@ fn live_cache_miss_parks_slices_and_reads_them_back_once_complete() {
     // One drain reads back at most COMMITTED_REPLAY_SLICES; the coordinator drains again
     // while parked slices are due.
     for _ in 0..16 {
-        streaming_session_drain_articles(id).unwrap().unwrap();
+        drain_and_replay(id);
     }
     let status = streaming_session_status(id).unwrap();
     assert_eq!(status.verified, status.total);
@@ -1476,7 +1488,7 @@ fn live_committed_slice_waits_until_its_bytes_reach_the_disk() {
         std::fs::write(path, vec![0u8; bytes.len()]).unwrap();
         defer_uncached(id, name, path, bytes, (0, bytes.len()), 4096);
     }
-    streaming_session_drain_articles(id).unwrap().unwrap();
+    drain_and_replay(id);
     let before = streaming_session_status(id).unwrap();
     assert_eq!(before.verified, 0);
     assert_eq!(before.damaged, 0);
@@ -1486,7 +1498,7 @@ fn live_committed_slice_waits_until_its_bytes_reach_the_disk() {
     }
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
-        streaming_session_drain_articles(id).unwrap().unwrap();
+        drain_and_replay(id);
         let status = streaming_session_status(id).unwrap();
         if status.verified == status.total {
             break;
@@ -1510,6 +1522,32 @@ fn live_session_plans_recovery_slots_for_the_expected_damage() {
     let entry = active_streaming_session(id).unwrap();
     assert_eq!(entry.session.max_syndrome_slots(), 2);
     assert_eq!(entry.session.status().syndrome_slots, 2);
+    drop(entry);
+    streaming_session_forget(id);
+}
+
+#[test]
+fn live_committed_slice_with_wrong_downloaded_bytes_is_damaged_at_once() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900183;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 * 1024 * 1024)
+        .unwrap();
+    let files = written_copies(&fx, &set);
+    // The articles of the first file were downloaded wrong: each reads back with its own
+    // CRC, so it is not waiting for a cache flush, yet the slices do not match par2.
+    let (name, path, bytes) = &files[0];
+    let mut wrong = bytes.clone();
+    for byte in wrong.iter_mut().step_by(97) {
+        *byte ^= 0x5a;
+    }
+    std::fs::write(path, &wrong).unwrap();
+    defer_uncached(id, name, path, &wrong, (0, wrong.len()), 1000);
+    drain_and_replay(id);
+    let status = streaming_session_status(id).unwrap();
+    assert!(status.damaged > 0, "wrong downloaded bytes must be damage, not a wait");
+    let entry = active_streaming_session(id).unwrap();
+    assert_eq!(entry.parked_slices(), 0);
     drop(entry);
     streaming_session_forget(id);
 }

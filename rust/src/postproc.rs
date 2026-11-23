@@ -704,7 +704,7 @@ impl NzbgetRsParChecker {
             self.lock_signal().par_ignore_ext = opts.par_ignore_ext.clone();
             let cpu_cores = crate::parchecker::batch_repair_threads(
                 opts.par_threads,
-                crate::sysmetrics::cpu_count() as i32,
+                crate::sysmetrics::usable_cpu_count() as i32,
                 crate::sysmetrics::physical_cpu_count() as i32,
                 crate::parchecker::repair_shares_cpu(),
             );
@@ -3220,7 +3220,13 @@ fn begin_live_hold_run(
 ) -> Option<LiveHoldRun> {
     let mut map = direct_unpack_holds();
     let state = map.get_mut(&nzb_id)?;
-    if state.held.is_empty() || state.abandoned || state.live_repair_running {
+    // Never alongside the download-end repair of the same download (checked under the
+    // holds lock, which that repair also takes before it starts).
+    if state.held.is_empty()
+        || state.abandoned
+        || state.live_repair_running
+        || live_end_repair_running(nzb_id)
+    {
         return None;
     }
     state.live_repair_running = true;
@@ -3287,16 +3293,29 @@ pub(crate) fn live_repair_should_defer_post(nzb_id: i32) -> bool {
     static SINCE: std::sync::LazyLock<Mutex<std::collections::HashMap<i32, std::time::Instant>>> =
         std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
     const LIMIT: Duration = Duration::from_secs(10);
+    // A running download-end repair is waited for while it progresses: never cut off
+    // mid-decode, and its own wait does not start the clock below.
+    match live_end_repair_defers_post(nzb_id) {
+        Some(true) => return true,
+        Some(false) => {}
+        None => {}
+    }
     let running = direct_unpack_holds()
         .get(&nzb_id)
-        .is_some_and(|state| state.live_repair_running)
-        || live_end_repair_running(nzb_id);
-    // A download-end live repair that can run now finishes the job in RAM: wait for it
-    // rather than starting a batch repair.
+        .is_some_and(|state| state.live_repair_running);
+    // A download-end live repair that can start now finishes the job from the live
+    // syndromes: wait (boundedly) for it to start rather than starting a batch repair. Not
+    // when it failed or its targets cannot be resolved, nor when automatic repair is off.
+    let end_repair_due = live_end_repair_defers_post(nzb_id).is_none()
+        && crate::options::active_options().is_some_and(|options| {
+            options.scalars().par_repair != 0
+                && options.scalars().par_check != crate::queuesubsys_host::PC_MANUAL
+        })
+        && crate::parchecker::streaming_session_download_end_targets(nzb_id).is_some();
     let pending = running
         || crate::parchecker::streaming_session_pending_completed_jobs().contains(&nzb_id)
         || crate::parchecker::streaming_session_completion_drain_active(nzb_id)
-        || crate::parchecker::streaming_session_download_end_targets(nzb_id).is_some();
+        || end_repair_due;
     let mut since = SINCE.lock().unwrap_or_else(|e| e.into_inner());
     if !pending {
         since.remove(&nzb_id);
@@ -3447,27 +3466,103 @@ pub(crate) fn direct_unpack_try_live_par_repair(
         crate::log::log_active_bytes(kind, &message);
     });
     if let Ok(handle) = spawned {
-        let previous = LIVE_PAR_HELPERS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(nzb_id, handle);
-        if let Some(previous) = previous {
-            let _ = previous.join();
-        }
+        keep_live_helper(&LIVE_PAR_HELPERS, nzb_id, handle);
     }
 }
 
-/// Downloads whose download-end live repair is running.
+/// The download-end live repair of a download, while it runs or once it cannot.
 #[cfg(unix)]
-static LIVE_END_REPAIRS: std::sync::LazyLock<Mutex<std::collections::HashSet<i32>>> =
-    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
+#[derive(Clone, Copy, Debug)]
+enum EndRepair {
+    /// Running; its progress counter last changed at `progressed_at`.
+    Running {
+        progress: u64,
+        progressed_at: std::time::Instant,
+    },
+    /// It failed: par-check repairs the download; no retry.
+    Failed,
+    /// Its targets are not under their par2 names (or not complete) yet: par-check goes
+    /// ahead without waiting; tried again after `retry_at`.
+    Unresolvable { retry_at: std::time::Instant },
+}
 
 #[cfg(unix)]
-fn live_end_repair_running(nzb_id: i32) -> bool {
+static LIVE_END_REPAIRS: std::sync::LazyLock<Mutex<std::collections::HashMap<i32, EndRepair>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+/// Post-processing waits for a running download-end repair while it makes progress; it
+/// gives up after this long without any.
+#[cfg(unix)]
+const END_REPAIR_STALL: Duration = Duration::from_secs(300);
+#[cfg(unix)]
+const END_REPAIR_RETRY: Duration = Duration::from_secs(10);
+
+#[cfg(unix)]
+fn live_end_repair_state(nzb_id: i32) -> Option<EndRepair> {
     LIVE_END_REPAIRS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .contains(&nzb_id)
+        .get(&nzb_id)
+        .copied()
+}
+
+#[cfg(unix)]
+fn live_end_repair_running(nzb_id: i32) -> bool {
+    matches!(live_end_repair_state(nzb_id), Some(EndRepair::Running { .. }))
+}
+
+/// Whether post-processing should wait for the download-end repair of `nzb_id`: one that
+/// runs and made progress within [`END_REPAIR_STALL`] (a stalled one is cancelled, and
+/// post-processing waits for its helper to leave the files), or one that can start right
+/// now. `None` when no end repair concerns post-processing.
+#[cfg(unix)]
+fn live_end_repair_defers_post(nzb_id: i32) -> Option<bool> {
+    let now = std::time::Instant::now();
+    let mut map = LIVE_END_REPAIRS.lock().unwrap_or_else(|e| e.into_inner());
+    match map.get_mut(&nzb_id) {
+        Some(EndRepair::Running {
+            progress,
+            progressed_at,
+            ..
+        }) => {
+            let current = crate::parchecker::streaming_session_repair_progress(nzb_id);
+            if let Some(current) = current.filter(|current| current != progress) {
+                *progress = current;
+                *progressed_at = now;
+            }
+            if now.duration_since(*progressed_at) >= END_REPAIR_STALL {
+                drop(map);
+                crate::parchecker::streaming_session_cancel(nzb_id);
+            }
+            Some(true)
+        }
+        Some(EndRepair::Failed) => Some(false),
+        Some(EndRepair::Unresolvable { retry_at }) if now < *retry_at => Some(false),
+        _ => None,
+    }
+}
+
+/// Keeps a live repair helper's handle for joining before cleanup. Handles of helpers that
+/// already ended are joined here (they return at once); a running one is never waited for,
+/// since callers may hold the queue lock.
+#[cfg(unix)]
+fn keep_live_helper(
+    helpers: &LiveHelpers,
+    nzb_id: i32,
+    handle: std::thread::JoinHandle<()>,
+) {
+    let finished = {
+        let mut map = helpers.lock().unwrap_or_else(|e| e.into_inner());
+        let list = map.entry(nzb_id).or_default();
+        let (done, running): (Vec<_>, Vec<_>) =
+            std::mem::take(list).into_iter().partition(|h| h.is_finished());
+        *list = running;
+        list.push(handle);
+        done
+    };
+    for handle in finished {
+        let _ = handle.join();
+    }
 }
 
 /// The live repair at the end of a download without held direct-unpack volumes: once every
@@ -3482,13 +3577,30 @@ fn live_par_repair_at_download_end(
     nzb: &crate::queuesubsys_host::NzbSnap,
 ) {
     let nzb_id = nzb.id;
-    if live_end_repair_running(nzb_id) {
+    let now = std::time::Instant::now();
+    match live_end_repair_state(nzb_id) {
+        Some(EndRepair::Running { .. } | EndRepair::Failed) => return,
+        Some(EndRepair::Unresolvable { retry_at }) if now < retry_at => return,
+        _ => {}
+    }
+    // Never alongside a live repair of held direct-unpack volumes.
+    if direct_unpack_holds()
+        .get(&nzb_id)
+        .is_some_and(|state| state.live_repair_running)
+    {
         return;
     }
     let Some(names) = crate::parchecker::streaming_session_download_end_targets(nzb_id) else {
         return;
     };
+    let unresolvable = || {
+        LIVE_END_REPAIRS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(nzb_id, EndRepair::Unresolvable { retry_at: now + END_REPAIR_RETRY });
+    };
     if names.len() > 512 {
+        unresolvable();
         return;
     }
     let mut targets = Vec::with_capacity(names.len());
@@ -3497,10 +3609,12 @@ fn live_par_repair_at_download_end(
             .map(|index| host.nzb_completed_file_at(nzb.ptr, index))
             .find(|file| !file.par_file && file.filename == *name);
         let Some(file) = found else {
+            unresolvable();
             return;
         };
         let path = crate::fsops::path(&nzb.dest_dir).join(crate::fsops::path(name));
         if !path.is_file() {
+            unresolvable();
             return;
         }
         targets.push(crate::parlive::WriterTarget {
@@ -3525,28 +3639,48 @@ fn live_par_repair_at_download_end(
     ) else {
         return;
     };
-    if !LIVE_END_REPAIRS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(nzb_id)
     {
-        return;
+        // The holds lock first, as the held path takes it: one of the two starts.
+        let holds = direct_unpack_holds();
+        if holds.get(&nzb_id).is_some_and(|state| state.live_repair_running) {
+            return;
+        }
+        let mut map = LIVE_END_REPAIRS.lock().unwrap_or_else(|e| e.into_inner());
+        if matches!(map.get(&nzb_id), Some(EndRepair::Running { .. })) {
+            return;
+        }
+        map.insert(
+            nzb_id,
+            EndRepair::Running {
+                progress: crate::parchecker::streaming_session_repair_progress(nzb_id)
+                    .unwrap_or(0),
+                progressed_at: now,
+            },
+        );
+        drop(map);
+        drop(holds);
     }
-    struct Running(i32);
+    /// Ends the running state: removed after success, `Failed` otherwise (also on unwind).
+    struct Running {
+        nzb_id: i32,
+        ok: bool,
+    }
     impl Drop for Running {
         fn drop(&mut self) {
-            LIVE_END_REPAIRS
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&self.0);
+            let mut map = LIVE_END_REPAIRS.lock().unwrap_or_else(|e| e.into_inner());
+            if self.ok {
+                map.remove(&self.nzb_id);
+            } else {
+                map.insert(self.nzb_id, EndRepair::Failed);
+            }
         }
     }
-    let running = Running(nzb_id);
+    let running = Running { nzb_id, ok: false };
     let nzb_name = nzb.name.clone();
     let spawned = std::thread::Builder::new()
         .name("live-par-end-repair".to_string())
         .spawn(move || {
-            let running = running; // Every exit, including unwind, lets par-check run.
+            let mut running = running; // Every exit, including unwind, lets par-check run.
             let started = std::time::Instant::now();
             let outcome = request
                 .acquire()
@@ -3555,6 +3689,7 @@ fn live_par_repair_at_download_end(
             message.extend_from_slice(&nzb_name);
             let kind = match outcome {
                 Ok((report, files)) => {
+                    running.ok = true;
                     message.extend_from_slice(format!(": repaired {} block(s) with {} recovery block(s) in {:.1} s as the download ended, {} file(s) verified; no batch repair needed", report.repaired_slices.len(), report.recovery_used, started.elapsed().as_secs_f64(), files).as_bytes());
                     MK_INFO
                 }
@@ -3567,21 +3702,23 @@ fn live_par_repair_at_download_end(
             drop(running);
         });
     if let Ok(handle) = spawned {
-        let previous = LIVE_PAR_HELPERS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(nzb_id, handle);
-        if let Some(previous) = previous {
-            let _ = previous.join();
-        }
+        keep_live_helper(&LIVE_END_HELPERS, nzb_id, handle);
     }
 }
 
-/// Helper threads of running live par2 repairs, per download.
 #[cfg(unix)]
-static LIVE_PAR_HELPERS: std::sync::LazyLock<
-    Mutex<std::collections::HashMap<i32, std::thread::JoinHandle<()>>>,
-> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+type LiveHelpers =
+    std::sync::LazyLock<Mutex<std::collections::HashMap<i32, Vec<std::thread::JoinHandle<()>>>>>;
+
+/// Helper threads of live par2 repairs of held direct-unpack volumes, per download.
+#[cfg(unix)]
+static LIVE_PAR_HELPERS: LiveHelpers =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+/// Helper threads of download-end live par2 repairs, per download.
+#[cfg(unix)]
+static LIVE_END_HELPERS: LiveHelpers =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
 /// Waits for the live par2 repair of download `nzb_id` to end. Called before the download's
 /// files are cleaned up (deletion, shutdown) so no repair write outlives the download.
@@ -3590,13 +3727,23 @@ pub(crate) fn direct_unpack_join_live_par_repair(nzb_id: i32) {
     crate::parchecker::streaming_session_cancel(nzb_id);
     #[cfg(unix)]
     {
-        let handle = LIVE_PAR_HELPERS
+        let mut handles = Vec::new();
+        for helpers in [&LIVE_PAR_HELPERS, &LIVE_END_HELPERS] {
+            if let Some(list) = helpers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&nzb_id)
+            {
+                handles.extend(list);
+            }
+        }
+        for handle in handles {
+            let _ = handle.join();
+        }
+        LIVE_END_REPAIRS
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&nzb_id);
-        if let Some(handle) = handle {
-            let _ = handle.join();
-        }
     }
     #[cfg(not(unix))]
     let _ = nzb_id;
@@ -5966,5 +6113,68 @@ mod locked_archive_tests {
         locked_archives().insert(id);
         assert!(take_direct_unpack_locked(id));
         assert!(!take_direct_unpack_locked(id));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod live_end_repair_tests {
+    use super::*;
+
+    #[test]
+    fn keeping_a_helper_never_waits_for_a_running_one() {
+        static HELPERS: LiveHelpers =
+            std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let running = std::thread::spawn(move || {
+            let _ = wait.recv();
+        });
+        keep_live_helper(&HELPERS, 7, running);
+        // A second helper while the first still runs: returns at once, keeps both.
+        let started = std::time::Instant::now();
+        keep_live_helper(&HELPERS, 7, std::thread::spawn(|| {}));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(HELPERS.lock().unwrap()[&7].len(), 2);
+        release.send(()).unwrap();
+        while !HELPERS.lock().unwrap()[&7].iter().all(|h| h.is_finished()) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Ended helpers are joined when the next one is kept.
+        keep_live_helper(&HELPERS, 7, std::thread::spawn(|| {}));
+        assert_eq!(HELPERS.lock().unwrap()[&7].len(), 1);
+    }
+
+    #[test]
+    fn post_processing_waits_only_for_a_progressing_or_startable_end_repair() {
+        let id = -1_975_001;
+        let set = |state: Option<EndRepair>| {
+            let mut map = LIVE_END_REPAIRS.lock().unwrap();
+            match state {
+                Some(state) => map.insert(id, state),
+                None => map.remove(&id),
+            };
+        };
+        set(None);
+        assert_eq!(live_end_repair_defers_post(id), None);
+        // A failed end repair or unresolvable targets: par-check goes ahead at once.
+        set(Some(EndRepair::Failed));
+        assert_eq!(live_end_repair_defers_post(id), Some(false));
+        let later = std::time::Instant::now() + Duration::from_secs(60);
+        set(Some(EndRepair::Unresolvable { retry_at: later }));
+        assert_eq!(live_end_repair_defers_post(id), Some(false));
+        let past = std::time::Instant::now() - Duration::from_millis(1);
+        set(Some(EndRepair::Unresolvable { retry_at: past }));
+        assert_eq!(live_end_repair_defers_post(id), None);
+        // A running one is waited for, however long it has run, while it progresses.
+        set(Some(EndRepair::Running {
+            progress: 0,
+            progressed_at: std::time::Instant::now(),
+        }));
+        assert_eq!(live_end_repair_defers_post(id), Some(true));
+        assert!(live_end_repair_running(id));
+        // The held-volume repair does not start beside it.
+        direct_unpack_holds().entry(id).or_default().held.push(b"/x/a.rar".to_vec());
+        assert!(begin_live_hold_run(id, crate::parlive::SessionGeneration(1)).is_none());
+        direct_unpack_holds().remove(&id);
+        set(None);
     }
 }

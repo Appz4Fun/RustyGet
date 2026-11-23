@@ -1230,6 +1230,7 @@ pub fn format_nserv_usage(base_name: &[u8]) -> Vec<u8> {
     -s <cert> <key> - paths to SSL certificate and key files\n\
     -v <verbose>    - verbosity level 0..3 (default is 2)\n\
     -w <msec>       - response latency (in milliseconds)\n\
+    -x <msec>       - extra latency before a missing-article answer (430)\n\
     -r <KB/s>       - speed throttling (in kilobytes per second)\n\
     -z <seg-size>   - generate nzbs for all files in data-dir (size in bytes)\n\
     -q              - quit after generating nzbs (in combination with -z)\n",

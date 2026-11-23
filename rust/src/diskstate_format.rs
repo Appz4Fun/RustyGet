@@ -8138,6 +8138,22 @@ fn run_active_diskstate_exec(
     unsafe { diskstate_exec(op, &env) }
 }
 
+/// Whether the article list of file `file_id` is on disk (`<QueueDir>/<id>`):
+/// a file deleted from the queue (a parked download's files) has none, so a
+/// reader that only samples it checks first instead of logging "Error reading
+/// diskstate" for a file it knows may be gone.
+#[cfg(unix)]
+pub(crate) fn active_file_info_exists(file_id: i32) -> bool {
+    let Some(opts) = crate::options::active_options() else {
+        return false;
+    };
+    queue_file_exists(
+        opts.str_bytes(OptStr::QueueDir),
+        crate::paths::PATH_SEPARATOR as u8,
+        file_id.to_string().as_bytes(),
+    )
+}
+
 #[cfg(unix)]
 pub(crate) fn active_disk_queue_exists() -> bool {
     let mut ctx = ActiveDiskExecCtx::new(None);

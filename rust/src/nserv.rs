@@ -1050,6 +1050,8 @@ pub struct NServParsedArgs {
     pub segment_size: i32,
     pub quit: bool,
     pub latency: i32,
+    /// `-x`: extra milliseconds before answering 430 (a missing article)
+    pub missing_latency: i32,
     pub speed: i32,
     pub mem_cache: bool,
     pub param_error: bool,
@@ -1072,6 +1074,7 @@ pub fn nserv_parse_args(args: &[&[u8]]) -> NServParsedArgs {
         segment_size: 500_000,
         quit: false,
         latency: 0,
+        missing_latency: 0,
         speed: 0,
         mem_cache: false,
         param_error: false,
@@ -1096,7 +1099,7 @@ pub fn nserv_parse_args(args: &[&[u8]]) -> NServParsedArgs {
             match ch {
                 b'm' => out.mem_cache = true,
                 b'q' => out.quit = true,
-                b'b' | b'c' | b'd' | b'l' | b'p' | b'i' | b's' | b'v' | b'w' | b'r' | b'z' => {
+                b'b' | b'c' | b'd' | b'l' | b'p' | b'i' | b's' | b'v' | b'w' | b'x' | b'r' | b'z' => {
                     let optarg: Option<&[u8]> = if pos < arg.len() {
                         let rest = &arg[pos..];
                         pos = arg.len();
@@ -1122,6 +1125,7 @@ pub fn nserv_parse_args(args: &[&[u8]]) -> NServParsedArgs {
                         b'i' => out.instances = parse_c_atoi_or_default(val, 1),
                         b'v' => verbosity = parse_c_atoi_or_default(val, 1),
                         b'w' => out.latency = parse_c_atoi_or_default(val, 0),
+                        b'x' => out.missing_latency = parse_c_atoi_or_default(val, 0),
                         b'r' => out.speed = parse_c_atoi_or_default(val, 0),
                         b'z' => {
                             out.generate_nzb = true;
@@ -1457,6 +1461,8 @@ struct NservSharedState {
     data_dir: Option<Vec<u8>>,
     cache_dir: Option<Vec<u8>>,
     latency: i32,
+    /// extra wait before a 430 answer (`-x`)
+    missing_latency: i32,
     speed: i32,
     cache: Option<std::sync::Arc<NntpCache>>,
     stopped: std::sync::atomic::AtomicBool,
@@ -1503,8 +1509,14 @@ fn run_nntp_processor_session(
         };
         let raw_line = raw_line.to_vec();
         drop(reader);
+        let missing_latency = shared.missing_latency;
         let mut write_line_fn = |reply: &[u8]| {
             let end = reply.iter().position(|&b| b == 0).unwrap_or(reply.len());
+            // -x: a missing article answers late, as a proxy that asks its
+            // upstream before it says 430 does
+            if missing_latency > 0 && reply.starts_with(b"430") {
+                std::thread::sleep(Duration::from_millis(missing_latency as u64));
+            }
             conn.borrow_mut().write_line(&reply[..end]);
         };
         let mut send_fn = |chunk: &[u8]| conn.borrow_mut().send(chunk);
@@ -1736,6 +1748,7 @@ pub unsafe fn nzbget_rs_nserv_run(
         data_dir: (!handle.parsed.data_dir.is_empty()).then(|| handle.parsed.data_dir.clone()),
         cache_dir: (!handle.parsed.cache_dir.is_empty()).then(|| handle.parsed.cache_dir.clone()),
         latency: handle.parsed.latency,
+        missing_latency: handle.parsed.missing_latency,
         speed: handle.parsed.speed,
         cache: handle
             .parsed

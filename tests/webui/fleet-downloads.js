@@ -41,7 +41,8 @@ function fleetQueue(groups, phase) {
   const held = { Status: 'PAUSED', MaxPriority: -100, MinPriority: -100 };
   const q = [
     item(base, 53, REL + '_3', KEY, Object.assign({}, held, { DupeScore: 99,
-      Parameters: params({ DupeHeld: 'yes', DupeFleetOrder: '4', DupeFleetPrimary: '51', DupeAlive: '0', DupeFleet: '5' }) })),
+      Parameters: params({ DupeHeld: 'yes', DupeFleetOrder: '4', DupeFleetPrimary: '51', DupeAlive: '0',
+        DupeAliveSample: '0/40', DupeFleet: '5' }) })),
     item(base, 52, REL + '_1', KEY, Object.assign({}, held, { DupeScore: 98,
       Parameters: params({ DupeHeld: 'yes', DupeFleetOrder: '2', DupeFleetPrimary: '51', DupeKind: 'alt',
         DupeCopyKind: 'borrowable', DupeAlive: '97', DupeFleet: '3' }) })),
@@ -140,13 +141,66 @@ function fleetHistory(history) {
         assert.match(await text(54), /held donor/i);
         assert.match(await text(52), /alt · 97\.0% alive/i);
         assert.match(await text(55), /container · unverified/i);
-        assert.match(await text(53), /dead/i);
+        assert.match(await text(53), /dead \(0\/40 sampled\)/i);
         assert.equal(await toggle().getAttribute('aria-expanded'), 'true');
         // review: a {{password}} in a copy's name never shows
         const list = await page.locator('#DownloadsTable .fleet-sublist').innerText();
         assert.doesNotMatch(list, /s3cret/);
         assert.doesNotMatch(await page.locator('#DownloadsTable .fleet-sublist').innerHTML(), /s3cret/);
         await shot('expanded');
+      });
+
+      // B3 (fleet-e2e-6790): the bundled icon subset lacked chevron_right and
+      // expand_more, so the toggle showed the words "CHEVRON_RIGHT" and
+      // "EXPAND_MORE". The glyph must render as one icon-sized symbol.
+      const iconWidth = async () => {
+        await page.evaluate(() => document.fonts.ready);
+        return page.locator(`#DownloadsTable a.fleet-toggle[data-fleet-key="${KEY}"] i.material-icon`).evaluate(el => {
+          const r = el.getBoundingClientRect();
+          return { width: r.width, height: r.height, text: el.textContent };
+        });
+      };
+      await check('the toggle shows an icon, not its name', async () => {
+        const icons = require('../../webui/lib/material-symbols-rounded.json').icon_names;
+        for (const name of ['chevron_right', 'expand_more']) {
+          assert(icons.includes(name), `${name} is in the bundled font subset`);
+        }
+        const open = await iconWidth();
+        assert.equal(open.text, 'expand_more');
+        assert(open.width > 0 && open.width < 40, `expand_more renders icon-sized: ${JSON.stringify(open)}`);
+        await toggle().click();
+        await page.waitForFunction(() => !document.querySelector('#DownloadsTable .fleet-sublist'));
+        const closed = await iconWidth();
+        assert.equal(closed.text, 'chevron_right');
+        assert(closed.width > 0 && closed.width < 40, `chevron_right renders icon-sized: ${JSON.stringify(closed)}`);
+        // the font itself has the glyph: the ligature is far narrower than the word
+        const ratio = await page.evaluate(() => {
+          const probe = (font) => {
+            const s = document.createElement('span');
+            s.style.cssText = 'position:absolute;visibility:hidden;font-size:20px;white-space:nowrap;font-family:' + font;
+            s.textContent = 'chevron_right';
+            document.body.appendChild(s);
+            const w = s.getBoundingClientRect().width;
+            s.remove();
+            return w;
+          };
+          return probe('"Material Symbols Rounded"') / probe('monospace');
+        });
+        assert(ratio < 0.3, `chevron_right is one glyph in the bundled font (width ratio ${ratio})`);
+        await toggle().click();
+        await page.locator('#DownloadsTable .fleet-sublist .fleet-sub').first().waitFor();
+      });
+
+      await check('a cut or dead sample says how many articles it rests on', async () => {
+        const labels = await page.evaluate(() => {
+          const g = map => ({ Parameters: Object.entries(map).map(([Name, Value]) => ({ Name, Value })) });
+          return [
+            DownloadsUI.fleetMemberLabel(g({ DupeAlive: '17', DupeAliveSample: '34/200', DupeAliveCut: 'yes' })).text,
+            DownloadsUI.fleetMemberLabel(g({ DupeAlive: '0', DupeAliveSample: '0/40' })).text,
+            DownloadsUI.fleetMemberLabel(g({ DupeAlive: '0' })).text,
+            DownloadsUI.fleetMemberLabel(g({ DupeAlive: '88', DupeAliveSample: '176/200' })).text];
+        });
+        assert.deepEqual(labels, ['~17.0% alive (34/200 sampled, cut short)', 'dead (0/40 sampled)', 'dead', '88.0% alive']);
       });
 
       await check('"next" only on the copy failover takes', async () => {

@@ -5989,5 +5989,13 @@
   "fleet_label_alive": {
     "message": "$1% alive",
     "description": "Fleet member label: $1 is the share of its sampled articles that exist."
+  },
+  "fleet_label_dead_sampled": {
+    "message": "dead ($1 sampled)",
+    "description": "Fleet member label: none of its sampled articles exist; $1 is found/asked, such as 0/40."
+  },
+  "fleet_label_alive_cut": {
+    "message": "~$1% alive ($2 sampled, cut short)",
+    "description": "Fleet member label: its check ran out of its time budget; $1 is the share measured so far, $2 found/asked."
   }
 }

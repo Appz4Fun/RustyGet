@@ -1083,6 +1083,18 @@ pub struct DonorOptions {
     pub probe: i32,
     pub budget_ms: i32,
     pub deadline_ms: i64,
+    /// Requests each server works on at once for one posting, each on a
+    /// connection of its own (1: one walker per server, as before). A server
+    /// that answers a STAT only every second or so (a proxy slow on missing
+    /// articles) is asked in parallel instead of one article at a time (B1).
+    pub lanes: i32,
+    /// The longest one posting is checked, in ms (0: no limit of its own):
+    /// a fleet's per-copy budget. What was measured until then is kept.
+    pub posting_budget_ms: i32,
+    /// STATs added to a probe that found every article missing, so that 0%
+    /// and ~2% alive can be told apart (0: none). Taken only within the
+    /// posting's budget.
+    pub dead_extra: i32,
 }
 
 impl Default for DonorOptions {
@@ -1092,6 +1104,9 @@ impl Default for DonorOptions {
             probe: 10,
             budget_ms: 120_000,
             deadline_ms: 0,
+            lanes: 1,
+            posting_budget_ms: 0,
+            dead_extra: 0,
         }
     }
 }
@@ -1388,6 +1403,22 @@ pub fn donor_check_items_guarded(
     budget_ms: i32,
     keepalive: Option<std::sync::Arc<dyn Send + Sync>>,
 ) -> DonorHealthResult {
+    donor_check_items_lanes(servers, items, budget_ms, 1, keepalive)
+}
+
+/// [`donor_check_items_guarded`] with `lanes` walkers per server: each takes
+/// the next unsettled articles of a cursor the server's walkers share, on a
+/// connection of its own, so a server slow per request answers `lanes`
+/// requests at once. At the end of `budget_ms` what settled is counted and
+/// the rest is left unknown (neither present nor missing).
+pub fn donor_check_items_lanes(
+    servers: &[std::sync::Arc<DonorServer>],
+    items: &[DonorItem],
+    budget_ms: i32,
+    lanes: i32,
+    keepalive: Option<std::sync::Arc<dyn Send + Sync>>,
+) -> DonorHealthResult {
+    let lanes = lanes.clamp(1, 16) as usize;
     let mut health = DonorHealthResult {
         checked: items.len() as i32,
         ..Default::default()
@@ -1429,9 +1460,15 @@ pub fn donor_check_items_guarded(
             count,
         )),
         cond: std::sync::Condvar::new(),
-        walking: std::sync::atomic::AtomicUsize::new(servers.len()),
+        walking: std::sync::atomic::AtomicUsize::new(servers.len() * lanes),
         _keepalive: keepalive,
     });
+    // one cursor per server, shared by its lanes
+    let cursors: std::sync::Arc<Vec<std::sync::atomic::AtomicUsize>> = std::sync::Arc::new(
+        (0..servers.len())
+            .map(|_| std::sync::atomic::AtomicUsize::new(0))
+            .collect(),
+    );
     // Rebind gates so their settled closure reads `state.final_verdict[i]`
     let mut gates_bound = Vec::with_capacity(count);
     for (i, item) in items.iter().enumerate() {
@@ -1446,10 +1483,11 @@ pub fn donor_check_items_guarded(
     }
     let gates_arc = std::sync::Arc::new(gates_bound);
 
-    for s in 0..servers.len() {
+    for s in (0..servers.len()).flat_map(|s| std::iter::repeat_n(s, lanes)) {
         DONOR_WALKERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let st = state.clone();
         let gt = gates_arc.clone();
+        let cursors = cursors.clone();
         std::thread::spawn(move || {
             struct WalkerGuard(std::sync::Arc<SharedCheckState>);
             impl Drop for WalkerGuard {
@@ -1464,17 +1502,20 @@ pub fn donor_check_items_guarded(
             }
             let _guard = WalkerGuard(st.clone());
             let server = &st.servers[s];
-            let mut cursor = 0usize;
-            while cursor < st.items.len() {
+            let cursor = &cursors[s];
+            while cursor.load(std::sync::atomic::Ordering::SeqCst) < st.items.len() {
                 if st.stop.load(std::sync::atomic::Ordering::SeqCst) || donor_stopping() {
                     return;
                 }
                 let mut todo = Vec::new();
-                while cursor < st.items.len() && (todo.len() as i32) < server.depth() {
-                    if st.final_verdict[cursor].load(std::sync::atomic::Ordering::SeqCst) == 0 {
-                        todo.push(cursor);
+                while (todo.len() as i32) < server.depth() {
+                    let at = cursor.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if at >= st.items.len() {
+                        break;
                     }
-                    cursor += 1;
+                    if st.final_verdict[at].load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                        todo.push(at);
+                    }
                 }
                 if todo.is_empty() {
                     continue;
@@ -1606,19 +1647,62 @@ pub fn donor_check_posting_guarded(
     };
 
     let deadline = donor_now_ms() + (options.budget_ms as i64);
+    let lanes = options.lanes;
     let mut health =
-        donor_check_items_guarded(servers, &first, options.budget_ms, keepalive.clone());
+        donor_check_items_lanes(servers, &first, options.budget_ms, lanes, keepalive.clone());
+    let probed: std::collections::BTreeSet<&str> =
+        first.iter().map(|it| it.message_id.as_str()).collect();
+    let rest: Vec<DonorItem> = items
+        .iter()
+        .filter(|it| !probed.contains(it.message_id.as_str()))
+        .cloned()
+        .collect();
+    let rem_budget = || (deadline - donor_now_ms()).max(10) as i32;
     if full && !donor_dead_probe(&health) {
-        let probed: std::collections::BTreeSet<&str> =
-            first.iter().map(|it| it.message_id.as_str()).collect();
-        let rest: Vec<DonorItem> = items
-            .into_iter()
-            .filter(|it| !probed.contains(it.message_id.as_str()))
-            .collect();
-        let rem_budget = (deadline - donor_now_ms()).max(10) as i32;
-        health += donor_check_items_guarded(servers, &rest, rem_budget, keepalive);
+        health += donor_check_items_lanes(servers, &rest, rem_budget(), lanes, keepalive);
+    } else if full && options.dead_extra > 0 && deadline - donor_now_ms() > 1000 {
+        // every probed article missing: a few more tell 0% from ~2% alive
+        let extra = dead_extra_items(&rest, ids, groups, &probed, options);
+        if !extra.is_empty() {
+            health += donor_check_items_lanes(servers, &extra, rem_budget(), lanes, keepalive);
+        }
     }
     health
+}
+
+/// The articles a probe that found every article missing adds
+/// ([`DonorOptions::dead_extra`]): the next ones of the sample, else more
+/// picked from the posting, never one asked already.
+fn dead_extra_items(
+    rest: &[DonorItem],
+    ids: &[String],
+    groups: &std::sync::Arc<Vec<String>>,
+    probed: &std::collections::BTreeSet<&str>,
+    options: &DonorOptions,
+) -> Vec<DonorItem> {
+    let want = options.dead_extra.max(0) as usize;
+    let mut out: Vec<DonorItem> = rest.iter().take(want).cloned().collect();
+    if out.len() < want {
+        let mut more = options.sample;
+        more.percent = 0;
+        more.minimum = (options.probe.max(0) as usize + want) as i32;
+        more.maximum = more.minimum;
+        more.max_body = 0;
+        for it in donor_plan(ids, groups, &more) {
+            if out.len() >= want {
+                break;
+            }
+            if !probed.contains(it.message_id.as_str())
+                && !out.iter().any(|o| o.message_id == it.message_id)
+            {
+                out.push(it);
+            }
+        }
+    }
+    for it in &mut out {
+        it.body = false;
+    }
+    out
 }
 
 pub struct DonorPosting {
@@ -1651,6 +1735,25 @@ pub fn donor_check_postings_guarded<F>(
 ) where
     F: Fn(&str, &DonorHealthResult) + Send + Sync,
 {
+    donor_check_postings_timed(servers, postings, options, full, concurrency, keepalive, |k, h, _| {
+        emit(k, h)
+    });
+}
+
+/// [`donor_check_postings_guarded`] whose `emit` also gets the time the
+/// posting's own check took, in ms; each posting is checked for at most
+/// [`DonorOptions::posting_budget_ms`] (when set) from its own start.
+pub fn donor_check_postings_timed<F>(
+    servers: &[std::sync::Arc<DonorServer>],
+    postings: &[DonorPosting],
+    options: &DonorOptions,
+    full: bool,
+    concurrency: i32,
+    keepalive: Option<std::sync::Arc<dyn Send + Sync>>,
+    emit: F,
+) where
+    F: Fn(&str, &DonorHealthResult, i64) + Send + Sync,
+{
     let next = std::sync::atomic::AtomicUsize::new(0);
     let thread_count = postings.len().min(concurrency.max(1) as usize);
     let next_ref = &next;
@@ -1671,10 +1774,14 @@ pub fn donor_check_postings_guarded<F>(
                     }
                     own.budget_ms = own.budget_ms.min(left as i32);
                 }
+                if options.posting_budget_ms > 0 {
+                    own.budget_ms = own.budget_ms.min(options.posting_budget_ms);
+                }
                 let p = &postings[idx];
+                let start = donor_now_ms();
                 let h =
                     donor_check_posting_guarded(servers, &p.ids, &p.groups, &own, full, ka.clone());
-                emit_ref(&p.key, &h);
+                emit_ref(&p.key, &h, donor_now_ms() - start);
             });
         }
     });
@@ -4391,6 +4498,141 @@ mod tests {
     /// unknown (unverified, -1) and not complete, never dead or 0% alive; the
     /// errors don't water down the share of the articles that did answer.
     #[test]
+    fn a_cut_check_keeps_what_it_measured() {
+        // a cut check (some sampled articles never answered) keeps what was
+        // measured once articles were found, and stays unknown with none
+        let (alive, dead, _) = eval_fleet_member_health(true, false, 34, 166, 0, DONOR_MIN_KNOWN, 50);
+        assert_eq!((alive, dead), (17, true));
+        let (alive, dead, _) = eval_fleet_member_health(true, false, 0, 7, 0, DONOR_MIN_KNOWN, 50);
+        assert_eq!((alive, dead), (-1, false));
+    }
+
+    /// B1: a server that answers a STAT only after a while is asked several
+    /// requests at once (lanes, each on a connection of its own), a posting is
+    /// checked for at most its own budget and keeps what it measured, and a
+    /// probe whose first ten articles were all missing asks a few more before
+    /// the copy is called dead.
+    #[test]
+    fn slow_servers_are_asked_in_lanes_within_the_posting_budget() {
+        use std::sync::atomic::{AtomicI32, Ordering};
+        use std::sync::Arc;
+        struct Slow {
+            delay_ms: u64,
+            present: std::collections::BTreeSet<String>,
+            active: AtomicI32,
+            peak: AtomicI32,
+            asked: AtomicI32,
+        }
+        impl DonorServerExchange for Arc<Slow> {
+            fn exchange(&self, batch: &[DonorRequest]) -> Result<Vec<DonorAnswer>, DonorExchangeError> {
+                let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+                self.peak.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(self.delay_ms * batch.len() as u64));
+                self.asked.fetch_add(batch.len() as i32, Ordering::SeqCst);
+                self.active.fetch_sub(1, Ordering::SeqCst);
+                Ok(batch
+                    .iter()
+                    .map(|r| {
+                        if self.present.contains(&r.message_id) {
+                            DonorAnswer::Present
+                        } else {
+                            DonorAnswer::Missing
+                        }
+                    })
+                    .collect())
+            }
+        }
+        donor_reset();
+        let ids: Vec<String> = (0..400).map(|i| format!("lane{i}@x")).collect();
+        let groups = Arc::new(Vec::<String>::new());
+        let opts = |lanes: i32, posting_budget_ms: i32, dead_extra: i32| DonorOptions {
+            sample: DonorSampleOptions {
+                percent: 100,
+                minimum: 1,
+                maximum: 200,
+                body_percent: 0,
+                max_body: 0,
+                seed: 0,
+            },
+            probe: 10,
+            budget_ms: 60_000,
+            deadline_ms: 0,
+            lanes,
+            posting_budget_ms,
+            dead_extra,
+        };
+        // every article present, 20 ms a request: four lanes at once
+        let all = Arc::new(Slow {
+            delay_ms: 20,
+            present: ids.iter().cloned().collect(),
+            active: AtomicI32::new(0),
+            peak: AtomicI32::new(0),
+            asked: AtomicI32::new(0),
+        });
+        let server = Arc::new(DonorServer::new(8, all.clone()));
+        let posting = DonorPosting { key: "a".into(), ids: ids.clone(), groups: groups.clone() };
+        let got = std::sync::Mutex::new(Vec::new());
+        donor_check_postings_timed(&[server], std::slice::from_ref(&posting), &opts(4, 0, 0), true, 1, None, |_, h, ms| {
+            got.lock().unwrap().push((*h, ms))
+        });
+        let (h, _) = got.lock().unwrap()[0];
+        assert_eq!(h.present, 200);
+        assert!(all.peak.load(Ordering::SeqCst) >= 3, "lanes ask at once: {}", all.peak.load(Ordering::SeqCst));
+        // half missing and 25 ms a request: cut at its 600 ms budget,
+        // what was measured kept
+        let some = Arc::new(Slow {
+            delay_ms: 25,
+            present: ids.iter().step_by(2).cloned().collect(),
+            active: AtomicI32::new(0),
+            peak: AtomicI32::new(0),
+            asked: AtomicI32::new(0),
+        });
+        let server = Arc::new(DonorServer::new(8, some.clone()));
+        let got = std::sync::Mutex::new(Vec::new());
+        let start = std::time::Instant::now();
+        donor_check_postings_timed(&[server], std::slice::from_ref(&posting), &opts(1, 600, 0), true, 1, None, |_, h, ms| {
+            got.lock().unwrap().push((*h, ms))
+        });
+        assert!(start.elapsed() < std::time::Duration::from_millis(1500), "{:?}", start.elapsed());
+        let (h, ms) = got.lock().unwrap()[0];
+        assert!(ms < 1000, "{ms}");
+        assert!(h.answered() < h.checked && h.answered() >= 10, "{h:?}");
+        // every article missing but one in forty: ten probed missing, then
+        // more are asked, so the copy is not dead from ten
+        let rare = Arc::new(Slow {
+            delay_ms: 1,
+            present: ids.iter().skip(5).step_by(40).cloned().collect(),
+            active: AtomicI32::new(0),
+            peak: AtomicI32::new(0),
+            asked: AtomicI32::new(0),
+        });
+        let server = Arc::new(DonorServer::new(8, rare.clone()));
+        let none_present = DonorPosting { key: "r".into(), ids: ids.clone(), groups: groups.clone() };
+        let got = std::sync::Mutex::new(Vec::new());
+        donor_check_postings_timed(&[server.clone()], std::slice::from_ref(&none_present), &opts(2, 0, 30), true, 1, None, |_, h, _| {
+            got.lock().unwrap().push(*h)
+        });
+        let h = got.lock().unwrap()[0];
+        assert!(h.present + h.missing > 10, "more than ten asked: {h:?}");
+        assert!(h.present + h.missing <= 40, "at most ten and the extra: {h:?}");
+        // without the extra the probe stops at ten (as before)
+        let got = std::sync::Mutex::new(Vec::new());
+        let dead_only = Arc::new(Slow {
+            delay_ms: 1,
+            present: Default::default(),
+            active: AtomicI32::new(0),
+            peak: AtomicI32::new(0),
+            asked: AtomicI32::new(0),
+        });
+        let server = Arc::new(DonorServer::new(8, dead_only));
+        donor_check_postings_timed(&[server], std::slice::from_ref(&none_present), &opts(1, 0, 0), true, 1, None, |_, h, _| {
+            got.lock().unwrap().push(*h)
+        });
+        let h = got.lock().unwrap()[0];
+        assert_eq!((h.present, h.missing), (0, 10));
+    }
+
+    #[test]
     fn timeouts_leave_a_fleet_copy_unverified() {
         assert_eq!(eval_fleet_member_health(true, true, 0, 0, 20, 5, 80), (-1, false, false));
         assert_eq!(eval_fleet_member_health(true, false, 0, 0, 20, 5, 80), (-1, false, false));
@@ -5689,6 +5931,7 @@ mod tests {
             probe: 10,
             budget_ms: 10_000,
             deadline_ms: 0,
+            ..Default::default()
         };
 
         donor_reset();

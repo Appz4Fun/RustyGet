@@ -140,6 +140,22 @@ pub fn display_order(held: &[(MemberFacts, bool)]) -> Vec<usize> {
     out
 }
 
+/// The place written as [`ORDER_PARAM`] for each held copy, in
+/// [`display_order`] (indices into `held` with their place). Place 1
+/// ("next") goes only to a copy failover can take now: while every held copy
+/// is still being probed, locked or dead, the places start at 2, so a copy
+/// still being probed is never shown as next, not even for one refresh (B5).
+pub fn display_places(held: &[(MemberFacts, bool)]) -> Vec<(usize, i32)> {
+    let ready = |i: usize| held[i].0.pickable() && !held[i].1;
+    let order = display_order(held);
+    let first = if order.first().is_some_and(|&i| ready(i)) { 1 } else { 2 };
+    order
+        .into_iter()
+        .enumerate()
+        .map(|(pos, i)| (i, first + pos as i32))
+        .collect()
+}
+
 /// What a held copy becomes when its fleet ends with no live copy left: a
 /// failure (dead: nothing of it alive) or a donor kept in history
 /// (DELETED/DUPE, F3: any article alive, or not known, or locked).
@@ -740,9 +756,9 @@ mod host {
         }
         let flags: Vec<(MemberFacts, bool)> =
             ordered.iter().map(|(q, f)| (*f, is_probing(host, q.ptr))).collect();
-        let shown: Vec<&(NzbSnap, MemberFacts)> = display_order(&flags).into_iter().map(|i| &ordered[i]).collect();
-        for (pos, (q, _)) in shown.into_iter().enumerate() {
-            changed |= set_if_changed(host, q.ptr, ORDER_PARAM, (pos + 1).to_string().as_bytes());
+        for (i, place) in display_places(&flags) {
+            let q = &ordered[i].0;
+            changed |= set_if_changed(host, q.ptr, ORDER_PARAM, place.to_string().as_bytes());
             changed |= set_if_changed(host, q.ptr, PRIMARY_PARAM, primary.as_bytes());
         }
         if changed {
@@ -846,6 +862,12 @@ mod tests {
         assert_eq!(display_order(&held), vec![1, 0, 2, 3]);
         let none_ready = [(healthy, true), (locked, false), (dead, false)];
         assert_eq!(display_order(&none_ready), vec![0, 1, 2]);
+        // B5: place 1 is the weak copy failover takes; with none ready no
+        // copy gets place 1, so a copy still being probed is never "next"
+        assert_eq!(display_places(&held), vec![(1, 1), (0, 2), (2, 3), (3, 4)]);
+        assert_eq!(display_places(&none_ready), vec![(0, 2), (1, 3), (2, 4)]);
+        let probing_only = [(healthy, true), (weak, true)];
+        assert!(display_places(&probing_only).iter().all(|&(_, place)| place >= 2));
     }
 
     /// Review: a fleet ends only with nothing downloading, nothing probed and

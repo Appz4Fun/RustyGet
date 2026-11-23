@@ -106,6 +106,17 @@ release-tiers jobs="3":
     just build release {{jobs}}
     for t in $tiers; do just build release {{jobs}} "$t"; done
 
+# Build the release binary and run it in the foreground with a config file.
+# Extra arguments go to rustyget, e.g. `just run ~/rustyget.conf -o ControlPort=6790`.
+[positional-arguments]
+run config *args: (release "3")
+    #!/usr/bin/env bash
+    set -euo pipefail
+    config="$1"; shift
+    case "$config" in /*) ;; *) config="{{invocation_directory()}}/$config" ;; esac
+    if [ ! -f "$config" ]; then echo "Config file not found: $config" >&2; exit 1; fi
+    exec "{{root_dir}}/build/release/{{package}}" -c "$config" -s "$@"
+
 # Build debug binary (`build/debug/rustyget`)
 debug jobs="3":
     @just build debug {{jobs}}

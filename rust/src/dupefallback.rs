@@ -56,6 +56,26 @@ pub struct NzbgetRsByteRange {
     pub size: i64,
 }
 
+impl From<NzbgetRsByteRange> for par_rs::damage::ByteRange {
+    fn from(r: NzbgetRsByteRange) -> Self {
+        Self::new(r.offset, r.size)
+    }
+}
+
+impl From<par_rs::damage::ByteRange> for NzbgetRsByteRange {
+    fn from(r: par_rs::damage::ByteRange) -> Self {
+        Self {
+            offset: r.offset,
+            size: r.size,
+        }
+    }
+}
+
+/// `ranges` as par-rs byte ranges.
+pub(crate) fn par_ranges(ranges: &[NzbgetRsByteRange]) -> Vec<par_rs::damage::ByteRange> {
+    ranges.iter().map(|&r| r.into()).collect()
+}
+
 /// Checks whether damaged data bytes (or projected damage from articles tried so far)
 /// exceed available PAR2 recovery bytes.
 pub fn par_cannot_cover(
@@ -495,22 +515,6 @@ impl LeadState {
     }
 }
 
-/// Checks whether `[from, to)` is completely covered by a sorted slice of `[offset, offset + size)` ranges.
-pub fn range_covered(sorted_ranges: &[NzbgetRsByteRange], mut from: i64, to: i64) -> bool {
-    for r in sorted_ranges {
-        let start = r.offset;
-        let end = r.offset.saturating_add(r.size);
-        if start > from {
-            return false;
-        }
-        from = from.max(end);
-        if from >= to {
-            return true;
-        }
-    }
-    from >= to
-}
-
 fn hex_lower(bytes: &[u8]) -> [u8; 32] {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut out = [0u8; 32];
@@ -581,21 +585,10 @@ pub fn load_par2_sums(dir: &Path) -> BTreeMap<[u8; 32], Par2FileSums> {
 /// The IEEE CRC-32 of `bytes` (par-rs's).
 pub use par_rs::crc::crc32 as crc32_ieee;
 
-/// Computes the lower-case 32-hex-digit MD5 of the first 16 KiB of `path`.
+/// Computes the lower-case 32-hex-digit MD5 of the first 16 KiB of `path` (par-rs's lenient
+/// form: an unopenable file hashes as empty and a read error ends the data where it happened).
 pub fn hash16k_of(path: &Path) -> [u8; 32] {
-    use md5::{Digest, Md5};
-    let mut buf = vec![0u8; 16 * 1024];
-    let mut read_len = 0usize;
-    if let Ok(mut f) = File::open(path) {
-        while read_len < buf.len() {
-            match f.read(&mut buf[read_len..]) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => read_len += n,
-            }
-        }
-    }
-    let digest = Md5::digest(&buf[..read_len]);
-    hex_lower(&digest)
+    hex_lower(&par_rs::hasher::file_md5_16k_lenient(path))
 }
 
 /// `DupeArticleFallback::ListPar2Files`: returns `(name, length, block_size)` for all PAR2 entries in `dir`.
@@ -606,9 +599,10 @@ pub fn list_par2_files(dir: &Path) -> Vec<(Vec<u8>, u64, u64)> {
         .collect()
 }
 
-/// `DupeArticleFallback::BorrowedPar2Mismatches` with a caller-supplied CRC32 backend.
+/// `DupeArticleFallback::BorrowedPar2Mismatches`: the borrowed articles whose fully arrived PAR2
+/// blocks fail their CRC-32 (par-rs's `verify::slice_crc_matches`).
 #[allow(clippy::too_many_arguments)]
-pub fn borrowed_par2_mismatches_with_crc<F>(
+pub fn borrowed_par2_mismatches(
     path: &Path,
     dest_dir: &Path,
     filename: &[u8],
@@ -617,11 +611,7 @@ pub fn borrowed_par2_mismatches_with_crc<F>(
     fallback_rounds: &[i32],
     segment_offsets: &[i64],
     segment_sizes: &[i32],
-    crc_fn: F,
-) -> Vec<i32>
-where
-    F: Fn(&[u8]) -> u32,
-{
+) -> Vec<i32> {
     let n = statuses
         .len()
         .min(donor_ids.len())
@@ -662,20 +652,17 @@ where
 
     let mut arrived: Vec<(i64, i64)> = (0..n)
         .filter(|&i| statuses[i] == ARTICLE_STATUS_FINISHED && segment_sizes[i] > 0)
-        .map(|i| {
-            (
-                segment_offsets[i],
-                segment_offsets[i].wrapping_add(segment_sizes[i] as i64),
-            )
+        // The offset comes from the article's yEnc header, so skip ranges whose end
+        // overflows (par-rs `ByteRange::end` adds without a guard).
+        .filter_map(|i| {
+            let start = segment_offsets[i];
+            start.checked_add(segment_sizes[i] as i64).map(|end| (start, end))
         })
         .collect();
     arrived.sort_unstable();
-    let arrived_ranges: Vec<NzbgetRsByteRange> = arrived
+    let arrived_ranges: Vec<par_rs::damage::ByteRange> = arrived
         .into_iter()
-        .map(|(start, end)| NzbgetRsByteRange {
-            offset: start,
-            size: end.wrapping_sub(start),
-        })
+        .map(|(start, end)| par_rs::damage::ByteRange::new(start, end - start))
         .collect();
 
     let mut in_file = File::open(path);
@@ -704,16 +691,15 @@ where
             let to = from.saturating_add(bs).min(file_size);
             if from >= file_size
                 || (block as usize) >= sums.crcs.len()
-                || !range_covered(&arrived_ranges, from, to)
+                || !par_rs::damage::range_covered(&arrived_ranges, from, to)
             {
                 continue;
             }
             let ok = *verdicts.entry(block).or_insert_with(|| {
-                buffer.fill(0);
+                let mut read_so_far = 0usize;
                 if let Ok(ref mut f) = in_file {
                     if f.seek(SeekFrom::Start(from as u64)).is_ok() {
                         let target_read = (to - from) as usize;
-                        let mut read_so_far = 0usize;
                         while read_so_far < target_read {
                             match f.read(&mut buffer[read_so_far..target_read]) {
                                 Ok(0) | Err(_) => break,
@@ -722,7 +708,13 @@ where
                         }
                     }
                 }
-                crc_fn(&buffer) == sums.crcs[block as usize]
+                // The slice CRC covers the block zero padded to `block_size`; an unread
+                // tail counts as zeros, as before.
+                let expected = par_rs::packet::SliceChecksum {
+                    md5: [0; 16],
+                    crc32: sums.crcs[block as usize],
+                };
+                par_rs::verify::slice_crc_matches(&expected, &buffer[..read_so_far], block_size)
             });
             bad = !ok;
         }
@@ -733,32 +725,10 @@ where
     mismatches
 }
 
-/// Counts distinct blocks of `block_size` touched by `holes` (`ParDamage::BlocksTouched`).
+/// Counts distinct blocks of `block_size` touched by `holes` (`ParDamage::BlocksTouched`):
+/// par-rs's `damage::blocks_touched` on the FFI range type.
 pub fn blocks_touched(holes: &[NzbgetRsByteRange], block_size: u64) -> i32 {
-    if block_size == 0 || block_size > (i64::MAX as u64) {
-        return 0;
-    }
-    let bs = block_size as i64;
-    let mut spans = Vec::with_capacity(holes.len());
-    for hole in holes {
-        if hole.size > 0 && hole.offset >= 0 {
-            let first = hole.offset / bs;
-            let last = hole.offset.saturating_add(hole.size).saturating_sub(1) / bs;
-            spans.push((first, last));
-        }
-    }
-    spans.sort_unstable();
-
-    let mut count: i64 = 0;
-    let mut covered_to: i64 = -1;
-    for (first, last) in spans {
-        let from = first.max(covered_to.saturating_add(1));
-        if last >= from {
-            count = count.saturating_add(last.saturating_sub(from).saturating_add(1));
-            covered_to = last;
-        }
-    }
-    count.min(i32::MAX as i64) as i32
+    par_rs::damage::blocks_touched(&par_ranges(holes), block_size)
 }
 
 /// Computes `ParDamage::Verdict` projection and `Certain`/`Projected` flags.
@@ -1953,7 +1923,7 @@ pub(crate) fn borrowed_par2_mismatches_slice(
         segment_offsets.push(a.segment_offset);
         segment_sizes.push(a.segment_size);
     }
-    let raw = borrowed_par2_mismatches_with_crc(
+    let raw = borrowed_par2_mismatches(
         crate::fsops::path(path),
         crate::fsops::path(dest_dir),
         filename,
@@ -1962,7 +1932,6 @@ pub(crate) fn borrowed_par2_mismatches_slice(
         &fallback_rounds,
         &segment_offsets,
         &segment_sizes,
-        crc32_ieee,
     );
     raw.into_iter()
         .filter_map(|idx| {
@@ -3546,31 +3515,6 @@ mod tests {
         candidates
     }
 
-    /// The PAR2 check with the default CRC32 backend.
-    #[allow(clippy::too_many_arguments)]
-    fn borrowed_par2_mismatches(
-        path: &Path,
-        dest_dir: &Path,
-        filename: &[u8],
-        statuses: &[i32],
-        donor_ids: &[i32],
-        fallback_rounds: &[i32],
-        segment_offsets: &[i64],
-        segment_sizes: &[i32],
-    ) -> Vec<i32> {
-        borrowed_par2_mismatches_with_crc(
-            path,
-            dest_dir,
-            filename,
-            statuses,
-            donor_ids,
-            fallback_rounds,
-            segment_offsets,
-            segment_sizes,
-            crc32_ieee,
-        )
-    }
-
     #[test]
     fn dupe_article_fallback_full_suite_port_from_cpp() {
         // 1. DupeArticleFallbackRejectsDamagedPar2BlockSizeTest
@@ -3650,6 +3594,20 @@ mod tests {
                 &[100],
             );
             assert!(mismatches.is_empty());
+
+            // A yEnc offset near i64::MAX must not overflow (it would abort a debug build).
+            write_par(100);
+            let mismatches = borrowed_par2_mismatches(
+                &f_bin,
+                &dir,
+                b"f.bin",
+                &[ARTICLE_STATUS_FINISHED, ARTICLE_STATUS_FINISHED],
+                &[1, 1],
+                &[0, 0],
+                &[0, i64::MAX - 10],
+                &[100, 100],
+            );
+            assert_eq!(mismatches, vec![0]);
             let _ = std::fs::remove_dir_all(&dir);
         }
 

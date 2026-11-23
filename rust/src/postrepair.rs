@@ -219,9 +219,8 @@ pub struct NzbgetRsParSegment {
 }
 
 pub use crate::parchecker::{
-    calc_stage_progress, classify_streambuf_line, compute_valid_blocks, maybe_splitted_fragment,
-    smart_calc_range_crc, PAR_STAGE_LOADING_PARS, PAR_STAGE_REPAIRING,
-    PAR_STAGE_VERIFYING_REPAIRED, PAR_STAGE_VERIFYING_SOURCES,
+    calc_stage_progress, classify_streambuf_line, maybe_splitted_fragment, PAR_STAGE_LOADING_PARS,
+    PAR_STAGE_REPAIRING, PAR_STAGE_VERIFYING_REPAIRED, PAR_STAGE_VERIFYING_SOURCES,
 };
 
 // ============================================================================

@@ -14,7 +14,6 @@ use crate::parlive::{
     download_writes, reserve_control, resources, ControlLease, SessionBudgetLease,
     SessionGeneration, WriteCoordinator, LIVE_BUDGET,
 };
-use crate::postrepair::{strncasecmp_prefix, NzbgetRsParSegment};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -3407,36 +3406,8 @@ pub fn classify_streambuf_line(msg: &[u8]) -> (bool, usize) {
     (extra_debug, offset)
 }
 
-/// `ParChecker::MaybeSplittedFragement`
-pub fn maybe_splitted_fragment(filename1: &[u8], filename2: &[u8]) -> bool {
-    let len = filename2.len();
-    if strncasecmp_prefix(filename1, filename2) {
-        if filename1.get(len) == Some(&b'.') {
-            if filename1[len + 1..].iter().all(|b| b.is_ascii_digit()) {
-                return true;
-            }
-        }
-    }
-
-    let rfind_dot = |s: &[u8]| s.iter().rposition(|&b| b == b'.');
-    if let (Some(pos1), Some(pos2)) = (rfind_dot(filename1), rfind_dot(filename2)) {
-        let ext1 = &filename1[pos1..];
-        let ext2 = &filename2[pos2..];
-        if ext1.len() == 4
-            && ext2.len() == 4
-            && filename2.len() >= pos1
-            && strncasecmp_prefix(filename1, &filename2[..pos1])
-        {
-            if ext1[1..].iter().all(|b| b.is_ascii_digit())
-                && ext2[1..].iter().all(|b| b.is_ascii_digit())
-            {
-                return true;
-            }
-        }
-    }
-
-    false
-}
+/// `ParChecker::MaybeSplittedFragement` (par-rs's `renamer::maybe_split_fragment`).
+pub use par_rs::renamer::maybe_split_fragment as maybe_splitted_fragment;
 
 /// Extracts the base filename of `par_filename` with its last `.ext` stripped (`ParChecker::SortExtraFiles`).
 pub fn extract_base_par_stem(par_filename: &[u8]) -> Vec<u8> {
@@ -3484,108 +3455,6 @@ pub fn calc_stage_progress(
     };
 
     stage_progress.clamp(0, 1000)
-}
-
-/// Combines per-block CRCs into a PAR2 block-range or file-level CRC.
-pub fn combine_block_crcs(block_crcs: &[u32], block_size: u64) -> u32 {
-    let mut par_crc = 0u32;
-    let len2 = block_size as u32;
-    for (i, &block_crc) in block_crcs.iter().enumerate() {
-        par_crc = if i == 0 {
-            block_crc
-        } else {
-            crate::crc::combine(par_crc, block_crc, len2)
-        };
-    }
-    par_crc
-}
-
-/// `ParChecker::VerifyPartialDataFile` valid-block determination.
-pub fn compute_valid_blocks(
-    block_count: usize,
-    block_size: i64,
-    file_size: i64,
-    segments: &[NzbgetRsParSegment],
-    out_valid: &mut [u8],
-) {
-    let n = block_count.min(out_valid.len());
-    for i in 0..n {
-        let block_start = (i as i64) * block_size;
-        let block_end = if block_start + block_size < file_size - 1 {
-            block_start + block_size
-        } else {
-            file_size - 1
-        };
-        let mut block_ok = false;
-        let mut block_end_found = false;
-        let mut cur_offset = 0i64;
-        for seg in segments {
-            let seg_end = seg.offset + (seg.size as i64);
-            if !block_ok && seg.success != 0 && seg.offset <= block_start && seg_end >= block_start
-            {
-                block_ok = true;
-                cur_offset = seg.offset;
-            }
-            if block_ok {
-                if !(seg.success != 0 && seg.offset == cur_offset) {
-                    block_ok = false;
-                    break;
-                }
-                if seg_end >= block_end {
-                    block_end_found = true;
-                    break;
-                }
-                cur_offset = seg_end;
-            }
-        }
-        out_valid[i] = u8::from(block_ok && block_end_found);
-    }
-}
-
-/// `ParChecker::SmartCalcFileRangeCrc`
-pub fn smart_calc_range_crc<F>(
-    start: i64,
-    end: i64,
-    segments: &[NzbgetRsParSegment],
-    mut dumb_calc_cb: F,
-) -> Option<u32>
-where
-    F: FnMut(i64, i64) -> Option<u32>,
-{
-    let mut download_crc = 0u32;
-    let mut started = false;
-    for seg in segments {
-        let seg_end = seg.offset + (seg.size as i64);
-        if !started && seg.offset > start {
-            download_crc = dumb_calc_cb(start, seg.offset - 1)?;
-            if seg_end >= end {
-                break;
-            }
-            started = true;
-        }
-
-        if seg.offset >= start && seg_end <= end {
-            download_crc = if !started {
-                seg.crc
-            } else {
-                crate::crc::combine(download_crc, seg.crc, seg.size as u32)
-            };
-            started = true;
-        }
-
-        if seg_end == end {
-            break;
-        }
-
-        if seg_end > end {
-            let partial_crc = dumb_calc_cb(seg.offset, end)?;
-            download_crc =
-                crate::crc::combine(download_crc, partial_crc, (end - seg.offset + 1) as u32);
-            break;
-        }
-    }
-
-    Some(download_crc)
 }
 
 #[cfg(test)]

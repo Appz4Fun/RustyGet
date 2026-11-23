@@ -28,6 +28,13 @@ pub(crate) fn print(hash: &[u8]) -> [u8; 33] {
     out
 }
 
+// OPEN ITEM (par-rs): `par_rs::LegacyHeadAnalyzer` (par-rs #82, unchanged at 4b03a90) ports
+// this exactly and passes the tests below, but it allocates on the per-piece path, which
+// tests/renameanalyzer_allocations.rs forbids (501 allocations in 100 reset/append/finish
+// rounds; 0 here). `reset` builds a `Vec::with_capacity(64)` MD5 buffer, `finish` clones that
+// buffer to pad it, and the first `append` grows the `signature` Vec. par-rs needs fixed
+// `[u8; 64]` buffers (with a length) for both and an in-place padded final block; then this
+// type becomes `pub use par_rs::LegacyHeadAnalyzer as Analyzer` with `print` kept here.
 pub struct Analyzer {
     md5: Md5,
     signature: [u8; HEADER],

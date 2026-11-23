@@ -31,7 +31,8 @@ flowchart LR
 2. **One fleet per group:** send `appendfleet` with all of the group's files, the dialog's category and priority, and DupeKey `dupes:<normalized name>`. If the user typed a DupeKey in the dialog, use theirs instead.
 3. **The dialog shows the grouping** before Submit ("19 files → 1 fleet: Dune.Part.Two…FraMeSToR"), so the user can see what will happen. Add a checkbox, on by default: "Add copies of the same release as one fleet". When it's off, every file goes in on its own as today.
 4. **Force** (the "DupeForce" box) keeps today's behaviour: every file is its own download, with no fleet.
-5. **Exact duplicate files** (same content) are dropped in the dialog before upload, so they don't cost a probe.
+5. **Keep imperfect copies as low-priority donors.** A copy that is not good enough to be primary is never discarded. Only the best copy downloads. Every other copy with any articles alive (for example 48% or 15%) stays in the fleet as a low-priority donor, ranked by its alive percentage and labelled with it ("borrowable alt · 48% alive"). It is never marked FAILURE or deleted while the fleet is open, so the primary can still borrow the articles it has. Only a copy with nothing alive at all is labelled dead. Even that one stays in history with its nzb, never deleted, in case it comes back on another server. Copies leave the fleet only when the primary succeeds, and then they go to history as DUPE.
+6. **Exact duplicate files** (same content) are dropped in the dialog before upload, so they don't cost a probe.
 
 ## Out of scope here, possible follow-ups
 
@@ -43,5 +44,6 @@ flowchart LR
 - Dropping 3+ copies of one release creates a single fleet: one item downloading, the others labelled TWIN / borrowable alt / non-borrowable alt in Downloads.
 - After the primary succeeds, the other copies go to history as DELETED/DUPE, and nothing re-downloads.
 - Dropping copies of two different releases at once creates two fleets.
+- A partially alive copy (for example 19 of 40 sampled articles) stays queued as a low-priority donor with its alive % shown. It is not marked FAILURE/HEALTH, and the primary borrows from it.
 - With the checkbox off, or with Force on, behaviour is exactly as today.
 - Web UI tests cover the grouping (suffix stripping, two releases, a single file, a user-supplied DupeKey).

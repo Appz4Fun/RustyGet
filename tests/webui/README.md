@@ -2,6 +2,12 @@ The Add dialog's grouping of copies of one release (`webui/dupegroup.js`, see
 `docs/DROP_AS_FLEET.md`) is checked in plain Node, without a browser or daemon:
 `node tests/webui/dupe-group.js`. Its name cases are the ones the Rust unit
 test `releasename::tests::copy_suffixes_strip_only_after_a_group_tag` checks.
+The dialog, Downloads and History around it run in Playwright, offline (the
+details fixture, no daemon): `node tests/webui/drop-fleet.js http://127.0.0.1:17999/`
+checks the "N files → 1 fleet" preview, the box on by default, plain appends
+with the box off or Force on, two releases as two fleets, the fleet panel's
+primary and twin, alt and unverified backups, honest projected health, and
+History's donors (never FAILURE/HEALTH), with no console errors.
 
 The WebUI density regression check uses Playwright and Chrome against an isolated,
 loopback NZBGet instance serving the current WebUI. The fixture should start with

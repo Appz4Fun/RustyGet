@@ -866,10 +866,11 @@ fn check_placement_available(
 
 /// The bytes of articles a fleet of copies grouped by name reads from each copy
 /// while it ranks them (BODY checks); STATs cost nothing and are not counted.
-// OPEN ITEM (par-rs): switch to par_rs::probe once #87 merges
-// (plan_probe for the spread articles within this budget, check_probe for
-// slice-verified Match/Mismatch/Incomplete; probed slices matching the same
-// IFSC are twin evidence). Until then the fleet's own STAT/BODY sampling runs.
+// OPEN ITEM (par-rs): switch to par_rs::probe (#87, merged as b2ba9e5) for
+// twin proof where a slice fits the budget (max(1 MB, one slice), one or two
+// slices a copy: check_probe Match against the same IFSC); the alive check
+// stays this spread STAT/BODY sampling. Not pinned here yet: the par2 file
+// lists TwinCheck compares already prove twins.
 pub const GROUP_PROBE_BYTES: i64 = 1024 * 1024;
 
 /// Is `key` the DupeKey of copies grouped by name (`dupes:<normalized name>`)?

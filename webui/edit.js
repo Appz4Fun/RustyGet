@@ -100,6 +100,13 @@ var DetailsPanel = (new function($)
 	// in rust/src/dupecoord.rs reads them).
 	function healthPermille(item)
 	{
+		// judged on a sample (DupeProjected, or DupeParked once kept as a donor):
+		// that, not a Health that counts every untried article as good
+		var shown = DownloadsUI.shownHealth(item);
+		if (shown !== item.Health)
+		{
+			return shown;
+		}
 		if (item.SuccessArticles + item.FailedArticles > 0)
 		{
 			return item.Health;

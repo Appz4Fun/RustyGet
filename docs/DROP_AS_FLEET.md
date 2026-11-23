@@ -182,7 +182,7 @@ badge, and shows a kept donor's `DupeParked` the same way.
   7-Zip, then an encrypted one. Health still gates: a weak plain copy never
   leads a healthy one. The backups keep their order (twins first).
 
-Open item (F2a): once par-rs #87 merges, the 1 MB probe switches to
+Open item (F2a): par-rs #87 is merged (b2ba9e5) but not pinned here yet; the 1 MB probe is to switch to
 `par_rs::probe::{plan_probe, check_probe}` (slice-verified Match, Mismatch or
 Incomplete; probed slices that match the same IFSC are twin evidence). It is
 marked `OPEN ITEM (par-rs)` at `GROUP_PROBE_BYTES`.
@@ -198,7 +198,7 @@ marked `OPEN ITEM (par-rs)` at `GROUP_PROBE_BYTES`.
 | A copy with nothing alive is labelled dead, stays in history with its nzb, and is never deleted. | functional `dropnzbdir` (`DupeAlive=0`, nzb-file still in NzbDir), `dropkeepdonor` (`DupeParked` near 0, nzb-file kept) |
 | Exact duplicate files are dropped before upload. | web UI `dupe-group.js` "exact duplicate files are dropped before upload"; functional `dropnzbdir` (the exact copy in NzbDir is SAME_POSTING, not added) |
 | With the checkbox off, or with Force on, behaviour is exactly as today. | web UI `dupe-group.js` "box off or Force on: every file on its own, as before"; functional `dropjoin` (`DupeJoin=no` and DupeMode FORCE copies keep no DupeKey and each downloads) |
-| Web UI tests cover the grouping (suffix stripping, two releases, a single file, a user-supplied DupeKey). | `tests/webui/dupe-group.js` |
+| Web UI tests cover the grouping (suffix stripping, two releases, a single file, a user-supplied DupeKey). | `tests/webui/dupe-group.js`; Playwright `tests/webui/drop-fleet.js` (the Add dialog's preview, box on by default, box off and Force as plain appends, two releases as two fleets; Downloads: one primary, twin, alt and unverified backups, projected health; History: donors never FAILURE/HEALTH, DELETED/DUPE after the primary succeeds; no console errors) |
 | The NzbDir scanner treats files of one release in one scan pass as one fleet. | functional `dropnzbdir`; Rust `scanner::tests::nzbdir_copies_of_one_release_form_one_fleet` |
 | Items with no DupeKey and the same normalized name join one group, whatever added them. | functional `dropjoin`; Rust `dupecoord::tests::group_scores_follow_the_order_copies_came` |
 | A group goes to the front of the queue, and each backup sends at most about 1 to 2 MB during intake. | functional `dropnzbdir` (queue order with an item queued before the drop; nserv request log: bytes served per backup copy at most 2 MB, borrowed articles included), `dropjoin` (the joined copy moves in front of an item queued before it); Rust `dupesearch_coord::tests::grouped_fleets_probe_about_a_megabyte_per_copy` |

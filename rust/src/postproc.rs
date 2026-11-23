@@ -3761,9 +3761,10 @@ static LIVE_PAR_HELPERS: LiveHelpers =
 static LIVE_END_HELPERS: LiveHelpers =
     std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
-/// Stops the live par2 repairs of download `nzb_id` before its files are cleaned up
-/// (deletion, shutdown, a rename): cancels them, and joins their helper threads on a reaper
-/// thread, never here. Callers hold the queue lock, and a helper may be waiting for the
+/// Stops the live par2 repairs of download `nzb_id` before its files are deleted, moved,
+/// renamed, merged or split (deletion, shutdown, the direct renamer's renames and its
+/// merge or split of output files, a dupe hand-off): cancels them, and joins their helper
+/// threads on a reaper thread, never here. Callers hold the queue lock, and a helper may be waiting for the
 /// article cache's flush lock while the flusher holding it waits for the queue lock; joining
 /// here would hang the queue. Cancelled, a helper stops waiting for that lock within 50 ms,
 /// par-rs stops between slices, and its target writes go through descriptors it owns, so
@@ -3784,21 +3785,64 @@ pub(crate) fn direct_unpack_join_live_par_repair(nzb_id: i32) {
                 handles.extend(list);
             }
         }
-        reap_live_helpers(handles);
+        reap_live_helpers(nzb_id, handles);
     }
     #[cfg(not(unix))]
     let _ = nzb_id;
 }
 
-/// Joins ended or cancelled live repair helpers on a thread of its own (finished ones at once).
+/// Reaper threads still joining cancelled helpers, for the bounded wait at shutdown.
 #[cfg(unix)]
-fn reap_live_helpers(handles: Vec<std::thread::JoinHandle<()>>) {
+static LIVE_REAPERS: std::sync::LazyLock<Mutex<Vec<std::thread::JoinHandle<()>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
+
+/// At shutdown, after the live sessions are cancelled: waits up to `limit` for every live
+/// repair helper and reaper to end, so no repair write outlives the daemon's own cleanup
+/// when it can be helped. Helpers still running then are left to end on their own. Never
+/// call it with the queue lock held.
+pub(crate) fn live_par_helpers_wait(limit: Duration) {
+    #[cfg(unix)]
+    {
+        let deadline = std::time::Instant::now() + limit;
+        let mut handles: Vec<std::thread::JoinHandle<()>> = Vec::new();
+        for helpers in [&LIVE_PAR_HELPERS, &LIVE_END_HELPERS] {
+            let mut map = helpers.lock().unwrap_or_else(|e| e.into_inner());
+            handles.extend(map.drain().flat_map(|(_, list)| list));
+        }
+        handles.extend(LIVE_REAPERS.lock().unwrap_or_else(|e| e.into_inner()).drain(..));
+        while !handles.iter().all(std::thread::JoinHandle::is_finished)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        for handle in handles {
+            if handle.is_finished() {
+                let _ = handle.join();
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = limit;
+}
+
+/// Joins ended or cancelled live repair helpers on a thread of its own (finished ones at once).
+/// Once they ended, a cancelled end repair's `Failed` state is cleared, so a later live
+/// session of the same download (after a rename) may run one again.
+#[cfg(unix)]
+fn reap_live_helpers(nzb_id: i32, handles: Vec<std::thread::JoinHandle<()>>) {
+    let clear_failed = move || {
+        let mut map = LIVE_END_REPAIRS.lock().unwrap_or_else(|e| e.into_inner());
+        if matches!(map.get(&nzb_id), Some(EndRepair::Failed)) {
+            map.remove(&nzb_id);
+        }
+    };
     let (finished, running): (Vec<_>, Vec<_>) =
         handles.into_iter().partition(|handle| handle.is_finished());
     for handle in finished {
         let _ = handle.join();
     }
     if running.is_empty() {
+        clear_failed();
         return;
     }
     let reaper = std::thread::Builder::new()
@@ -3807,9 +3851,14 @@ fn reap_live_helpers(handles: Vec<std::thread::JoinHandle<()>>) {
             for handle in running {
                 let _ = handle.join();
             }
+            clear_failed();
         });
     // Without a reaper the handles are dropped: the threads still end on their own.
-    drop(reaper);
+    if let Ok(reaper) = reaper {
+        let mut reapers = LIVE_REAPERS.lock().unwrap_or_else(|e| e.into_inner());
+        reapers.retain(|handle| !handle.is_finished());
+        reapers.push(reaper);
+    }
 }
 
 /// Gives up on the held volumes of download `nzb_id` (its repair failed).
@@ -6244,6 +6293,61 @@ mod live_end_repair_tests {
         drop(held);
         // Not cancelled: it takes the fence once free.
         assert_eq!(crate::articledl::with_live_cache_fence_unless(|| false, || 7), Some(7));
+    }
+
+    #[test]
+    fn a_cancelled_fence_waiter_never_swallows_a_plain_waiters_wakeup() {
+        // The fence is held; a live repair helper and the cache flusher both wait for it.
+        // The helper is cancelled and leaves without the lock: the flusher must still get it.
+        for _ in 0..20 {
+            let held = crate::articledl::hold_cache_flush_lock_for_test();
+            let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let flag = std::sync::Arc::clone(&cancelled);
+            let helper = std::thread::spawn(move || {
+                crate::articledl::with_live_cache_fence_unless(
+                    || flag.load(std::sync::atomic::Ordering::Relaxed),
+                    || (),
+                )
+            });
+            let flusher = std::thread::spawn(crate::articledl::lock_and_unlock_cache_flush_for_test);
+            std::thread::sleep(Duration::from_millis(5));
+            cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+            drop(held);
+            let started = std::time::Instant::now();
+            while !flusher.is_finished() {
+                assert!(started.elapsed() < Duration::from_secs(2), "lost wakeup: flusher hangs");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            flusher.join().unwrap();
+            let _ = helper.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn a_cancelled_end_repair_can_run_again_once_its_helper_ended() {
+        let id = -1_975_003;
+        LIVE_END_REPAIRS.lock().unwrap().insert(id, EndRepair::Failed);
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        keep_live_helper(
+            &LIVE_END_HELPERS,
+            id,
+            std::thread::spawn(move || {
+                let _ = wait.recv();
+            }),
+        );
+        direct_unpack_join_live_par_repair(id);
+        // Still Failed while the helper runs.
+        assert!(matches!(live_end_repair_state(id), Some(EndRepair::Failed)));
+        release.send(()).unwrap();
+        let started = std::time::Instant::now();
+        while live_end_repair_state(id).is_some() {
+            assert!(started.elapsed() < Duration::from_secs(2), "Failed never cleared");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Shutdown's bounded wait returns at once with nothing left running.
+        let started = std::time::Instant::now();
+        live_par_helpers_wait(Duration::from_secs(5));
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

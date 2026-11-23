@@ -1609,6 +1609,9 @@ impl NzbgetRsQueueCoordinator {
         if let Some(metrics) = &self.callback_metrics {
             metrics.emit_after_join();
         }
+        // Live repair helpers were cancelled with their sessions at stop; give them a
+        // bounded moment to leave the files before the final cleanup.
+        crate::postproc::live_par_helpers_wait(std::time::Duration::from_secs(10));
         crate::parchecker::streaming_sessions_forget_all();
         host.coord_dq_final();
         host.log(

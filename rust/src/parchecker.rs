@@ -2934,6 +2934,39 @@ pub(crate) fn streaming_session_can_schedule_repair(nzb_id: i32) -> bool {
     unknown as u64 <= (status.ready_recovery as u64).saturating_add(queued_upper_bound)
 }
 
+/// Opens a repair target under the write barrier. An existing file is opened as it is; a
+/// missing one is created only while the session is current, and removed again when the
+/// session turns out cancelled right after (a deleted or moved download), so a cancelled
+/// repair never leaves an empty file behind in a folder that is going away.
+fn open_live_repair_target(
+    entry: &ActiveStreamingSession,
+    path: &Path,
+    cancelled: impl Fn() -> bool,
+) -> Result<std::fs::File, RepairError> {
+    let unproven = || live_error("live target admission", "target ownership unproven");
+    match crate::parlive::open_repair_target(&entry.writers, path, false) {
+        Ok(file) if cancelled() => {
+            drop(file);
+            Err(RepairError::Cancelled)
+        }
+        Ok(file) => Ok(file),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if cancelled() {
+                return Err(RepairError::Cancelled);
+            }
+            let file = crate::parlive::open_repair_target(&entry.writers, path, true)
+                .map_err(|_| unproven())?;
+            if cancelled() {
+                drop(file);
+                let _ = std::fs::remove_file(path);
+                return Err(RepairError::Cancelled);
+            }
+            Ok(file)
+        }
+        Err(_) => Err(unproven()),
+    }
+}
+
 /// Captured under the queue lock; it owns the original session and admitted metadata.
 pub(crate) struct LiveRepairRequest {
     nzb_id: i32,
@@ -3071,8 +3104,7 @@ impl LiveRepairRequest {
         // Writers are drained: bind the actual target inodes under the barrier.
         let mut files = Vec::with_capacity(paths.len());
         for (path, (_, file_id)) in paths.iter().zip(&self.ids) {
-            let file = crate::parlive::open_repair_target(&self.entry.writers, path)
-                .map_err(|_| live_error("live target admission", "target ownership unproven"))?;
+            let file = open_live_repair_target(&self.entry, path, cancelled)?;
             files.push(par_rs::RepairTargetFile { file_id: *file_id, file });
         }
         Ok(TargetWriteLease {

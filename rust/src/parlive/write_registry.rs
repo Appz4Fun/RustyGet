@@ -479,12 +479,13 @@ pub(crate) fn donor_write_context(
 pub(crate) fn open_repair_target(
     coordinator: &WriteCoordinator,
     path: &Path,
+    create: bool,
 ) -> std::io::Result<std::fs::File> {
     let root = coordinator.physical_root().ok_or_else(refused)?;
     if path.parent() != Some(root.spelling.as_path()) {
         return Err(refused());
     }
-    root.open_leaf(path.file_name().ok_or_else(refused)?, true, true)
+    root.open_leaf(path.file_name().ok_or_else(refused)?, true, create)
 }
 
 /// The target path must still name the descriptor admitted for repair.

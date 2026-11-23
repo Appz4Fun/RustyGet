@@ -1414,6 +1414,47 @@ fn defer_uncached(
 }
 
 #[test]
+fn a_cancelled_repair_never_creates_a_missing_target() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900184;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 << 20).unwrap();
+    let desc = &set.file_descs[&set.main.as_ref().unwrap().recoverable_file_ids[0]];
+    // Bind the physical root as a repair admission does.
+    let context = crate::parlive::source_write_context(id, 40, &fx.0, &desc.name).unwrap();
+    context.attest_existing_source().unwrap();
+    let entry = active_streaming_session(id).unwrap();
+    let missing = fx.0.join("not-there-yet.bin");
+    // Current: an existing target opens, a missing one is created.
+    let existing = fx.0.join(desc.local_name());
+    assert!(open_live_repair_target(&entry, &existing, || false).is_ok());
+    assert!(open_live_repair_target(&entry, &missing, || false).is_ok());
+    assert!(missing.exists());
+    std::fs::remove_file(&missing).unwrap();
+    // Cancelled (the download was deleted or moved): nothing is created.
+    assert!(matches!(
+        open_live_repair_target(&entry, &missing, || true),
+        Err(RepairError::Cancelled)
+    ));
+    assert!(!missing.exists());
+    // Cancelled just after the create: the new file is removed again.
+    let calls = std::cell::Cell::new(0);
+    let cancelled_after_create = || {
+        calls.set(calls.get() + 1);
+        calls.get() > 1
+    };
+    assert!(matches!(
+        open_live_repair_target(&entry, &missing, cancelled_after_create),
+        Err(RepairError::Cancelled)
+    ));
+    assert!(!missing.exists());
+    drop(entry);
+    drop(context);
+    streaming_session_forget(id);
+    crate::parlive::forget_download_writes(id);
+}
+
+#[test]
 fn live_cache_miss_is_read_by_par_rs_from_the_written_file() {
     let fx = Fixture::new();
     let set = fx.set();

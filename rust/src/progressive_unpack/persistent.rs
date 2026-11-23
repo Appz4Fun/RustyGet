@@ -654,6 +654,9 @@ struct InlineRefill {
     failed: bool,
     /// When the volumes were last asked about (asked at most every `INLINE_CHECK`).
     checked: Option<std::time::Instant>,
+    /// No password: every member is plain, so `refill_from_packed` joins the open group
+    /// (`PartialLimits::group_refills`) and is used even for a span with good bytes in it.
+    plain: bool,
 }
 
 /// How often a running session asks whether the volumes of its holes were repaired. Patching
@@ -816,7 +819,10 @@ fn refill_released<F>(
                 left.push((key, hv, range));
                 continue;
             };
-            let filled = if gaps {
+            // A plain member's refill reads only the holes inside the span and joins the open
+            // group; an encrypted member's refill is a transaction per step, so a span with
+            // good bytes in it is one `fill_packed` instead.
+            let filled = if gaps && !inline.plain {
                 match read_span(f.as_mut(), &range) {
                     Ok(bytes) => file.fill_packed(v, range.start, &bytes),
                     Err(cause) => Err(zipfast::partial::PartialError::new(
@@ -958,6 +964,13 @@ impl<'a> Run<'a> {
         limits.fill_bytes = fill_bytes.max(opts.limits.read_chunk as u32);
         limits.group_commit_bytes = group_bytes;
         limits.group_commit_interval = group_interval;
+        // Holes the extraction meets and refills of plain members join the open group instead
+        // of a transaction each. After a crash a grouped hole is met and reported again (the
+        // member resumes before it), and grouped refill bytes are holes again: the restarted
+        // run's inline refill and its refill of adopted members read them back.
+        limits.group_holes = !legacy();
+        limits.group_refills = !legacy();
+        self.inline.plain = self.req.password.is_empty() && !legacy();
         let popts = PartialOptions {
             binding: self.plan.binding.clone(),
             naming: PartialNaming::ArchivePath,

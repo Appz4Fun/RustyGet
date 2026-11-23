@@ -6160,3 +6160,312 @@ fn persistent_throughput() {
         }
     }
 }
+
+/// Copies a directory tree (files and folders only).
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap() {
+        let e = e.unwrap();
+        let ty = e.file_type().unwrap();
+        if ty.is_dir() {
+            copy_tree(&e.path(), &to.join(e.file_name()));
+        } else if ty.is_file() {
+            std::fs::copy(e.path(), to.join(e.file_name())).unwrap();
+        }
+    }
+}
+
+/// Puts the tree `live` back to the copy `saved` the way a crash leaves it: a file in both keeps
+/// its inode (zipfast holds outputs by identity) and gets the saved bytes and length, folders
+/// stay, and what is only in `live` goes.
+fn restore_tree(saved: &Path, live: &Path) {
+    use std::io::Write as _;
+    std::fs::create_dir_all(live).unwrap();
+    for e in std::fs::read_dir(live).unwrap() {
+        let e = e.unwrap();
+        if !saved.join(e.file_name()).exists() {
+            if e.file_type().unwrap().is_dir() {
+                std::fs::remove_dir_all(e.path()).unwrap();
+            } else {
+                std::fs::remove_file(e.path()).unwrap();
+            }
+        }
+    }
+    for e in std::fs::read_dir(saved).unwrap() {
+        let e = e.unwrap();
+        let to = live.join(e.file_name());
+        if e.file_type().unwrap().is_dir() {
+            restore_tree(&e.path(), &to);
+        } else if to.is_file() {
+            let bytes = std::fs::read(e.path()).unwrap();
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&to)
+                .unwrap();
+            f.write_all(&bytes).unwrap();
+        } else {
+            std::fs::copy(e.path(), &to).unwrap();
+        }
+    }
+}
+
+/// A download whose damaged volume is handed over with its hole; once the session asks for
+/// volume `snap_at` (the hole's group is still open: holes and the output around them join the
+/// group commit), the set's whole persistent state is copied aside, which is what a crash at
+/// that instant would leave on disk.
+struct SnapshotAt {
+    inner: Downloading,
+    snap_at: PathBuf,
+    root: PathBuf,
+    saved: PathBuf,
+    taken: Arc<AtomicBool>,
+}
+
+impl VolumeFeed for SnapshotAt {
+    fn volume(&mut self, path: &Path) -> VolumeView {
+        if path == self.snap_at && !self.taken.load(Ordering::Relaxed) {
+            copy_tree(&self.root, &self.saved);
+            self.taken.store(true, Ordering::Relaxed);
+        }
+        self.inner.volume(path)
+    }
+    fn wait_repaired(&mut self, c: &mut dyn FnMut() -> bool) -> bool {
+        self.inner.wait_repaired(c)
+    }
+    fn expected_volumes(&self) -> u64 {
+        self.inner.expected_volumes()
+    }
+}
+
+#[test]
+fn a_crash_before_a_grouped_hole_commits_reports_the_hole_again() {
+    // First run: a hole in volume 2 joins the open group (`group_holes`); the state on disk at
+    // the moment volume 4 is asked for is kept, and the run is cancelled. Restoring that state
+    // stands in for a daemon killed before the group committed: the hole was never durable.
+    // Second run: resumes from the committed output, meets the hole again, reports it and
+    // patches it from the repaired volume.
+    let t = TestDir::new("persist_crash_grouped_hole");
+    let data = pattern(3_000_000);
+    let chunk = 500_000;
+    let vols = rar5_volumes("movie.mkv", &data, chunk);
+    let first = write_set(&t.dl(), &vols);
+    let v2 = t.dl().join(volume_name(1, vols.len()));
+    let p = payload_offset(&vols[1], chunk) as u64 + 100_000;
+    let mut dmg = vols[1].clone();
+    dmg[p as usize..p as usize + 50_000].fill(0);
+    std::fs::write(&v2, &dmg).unwrap();
+    let state = t.out().join(persistent::STATE_DIR);
+    let saved = t.0.join("crash-state");
+    let taken = Arc::new(AtomicBool::new(false));
+    let feed = SnapshotAt {
+        inner: Downloading {
+            damaged: Damaged {
+                holes: vec![(v2.clone(), vec![(p, 50_000)])],
+                repair: Vec::new(),
+                handed: false,
+            },
+            volumes: vols.len() as u64,
+        },
+        snap_at: t.dl().join(volume_name(3, vols.len())),
+        root: state.clone(),
+        saved: saved.clone(),
+        taken: taken.clone(),
+    };
+    let req = Request {
+        first_volume: &first,
+        dest: &t.out(),
+        password: "",
+        overwrite: Overwrite::Always,
+        on_wait: None,
+    };
+    let mut log1 = Vec::new();
+    let flag = taken.clone();
+    let r1 = extract(
+        &req,
+        Box::new(feed),
+        &mut |_, m: &str| log1.push(m.to_string()),
+        &mut || flag.load(Ordering::Relaxed),
+    );
+    assert!(
+        matches!(r1, Err(Error::Failed(Failure::Canceled))),
+        "{log1:?}"
+    );
+    assert!(
+        log1.iter().any(|l| l.contains("has a hole at")),
+        "{log1:?}"
+    );
+    assert!(taken.load(Ordering::Relaxed), "{log1:?}");
+    // The crash: what was on disk when volume 4 was asked for, not what the cancel committed.
+    restore_tree(&saved, &state);
+    // Volume 2 is still damaged on disk and handed over with its hole; its repair puts the
+    // original bytes back.
+    let damaged = Damaged {
+        holes: vec![(v2.clone(), vec![(p, 50_000)])],
+        repair: vec![(v2, vols[1].clone())],
+        handed: false,
+    };
+    let (r2, log2) = run_downloading(&first, &t.out(), damaged, vols.len() as u64);
+    expect_ok(r2, &log2);
+    assert!(persistent(&log2), "{log2:?}");
+    assert!(
+        log2.iter().any(|l| l.contains("resuming movie.mkv")),
+        "{log2:?}"
+    );
+    // Lost with the group, so met and reported again.
+    assert!(
+        log2.iter().any(|l| l.contains("has a hole at")),
+        "{log2:?}"
+    );
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    assert!(!state.exists());
+}
+
+/// `Downloading`, whose volumes count as repaired once volume `release` was asked for (after
+/// the first member finished), and which answers volume `snap_at` only once `patched` is set:
+/// then it copies the set's persistent state aside (as `SnapshotAt` does) and hands it over.
+struct RefillThenSnapshot {
+    inner: Downloading,
+    release: PathBuf,
+    released: AtomicBool,
+    snap_at: PathBuf,
+    patched: Arc<AtomicBool>,
+    root: PathBuf,
+    saved: PathBuf,
+    taken: Arc<AtomicBool>,
+}
+
+impl VolumeFeed for RefillThenSnapshot {
+    fn volume(&mut self, path: &Path) -> VolumeView {
+        if path == self.release {
+            self.released.store(true, Ordering::Relaxed);
+        }
+        if path == self.snap_at && !self.taken.load(Ordering::Relaxed) {
+            if !self.patched.load(Ordering::Relaxed) {
+                return VolumeView::NotYet;
+            }
+            copy_tree(&self.root, &self.saved);
+            self.taken.store(true, Ordering::Relaxed);
+        }
+        self.inner.volume(path)
+    }
+    fn wait_repaired(&mut self, c: &mut dyn FnMut() -> bool) -> bool {
+        self.inner.wait_repaired(c)
+    }
+    fn expected_volumes(&self) -> u64 {
+        self.inner.expected_volumes()
+    }
+    fn repaired(&self, _path: &Path) -> bool {
+        self.released.load(Ordering::Relaxed)
+    }
+}
+
+#[test]
+fn a_crash_before_a_grouped_refill_commits_refills_the_hole_again() {
+    // a.bin (whole in volume 1) has a hole; it finishes, which commits the hole, and the hole
+    // is refilled inline into a.bin's open group (`group_refills`) while b.bin goes on. The
+    // state on disk when volume 3 is asked for is kept and the run cancelled: a crash before
+    // that group committed, so the refilled bytes are a hole again. The second run adopts
+    // a.bin as finished with its hole and refills it from the volumes.
+    let t = TestDir::new("persist_crash_grouped_refill");
+    let a = pattern(400_000);
+    let b: Vec<u8> = pattern(900_000).iter().map(|x| x ^ 0x5a).collect();
+    let b_parts: Vec<&[u8]> = b.chunks(300_000).collect();
+    let mut vols = Vec::new();
+    let mut a_payload = 0u64;
+    for (i, part) in b_parts.iter().enumerate() {
+        let last = i + 1 == b_parts.len();
+        let mut v = SIG.to_vec();
+        v.extend(main_block(true, (i > 0).then_some(i as u64)));
+        if i == 0 {
+            let block = file_block("a.bin", a.len() as u64, &a, crc32fast::hash(&a), false, false);
+            a_payload = (v.len() + block.len() - a.len()) as u64;
+            v.extend(block);
+        }
+        let crc = if last {
+            crc32fast::hash(&b)
+        } else {
+            crc32fast::hash(part)
+        };
+        v.extend(file_block("b.bin", b.len() as u64, part, crc, i > 0, !last));
+        v.extend(end_block(!last));
+        vols.push(v);
+    }
+    let first = write_set(&t.dl(), &vols);
+    let v1 = first.clone();
+    let hole = (a_payload + 100_000, 50_000);
+    let state = t.out().join(persistent::STATE_DIR);
+    let saved = t.0.join("crash-state");
+    let taken = Arc::new(AtomicBool::new(false));
+    // The hole is handed over; the bytes on disk are intact, standing in for the repair.
+    let patched = Arc::new(AtomicBool::new(false));
+    let feed = RefillThenSnapshot {
+        inner: Downloading {
+            damaged: Damaged {
+                holes: vec![(v1.clone(), vec![hole])],
+                repair: Vec::new(),
+                handed: false,
+            },
+            volumes: vols.len() as u64,
+        },
+        release: t.dl().join(volume_name(1, vols.len())),
+        released: AtomicBool::new(false),
+        snap_at: t.dl().join(volume_name(2, vols.len())),
+        patched: patched.clone(),
+        root: state.clone(),
+        saved: saved.clone(),
+        taken: taken.clone(),
+    };
+    let req = Request {
+        first_volume: &first,
+        dest: &t.out(),
+        password: "",
+        overwrite: Overwrite::Always,
+        on_wait: None,
+    };
+    let mut log1 = Vec::new();
+    let flag = taken.clone();
+    let r1 = extract(
+        &req,
+        Box::new(feed),
+        &mut |_, m: &str| {
+            if m.starts_with("Unrar: patched a.bin from repaired") {
+                patched.store(true, Ordering::Relaxed);
+            }
+            log1.push(m.to_string())
+        },
+        &mut || flag.load(Ordering::Relaxed),
+    );
+    assert!(
+        matches!(r1, Err(Error::Failed(Failure::Canceled))),
+        "{log1:?}"
+    );
+    assert!(
+        log1.iter()
+            .any(|l| l.starts_with("Unrar: patched a.bin from repaired")),
+        "{log1:?}"
+    );
+    restore_tree(&saved, &state);
+    let damaged = Damaged {
+        holes: Vec::new(),
+        repair: Vec::new(),
+        handed: false,
+    };
+    let (r2, log2) = run_downloading(&first, &t.out(), damaged, vols.len() as u64);
+    expect_ok(r2, &log2);
+    assert!(persistent(&log2), "{log2:?}");
+    assert!(
+        log2.iter()
+            .any(|l| l.contains("resuming a.bin") && l.contains("finished")),
+        "{log2:?}"
+    );
+    // The refill was lost with its group: a.bin is refilled again.
+    assert!(
+        log2.iter()
+            .any(|l| l == "Unrar: repaired a.bin from the repaired volumes (holes refilled)"),
+        "{log2:?}"
+    );
+    assert_eq!(std::fs::read(t.out().join("a.bin")).unwrap(), a);
+    assert_eq!(std::fs::read(t.out().join("b.bin")).unwrap(), b);
+    assert!(!state.exists());
+}

@@ -934,6 +934,15 @@ mod tests {
         );
         assert!(group_key(b"").is_empty());
         assert!(group_key(b"(1).nzb").is_empty());
+        // the first film and the sequel never share a group
+        assert_ne!(
+            group_key(b"Dune.2021.BluRay.1080p.TrueHD.Atmos.7.1.AVC.REMUX-FraMeSToR.nzb"),
+            group_key(b"Dune.Part.Two.2024.BluRay.1080p.TrueHD.Atmos.7.1.AVC.REMUX-FraMeSToR.nzb")
+        );
+        assert_eq!(
+            group_key(b"Dune.2021.BluRay.1080p.TrueHD.Atmos.7.1.AVC.REMUX-FraMeSToR_3.nzb"),
+            b"dupes:dune.2021.bluray.1080p.truehd.atmos.7.1.avc.remux.framestor".to_vec()
+        );
     }
 
     #[test]

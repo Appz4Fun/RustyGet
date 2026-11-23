@@ -1076,6 +1076,39 @@ pub(crate) fn join_copy_group_host(
     }
 }
 
+/// Groups the queued downloads without a DupeKey with the copies of their
+/// release ([`join_copy_group_host`]), once after start: a queue loaded from
+/// an earlier run, or filled while the grouping did not exist, gets the keys
+/// a download added now would get. Nothing is moved to history here: the
+/// copies already downloading keep downloading, and failover and TwinCheck
+/// see them as one fleet from now on.
+#[cfg(unix)]
+pub(crate) fn join_queued_copy_groups_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    dq_ptr: usize,
+) {
+    if dq_ptr == 0 || !host.opts().dupe_check {
+        return;
+    }
+    // from the end: the last copy joins the earlier ones, which are scored in
+    // queue order, so the copy queued first keeps the top score
+    let mut i = host.queue_len(dq_ptr);
+    while i > 0 {
+        i -= 1;
+        if i >= host.queue_len(dq_ptr) {
+            continue;
+        }
+        let qp = host.queue_at(dq_ptr, i);
+        if qp.is_none() {
+            continue;
+        }
+        let mut item = host.nzb_snap(qp, false);
+        if item.dupe_key.is_empty() && !item.deleting && item.delete_status == DeleteStatus::None {
+            join_copy_group_host(host, dq_ptr, &mut item);
+        }
+    }
+}
+
 #[cfg(unix)]
 pub(crate) fn nzb_found_host(
     host: &crate::queuesubsys_host::QueueSubsysHost,

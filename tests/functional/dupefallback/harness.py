@@ -11544,6 +11544,34 @@ def scenario_dropjoin(daemon, t):
     return ('dropjoin', ok, 'queued=%s scores=%s statuses=%s apart=%s' % (queued, scores, statuses, apart))
 
 
+def scenario_dropjoinrestart(daemon, t):
+    """Copies queued without a DupeKey before the grouping ran (here: with
+    DupeCheck off) join their group once after a restart with it on: the
+    same DupeKey dupes:<normalized name> and DupeScores in queue order. The
+    first film and its sequel stay apart."""
+    data = _payload(500_000, 15301)
+    rel = 'Restart.Movie.2024.1080p.WEB-DL.x264-GRP'
+    key = 'dupes:restart.movie.2024.1080p.web.dl.x264.grp'
+    sequel = 'Restart.Movie.Part.Two.2026.1080p.WEB-DL.x264-GRP'
+    api = daemon.wait_ready()
+    for i, name in enumerate((rel, rel + '_1', sequel)):
+        _ds_append(api, name, _drop_copy(t, 'jr%d' % i, data, set()), '', 0, paused=True)
+    before = {g['NZBName']: g.get('DupeKey') for g in api.listgroups()}
+    daemon.write_config(SCENARIO_OPTIONS['dropjoinrestart'][:-1] + ['DupeCheck=yes'])
+    api = daemon.reload(api)
+    deadline = time.time() + 60
+    keys = {}
+    while time.time() < deadline:
+        groups = api.listgroups()
+        keys = {g['NZBName']: (g.get('DupeKey'), g.get('DupeScore')) for g in groups}
+        if keys.get(rel + '_1', ('', 0))[0]:
+            break
+        time.sleep(1)
+    ok = (all(v == '' for v in before.values()) and keys.get(rel) == (key, 100) and keys.get(rel + '_1') == (key, 99)
+          and keys.get(sequel, ('x', 0))[0] == '')
+    return ('dropjoinrestart', ok, 'before=%s after=%s' % (before, keys))
+
+
 def scenario_dropkeepdonor(daemon, t):
     """A copy that fails its health check while its fleet is open stays in it as
     a donor, not a failure, and its shown health is the one it was judged on.
@@ -11591,6 +11619,7 @@ SCENARIOS = {
     'fleetnzbpassword': scenario_fleetnzbpassword,
     'fleettimeoutunverified': scenario_fleettimeoutunverified,
     'dropjoin': scenario_dropjoin,
+    'dropjoinrestart': scenario_dropjoinrestart,
     'dropkeepdonor': scenario_dropkeepdonor,
     'complementary': scenario_complementary,
     'historylog': scenario_historylog,
@@ -11995,6 +12024,7 @@ SCENARIO_OPTIONS = {
     'fleettimeoutunverified': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'dropnzbdir': ['NzbDirInterval=1', 'NzbDirFileAge=2', 'HealthCheck=dupe', 'DupeArticleFallback=article'],
     'dropjoin': ['HealthCheck=dupe'],
+    'dropjoinrestart': ['HealthCheck=dupe', 'DupeCheck=no'],
     'dropkeepdonor': ['HealthCheck=dupe', 'DupeArticleFallback=article'],
     'allheadspar': PROD_OPTIONS,
     'allheadsalt': PROD_OPTIONS,

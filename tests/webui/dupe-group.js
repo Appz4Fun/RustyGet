@@ -74,6 +74,13 @@ check('suffixed copies form one fleet', () => {
   assert.deepEqual(plan.dropped, []);
 });
 
+check('the first film and the sequel never share a group', () => {
+  assert.notEqual(DupeGroup.groupKey('Dune.2021.BluRay.1080p.TrueHD.Atmos.7.1.AVC.REMUX-FraMeSToR.nzb'),
+    DupeGroup.groupKey('Dune.Part.Two.2024.BluRay.1080p.TrueHD.Atmos.7.1.AVC.REMUX-FraMeSToR.nzb'));
+  assert.equal(DupeGroup.groupKey('Dune.2021.BluRay.1080p.TrueHD.Atmos.7.1.AVC.REMUX-FraMeSToR_3.nzb'),
+    'dupes:dune.2021.bluray.1080p.truehd.atmos.7.1.avc.remux.framestor');
+});
+
 check('two releases form two fleets', () => {
   const other = 'Dune.Part.Two.2024.BluRay.1080p.TrueHD.Atmos.7.1.AVC.REMUX-FraMeSToR';
   const files = [`${BASE}.nzb`, `${other}.nzb`, `${BASE}_1.nzb`, `${other}_1.nzb`, `${other} (2).nzb`]

@@ -3475,12 +3475,11 @@ pub(crate) fn direct_unpack_try_live_par_repair(
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug)]
 enum EndRepair {
-    /// Running; its progress counter last changed at `progressed_at`, and it is given up
-    /// after `stall_limit` without a change.
+    /// Running; par-rs's work counter was `work` and last rose (or the repair was idle or
+    /// waiting for another one) at `progressed_at`.
     Running {
-        progress: u64,
+        work: u64,
         progressed_at: std::time::Instant,
-        stall_limit: Duration,
     },
     /// It failed: par-check repairs the download; no retry.
     Failed,
@@ -3493,21 +3492,42 @@ enum EndRepair {
 static LIVE_END_REPAIRS: std::sync::LazyLock<Mutex<std::collections::HashMap<i32, EndRepair>>> =
     std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
-/// Post-processing waits for a running download-end repair while it makes progress; it
-/// gives up after this long without any, plus [`end_repair_stall_limit`]'s allowance.
+/// Post-processing waits for a running download-end repair while it makes progress: while
+/// par-rs's work counter rises, or the repair is idle (not in a repair call yet) or waiting
+/// for another one. It is given up after this long in a step without the counter rising.
 #[cfg(unix)]
 const END_REPAIR_STALL: Duration = Duration::from_secs(300);
-
-/// How long an end repair may go without visible progress. par-rs reports no progress
-/// while it plans and inverts the recovery matrix (its phase timers count only when a
-/// phase ends; decode shows its target writes), and that grows with the damaged slices and
-/// the recovery slots: allow 1 ms per damaged slice and slot on top of
-/// [`END_REPAIR_STALL`], at most 6 hours.
+/// The sync step syncs one file at a time, and one large target's sync can stay flat for
+/// a long while: it gets this long instead.
 #[cfg(unix)]
-fn end_repair_stall_limit(damaged: usize, slots: usize) -> Duration {
-    let work = (damaged as u64).saturating_mul(slots.max(1) as u64);
-    (END_REPAIR_STALL + Duration::from_millis(work)).min(Duration::from_secs(6 * 3600))
+const END_REPAIR_SYNC_STALL: Duration = Duration::from_secs(1800);
+
+/// Advances an end repair's stall clock with a fresh progress sample: returns the work
+/// counter and time to keep, and whether the repair has stalled (no work in a working step
+/// for longer than that step allows).
+#[cfg(unix)]
+fn end_repair_stall_update(
+    (work, progressed_at): (u64, std::time::Instant),
+    progress: Option<crate::parchecker::LiveRepairProgress>,
+    now: std::time::Instant,
+) -> (u64, std::time::Instant, bool) {
+    use crate::parchecker::LiveRepairStep;
+    let Some(progress) = progress else {
+        return (work, progressed_at, false);
+    };
+    if progress.work != work
+        || matches!(progress.step, LiveRepairStep::Idle | LiveRepairStep::PayloadWait)
+    {
+        return (progress.work, now, false);
+    }
+    let limit = if progress.step == LiveRepairStep::Sync {
+        END_REPAIR_SYNC_STALL
+    } else {
+        END_REPAIR_STALL
+    };
+    (work, progressed_at, now.duration_since(progressed_at) >= limit)
 }
+
 #[cfg(unix)]
 const END_REPAIR_RETRY: Duration = Duration::from_secs(10);
 
@@ -3534,17 +3554,15 @@ fn live_end_repair_defers_post(nzb_id: i32) -> Option<bool> {
     let now = std::time::Instant::now();
     let mut map = LIVE_END_REPAIRS.lock().unwrap_or_else(|e| e.into_inner());
     match map.get_mut(&nzb_id) {
-        Some(EndRepair::Running {
-            progress,
-            progressed_at,
-            stall_limit,
-        }) => {
-            let current = crate::parchecker::streaming_session_repair_progress(nzb_id);
-            if let Some(current) = current.filter(|current| current != progress) {
-                *progress = current;
-                *progressed_at = now;
-            }
-            if now.duration_since(*progressed_at) >= *stall_limit {
+        Some(EndRepair::Running { work, progressed_at }) => {
+            let (next, at, stalled) = end_repair_stall_update(
+                (*work, *progressed_at),
+                crate::parchecker::streaming_session_repair_progress(nzb_id),
+                now,
+            );
+            *work = next;
+            *progressed_at = at;
+            if stalled {
                 drop(map);
                 crate::parchecker::streaming_session_cancel(nzb_id);
             }
@@ -3667,13 +3685,9 @@ fn live_par_repair_at_download_end(
         map.insert(
             nzb_id,
             EndRepair::Running {
-                progress: crate::parchecker::streaming_session_repair_progress(nzb_id)
-                    .unwrap_or(0),
+                work: crate::parchecker::streaming_session_repair_progress(nzb_id)
+                    .map_or(0, |progress| progress.work),
                 progressed_at: now,
-                stall_limit: crate::parchecker::streaming_session_status(nzb_id).map_or(
-                    END_REPAIR_STALL,
-                    |status| end_repair_stall_limit(status.damaged, status.syndrome_slots),
-                ),
             },
         );
         drop(map);
@@ -6233,13 +6247,37 @@ mod live_end_repair_tests {
     use super::*;
 
     #[test]
-    fn the_stall_allowance_grows_with_the_matrix() {
-        assert_eq!(end_repair_stall_limit(0, 0), END_REPAIR_STALL);
-        assert_eq!(
-            end_repair_stall_limit(1000, 1200),
-            END_REPAIR_STALL + Duration::from_millis(1_200_000)
-        );
-        assert_eq!(end_repair_stall_limit(usize::MAX, usize::MAX), Duration::from_secs(6 * 3600));
+    fn an_end_repair_stalls_only_without_work_in_a_working_step() {
+        use crate::parchecker::{LiveRepairProgress, LiveRepairStep};
+        let progress = |step, work| {
+            let mut p = LiveRepairProgress::default();
+            p.step = step;
+            p.work = work;
+            Some(p)
+        };
+        let start = std::time::Instant::now();
+        let later = |secs| start + Duration::from_secs(secs);
+        // The work counter rising is progress, in any step and however long it runs.
+        let (work, at, stalled) =
+            end_repair_stall_update((10, start), progress(LiveRepairStep::Matrix, 11), later(400));
+        assert_eq!((work, at, stalled), (11, later(400), false));
+        // Flat in the matrix step: stalled after 300 s, not before.
+        let flat = progress(LiveRepairStep::Matrix, 10);
+        assert!(!end_repair_stall_update((10, start), flat, later(299)).2);
+        assert!(end_repair_stall_update((10, start), flat, later(300)).2);
+        // Idle or waiting for another repair: never a stall, and the clock restarts.
+        for step in [LiveRepairStep::Idle, LiveRepairStep::PayloadWait] {
+            let (_, at, stalled) =
+                end_repair_stall_update((10, start), progress(step, 10), later(5000));
+            assert!(!stalled);
+            assert_eq!(at, later(5000));
+        }
+        // Syncing one large file may stay flat much longer.
+        let sync = progress(LiveRepairStep::Sync, 10);
+        assert!(!end_repair_stall_update((10, start), sync, later(1799)).2);
+        assert!(end_repair_stall_update((10, start), sync, later(1800)).2);
+        // No session to ask: no verdict.
+        assert!(!end_repair_stall_update((10, start), None, later(100_000)).2);
     }
 
     #[test]
@@ -6396,9 +6434,8 @@ mod live_end_repair_tests {
         assert_eq!(live_end_repair_defers_post(id), None);
         // A running one is waited for, however long it has run, while it progresses.
         set(Some(EndRepair::Running {
-            progress: 0,
+            work: 0,
             progressed_at: std::time::Instant::now(),
-            stall_limit: END_REPAIR_STALL,
         }));
         assert_eq!(live_end_repair_defers_post(id), Some(true));
         assert!(live_end_repair_running(id));

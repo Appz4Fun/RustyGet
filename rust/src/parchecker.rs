@@ -59,7 +59,8 @@ pub use par_rs::stream::{
     SyndromeBank,
 };
 pub use par_rs::streaming::{
-    ArticleOutcome, EarlyRepairReport, LiveIoStats, LiveStatus, QueuedVolume, SessionOptions,
+    ArticleOutcome, EarlyRepairReport, LiveIoStats, LiveRepairProgress, LiveRepairStep,
+    LiveStatus, QueuedVolume, SessionOptions,
     SliceEvent, SliceState, StreamingParSession, UnpauseAction, VolumeStatus,
 };
 pub use par_rs::twin::{
@@ -2853,28 +2854,26 @@ pub(crate) fn streaming_session_download_end_targets(nzb_id: i32) -> Option<Vec<
     (!names.is_empty()).then_some(names)
 }
 
-/// A counter that grows while a live repair of job `nzb_id` works: its target bytes written,
-/// bytes read and phase times. `None` without a session.
-pub(crate) fn streaming_session_repair_progress(nzb_id: i32) -> Option<u64> {
-    let entry = active_streaming_session(nzb_id)?;
-    let io = entry.session.io_stats();
-    let repair = entry.session.repair_phase_stats();
-    Some(
-        [
-            io.source_bytes_read,
-            io.backfill_bytes_read,
-            io.recovery_bytes_read,
-            io.target_verification_bytes_read,
-            repair.target_bytes_written,
-            repair.backfill_ns,
-            repair.matrix_ns,
-            repair.decode_ns,
-            repair.target_verification_ns,
-            repair.completed,
-        ]
-        .iter()
-        .fold(0u64, |sum, value| sum.wrapping_add(*value)),
-    )
+/// Live progress of the repair call running on job `nzb_id`'s session (par-rs #104): its
+/// step, the step's done and total units, and the session's work counter, which rises while
+/// a repair makes progress. `None` without a session.
+pub(crate) fn streaming_session_repair_progress(nzb_id: i32) -> Option<LiveRepairProgress> {
+    Some(active_streaming_session(nzb_id)?.session.repair_progress())
+}
+
+/// The name of a live repair step, for the RPC and the log; empty when idle.
+pub(crate) fn live_repair_step_name(step: LiveRepairStep) -> &'static str {
+    match step {
+        LiveRepairStep::Idle => "",
+        LiveRepairStep::PayloadWait => "waiting",
+        LiveRepairStep::Backfill => "backfill",
+        LiveRepairStep::Matrix => "matrix",
+        LiveRepairStep::Decode => "decode",
+        LiveRepairStep::Sync => "sync",
+        LiveRepairStep::Refold => "refold",
+        LiveRepairStep::Verify => "verify",
+        _ => "repair",
+    }
 }
 
 /// Polls the live status of the [`StreamingParSession`] for `nzb_id`.
@@ -4253,6 +4252,15 @@ mod tests {
         // No volume known: the first exponents.
         let plan = live_recovery_plan(&LivePlanHint::default(), 1000, &HashSet::new());
         assert_eq!(plan.exponents, vec![0, 1]);
+    }
+
+    #[test]
+    fn live_repair_steps_have_rpc_names() {
+        assert_eq!(live_repair_step_name(LiveRepairStep::Idle), "");
+        assert_eq!(live_repair_step_name(LiveRepairStep::Matrix), "matrix");
+        assert_eq!(live_repair_step_name(LiveRepairStep::Decode), "decode");
+        assert_eq!(live_repair_step_name(LiveRepairStep::Sync), "sync");
+        assert_eq!(live_repair_step_name(LiveRepairStep::PayloadWait), "waiting");
     }
 
     #[test]

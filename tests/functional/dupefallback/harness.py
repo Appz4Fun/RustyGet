@@ -11488,14 +11488,20 @@ def _http_get(port, path):
     return status, body
 
 
-def _post_rpc_raw(port, origin, referer):
-    """(status, response head) of a JSON-RPC "version" POST with these headers."""
-    body = b'{"method":"version","params":[]}'
-    head = 'POST /jsonrpc HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n' % (port, len(body))
+def _post_rpc_raw(port, origin, referer, host=None, path='/jsonrpc', fetch_site=None, method='POST', body_text=True):
+    """(status, response head) of a JSON-RPC "version" call (a text/plain
+    POST, as a web form or fetch() can send cross-site) with these headers;
+    the whole response when the status is 403."""
+    body = b'{"method":"version","params":[]}' if method == 'POST' else b''
+    head = '%s %s HTTP/1.1\r\nHost: %s\r\n' % (method, path, host or '127.0.0.1:%d' % port)
+    if method == 'POST':
+        head += 'Content-Type: text/plain\r\nContent-Length: %d\r\n' % len(body)
     if origin:
         head += 'Origin: %s\r\n' % origin
     if referer:
         head += 'Referer: %s\r\n' % referer
+    if fetch_site:
+        head += 'Sec-Fetch-Site: %s\r\n' % fetch_site
     with socket.create_connection(('127.0.0.1', port), timeout=10) as sock:
         sock.sendall(head.encode() + b'\r\n' + body)
         data = b''
@@ -11504,8 +11510,17 @@ def _post_rpc_raw(port, origin, referer):
             if not chunk:
                 break
             data += chunk
+        if data.startswith(b'HTTP/1.1 403'):
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+                if b'ControlHostnames' in data:
+                    break
     first = data.split(b'\r\n', 1)[0].split(b' ')
-    return (int(first[1]) if len(first) > 1 and first[1].isdigit() else 0), data.split(b'\r\n\r\n', 1)[0]
+    code = int(first[1]) if len(first) > 1 and first[1].isdigit() else 0
+    return code, (data if code == 403 else data.split(b'\r\n\r\n', 1)[0])
 
 
 def _wait_rpc(port, timeout=30, auth=None):
@@ -11743,9 +11758,12 @@ def scenario_garbageconfig(daemon, t):
     option, a broken line, a duplicate, binary bytes, a non-UTF-8 value, a
     70 kB line): the daemon starts on the defaults for the bad options, warns
     once per bad line with file:line, what is wrong and what it used instead,
-    serves the web interface and lists the problems in setupstatus. An empty
-    file, a folder (its rustyget.conf is used) and an unreadable file start
-    too; the unreadable one says that settings can't be saved."""
+    serves the web interface and lists the problems in setupstatus. Without
+    a real password (none, the stock one, or AuthorizedIP) an API call from
+    another site (Origin, Referer, Sec-Fetch-Site) or naming a host that is
+    not this computer (DNS rebinding) gets 403 with what to do. An empty
+    file and a folder (its rustyget.conf is used) start; a file that exists
+    but can't be read stops RustyGet with the reason."""
     if t.name != 'local':
         return ('garbageconfig', True, 'skipped: needs local files')
     _stop_default_daemon(daemon, t)
@@ -11796,8 +11814,25 @@ def scenario_garbageconfig(daemon, t):
         code, head = _post_rpc_raw(daemon.rpc_port, origin, referer)
         if code != want:
             problems.append('origin=%s referer=%s -> %s' % (origin, referer, code))
-        if b'evil.example' in head or (origin == 'null' and b'Access-Control-Allow-Origin' in head):
+        if b'Access-Control-Allow-Origin: http://evil' in head or (origin == 'null' and b'Access-Control-Allow-Origin' in head):
             problems.append('reflected a foreign origin: %r' % head[:300])
+        if code == 403 and b'ControlHostnames' not in head:
+            problems.append('the refusal does not say what to do: %r' % head[-300:])
+    # DNS rebinding: a name that is not this computer's, without a password
+    for host, want in (('evil.example:%d' % daemon.rpc_port, 403), ('localhost:%d' % daemon.rpc_port, 200),
+                       ('[::1]:%d' % daemon.rpc_port, 200), ('127.0.0.1', 200)):
+        code, head = _post_rpc_raw(daemon.rpc_port, 'http://' + host, None, host=host)
+        if code != want:
+            problems.append('host=%s -> %s' % (host, code))
+        if want == 403 and b'evil.example' not in head:
+            problems.append('the refusal does not name the host: %r' % head[-300:])
+    # a GET without Origin or Referer that the browser marks cross-site
+    code, _ = _post_rpc_raw(daemon.rpc_port, None, None, path='/jsonrpc/version', method='GET', fetch_site='cross-site')
+    if code != 403:
+        problems.append('Sec-Fetch-Site cross-site GET -> %s' % code)
+    code, _ = _post_rpc_raw(daemon.rpc_port, None, None, path='/jsonrpc/version', method='GET', fetch_site='same-origin')
+    if code != 200:
+        problems.append('Sec-Fetch-Site same-origin GET -> %s' % code)
     # every loadconfig value can be read back (non-UTF-8 included)
     if not _jrpc(daemon.rpc_port, 'loadconfig').get('result'):
         problems.append('loadconfig failed')
@@ -11807,11 +11842,43 @@ def scenario_garbageconfig(daemon, t):
         pass
     proc.wait(timeout=30)
 
+    # a real password with AuthorizedIP: an address in the list is let in
+    # without credentials, so the same checks apply to it
+    port = free_port()
+    p = _spawn_env(t, [t.nzbget, '-c', conf, '-s', '-o', 'OutputMode=log', '-o', 'ControlPort=%d' % port,
+                       '-o', 'ControlPassword=example-secret-7', '-o', 'AuthorizedIP=127.0.0.1'],
+                   {'HOME': t.makedirs('ghome-aip')}, 'garbage-aip.out')
+    if _wait_rpc(port):
+        own = 'http://127.0.0.1:%d' % port
+        for origin, host, want in ((None, None, 200), (own, None, 200), ('http://evil.example', None, 403),
+                                   ('http://evil.example:%d' % port, 'evil.example:%d' % port, 403)):
+            code, _ = _post_rpc_raw(port, origin, None, host=host)
+            if code != want:
+                problems.append('AuthorizedIP origin=%s host=%s -> %s' % (origin, host, code))
+        try:
+            _jrpc(port, 'shutdown')
+        except Exception:
+            pass
+    else:
+        problems.append('AuthorizedIP daemon did not start')
+    p.wait(timeout=30)
+
+    # a file that exists but can't be read stops RustyGet (never the defaults
+    # instead of the user's settings)
+    if os.geteuid() != 0:
+        path = t.path('odd-unreadable.conf')
+        with open(path, 'w') as f:
+            f.write('MainDir=/x\n')
+        os.chmod(path, 0)
+        r = subprocess.run([t.nzbget, '-c', path, '-s', '-o', 'OutputMode=log', '-o', 'ControlPort=%d' % free_port()],
+                           env=dict(os.environ, HOME=t.makedirs('odd-home-unreadable')), capture_output=True, timeout=60)
+        if r.returncode == 0 or b'Could not read the configuration file' not in r.stdout + r.stderr:
+            problems.append('unreadable: rc=%s out=%r' % (r.returncode, (r.stdout + r.stderr)[-400:]))
+        os.chmod(path, 0o600)
+
     # files that can't be a configuration
     odd = [('empty', lambda p: open(p, 'wb').close(), False),
            ('folder', lambda p: os.makedirs(p), True)]
-    if os.geteuid() != 0:
-        odd.append(('unreadable', lambda p: (open(p, 'w').write('MainDir=/x\n'), os.chmod(p, 0)), False))
     for name, make, inner in odd:
         path = t.path('odd-' + name + '.conf')
         make(path)
@@ -11834,10 +11901,15 @@ def scenario_garbageconfig(daemon, t):
         st = _jrpc(port, 'setupstatus', auth=auth)['result']
         if inner and not os.path.isfile(os.path.join(path, 'rustyget.conf')):
             problems.append('folder: no rustyget.conf made inside')
-        if name == 'unreadable':
-            if st.get('ConfigWritable') or 'ermission' not in st.get('ConfigProblem', ''):
-                problems.append('unreadable: %s' % st)
-            os.chmod(path, 0o600)
+        if name == 'empty':
+            # the stock password is no protection: the credentials in a URL
+            # path from another site's form are refused, a tool's are not
+            code, _ = _post_rpc_raw(port, 'http://evil.example', None, path='/rustyget:tegbzn6789/jsonrpc')
+            if code != 403:
+                problems.append('stock password, cross-site form POST -> %s' % code)
+            code, _ = _post_rpc_raw(port, None, None, path='/rustyget:tegbzn6789/jsonrpc')
+            if code != 200:
+                problems.append('stock password from a tool -> %s' % code)
         if _http_get(port, '/')[0] not in (200, 401):
             problems.append('%s: no web interface' % name)
         try:

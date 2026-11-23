@@ -1826,7 +1826,7 @@ pub(crate) fn known_enum_names(option: &str) -> Option<&'static [&'static CStr]>
 /// Emits all default option `(name, value)` pairs for `Options::InitDefaults`.
 pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &CStr)) {
     let output_mode = if disable_curses { c"color" } else { c"curses" };
-    let defaults: [(&CStr, &CStr); 132] = [
+    let defaults: [(&CStr, &CStr); 133] = [
         (c"MainDir", c"~/downloads"),
         (c"WebDir", c""),
         (c"ConfigTemplate", c""),
@@ -1867,6 +1867,7 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"AddUsername", c""),
         (c"AddPassword", c""),
         (c"ControlPort", c"6789"),
+        (c"ControlHostnames", c""),
         (c"FormAuth", c"no"),
         (c"JsonP", c"no"),
         (c"SecureControl", c"no"),
@@ -4807,6 +4808,11 @@ impl NzbgetRsOptions {
                 crate::log::MK_INFO,
                 format!("Sign in with user \"{user}\" and the password printed when RustyGet started (ControlPassword in the configuration file)").as_bytes(),
             );
+            if crate::firstrun::in_container() {
+                self.tell_screen(
+                    "Running in a container: the web interface listens on all interfaces of the container (publish the port to reach it), and the password above is in the container's log (docker logs)",
+                );
+            }
         } else if password == crate::firstrun::STOCK_PASSWORD {
             self.tell(&format!(
                 "Web interface: {address} (user \"{user}\", password \"{password}\", the stock password: change it in Settings > Security)"
@@ -5025,16 +5031,25 @@ impl NzbgetRsOptions {
                 },
                 Err(e) => crate::firstrun::plain_io(&e),
             };
-            if self.create_missing_config {
-                // run on the defaults; the web interface says why nothing can be saved
+            if self.create_missing_config && std::fs::symlink_metadata(&path).is_err() {
+                // nothing there at all (it could not be created either): defaults
                 let text = format!(
-                    "Could not read the configuration file {}: {why}. RustyGet runs on its built-in defaults; fix the file (or start with -c <another file>) and restart",
+                    "There is no configuration file {}: {why}. RustyGet runs on its built-in defaults; start it with -c <file> to name one it can write",
                     path.display()
                 );
                 crate::firstrun::set_problem(&text);
                 self.config_error(&crate::firstrun::cstring_lossy(&text));
                 return;
             }
+            // a file that exists but can't be read is never replaced by the
+            // defaults: RustyGet stops and says what to fix
+            let text = format!(
+                "Could not read the configuration file {}: {why}. RustyGet does not start on its defaults instead of your settings: fix the file's permissions (or start with -c <another file>)",
+                path.display()
+            );
+            let p0 = [crate::firstrun::cstring_lossy(&text)];
+            let ptrs = [p0[0].as_ptr()];
+            self.emit_host(0, &[], &ptrs, 1);
             let msg = format_bytes_msg(&[b"Could not open file ", cf.to_bytes()]);
             self.config_error(&msg);
             self.fatal_error = true;

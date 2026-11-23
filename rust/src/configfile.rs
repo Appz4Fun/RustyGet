@@ -182,6 +182,36 @@ pub fn script_config_merge_bytes(raw: &[u8], entries: &[(&[u8], &[u8])]) -> Vec<
     out
 }
 
+/// The lines of `raw` a save would leave out because they are not settings:
+/// broken lines and options RustyGet does not know (line number, text).
+pub fn dropped_lines(raw: &[u8]) -> Vec<(usize, Vec<u8>)> {
+    let raw = normalize_line_ends(raw);
+    let mut out = Vec::new();
+    for (i, raw_line) in raw.split_inclusive(|&b| b == b'\n').enumerate() {
+        let line = match raw_line.iter().position(|&b| b == 0) {
+            Some(pos) => &raw_line[..pos],
+            None => raw_line,
+        };
+        if blank_or_comment(line).is_some() {
+            continue;
+        }
+        let mut trimmed = line;
+        while trimmed.last().is_some_and(|&b| matches!(b, b'\n' | b'\r' | b' ')) {
+            trimmed = &trimmed[..trimmed.len() - 1];
+        }
+        let keep = trimmed.contains(&b'=')
+            && crate::options::options_split_option_string(trimmed).is_some_and(|(name, _)| {
+                let c = cstr::to_cstring(name.trim_ascii());
+                crate::options::validate_option_name(&c, &mut || crate::firstrun::known_option(&c.to_string_lossy()))
+                    != crate::options::NameCheck::Invalid
+            });
+        if !keep {
+            out.push((i + 1, trimmed.to_vec()));
+        }
+    }
+    out
+}
+
 /// A blank line or a comment as a save keeps it (without its line end), or
 /// `None` for anything else.
 fn blank_or_comment(line: &[u8]) -> Option<&[u8]> {
@@ -762,6 +792,15 @@ pub fn build_cipher_baseline(names: &[&[u8]], values: &[&[u8]]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_save_lists_the_lines_it_would_drop() {
+        let raw = b"# kept\n\nArticleTimeout=soon\nNotAnOption=1\nthis line is broken\nServer1.Host=x\nFeed2.Name=y\r\n";
+        let dropped = dropped_lines(raw);
+        let lines: Vec<(usize, &[u8])> = dropped.iter().map(|(n, t)| (*n, t.as_slice())).collect();
+        assert_eq!(lines, vec![(4, &b"NotAnOption=1"[..]), (5, &b"this line is broken"[..])]);
+        assert!(dropped_lines(b"").is_empty());
+    }
 
     #[test]
     fn test_script_config_merge_and_parse() {

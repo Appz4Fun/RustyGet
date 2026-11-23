@@ -1,3 +1,27 @@
+rustyget (unreleased)
+  - Important notes (upgrading):
+    - Without a real password (ControlPassword empty, the stock "tegbzn6789",
+      or an address let in by AuthorizedIP), an API call must name this
+      computer's address, localhost, ControlIP or a name in the new option
+      ControlHostnames, and must come from RustyGet's own page. Other web sites
+      can no longer control RustyGet through your browser (including by DNS
+      rebinding). If you open RustyGet without a password through a reverse
+      proxy or a host name (for example nginx's default proxy_pass, which sends
+      Host: 127.0.0.1 while the browser is on nzb.example.com), the page now
+      answers 403 and says why: set a password (Settings > Security), or add
+      the name to ControlHostnames. Tools that call the API directly (no
+      Origin or Referer) work as before.
+    - With no configuration file, "rustyget -s" / "-D" writes
+      ~/.config/rustyget/rustyget.conf with a random password, printed once on
+      the console (in a container: in docker logs; there it listens on all
+      interfaces). "-c <missing file>" creates that file with a warning.
+    - A configuration file that exists but can't be read stops RustyGet, as
+      before; a file with broken content starts on the defaults for the bad
+      lines, with one warning per line.
+    - Settings checks every value before saving, backs the file up
+      (rustyget.conf.bak-<date>-<time>, the newest 10 and the first kept) and
+      asks before removing lines that are not settings.
+
 nzbget-v26.3
   - Important notes:
     - Version 26.3 is the final release supporting legacy platforms: Linux MIPS (mipseb/mipsel), PowerPC e500 (ppc500), and macOS < 12.0. Future versions (v27+) require C++20 and updated OS baselines.

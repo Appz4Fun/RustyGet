@@ -68,7 +68,9 @@ pub(crate) fn begin_load() {
         s.notes.clear();
         s.dropped = 0;
         s.problem.clear();
-        s.instance += 1;
+        // random per process start (a page can't mistake another daemon's
+        // number for this one's), then one more per load (a reload)
+        s.instance = if s.instance == 0 { random_u64() % (1 << 48) + 1 } else { s.instance + 1 };
     });
 }
 
@@ -116,15 +118,11 @@ pub fn pick_control_port(ip: &str, start: u16) -> u16 {
     start
 }
 
-/// A password of 20 letters and digits from the system's random source
-/// (about 119 bits), easy to copy from the terminal.
-pub fn random_password() -> String {
+/// Bytes from the system's random source (the clock as a weak fallback).
+pub fn random_bytes<const N: usize>() -> [u8; N] {
     use std::io::Read as _;
-    const ALPHABET: &[u8] = b"abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    let mut raw = [0u8; 64];
-    let filled = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut raw)).is_ok();
-    if !filled {
-        // no /dev/urandom: the clock and addresses (weak, but never empty)
+    let mut raw = [0u8; N];
+    if std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut raw)).is_err() {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(1, |d| d.as_nanos() as u64);
@@ -136,6 +134,64 @@ pub fn random_password() -> String {
             *b = (x >> 24) as u8;
         }
     }
+    raw
+}
+
+fn random_u64() -> u64 {
+    u64::from_le_bytes(random_bytes::<8>())
+}
+
+fn random_hex() -> String {
+    random_bytes::<8>().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Creates a new file `.<prefix><random>` in `dir` (O_CREAT|O_EXCL, and
+/// O_NOFOLLOW: never through a link someone planted), with `mode`.
+fn create_exclusive(dir: &Path, prefix: &str, mode: u32) -> std::io::Result<(std::fs::File, PathBuf)> {
+    let mut last = std::io::Error::from(std::io::ErrorKind::AlreadyExists);
+    for _ in 0..16 {
+        let path = dir.join(format!(".{prefix}{}", random_hex()));
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(mode).custom_flags(libc::O_NOFOLLOW);
+        }
+        #[cfg(not(unix))]
+        let _ = mode;
+        match opts.open(&path) {
+            Ok(f) => return Ok((f, path)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = e,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last)
+}
+
+/// Tests: make the next temporary-file write fail (as a full disk would).
+#[cfg(test)]
+static FAIL_NEXT_TEMP_WRITE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn temp_write(f: &mut std::fs::File, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(test)]
+    if FAIL_NEXT_TEMP_WRITE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        return Err(std::io::Error::from_raw_os_error(libc::ENOSPC));
+    }
+    f.write_all(bytes)?;
+    f.sync_all()
+}
+
+/// Inside a container (Docker, Podman)?
+pub fn in_container() -> bool {
+    Path::new("/.dockerenv").exists() || Path::new("/run/.containerenv").exists()
+}
+
+/// A password of 20 letters and digits from the system's random source
+/// (about 119 bits), easy to copy from the terminal.
+pub fn random_password() -> String {
+    const ALPHABET: &[u8] = b"abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let raw = random_bytes::<64>();
     // rejection sampling: no bias towards the first letters
     let limit = 256 - 256 % ALPHABET.len();
     raw.iter()
@@ -159,7 +215,9 @@ pub fn first_run_config(port: u16, password: &str) -> String {
         let body = line.trim_end_matches(['\n', '\r']);
         let replaced = match body.split_once('=') {
             Some(("MainDir", _)) => Some(format!("MainDir={DEFAULT_MAIN_DIR}")),
-            Some(("ControlIP", _)) => Some("ControlIP=127.0.0.1".to_owned()),
+            // in a container the port is published from outside: listen on
+            // all interfaces there (the password protects it)
+            Some(("ControlIP", _)) => Some(format!("ControlIP={}", if in_container() { "0.0.0.0" } else { "127.0.0.1" })),
             Some(("ControlPort", _)) => Some(format!("ControlPort={port}")),
             Some(("ControlPassword", _)) => Some(format!("ControlPassword={password}")),
             Some(("FormAuth", _)) => Some("FormAuth=yes".to_owned()),
@@ -567,6 +625,11 @@ pub fn running_option(name: &str) -> Option<String> {
     found
 }
 
+/// Is `name` an option RustyGet has (in the template or the defaults)?
+pub(crate) fn known_option(name: &str) -> bool {
+    predefined(name)
+}
+
 fn predefined(name: &str) -> bool {
     if options_meta().contains_key(&canonical_name(name)) {
         return true;
@@ -881,23 +944,14 @@ pub fn backup_config_in(config: &Path, dirs: &[PathBuf]) -> Result<Option<PathBu
 }
 
 fn write_backup(dir: &Path, prefix: &str, stamp: &str, bytes: &[u8]) -> Result<PathBuf, String> {
-    let tmp = dir.join(format!(".{prefix}saving-{}", std::process::id()));
     let fail = |what: &Path, e: &std::io::Error| format!("can't write the backup copy {}: {}", what.display(), plain_io(e));
-    {
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            opts.mode(0o600);
-        }
-        let mut f = opts.open(&tmp).map_err(|e| fail(&tmp, &e))?;
-        if let Err(e) = f.write_all(bytes).and_then(|()| f.sync_all()) {
-            drop(f);
-            let _ = std::fs::remove_file(&tmp);
-            return Err(fail(&tmp, &e));
-        }
+    let (mut f, tmp) = create_exclusive(dir, &format!("{prefix}saving-"), 0o600).map_err(|e| fail(dir, &e))?;
+    if let Err(e) = temp_write(&mut f, bytes) {
+        drop(f);
+        let _ = std::fs::remove_file(&tmp);
+        return Err(fail(&tmp, &e));
     }
+    drop(f);
     // a name after every one made in this second (so a pruned name is not
     // reused out of order); hard_link fails when it exists
     let base = format!("{prefix}{stamp}");
@@ -986,24 +1040,21 @@ pub fn write_config_atomically(config: &Path, bytes: &[u8]) -> Result<(), String
         ));
     }
     let name = target.file_name().map_or_else(|| "rustyget.conf".into(), |n| n.to_string_lossy().into_owned());
-    let tmp = target.with_file_name(format!(".{name}.saving-{}", std::process::id()));
     let fail = |e: &std::io::Error| format!("can't write {}: {}", target.display(), plain_io(e));
-
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
+    let mode = {
         use std::os::unix::fs::PermissionsExt as _;
-        opts.mode(meta.as_ref().map_or(0o600, |m| m.permissions().mode() & 0o7777));
-    }
-    let mut f = match opts.open(&tmp) {
-        Ok(f) => f,
+        meta.as_ref().map_or(0o600, |m| m.permissions().mode() & 0o7777)
+    };
+    #[cfg(not(unix))]
+    let mode = 0o600;
+    let (mut f, tmp) = match create_exclusive(&config_dir(&target), &format!("{name}.saving-"), mode) {
+        Ok(pair) => pair,
         // the folder can't be written: the file itself can be, in place
         Err(e) if matches!(errno_of(&e), libc::EACCES | libc::EPERM) => return write_in_place(&target, bytes),
         Err(e) => return Err(fail(&e)),
     };
-    let written = f.write_all(bytes).and_then(|()| f.sync_all());
+    let written = temp_write(&mut f, bytes);
     if let Err(e) = written {
         // never fall back to writing in place after this: the disk may be full
         drop(f);
@@ -1115,6 +1166,12 @@ Start it with -c <file> to name one."
 #[cfg(unix)]
 fn writable_file(path: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    // root passes access() for anything: a file nobody may write (0444) is
+    // read-only on purpose, and is respected
+    if std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o222 == 0) {
+        return false;
+    }
     let Ok(c) = CString::new(path.as_os_str().as_bytes()) else {
         return false;
     };
@@ -1507,6 +1564,15 @@ mod tests {
         assert_eq!(get("Server1.Active").as_deref(), Some("no"));
         // the same number of options as the template
         assert_eq!(entries.len(), crate::configfile::script_config_parse_bytes(TEMPLATE.as_bytes()).len());
+        // and every stock value passes the save checks (a description that
+        // reads like a choice list must not reject its own default)
+        let pairs: Vec<(Vec<u8>, Vec<u8>)> = entries
+            .iter()
+            .map(|(k, v)| (k.to_bytes().to_vec(), v.to_bytes().to_vec()))
+            .filter(|(k, _)| !k.ends_with(b"Dir") && k != b"LogFile")
+            .collect();
+        let problems = validate(&pairs, &|_| None);
+        assert!(problems.is_empty(), "{problems:?}");
     }
 
     #[test]
@@ -1584,11 +1650,13 @@ mod tests {
         let d = tmp("tmpfail");
         let conf = d.join("c.conf");
         std::fs::write(&conf, "NzbDirInterval=1\n").unwrap();
-        let blocker = d.join(format!(".c.conf.saving-{}", std::process::id()));
-        std::fs::create_dir(&blocker).unwrap();
-        assert!(write_config_atomically(&conf, b"NzbDirInterval=2\n").is_err());
+        FAIL_NEXT_TEMP_WRITE.store(true, std::sync::atomic::Ordering::SeqCst);
+        let err = write_config_atomically(&conf, b"NzbDirInterval=2\n").unwrap_err();
+        assert!(err.contains("No space left") || err.contains("space"), "{err}");
         assert_eq!(std::fs::read_to_string(&conf).unwrap(), "NzbDirInterval=1\n");
-        std::fs::remove_dir(&blocker).unwrap();
+        let left = std::fs::read_dir(&d).unwrap().filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().contains("saving")).count();
+        assert_eq!(left, 0, "the temporary file is removed");
         write_config_atomically(&conf, b"NzbDirInterval=2\n").unwrap();
         assert_eq!(std::fs::read_to_string(&conf).unwrap(), "NzbDirInterval=2\n");
         let _ = std::fs::remove_dir_all(&d);

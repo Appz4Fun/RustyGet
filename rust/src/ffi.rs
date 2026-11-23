@@ -3176,6 +3176,7 @@ pub(crate) unsafe fn serve_web_conn(conn: &crate::net::NzbgetRsConn, sig: &[u8; 
     let json_p = opts.as_deref().is_some_and(|o| o.scalars().json_p != 0);
     let gzip_enabled = !build_gzip_disabled();
     let debug_build = build_debug_enabled();
+    let control_hostnames = crate::firstrun::running_option("ControlHostnames").unwrap_or_default();
 
     let cfg = crate::webserver::WebServeConfig {
         signature: sig,
@@ -3196,6 +3197,8 @@ pub(crate) unsafe fn serve_web_conn(conn: &crate::net::NzbgetRsConn, sig: &[u8; 
         form_auth,
         gzip_enabled,
         debug_build,
+        control_ip: opts.as_deref().map_or(&[][..], |o| o.str_bytes(OptStr::ControlIp)),
+        control_hostnames: control_hostnames.as_bytes(),
     };
     let lower = crate::wildmask::Lower::Fold(&crate::util::wild_mask_fold_locale);
 

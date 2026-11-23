@@ -47,7 +47,9 @@ async function rpc(base, method, params = [], auth) { return (await rpcRaw(base,
 
 async function tab(page, name) {
   await page.evaluate(n => { $('#' + n + 'TabLink').tab('show'); }, name);
-  await page.waitForFunction(n => { const e = document.getElementById(n + 'Tab'); return e && e.classList.contains('active'); }, name, { timeout: 10000 });
+  // "in" ends Bootstrap's fade: a tab shown before the last fade ended waits
+  // for a transition end that never comes
+  await page.waitForFunction(n => { const e = document.getElementById(n + 'Tab'); return e && e.classList.contains('active') && (!e.classList.contains('fade') || e.classList.contains('in')); }, name, { timeout: 10000 });
 }
 
 async function invalidNames(page) {
@@ -508,6 +510,15 @@ async function garbage(browser, bin, viewport, theme) {
       await page.locator('#ConfigNav a[href="#CONNECTION"]').click();
       await page.locator('#S_ArticleTimeout').fill('45');
       await page.locator('#ConfigSaveBar_Save').click();
+      // the lines that are not settings are listed, and removed only on OK
+      await page.locator('#ConfirmDialog_OK').waitFor({ state: 'visible', timeout: 10000 });
+      assert.match(await page.locator('#ConfirmDialog_Title').textContent(), /Remove lines the file can't keep\?/);
+      const listed = await page.locator('#ConfirmDialog_Text').textContent();
+      assert(/NotAnOption/.test(listed) && /this line is broken/.test(listed), listed);
+      await page.waitForTimeout(400);
+      await page.locator('#ConfirmDialog_OK').scrollIntoViewIfNeeded();
+      await shot(page, prefix + '03c-save-drop-confirm');
+      await page.locator('#ConfirmDialog_OK').click();
       await page.locator('#ConfigReload').waitFor({ state: 'visible', timeout: 10000 });
       const backups = fs.readdirSync(run.work).filter(n => n.startsWith('rustyget.conf.bak-'));
       assert.equal(backups.length, 1);
@@ -656,7 +667,16 @@ async function oddFiles(bin) {
       ['empty', p => { fs.writeFileSync(p, ''); return p; }, false],
     ];
     if (!(process.getuid && process.getuid() === 0)) {
-      cases.push(['unreadable', p => { fs.writeFileSync(p, 'MainDir=/x\n'); fs.chmodSync(p, 0); return p; }, false]);
+      await run.check('an existing file that can\'t be read stops RustyGet', async () => {
+        const conf = path.join(run.work, 'unreadable.conf');
+        fs.writeFileSync(conf, 'MainDir=/x\n');
+        fs.chmodSync(conf, 0);
+        const d = run.spawn(bin, ['-c', conf, '-s', '-o', 'OutputMode=log', '-o', 'ControlPort=' + await freePort()], { HOME: run.work }, 'unreadable.out');
+        await waitFor(() => d.exitCode !== null, 20000, 'the exit');
+        assert.notEqual(d.exitCode, 0);
+        assert.match(run.read('unreadable.out'), /Could not read the configuration file .*fix the file's permissions/);
+        fs.chmodSync(conf, 0o600);
+      });
     }
     for (const [name, make, creates] of cases) {
       await run.check(name + ' configuration file', async () => {
@@ -687,11 +707,6 @@ async function oddFiles(bin) {
           const file = name === 'folder' ? path.join(conf, 'rustyget.conf') : conf;
           assert(fs.statSync(file).isFile(), file + ' created');
           assert.equal(s.ConfigWritable, true);
-        }
-        if (name === 'unreadable') {
-          assert.equal(s.ConfigWritable, false);
-          assert.match(s.ConfigProblem, /permission denied/i);
-          fs.chmodSync(conf, 0o600);
         }
         d.kill('SIGTERM');
         await new Promise(r => setTimeout(r, 500));

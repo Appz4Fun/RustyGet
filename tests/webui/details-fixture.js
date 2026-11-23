@@ -188,7 +188,9 @@ async function installDetailsFixture(page, base, writes = [], hooks = {}) {
     setupstatus: { ConfigFile: './fixture/rustyget.conf', ConfigCreated: false, ConfigWritable: true, ConfigProblem: '',
       PasswordSet: true, PasswordIsStock: false, ControlUsername: 'rustyget', Servers: 1, PathProblems: [], Warnings: [],
       MoreWarnings: 0, SetupComplete: true },
-    checkpath: { Path: './fixture', State: 'ok', Message: 'This folder exists and RustyGet can write to it.' }
+    checkpath: { Path: './fixture', State: 'ok', Message: 'This folder exists and RustyGet can write to it.' },
+    // nothing in the fixture file would be dropped by a save
+    checkconfig: []
   };
   await page.route('**/*', async route => {
     const request = route.request();

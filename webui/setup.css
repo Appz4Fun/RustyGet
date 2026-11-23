@@ -254,3 +254,9 @@ body.setup-open { overflow: hidden; }
 	.setup-banner__box--todo .setup-banner__todo[open] { flex-basis: 100%; }
 	.setup-banner__todo > summary { margin: 0; }
 }
+
+/* the lines a Settings save would drop: long ones wrap */
+.config-drop-list li {
+	overflow-wrap: anywhere;
+	word-break: break-word;
+}

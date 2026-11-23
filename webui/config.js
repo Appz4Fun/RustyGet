@@ -6098,6 +6098,45 @@ var Config = (new function($)
 		if (serverSaveRequest.length > 0)
 		{
 			$('#Notif_Config_Failed_Filename').text(Options.option('ConfigFile'));
+			// lines of the file a save leaves out (they are not settings) are
+			// listed first, and removed only when the user agrees
+			RPC.call('checkconfig', [serverSaveRequest], function(problems)
+			{
+				var dropped = (problems || []).filter(function(p) { return p.Name === ''; });
+				if (!dropped.length)
+				{
+					sendSave(serverSaveRequest);
+					return;
+				}
+				var confirmed = false;
+				ConfirmDialog.showModal('DropLinesConfirmDialog', function()
+				{
+					confirmed = true;
+					sendSave(serverSaveRequest);
+				}, function(dialog)
+				{
+					$('#ConfirmDialog_Text', dialog).append('<ul class="config-drop-list">' + dropped.map(function(p)
+					{
+						return '<li>' + Util.textToHtml(p.Problem) + '</li>';
+					}).join('') + '</ul>');
+					dialog.one('hidden', function() { if (!confirmed) removeSaveBanner(); });
+				});
+			}, function()
+			{
+				// an older daemon without checkconfig
+				sendSave(serverSaveRequest);
+			});
+		}
+		else
+		{
+			// only web-settings were changed, refresh page
+			document.location.reload(true);
+		}
+	}
+
+	function sendSave(serverSaveRequest)
+	{
+		{
 			RPC.call('saveconfig', [Config.withCipherBaseline(serverSaveRequest)], saveCompleted, function(value, result) {
 				removeSaveBanner();
 				var text = result && result.error ? result.error.message : String(value);
@@ -6112,11 +6151,6 @@ var Config = (new function($)
 					AlertDialog.showModal(I18n.defaultValue('config_not_saved', 'Settings were not saved'), Util.textToHtml(text));
 				}
 			});
-		}
-		else
-		{
-			// only web-settings were changed, refresh page
-			document.location.reload(true);
 		}
 	}
 

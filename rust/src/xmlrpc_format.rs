@@ -3822,6 +3822,20 @@ fn save_config_cursor(
     };
     let problems = crate::firstrun::validate_detailed(&opt_entries, &crate::firstrun::running_option, &current_of);
     if check_only {
+        // and the lines of the file a save would leave out (Name ""), so the
+        // page can ask before they go
+        let mut problems = problems;
+        if let Some(raw) = config_filename.filter(|f| !f.is_empty()).and_then(|f| std::fs::read(crate::cleanup::bytes_to_path_buf(f)).ok()) {
+            for (line, text) in crate::configfile::dropped_lines(&raw) {
+                // a huge line is shown by its start and length
+                let shown = String::from_utf8_lossy(&crate::options::printable(&text[..text.len().min(60)])).into_owned();
+                let shown = if text.len() > 60 { format!("{shown}...\" ({} bytes)", text.len()) } else { format!("{shown}\"") };
+                problems.push((
+                    String::new(),
+                    format!("Line {line}: \"{shown} is not a setting RustyGet knows; it will be removed from the file."),
+                ));
+            }
+        }
         let mut o = String::from("[");
         for (i, (name, problem)) in problems.iter().enumerate() {
             if i > 0 {

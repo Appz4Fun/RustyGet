@@ -255,6 +255,37 @@ $(document).ready(function()
 	}
 });
 
+/*** TAB SWITCH SAFETY *************************************************************/
+
+// Bootstrap 2 switches a fading tab only when the old pane reports the end of
+// its fade. When that event never comes (the fade was cut short, the window
+// was in the background) the page is left without a visible tab. Finish the
+// switch after the fade's time in any case.
+(function($)
+{
+	'use strict';
+	var Tab = $.fn.tab && $.fn.tab.Constructor;
+	if (!Tab || !Tab.prototype.activate)
+	{
+		return;
+	}
+	var activate = Tab.prototype.activate;
+	Tab.prototype.activate = function(element, container, callback)
+	{
+		var $active = container.find('> .active');
+		if (callback && $.support.transition && $active.hasClass('fade'))
+		{
+			var end = $.support.transition.end;
+			var timer = setTimeout(function()
+			{
+				$active.each(function() { $(this).triggerHandler(end); });
+			}, 400);
+			$active.one(end, function() { clearTimeout(timer); });
+		}
+		return activate.apply(this, arguments);
+	};
+}(jQuery));
+
 /*** FRONTEND MAIN PAGE ***********************************************************/
 
 var Frontend = (new function($)

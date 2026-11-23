@@ -1212,12 +1212,14 @@ pub(crate) unsafe fn activate_daemon(
         im.extend_from_slice(b" daemon-mode");
         dm_log(2, &im);
         // after the fork: a thread started in the parent would not survive it
+        crate::log::allow_background_threads();
         crate::sysmetrics::start_sampler();
     } else if server_mode {
         let mut im = b"RustyGet ".to_vec();
         im.extend_from_slice(ver);
         im.extend_from_slice(b" server-mode");
         dm_log(2, &im);
+        crate::log::allow_background_threads();
         crate::sysmetrics::start_sampler();
     } else if remote_mode {
         let mut im = b"RustyGet ".to_vec();

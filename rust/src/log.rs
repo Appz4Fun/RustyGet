@@ -505,15 +505,29 @@ fn rotate_if_due(
     roll_up_in_background(path.to_vec(), sep, keep);
 }
 
+/// Set once the process may start threads: after daemon-mode forks (or straight
+/// away in server mode). Until then a roll-up runs inline.
+static BACKGROUND_THREADS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Lets log roll-ups run on their own thread from now on. Called once the daemon
+/// has forked: a thread started before `fork` leaves the child "multithreaded",
+/// and on macOS the Objective-C runtime then aborts the daemon the first time a
+/// system library initializes a class in it (getaddrinfo loading libnetwork).
+pub fn allow_background_threads() {
+    BACKGROUND_THREADS.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// Gzips every rolled-over log next to `log_file` and deletes the oldest beyond
 /// `keep` (0 keeps all), off the logging path. One roll-up runs at a time.
+/// Before [`allow_background_threads`] it runs inline instead.
 fn roll_up_in_background(log_file: Vec<u8>, sep: u8, keep: i32) {
     static ROLL_UP: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let work = move || {
         let _one = ROLL_UP.lock().unwrap_or_else(|e| e.into_inner());
         crate::systemhealth::log_roll_up(&log_file, sep, keep);
     };
-    if cfg!(test) {
+    if cfg!(test) || !BACKGROUND_THREADS.load(std::sync::atomic::Ordering::SeqCst) {
         work();
     } else if std::thread::Builder::new()
         .name("log-rollup".into())

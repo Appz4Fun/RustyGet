@@ -652,14 +652,15 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
                         crate::paths::PATH_SEPARATOR,
                         &f.filename,
                     );
-                    return Some((fp, info_name, write_context));
+                    let live = (nzb.id, f.id, f.filename.clone(), f.hash16k.clone());
+                    return Some((fp, info_name, write_context, live));
                 }
             }
         }
         None
     });
 
-    let Some((file_ptr, info_name, write_context)) = selected else {
+    let Some((file_ptr, info_name, write_context, live)) = selected else {
         CACHE_FILE_INFO.store(0, Ordering::SeqCst);
         cache_unlock_flush();
         crate::log::log_active_bytes(MK_DEBUG, b"Checking cache... nothing to flush");
@@ -719,6 +720,31 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
         },
     );
 
+    // Live PAR: articles that waited for their bytes to reach the file can be read there
+    // now. Only those written in place (DirectWrite), up to the first failed write.
+    if direct_write && !skip_disk_write && flushed_articles > 0 {
+        let written = usize::try_from(flushed_articles).unwrap_or(0).min(items.len());
+        let all: i64 = items[..written]
+            .iter()
+            .map(|item| i64::from(item.segment_size))
+            .sum();
+        let good = if all == flushed_size { written } else { written - 1 };
+        let ranges: Vec<(u64, u64)> = items[..good]
+            .iter()
+            .filter_map(|item| {
+                Some((
+                    u64::try_from(item.segment_offset).ok()?,
+                    u64::try_from(item.segment_size).ok()?,
+                ))
+            })
+            .collect();
+        let (nzb_id, file_id, name, hash16k) = &live;
+        crate::parchecker::streaming_session_articles_committed(
+            *nzb_id,
+            (Some(*file_id), name, hash16k),
+            &ranges,
+        );
+    }
     let skip_after = qh.file_cache_flush_finish(file_ptr, flushed_articles)
         || crate::options::active_options().is_some_and(|o| o.scalars().skip_write != 0);
     cache_unlock_flush();

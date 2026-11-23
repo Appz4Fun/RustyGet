@@ -3425,6 +3425,7 @@ pub(crate) fn direct_unpack_try_live_par_repair(
         });
         publication.push((file_id, path));
     }
+    refresh_live_target_paths(host, nzb);
     let Ok(request) = crate::parchecker::streaming_session_prepare_repair(
         nzb_id,
         targets,
@@ -3622,6 +3623,7 @@ fn live_par_repair_at_download_end(
             path,
         });
     }
+    refresh_live_target_paths(host, nzb);
     let bytes = targets.iter().fold(4096u64, |total, target| {
         total.saturating_add((target.path.as_os_str().len() as u64).saturating_mul(4) + 512)
     });
@@ -3703,6 +3705,28 @@ fn live_par_repair_at_download_end(
         });
     if let Ok(handle) = spawned {
         keep_live_helper(&LIVE_END_HELPERS, nzb_id, handle);
+    }
+}
+
+/// Tells the live session where every completed file of the download is now, so a rename
+/// since its completion (the direct renamer) cannot make a repair's back-fill read a stale
+/// path. The caller holds the queue lock; par-rs learns the paths before the repair.
+#[cfg(unix)]
+fn refresh_live_target_paths(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb: &crate::queuesubsys_host::NzbSnap,
+) {
+    for index in 0..host.nzb_completed_files_len(nzb.ptr).min(4096) {
+        let file = host.nzb_completed_file_at(nzb.ptr, index);
+        if file.par_file {
+            continue;
+        }
+        let path = crate::fsops::path(&nzb.dest_dir).join(crate::fsops::path(&file.filename));
+        crate::parchecker::streaming_session_note_file_path(
+            nzb.id,
+            (Some(file.id), &file.filename, &[]),
+            &path,
+        );
     }
 }
 

@@ -11014,14 +11014,16 @@ def _livepar_io(t, timeout=30):
     numbers; {} when none was written within <timeout> seconds."""
     pattern = re.compile(
         r'Live PAR \(job \d+\) I/O: source_bytes_read ([\d.]+) MB .*?backfill_bytes_read ([\d.]+) MB, '
-        r'recovery_bytes_read ([\d.]+) MB.*?; (\d+) article\(s\) parked, (\d+) slice\(s\) read back from disk')
+        r'recovery_bytes_read ([\d.]+) MB.*?; (\d+) cache miss\(es\), (\d+) article\(s\) read from their '
+        r'file by par-rs, (\d+) waited for the cache flush')
     deadline = time.time() + timeout
     while time.time() < deadline:
         found = pattern.findall(t.read_file('nzbget.log').decode(errors='replace'))
         if found:
-            source, backfill, recovery, parked, read_back = found[-1]
+            source, backfill, recovery, misses, read_by_parrs, awaited = found[-1]
             return {'source_mb': float(source), 'backfill_mb': float(backfill),
-                    'recovery_mb': float(recovery), 'parked': int(parked), 'read_back': int(read_back)}
+                    'recovery_mb': float(recovery), 'misses': int(misses),
+                    'read_by_parrs': int(read_by_parrs), 'awaited': int(awaited)}
         time.sleep(0.5)
     return {}
 
@@ -11038,15 +11040,16 @@ def _livepar_run(daemon, t, tag, seed, missing, recovery):
 
 def scenario_liveparnocache(daemon, t):
     """Live PAR with no article cache (ArticleCache=0): RAM never holds an article, so
-    every one is a cache miss. Live repair must not give up: each article's slices are
-    parked and read back whole from the DirectWrite file once all their bytes are on
-    disk, the recovery volume is fetched for the two damaged blocks, and the live
-    repair rebuilds them as the download ends. No batch par-repair runs."""
+    every one is a cache miss. Live repair must not give up: each article is handed to
+    par-rs without its bytes, and par-rs reads its slice from the DirectWrite file
+    (set_target_path) once the slice is complete; the recovery volume is fetched for the
+    two damaged blocks, and the live repair rebuilds them as the download ends. No batch
+    par-repair runs."""
     h, intact, io = _livepar_run(daemon, t, 'lnc', 12480, {0: {5}, 1: {5}}, 3)
     live = _grep_log(t, 'as the download ended')
     batch = _grep_log(t, 'PAR repair timings for')
     ok = (h['Status'].startswith('SUCCESS') and intact and live >= 1 and batch == 0
-          and io.get('parked', 0) > 0 and io.get('read_back', 0) > 0)
+          and io.get('misses', 0) > 0 and io.get('read_by_parrs', 0) > 0 and io.get('source_mb', 0) > 0)
     return ('liveparnocache', ok, 'status=%s intact=%s live_repairs=%d batch_repairs=%d io=%s'
             % (h['Status'], intact, live, batch, io))
 

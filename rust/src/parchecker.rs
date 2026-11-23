@@ -185,80 +185,31 @@ struct ActiveStreamingSession {
     /// captures failed, not only the first failure.
     refusals: Mutex<Vec<(String, u64)>>,
     stop_logged: AtomicBool,
-    /// Slices RAM could not supply (article cache miss, staging full), replayed whole
-    /// from the committed source file once all their bytes are on disk.
-    committed: Mutex<CommittedReplay>,
-    /// A worker thread is reading parked slices back (`streaming_session_kick_replay`).
-    replay_running: AtomicBool,
-    /// IFSC CRC32 of every slice (zero-padded), to accept a committed slice read only
-    /// when every one of its bytes has reached the disk.
-    slice_crcs: HashMap<FileId, Vec<u32>>,
+    /// Where each file's bytes are written and the articles that wait for theirs to get
+    /// there; see [`CommittedSources`].
+    committed: Mutex<CommittedSources>,
     // Drop last, after the session, queue and all owned metadata. Grows with
     // the syndrome slots as damage appears (see `grow_for_damage`).
     budget: Mutex<SessionBudgetLease>,
 }
 
-/// The None path of live repair, done by RustyGet: par-rs's `on_article_finished(.., None)`
-/// reads a completed slice back from `base_dir/<par2 name>`, but RustyGet's bytes are still
-/// in the job's DirectWrite file (`<dest>/<id>.out.tmp`) or under an obfuscated name, so
-/// RustyGet reads the slice from its own file and hands it over whole (whole slices need
-/// no staging). An article whose bytes RAM could not supply parks its slices here instead
-/// of leaving live repair until the file completes.
+/// Live repair's None path: an article whose bytes RAM cannot supply is handed to par-rs
+/// without them (`on_article_finished(.., None)`) once they are in the file, and par-rs
+/// reads the slice from that file when the slice is complete. The file is the job's
+/// DirectWrite output (`<dest>/<id>.out.tmp`) or the completed file under its current
+/// (possibly obfuscated) name, given to par-rs with `set_target_path`.
+///
+/// A cache miss means the article reached its file, so it is handed over at once. An
+/// article refused while still in the cache (RAM staging full, or the snapshot queue full)
+/// waits here until the article cache writes it out
+/// (`streaming_session_articles_committed`); one never flushed before its file completes
+/// is covered by the completion replay.
 #[derive(Default)]
-struct CommittedReplay {
-    /// The file each queue file's downloaded bytes are written into right now.
-    sources: HashMap<FileId, PathBuf>,
-    /// Byte ranges of articles that finished downloading, per file.
-    arrived: HashMap<FileId, Vec<ByteRange>>,
-    /// Ranges added to `arrived` since it was last normalized.
-    unsorted: HashMap<FileId, usize>,
-    /// Each finished article's range and CRC32, per file, to tell a slice whose bytes have
-    /// not all reached the disk from one whose downloaded bytes are wrong.
-    articles: HashMap<FileId, Vec<(u64, u64, u32)>>,
-    parked: HashMap<(FileId, u64), ParkedSlice>,
-    /// The earliest `due` of `parked`, so checking for due work scans nothing.
-    next_due: Option<std::time::Instant>,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct ParkedSlice {
-    due: std::time::Instant,
-    backoff_ms: u64,
-}
-
-/// Slices one drain reads back at most, so incoming snapshots keep the operation lock.
-const COMMITTED_REPLAY_SLICES: usize = 64;
-const COMMITTED_RETRY_MAX_MS: u64 = 8_000;
-
-impl CommittedReplay {
-    /// The finished articles overlapping `start..end` of file `id`.
-    fn articles_in(&self, id: &FileId, start: u64, end: u64) -> Vec<(u64, u64, u32)> {
-        self.articles.get(id).map_or_else(Vec::new, |articles| {
-            articles
-                .iter()
-                .filter(|&&(offset, size, _)| offset < end && offset + size > start)
-                .copied()
-                .collect()
-        })
-    }
-
-    fn note_due(&mut self, due: std::time::Instant) {
-        if self.next_due.is_none_or(|next| due < next) {
-            self.next_due = Some(due);
-        }
-    }
-
-    fn recompute_next_due(&mut self) {
-        self.next_due = self.parked.values().map(|slice| slice.due).min();
-    }
-
-    fn arrived_sorted(&mut self, id: &FileId) -> &[ByteRange] {
-        let ranges = self.arrived.entry(*id).or_default();
-        if self.unsorted.remove(id).is_some_and(|n| n > 0) {
-            *ranges = normalize_ranges(ranges);
-        }
-        ranges
-    }
+struct CommittedSources {
+    /// The file each queue file's bytes are written into, and whether par-rs knows it.
+    paths: HashMap<FileId, (PathBuf, bool)>,
+    /// Articles (offset, size, CRC32) waiting for the cache to write them out.
+    awaiting: HashMap<FileId, Vec<(u64, u64, u32)>>,
 }
 
 struct DeferredArticle {
@@ -267,6 +218,8 @@ struct DeferredArticle {
     crc32: u32,
     size: u64,
     bytes: Option<Vec<u8>>,
+    /// Without `bytes`: the article is in its file (par-rs reads it there), not lost.
+    committed: bool,
 }
 
 // Keep both payload ownership and its reservation through the actual fold.
@@ -306,6 +259,13 @@ impl LiveArticleLease {
                 article.offset,
                 data,
                 article.crc32,
+            ),
+            None if article.committed => self.entry.session.on_article_finished(
+                &article.file_id,
+                article.offset,
+                article.size,
+                article.crc32,
+                None,
             ),
             None => self
                 .entry
@@ -544,12 +504,6 @@ fn build_streaming_session_with(
         lengths.insert(*id, desc.file_length);
         target_names.insert(*id, PathBuf::from(desc.local_name()));
     }
-    let slice_crcs = set
-        .ifscs
-        .iter()
-        .filter(|(id, _)| lengths.contains_key(id))
-        .map(|(id, ifsc)| (*id, ifsc.slices.iter().map(|c| c.crc32).collect()))
-        .collect();
     let generation = NEXT_LIVE_GENERATION
         .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
             value.checked_add(1)
@@ -558,7 +512,15 @@ fn build_streaming_session_with(
     let article_byte_limit = options.max_working_bytes;
     let session = match plan {
         Some((plan, syndrome_ram)) => {
-            StreamingParSession::with_recovery_plan(set, base_dir, options, plan, syndrome_ram)?
+            let slots = usize::try_from(syndrome_ram / main.slice_size.max(1)).unwrap_or(usize::MAX);
+            StreamingParSession::with_recovery_plan_limits(
+                set,
+                base_dir,
+                options,
+                plan,
+                syndrome_ram,
+                slots,
+            )?
         }
         None => StreamingParSession::new(set, base_dir, options)?,
     };
@@ -586,9 +548,7 @@ fn build_streaming_session_with(
         warning_reported: AtomicBool::new(false),
         refusals: Mutex::new(Vec::new()),
         stop_logged: AtomicBool::new(false),
-        committed: Mutex::new(CommittedReplay::default()),
-        replay_running: AtomicBool::new(false),
-        slice_crcs,
+        committed: Mutex::new(CommittedSources::default()),
     }))
 }
 
@@ -646,151 +606,117 @@ fn ensure_registry_generation(
 }
 
 impl ActiveStreamingSession {
-    /// An article of file `id` finished downloading at `offset..offset + size`; `source` is
-    /// the file its bytes are written into, when known.
-    fn note_arrival(&self, id: FileId, offset: u64, size: u64, crc32: u32, source: Option<&Path>) {
-        let mut replay = self.committed.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(path) = source {
-            if replay.sources.get(&id).is_none_or(|known| known != path) {
-                replay.sources.insert(id, path.to_path_buf());
-            }
-        }
-        let (Ok(offset), Ok(size)) = (i64::try_from(offset), i64::try_from(size)) else {
-            return;
-        };
-        replay
-            .arrived
-            .entry(id)
-            .or_default()
-            .push(ByteRange::new(offset, size));
-        replay
-            .articles
-            .entry(id)
-            .or_default()
-            .push((offset as u64, size as u64, crc32));
-        // The article may complete a parked slice: try it on the next drain.
-        let ss = self.session.slice_size();
-        if ss > 0 && size > 0 && !replay.parked.is_empty() {
-            let now = std::time::Instant::now();
-            let last = (offset as u64).saturating_add(size as u64 - 1) / ss;
-            for slice in offset as u64 / ss..=last {
-                let made_due = replay.parked.get_mut(&(id, slice)).is_some_and(|parked| {
-                    if parked.backoff_ms == 0 {
-                        parked.due = now;
-                    }
-                    parked.backoff_ms == 0
-                });
-                if made_due {
-                    replay.note_due(now);
-                }
-            }
-        }
-        let pending = replay.unsorted.entry(id).or_default();
-        *pending += 1;
-        // Keep the list short while articles stream in, without sorting on every one.
-        if *pending >= 256 {
-            replay.arrived_sorted(&id);
+    /// File `id`'s bytes are written into `path` now. Only noted (callers may hold the
+    /// queue lock); [`Self::apply_target_paths`] tells par-rs.
+    fn note_written(&self, id: FileId, path: &Path) {
+        let mut sources = self.committed.lock().unwrap_or_else(|e| e.into_inner());
+        if sources.paths.get(&id).is_none_or(|(known, _)| known != path) {
+            sources.paths.insert(id, (path.to_path_buf(), false));
         }
     }
 
-    /// Park the slices of `offset..offset + size` that are not verified yet, to be read
-    /// back whole once on disk. False when no written file is known for `id`: the
-    /// article then waits for its file's completion replay, as before.
-    fn park_committed(&self, id: FileId, offset: u64, size: u64) -> bool {
-        let ss = self.session.slice_size();
-        let Some(&length) = self.file_lengths.get(&id) else {
-            return false;
-        };
-        if ss == 0 || size == 0 || offset >= length {
-            return false;
-        }
-        let mut replay = self.committed.lock().unwrap_or_else(|e| e.into_inner());
-        if !replay.sources.contains_key(&id) {
-            return false;
-        }
-        let last = (offset.saturating_add(size).min(length) - 1) / ss;
-        let now = std::time::Instant::now();
-        for slice in offset / ss..=last {
-            let verified = matches!(
-                self.session.slice_state(&id, slice as usize),
-                Ok(SliceState::VerifiedGood)
-            );
-            if !verified {
-                replay.parked.entry((id, slice)).or_insert(ParkedSlice {
-                    due: now,
-                    backoff_ms: 0,
-                });
-                replay.note_due(now);
+    /// Tells par-rs where the files noted since last time are (`set_target_path`). It waits
+    /// for a repair under way, so callers hold the operation lock (no RustyGet repair runs)
+    /// and never call it from a repair's slice callback.
+    fn apply_target_paths(&self) -> Result<(), RepairError> {
+        let pending: Vec<(FileId, PathBuf)> = self
+            .committed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .paths
+            .iter()
+            .filter(|(_, (_, applied))| !applied)
+            .map(|(id, (path, _))| (*id, path.clone()))
+            .collect();
+        for (id, path) in pending {
+            self.session.set_target_path(&id, &path)?;
+            let mut sources = self.committed.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((current, applied)) = sources.paths.get_mut(&id) {
+                if *current == path {
+                    *applied = true;
+                }
             }
         }
-        drop(replay);
+        Ok(())
+    }
+
+    /// The written file of `id` is known.
+    fn has_written_file(&self, id: &FileId) -> bool {
+        self.committed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .paths
+            .contains_key(id)
+    }
+
+    /// An article RAM cannot take while it is still in the cache: hand it over without its
+    /// bytes once the cache writes it out. False when no written file is known for `id`
+    /// (the completion replay covers it then).
+    fn await_commit(&self, id: FileId, offset: u64, size: u64, crc32: u32) -> bool {
+        let mut sources = self.committed.lock().unwrap_or_else(|e| e.into_inner());
+        if !sources.paths.contains_key(&id) {
+            return false;
+        }
+        let awaiting = sources.awaiting.entry(id).or_default();
+        if awaiting.len() >= 4096 {
+            return false;
+        }
+        awaiting.push((offset, size, crc32));
+        drop(sources);
         self.metrics
-            .committed_parked
+            .awaited_commits
             .fetch_add(1, Ordering::Relaxed);
         true
     }
 
-    /// Every slice of `offset..offset + size` is parked already: the slice replay reads
-    /// this article from disk, so no RAM copy is needed.
-    fn all_parked(&self, id: FileId, offset: u64, size: u64) -> bool {
-        let ss = self.session.slice_size();
-        if ss == 0 || size == 0 {
-            return false;
-        }
-        let replay = self.committed.lock().unwrap_or_else(|e| e.into_inner());
-        if replay.parked.is_empty() {
-            return false;
-        }
-        let last = (offset.saturating_add(size) - 1) / ss;
-        (offset / ss..=last).all(|slice| replay.parked.contains_key(&(id, slice)))
-    }
-
-    /// File `id` completed: its completion replay covers its parked slices, and later
-    /// reads go to its final path.
-    fn forget_parked(&self, id: FileId) {
-        let mut replay = self.committed.lock().unwrap_or_else(|e| e.into_inner());
-        replay.parked.retain(|(file, _), _| *file != id);
-        replay.sources.remove(&id);
-        replay.articles.remove(&id);
-        replay.recompute_next_due();
-    }
-
-    fn unpark(&self, id: FileId, slice: u64) {
-        let mut replay = self.committed.lock().unwrap_or_else(|e| e.into_inner());
-        replay.parked.remove(&(id, slice));
-        replay.recompute_next_due();
-    }
-
-    /// The slice is not on disk yet: try again later, waiting longer each time (to 8 s).
-    fn back_off(&self, id: FileId, slice: u64) {
-        let mut replay = self.committed.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(parked) = replay.parked.get_mut(&(id, slice)) else {
-            return;
+    /// Articles of `id` at `ranges` are in its file now: queue the waiting ones among them
+    /// for par-rs to read there.
+    fn committed_ranges(&self, id: FileId, ranges: &[(u64, u64)]) -> usize {
+        let ready: Vec<(u64, u64, u32)> = {
+            let mut sources = self.committed.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(awaiting) = sources.awaiting.get_mut(&id) else {
+                return 0;
+            };
+            let (ready, waiting): (Vec<_>, Vec<_>) = awaiting.drain(..).partition(|&(o, n, _)| {
+                ranges.iter().any(|&(offset, size)| offset <= o && o + n <= offset + size)
+            });
+            *awaiting = waiting;
+            ready
         };
-        parked.backoff_ms = (parked.backoff_ms * 2).clamp(500, COMMITTED_RETRY_MAX_MS);
-        parked.due =
-            std::time::Instant::now() + std::time::Duration::from_millis(parked.backoff_ms);
-        replay.recompute_next_due();
+        let mut queue = self.articles.lock().unwrap_or_else(|e| e.into_inner());
+        for &(offset, size, crc32) in &ready {
+            queue.pending.push_back(DeferredArticle {
+                file_id: id,
+                offset,
+                crc32,
+                size,
+                bytes: None,
+                committed: true,
+            });
+        }
+        ready.len()
     }
 
-    /// A parked slice is due for a read.
-    fn committed_replay_due(&self) -> bool {
-        let replay = self.committed.lock().unwrap_or_else(|e| e.into_inner());
-        replay
-            .next_due
-            .is_some_and(|due| due <= std::time::Instant::now())
+    /// File `id` completed: its completion replay covers what waits, and par-rs reads it at
+    /// `path` from now on.
+    fn file_completed(&self, id: FileId, path: &Path) {
+        let mut sources = self.committed.lock().unwrap_or_else(|e| e.into_inner());
+        sources.awaiting.remove(&id);
+        sources.paths.insert(id, (path.to_path_buf(), false));
     }
 
-    /// Parked slices still waiting, for the log.
-    fn parked_slices(&self) -> usize {
+    /// Articles still waiting for the cache, for the log.
+    fn awaiting_commits(&self) -> usize {
         self.committed
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .parked
-            .len()
+            .awaiting
+            .values()
+            .map(Vec::len)
+            .sum()
     }
 
-    /// A back-fill is pending, none runs, and no retry delay is in force.
+    /// A back-fill is pending, none runs, and no retry delay is in force.    /// A back-fill is pending, none runs, and no retry delay is in force.
     fn backfill_due(&self) -> bool {
         self.session.needs_backfill()
             && !self.backfill_running.load(Ordering::Acquire)
@@ -1269,9 +1195,8 @@ pub(crate) fn streaming_session_defer_committed_article(
                 "invalid accepted range",
             ));
         }
-        entry.note_arrival(id, offset, size, crc32, written);
-        if entry.all_parked(id, offset, size) {
-            return Ok(());
+        if let Some(path) = written {
+            entry.note_written(id, path);
         }
         let mut queue = entry.articles.lock().unwrap_or_else(|e| e.into_inner());
         let next = queue.bytes.checked_add(size);
@@ -1290,7 +1215,7 @@ pub(crate) fn streaming_session_defer_committed_article(
         }
         if queue.pending.len() >= 4096 || next.is_none_or(|n| n > limit) {
             drop(queue);
-            if entry.park_committed(id, offset, size) {
+            if entry.await_commit(id, offset, size, crc32) {
                 return Ok(());
             }
             return Err(RepairError::StreamingMemoryLimit {
@@ -1301,12 +1226,24 @@ pub(crate) fn streaming_session_defer_committed_article(
         }
         let Some(bytes) = snapshot() else {
             entry.metrics.cache_misses.fetch_add(1, Ordering::Relaxed);
-            drop(queue);
-            // Not in the cache any more: the article reached its file. Read its slices
-            // back from there once they are complete.
-            if entry.park_committed(id, offset, size) {
+            // Not in the cache any more: the article reached its file. par-rs reads it
+            // there once its slice is complete.
+            if entry.has_written_file(&id) && queue.pending.len() < 4096 {
+                queue.pending.push_back(DeferredArticle {
+                    file_id: id,
+                    offset,
+                    crc32,
+                    size,
+                    bytes: None,
+                    committed: true,
+                });
+                entry
+                    .metrics
+                    .committed_articles
+                    .fetch_add(1, Ordering::Relaxed);
                 return Ok(());
             }
+            drop(queue);
             return Err(live_error(
                 "live article cache",
                 "cache bytes unavailable; committed replay required",
@@ -1326,6 +1263,7 @@ pub(crate) fn streaming_session_defer_committed_article(
             crc32,
             size,
             bytes: Some(bytes),
+            committed: false,
         });
         entry
             .metrics
@@ -1390,6 +1328,7 @@ pub(crate) fn streaming_session_defer_failure_for_queue(
             size,
             crc32: 0,
             bytes: None,
+            committed: false,
         });
         Ok(())
     })()))
@@ -1432,6 +1371,7 @@ fn drain_live_articles_locked(
 ) -> Result<usize, RepairError> {
     entry.record((|| {
         let mut count = 0;
+        entry.apply_target_paths()?;
         loop {
             ensure_current_generation(nzb_id, entry)?;
             let Some(article) = take_live_article(entry) else {
@@ -1447,8 +1387,16 @@ fn drain_live_articles_locked(
             }
             let parked = matches!(&result, Err(RepairError::StreamingMemoryLimit { .. }))
                 && article.article.as_ref().is_some_and(|a| {
-                    a.bytes.is_some() && entry.park_committed(a.file_id, a.offset, a.size)
+                    a.bytes.is_some() && entry.await_commit(a.file_id, a.offset, a.size, a.crc32)
                 });
+            // An article read from its file failed to read: the file was renamed (completed)
+            // before par-rs learned its new path. Its completion replay covers it.
+            let renamed = matches!(&result, Err(RepairError::Io { .. }))
+                && article
+                    .article
+                    .as_ref()
+                    .is_some_and(|a| a.bytes.is_none() && a.committed);
+            let parked = parked || renamed;
             drop(article);
             if parked {
                 count += 1;
@@ -1462,224 +1410,40 @@ fn drain_live_articles_locked(
     })())
 }
 
-/// Starts the committed-slice replay of job `nzb_id` on a worker thread of its own when a
-/// parked slice is due and none runs, so the reads stay off the download threads.
-pub(crate) fn streaming_session_kick_replay(nzb_id: i32) {
+/// Queue file `identity` of job `nzb_id` is at `path` now (completed, possibly renamed since):
+/// par-rs reads and back-fills it there (`set_target_path`, applied before the next fold or
+/// repair). Metadata only; callers may hold the queue lock.
+pub(crate) fn streaming_session_note_file_path(
+    nzb_id: i32,
+    identity: (Option<i32>, &[u8], &[u8]),
+    path: &Path,
+) {
     let Some(entry) = active_streaming_session(nzb_id) else {
         return;
     };
-    if entry.session.is_cancelled()
-        || !entry.committed_replay_due()
-        || entry
-            .replay_running
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-    {
+    if let Ok(id) = live_source_id(&entry, identity.0, identity.1, identity.2) {
+        entry.note_written(id, path);
+    }
+}
+
+/// Articles of a queue file reached its file: the article cache wrote them out. Those that
+/// waited for it (RAM could not take them) are handed to par-rs, which reads them there.
+/// Metadata only; the cache thread calls it after its write.
+pub(crate) fn streaming_session_articles_committed(
+    nzb_id: i32,
+    identity: (Option<i32>, &[u8], &[u8]),
+    ranges: &[(u64, u64)],
+) {
+    let Some(entry) = active_streaming_session(nzb_id) else {
+        return;
+    };
+    if entry.session.is_cancelled() || ranges.is_empty() {
         return;
     }
-    let worker = Arc::clone(&entry);
-    let spawned = std::thread::Builder::new()
-        .name(format!("live-par-replay-{nzb_id}"))
-        .spawn(move || {
-            struct Running<'a>(&'a AtomicBool);
-            impl Drop for Running<'_> {
-                fn drop(&mut self) {
-                    self.0.store(false, Ordering::Release);
-                }
-            }
-            let _running = Running(&worker.replay_running);
-            while worker.committed_replay_due() {
-                match replay_committed_slices(nzb_id, &worker) {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {}
-                }
-            }
-        });
-    if spawned.is_err() {
-        entry.replay_running.store(false, Ordering::Release);
-    }
-}
-
-/// What reading a parked slice back found.
-enum SliceReadBack {
-    /// Every byte is on disk and matches IFSC.
-    Verified(Vec<u8>),
-    /// Not all of it has reached the disk yet (an article still in the cache).
-    NotYet,
-    /// Every article reads back with its own CRC, yet the slice does not match IFSC: the
-    /// downloaded data itself is wrong.
-    Damaged,
-}
-
-/// Reads parked slices back from the files their articles were written into and hands each
-/// over whole once its bytes match the slice's IFSC CRC32 (every byte on disk). A slice not
-/// on disk yet is tried again later, backing off to 8 s; one whose articles all read back
-/// with their own CRCs but whose slice CRC differs is damaged at once. Each slice holds the
-/// operation lock only for its own hand-over. Returns the slices it settled.
-fn replay_committed_slices(
-    nzb_id: i32,
-    entry: &Arc<ActiveStreamingSession>,
-) -> Result<usize, RepairError> {
-    let ss = entry.session.slice_size();
-    if ss == 0 {
-        return Ok(0);
-    }
-    let now = std::time::Instant::now();
-    let due: Vec<(FileId, u64, PathBuf, Vec<(u64, u64, u32)>)> = {
-        let mut replay = entry.committed.lock().unwrap_or_else(|e| e.into_inner());
-        let mut keys = Vec::new();
-        for (key, slice) in &replay.parked {
-            if slice.due <= now {
-                keys.push(*key);
-                if keys.len() >= COMMITTED_REPLAY_SLICES {
-                    break;
-                }
-            }
-        }
-        let mut due = Vec::new();
-        for (id, slice) in keys {
-            let Some(&length) = entry.file_lengths.get(&id) else {
-                continue;
-            };
-            let Some(source) = replay.sources.get(&id).cloned() else {
-                continue;
-            };
-            let start = slice * ss;
-            let end = (start + ss).min(length);
-            let arrived = replay.arrived_sorted(&id);
-            if !range_covered(arrived, start as i64, end as i64) {
-                // Not every article of the slice is here yet: its last one makes it due
-                // again (`note_arrival`); the timer is only a fallback.
-                if let Some(parked) = replay.parked.get_mut(&(id, slice)) {
-                    parked.due = now + std::time::Duration::from_secs(2);
-                }
-                continue;
-            }
-            let articles = replay.articles_in(&id, start, end);
-            due.push((id, slice, source, articles));
-        }
-        replay.recompute_next_due();
-        due
+    let Ok(id) = live_source_id(&entry, identity.0, identity.1, identity.2) else {
+        return;
     };
-    let mut settled = 0;
-    for (id, slice, source, articles) in due {
-        ensure_current_generation(nzb_id, entry)?;
-        if matches!(
-            entry.session.slice_state(&id, slice as usize)?,
-            SliceState::VerifiedGood
-        ) {
-            entry.unpark(id, slice);
-            continue;
-        }
-        let start = slice * ss;
-        let len = (entry.file_lengths[&id] - start).min(ss) as usize;
-        let expected = entry
-            .slice_crcs
-            .get(&id)
-            .and_then(|crcs| crcs.get(slice as usize))
-            .copied();
-        let read_back = match read_committed_slice(entry, &source, start, len) {
-            Ok(bytes) if expected == Some(padded_slice_crc(&bytes, ss)) => {
-                SliceReadBack::Verified(bytes)
-            }
-            Ok(_) if articles_match_on_disk(entry, &source, &articles) => SliceReadBack::Damaged,
-            _ => SliceReadBack::NotYet,
-        };
-        let outcome = match read_back {
-            SliceReadBack::NotYet => {
-                entry.back_off(id, slice);
-                continue;
-            }
-            SliceReadBack::Damaged => {
-                with_live_entry(nzb_id, entry, |entry| {
-                    entry
-                        .session
-                        .on_article_failed_permanently(&id, start, len as u64)
-                        .map(|(events, unpause)| ArticleOutcome { events, unpause })
-                })
-            }
-            SliceReadBack::Verified(bytes) => with_live_entry(nzb_id, entry, |entry| {
-                entry.session.on_article_finished_memory_only(
-                    &id,
-                    start,
-                    &bytes,
-                    crc32fast::hash(&bytes),
-                )
-            }),
-        };
-        let outcome = match outcome {
-            Ok(outcome) => outcome,
-            // Metadata full for now: keep it parked and try again later.
-            Err(RepairError::StreamingMemoryLimit { .. }) => {
-                entry.back_off(id, slice);
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        entry.unpark(id, slice);
-        entry
-            .metrics
-            .committed_slices
-            .fetch_add(1, Ordering::Relaxed);
-        entry.unpause(outcome.unpause.as_ref());
-        settled += 1;
-    }
-    Ok(settled)
-}
-
-/// Every article of `articles` reads back from `path` with its own CRC32: the bytes on
-/// disk are the downloaded ones.
-fn articles_match_on_disk(
-    entry: &ActiveStreamingSession,
-    path: &Path,
-    articles: &[(u64, u64, u32)],
-) -> bool {
-    !articles.is_empty()
-        && articles.iter().all(|&(offset, size, crc)| {
-            usize::try_from(size)
-                .ok()
-                .and_then(|len| read_committed_slice(entry, path, offset, len).ok())
-                .is_some_and(|bytes| crc32fast::hash(&bytes) == crc)
-        })
-}
-
-/// Reads `len` bytes at `offset` of `path`, charged to the session's payload limit.
-fn read_committed_slice(
-    entry: &ActiveStreamingSession,
-    path: &Path,
-    offset: u64,
-    len: usize,
-) -> Result<Vec<u8>, RepairError> {
-    use std::os::unix::fs::FileExt;
-    let _charge = CallerPayloadCharge::acquire(entry, len as u64)?;
-    let file = std::fs::File::open(path).map_err(|source| RepairError::Io {
-        context: format!("opening committed slice source {}", path.display()),
-        source,
-    })?;
-    let mut bytes = vec![0u8; len];
-    file.read_exact_at(&mut bytes, offset)
-        .map_err(|source| RepairError::Io {
-            context: "reading committed slice".to_owned(),
-            source,
-        })?;
-    entry
-        .catchup_source_bytes
-        .fetch_add(len as u64, Ordering::Relaxed);
-    Ok(bytes)
-}
-
-/// CRC32 of `bytes` zero-padded to `slice_size`, as an IFSC packet stores it.
-fn padded_slice_crc(bytes: &[u8], slice_size: u64) -> u32 {
-    let mut hasher = crc32fast::Hasher::new();
-    hasher.update(bytes);
-    let mut pad = slice_size.saturating_sub(bytes.len() as u64);
-    const ZEROS: [u8; 4096] = [0; 4096];
-    while pad > 0 {
-        let n = pad.min(ZEROS.len() as u64) as usize;
-        hasher.update(&ZEROS[..n]);
-        pad -= n as u64;
-    }
-    hasher.finalize()
+    entry.committed_ranges(id, ranges);
 }
 
 /// Jobs with queued work, copied under the registry lock without doing repair work.
@@ -1717,9 +1481,8 @@ pub(crate) fn streaming_session_pending_article_jobs() -> Vec<i32> {
                 .unwrap_or_else(|e| e.into_inner())
                 .is_empty();
             let backfill = entry.backfill_due();
-            let committed = entry.committed_replay_due();
             let poll = live_poll_due(id);
-            (queued || warning || unpause || backfill || committed || poll).then_some(id)
+            (queued || warning || unpause || backfill || poll).then_some(id)
         })
         .collect()
 }
@@ -1970,7 +1733,7 @@ pub(crate) fn streaming_session_process_completed_file_with_start(
         };
         let queue_id = file.queued_id.and_then(|id| i32::try_from(id).ok());
         let id = live_source_id(&entry, queue_id, &file.name, &file.hash16k)?;
-        entry.forget_parked(id);
+        entry.file_completed(id, &file.path);
         let length = entry.file_lengths[&id];
         if length > i64::MAX as u64 {
             return Err(live_error(
@@ -4438,15 +4201,6 @@ mod tests {
         // No volume known: the first exponents.
         let plan = live_recovery_plan(&LivePlanHint::default(), 1000, &HashSet::new());
         assert_eq!(plan.exponents, vec![0, 1]);
-    }
-
-    #[test]
-    fn padded_slice_crc_matches_ifsc_padding() {
-        let data = b"abc";
-        let mut padded = vec![0u8; 10_000];
-        padded[..3].copy_from_slice(data);
-        assert_eq!(padded_slice_crc(data, 10_000), crc32fast::hash(&padded));
-        assert_eq!(padded_slice_crc(&padded, 10_000), crc32fast::hash(&padded));
     }
 
     #[test]

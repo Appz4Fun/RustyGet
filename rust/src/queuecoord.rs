@@ -3244,7 +3244,6 @@ impl NzbgetRsQueueCoordinator {
                 Some(Err(_))
             );
             crate::parchecker::streaming_session_kick_backfill(id);
-            crate::parchecker::streaming_session_kick_replay(id);
             let polled = crate::parchecker::streaming_session_poll(id, false);
             host.with_locked_queue(|dq| {
                 let ptr = host.queue_find_by_id(dq, id);

@@ -4982,7 +4982,7 @@ def scenario_retrykeepsjobs(daemon, t):
     volume (not downloaded again) was never repaired."""
     parked, h2, intact = _retry_parked_release(daemon, t)
     repaired = _grep_log(t, 'of Rel.part01.rar from duplicate DonRK')
-    ok = parked.startswith('FAILURE') and repaired >= 1 and intact('Rel.part01.rar')
+    ok = _failed_or_kept(parked) and repaired >= 1 and intact('Rel.part01.rar')
     return ('retrykeepsjobs', ok, 'parked=%s status=%s repaired_logs=%d intact=%s'
             % (parked, h2['Status'], repaired, intact('Rel.part01.rar')))
 
@@ -4995,7 +4995,7 @@ def scenario_retryparkedname(daemon, t):
     byte-identical and the release succeeds."""
     parked, h2, intact = _retry_parked_release(daemon, t)
     temp_named = _grep_log(t, '.out.tmp (no article available)') + _grep_log(t, 'Stream repair of 5.out.tmp')
-    ok = (parked.startswith('FAILURE') and 'SUCCESS' in h2['Status'] and intact('Rel.part01.rar') and
+    ok = (_failed_or_kept(parked) and 'SUCCESS' in h2['Status'] and intact('Rel.part01.rar') and
           intact('Rel.part02.rar') and temp_named == 0)
     return ('retryparkedname', ok, 'parked=%s status=%s part01=%s part02=%s temp_named_logs=%d'
             % (parked, h2['Status'], intact('Rel.part01.rar'), intact('Rel.part02.rar'), temp_named))
@@ -5019,7 +5019,7 @@ def scenario_healthlastarticle(daemon, t):
         [('hlA/x.part01.rar', 'Rel.part01.rar', len(payload), seg_primary, {9, 10})]), False, 'hl-key', 100)
     h = daemon.wait_history(daemon_api, 'RelHL')
     queued = _grep_log(t, 'Queueing stream repair of Rel.part01.rar')
-    return ('healthlastarticle', h['Status'].startswith('FAILURE') and queued >= 1,
+    return ('healthlastarticle', _failed_or_kept(h['Status']) and queued >= 1,
             'status=%s health=%d queued_logs=%d' % (h['Status'], h['Health'], queued))
 
 
@@ -7122,7 +7122,9 @@ def scenario_fleettwinvolumes(daemon, t):
     items = {g['NZBName']: g for g in api.listgroups() + api.history() if g.get('DupeKey') == 'fleet:vol'}
     kinds = {n: {p['Name']: p['Value'] for p in g.get('Parameters', [])}.get('DupeCopyKind')
              for n, g in items.items()}
-    ok = (set(order[:2]) == {'Show.S01E01.twinA', 'Show.S01E01.twinvol'}
+    # F10: the stored copy is the primary (its packing is known; the twins'
+    # first articles tell no packing), the twins follow it
+    ok = (order[0] == 'Show.S01E01.store' and set(order[1:3]) == {'Show.S01E01.twinA', 'Show.S01E01.twinvol'}
           and kinds.get('Show.S01E01.twinvol') == 'twin' and kinds.get('Show.S01E01.twinA') == 'twin')
     return ('fleettwinvolumes', ok, 'order=%s kinds=%s' % (order, kinds))
 
@@ -7453,7 +7455,7 @@ def scenario_watchrescue(daemon, t):
         time.sleep(0.5)
         hb = daemon.wait_history(api, 'Backup')
     rescued = _grep_log(t, 'Rescue: Primary failed its health check with nothing of its key queued: returning backup Backup')
-    ok = hp['Status'] == 'FAILURE/HEALTH' and rescued == 1 and hb['Status'].startswith('SUCCESS') and _verify_output(t, data)
+    ok = _failed_or_kept(hp['Status']) and rescued == 1 and hb['Status'].startswith('SUCCESS') and _verify_output(t, data)
     return ('watchrescue', ok, 'primary=%s backup=%s rescue_logs=%d' % (hp['Status'], hb['Status'], rescued))
 
 
@@ -7890,7 +7892,7 @@ def scenario_deadbackupsonly(daemon, t):
     time.sleep(3)
     back = _grep_log(t, 'Found duplicate Backup') + _grep_log(t, 'Failing over Primary')
     hb = daemon.wait_history(api, 'Backup')
-    ok = back == 0 and hb['Status'] == 'DELETED/DUPE' and hp['Status'].startswith('FAILURE')
+    ok = back == 0 and hb['Status'] == 'DELETED/DUPE' and _failed_or_kept(hp['Status'])
     return ('deadbackupsonly', ok, 'primary=%s backup=%s returned_logs=%d' % (hp['Status'], hb['Status'], back))
 
 
@@ -8141,7 +8143,7 @@ def scenario_restartfailover(daemon, t):
             break
         time.sleep(0.5)
     integ = _verify_output(t, data)
-    ok = (hist.get('BackA', '').startswith('SUCCESS') and hist.get('Pick', '').startswith('FAILURE') and
+    ok = (hist.get('BackA', '').startswith('SUCCESS') and _failed_or_kept(hist.get('Pick', '')) and
           hist.get('BackB') == 'DELETED/DUPE' and integ)
     return ('restartfailover', ok, 'pick=%s backupA=%s backupB=%s integrity=%s'
             % (hist.get('Pick'), hist.get('BackA'), hist.get('BackB'), integ))
@@ -8397,7 +8399,7 @@ def scenario_repairlast(daemon, t):
     # (with no par2 nothing is borrowed either, so the download may fail over
     # before the repair decision that logs the skip: no repair is what counts)
     repaired = _grep_log(t, 'Stream repair of rlA') + _grep_log(t, 'Recovered') 
-    ok = (skipped >= 1 or repaired == 0) and hist.get('DamagedRl', '').startswith('FAILURE') and \
+    ok = (skipped >= 1 or repaired == 0) and _failed_or_kept(hist.get('DamagedRl', '')) and \
         hist.get('BackRl', '').startswith('SUCCESS')
     return ('repairlast', ok, 'damaged=%s backup=%s skip_logs=%d repair_logs=%d' % (
         hist.get('DamagedRl'), hist.get('BackRl'), skipped, repaired))
@@ -11370,6 +11372,13 @@ DROP_OTHER = 'Drop.Show.S01E02.720p.HDTV.x264-GRP'
 DROP_OTHER_KEY = 'dupes:drop.show.s01e02.720p.hdtv.x264.grp'
 
 
+def _failed_or_kept(status):
+    """A tried copy that failed: FAILURE, or, while other copies of its key
+    are left (its fleet is open), kept in it as a donor (DELETED/DUPE with
+    DupeParked, docs/DROP_AS_FLEET.md F3) instead of a failure."""
+    return status.startswith('FAILURE') or status == 'DELETED/DUPE'
+
+
 def _drop_copy(t, tag, data, missing, seg=100_000, dead_par=False):
     """One posting of ``data`` with a par2 index (article borrowing checks
     borrowed bytes against it); ``missing`` parts are gone from the server, and
@@ -11995,8 +12004,9 @@ EXPECTED_HISTORY_STATUS = {
     'xdecomp_enc7z': 'SUCCESS/HEALTH', 'xdecomp_neg': 'FAILURE/HEALTH',
     'xdecomp_symlink': 'FAILURE/HEALTH', 'xdecomp_off': 'FAILURE/HEALTH',
     'wholefile': 'SUCCESS/HEALTH',
-    'dupefailover': 'FAILURE/HEALTH', 'dupehopeless': 'FAILURE/HEALTH',
-    'dupedeadstart': 'FAILURE/HEALTH',
+    # a failed copy whose key still has backups is kept as a donor (F3)
+    'dupefailover': 'DELETED/DUPE', 'dupehopeless': 'DELETED/DUPE',
+    'dupedeadstart': 'DELETED/DUPE',
 }
 
 # per-scenario daemon options; the article-level scenarios keep the legacy

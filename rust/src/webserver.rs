@@ -558,18 +558,14 @@ pub(crate) fn has_embedded_webui() -> bool {
     embedded_file(b"index.html").is_some()
 }
 
-/// Is WebDir set to a folder with the web interface in it? Otherwise the
-/// built-in one is served.
+/// Is WebDir set to a folder that can be read? Then its files are served
+/// (and the built-in ones only for a file it does not have); otherwise the
+/// built-in web interface is.
 pub(crate) fn web_dir_usable(web_dir: &[u8]) -> bool {
     if web_dir.is_empty() || web_dir.contains(&0) {
         return false;
     }
-    let mut index = web_dir.to_vec();
-    index.push(crate::paths::PATH_SEPARATOR);
-    index.extend_from_slice(b"index.html");
-    std::fs::File::open(crate::cleanup::bytes_to_path_buf(&index))
-        .and_then(|f| f.metadata())
-        .is_ok_and(|m| m.is_file())
+    std::fs::read_dir(crate::cleanup::bytes_to_path_buf(web_dir)).is_ok()
 }
 
 /// A built-in file with the trailing NUL the callers expect.
@@ -1116,7 +1112,7 @@ where
             let loaded = if embedded {
                 load_embedded_file(part)
             } else {
-                load_web_file(&disk_filename, cfg.config_file)
+                load_web_file(&disk_filename, cfg.config_file).or_else(|| load_embedded_file(part))
             };
             let Some(buf) = loaded else {
                 let mut w = Vec::with_capacity(32 + part.len());
@@ -1172,12 +1168,13 @@ where
             log_msg(0, &dbg);
         }
 
+        let mut rel = url.strip_prefix(b"/").unwrap_or(&url).to_vec();
+        rel.extend_from_slice(def_res);
         let loaded = if embedded {
-            let mut rel = url.strip_prefix(b"/").unwrap_or(&url).to_vec();
-            rel.extend_from_slice(def_res);
             load_embedded_file(&rel)
         } else {
-            load_web_file(&filename, cfg.config_file)
+            // WebDir's own file first; one it lacks (an empty WebDir) comes built in
+            load_web_file(&filename, cfg.config_file).or_else(|| load_embedded_file(&rel))
         };
         let Some(mut buf) = loaded else {
             let base = &filename[crate::paths::base_file_name(&filename)..];
@@ -1354,9 +1351,9 @@ mod tests {
         assert!(!web_dir_usable(b"/nonexistent/webui"));
         let dir = std::env::temp_dir().join(format!("rg-webdir-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        assert!(!web_dir_usable(dir.to_str().unwrap().as_bytes()), "no index.html");
-        std::fs::write(dir.join("index.html"), b"x").unwrap();
-        assert!(web_dir_usable(dir.to_str().unwrap().as_bytes()));
+        assert!(web_dir_usable(dir.to_str().unwrap().as_bytes()), "a readable folder");
+        std::fs::write(dir.join("file"), b"x").unwrap();
+        assert!(!web_dir_usable(dir.join("file").to_str().unwrap().as_bytes()), "a file is not a folder");
         let _ = std::fs::remove_dir_all(&dir);
         for name in [&b"rustyget.conf"[..], b"x/RUSTYGET.CONF", b"rustyget.conf.bak-20261123-101010", b".rustyget.conf.saving-42"] {
             assert!(web_file_is_forbidden(name), "{}", String::from_utf8_lossy(name));

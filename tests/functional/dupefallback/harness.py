@@ -11511,7 +11511,7 @@ def _spawn_env(t, args, env, output_rel):
     full = dict(os.environ)
     full.update(env)
     with open(t.path(output_rel), 'wb') as output:
-        p = subprocess.Popen(args, stdout=output, stderr=subprocess.STDOUT, env=full, cwd=t.work)
+        p = subprocess.Popen(args, stdout=output, stderr=subprocess.STDOUT, env=full)
     t.procs.append(p)
     return p
 
@@ -11655,7 +11655,7 @@ def scenario_noconfig(daemon, t):
 
     # -D, no file at all (another empty HOME)
     home3 = t.makedirs('nchome-d')
-    r = subprocess.run([binary, '-D', '-o', 'OutputMode=log'], env=dict(os.environ, HOME=home3), cwd=t.work,
+    r = subprocess.run([binary, '-D', '-o', 'OutputMode=log'], env=dict(os.environ, HOME=home3),
                        capture_output=True, timeout=30)
     m = re.search(rb'http://127\.0\.0\.1:(\d+)/', r.stdout)
     if r.returncode != 0 or not m:

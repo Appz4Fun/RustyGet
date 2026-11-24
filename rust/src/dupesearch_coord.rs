@@ -795,7 +795,10 @@ fn inspect_nzb(
     let marked_alive = qh.nzb_get_param(nzb_ptr, ALIVE_PARAM);
     let owned_key_param = qh.nzb_get_param(nzb_ptr, OWNED_KEY_PARAM);
     let is_donor = marked_alive.is_some() || qh.nzb_get_param(nzb_ptr, DONOR_PARAM).is_some();
-    let has_dupe_fleet = qh.nzb_get_param(nzb_ptr, FLEET_PARAM).is_some();
+    // ranked by its fleet (DupeFleet), or added by a fleet grouped by name
+    // and not ranked yet (DupeFleetMember, durable across a restart)
+    let has_dupe_fleet = qh.nzb_get_param(nzb_ptr, FLEET_PARAM).is_some()
+        || qh.nzb_get_param(nzb_ptr, crate::fleethold::MEMBER_PARAM).is_some();
     NzbSnap {
         ptr: nzb_ptr,
         id: s.id,
@@ -922,7 +925,7 @@ fn pick_fleet_marked(host_ctx: *mut c_void, host_cb: DupeHostFn, dq_ptr: usize, 
     let Some(qh) = crate::ffi::queue_host() else {
         return pick.has_dupe_fleet;
     };
-    let marked = |s: &NzbSnap| fleet_own_marks(s.has_dupe_fleet, crate::fleethold::is_probing(&qh, s.ptr));
+    let marked = |s: &NzbSnap| fleet_param_marks(|n| qh.nzb_get_param(s.ptr, n));
     if marked(pick) {
         return true;
     }
@@ -937,11 +940,19 @@ fn pick_fleet_marked(host_ctx: *mut c_void, host_cb: DupeHostFn, dq_ptr: usize, 
     })
 }
 
-/// Whether a copy carries a fleet's own marks: its rank (`DupeFleet`) or the
+/// Whether a copy carries a fleet's own marks: its rank (`DupeFleet`) or its
+/// fleet membership (`DupeFleetMember`, both read as `has_dupe_fleet`), or the
 /// fleet probe's mark (`DupeProbing`). Not a plain hold (`DupeHeld`), which
 /// ordinary DupeSearch backups get from the duplicate check too.
 pub fn fleet_own_marks(dupe_fleet: bool, probing: bool) -> bool {
     dupe_fleet || probing
+}
+
+/// [`fleet_own_marks`] from a copy's parameters (`get` returns a parameter's
+/// value): `DupeFleet` or `DupeFleetMember` present, or `DupeProbing=yes`.
+pub fn fleet_param_marks(get: impl Fn(&[u8]) -> Option<Vec<u8>>) -> bool {
+    let probing = get(crate::fleethold::PROBING_PARAM).is_some_and(|v| v.trim_ascii().eq_ignore_ascii_case(b"yes"));
+    fleet_own_marks(get(FLEET_PARAM).is_some() || get(crate::fleethold::MEMBER_PARAM).is_some(), probing)
 }
 
 /// Seconds a fleet of copies grouped by name may spend checking each copy:
@@ -6389,14 +6400,22 @@ fn fleet_apply_member(
                 }
             }
             // never left marked held or probing in history, whoever filed it
-            for name in [
-                crate::fleethold::PROBING_PARAM,
-                crate::fleethold::HELD_PARAM,
-                crate::fleethold::HELD_PRIORITY_PARAM,
-                crate::fleethold::HELD_FILES_PARAM,
-            ] {
-                qh.nzb_set_param(ptr_, name, None);
+            // its own priority back and the hold's marks gone (as a copy that
+            // leaves the queue is), whoever filed it; the files the hold paused
+            // are resumed first, so a copy returned to the queue from history
+            // never comes back paused
+            if let Some(ids) = qh
+                .nzb_get_param(ptr_, crate::fleethold::HELD_FILES_PARAM)
+                .map(|v| crate::fleethold::parse_held_files(&v))
+            {
+                for i in 0..qh.nzb_file_len(ptr_) {
+                    let f = qh.file_snap(qh.nzb_file_at(ptr_, i));
+                    if ids.contains(&f.id) {
+                        qh.file_set_int(f.ptr, crate::queuesubsys_host::FILE_INT_PAUSED, 0);
+                    }
+                }
             }
+            crate::fleethold::leave_fleet_host(&qh, ptr_);
             qh.dq_history_changed(dq_ptr);
             qh.dq_save(dq_ptr);
             return nzb_id;
@@ -7510,6 +7529,7 @@ pub unsafe fn fleet_append(
                         let params: Vec<(&[u8], &[u8])> = vec![
                             (crate::fleethold::HELD_PARAM, b"yes"),
                             (crate::fleethold::PROBING_PARAM, b"yes"),
+                            (crate::fleethold::MEMBER_PARAM, b"yes"),
                             (crate::fleethold::HELD_PRIORITY_PARAM, &prio),
                         ];
                         let id = scanner_add_external_paused(
@@ -8516,6 +8536,18 @@ mod tests {
         // ordinary DupeSearch backups too); DupeFleet or DupeProbing are
         assert!(!fleet_own_marks(false, false));
         assert!(fleet_own_marks(true, false) && fleet_own_marks(false, true));
+        // review 3: after a restart mid-probe a copy has only DupeHeld and
+        // DupeFleetMember (DupeProbing cleared, no DupeFleet yet): still a
+        // fleet's copy; a plain held DupeSearch backup is not
+        let from = |params: &'static [(&'static [u8], &'static [u8])]| {
+            fleet_param_marks(move |n| params.iter().find(|(k, _)| k.eq_ignore_ascii_case(n)).map(|(_, v)| v.to_vec()))
+        };
+        let member_only = from(&[(b"DupeHeld", b"yes"), (b"DupeFleetMember", b"yes")]);
+        let plain_held = from(&[(b"DupeHeld", b"yes")]);
+        assert!(from(&[(b"DupeProbing", b"yes")]) && from(&[(b"DupeFleet", b"3")]));
+        assert!(!from(&[(b"DupeProbing", b"no")]));
+        assert!(fleet_owns_pick(true, 0, DupeMode::Score, b"dupes:x.2024", member_only));
+        assert!(!fleet_owns_pick(true, 0, DupeMode::Score, b"dupes:x.2024", plain_held));
         assert_eq!(member_place(false), "queued");
         assert_eq!(member_place(true), "in history");
     }

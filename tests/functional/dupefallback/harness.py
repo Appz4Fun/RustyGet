@@ -7372,18 +7372,25 @@ def scenario_watchsearchedkey(daemon, t):
         if g and _params(g).get('DupeHeld') == 'yes':
             held = _params(g)
         time.sleep(0.25)
-    # the backup's add wakes the pick: a pass that starts after the backup is
-    # held proves a plain hold no longer skips it
+    # the backup's add wakes the pick: a pass logged after the backup's hold
+    # (by position in the log, so no poll timing matters) proves a plain hold
+    # no longer skips it
     needle = 'checking the backups of ' + DS_TITLE
-    before = _grep_log(t, needle)
+
+    def pass_after_hold():
+        log = t.read_file('nzbget.log').decode(errors='replace')
+        anchor = log.find('Holding ' + backup)
+        return anchor >= 0 and log.find(needle, anchor) >= 0, anchor >= 0
+    after, anchored = False, False
     deadline = time.time() + 90
-    while time.time() < deadline and _grep_log(t, needle) <= before:
+    while time.time() < deadline and not after:
+        after, anchored = pass_after_hold()
         time.sleep(0.25)
     checked = _grep_log(t, needle)
-    fleet_marks = held is not None and ('DupeFleet' in held or 'DupeProbing' in held)
-    ok = checked > before and held is not None and not fleet_marks
-    return ('watchsearchedkey', ok, 'backup_pass_logs=%d (before the hold %d) backup_held=%s fleet_marks=%s' % (
-        checked, before, held is not None, fleet_marks))
+    fleet_marks = held is not None and any(k in held for k in ('DupeFleet', 'DupeProbing', 'DupeFleetMember'))
+    ok = after and held is not None and not fleet_marks
+    return ('watchsearchedkey', ok, 'backup_pass_logs=%d pass_after_hold=%s anchored=%s backup_held=%s fleet_marks=%s' % (
+        checked, after, anchored, held is not None, fleet_marks))
 
 
 def scenario_watchdeadpick(daemon, t):

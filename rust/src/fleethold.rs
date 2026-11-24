@@ -19,6 +19,10 @@ pub const HELD_PARAM: &[u8] = b"DupeHeld";
 pub const HELD_PRIORITY_PARAM: &[u8] = b"DupeHeldPriority";
 /// `yes` while the fleet's background probe has not classified the copy yet.
 pub const PROBING_PARAM: &[u8] = b"DupeProbing";
+/// `yes` on every copy a fleet grouped by name added, from the moment it is
+/// added: durable, never cleared (a restart in the middle of a probe clears
+/// `DupeProbing`, and `DupeFleet` is written only when the copy is ranked).
+pub const MEMBER_PARAM: &[u8] = b"DupeFleetMember";
 /// The copy's place in its fleet: `0` the primary (downloading), `1` the copy
 /// failover tries next, then `2`, `3`, ...
 pub const ORDER_PARAM: &[u8] = b"DupeFleetOrder";

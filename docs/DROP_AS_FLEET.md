@@ -459,8 +459,10 @@ Review fixes (76a80014 review):
 
 - The backup pass skips only real fleets: a `dupes:` key alone is what
   DupeSearch writes onto every download it searches, so it also needs a
-  fleet's own marks, its rank (`DupeFleet`) or the probe's `DupeProbing`, on
-  itself or on a queued copy of its key (`pick_fleet_marked`). A plain
+  fleet's own marks, its rank (`DupeFleet`), its membership
+  (`DupeFleetMember=yes`, written when a fleet adds the copy and never cleared,
+  so a restart in the middle of a probe keeps it) or the probe's `DupeProbing`,
+  on itself or on a queued copy of its key (`pick_fleet_marked`). A plain
   `DupeHeld` is no fleet mark: the duplicate check holds ordinary DupeSearch
   backups too. Ordinary searched downloads keep their retry and re-ranks,
   with a held backup as well (functional `watchsearchedkey`).

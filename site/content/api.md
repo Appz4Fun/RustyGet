@@ -131,6 +131,7 @@ RustyGet also stores its findings as NZB parameters, which the API returns in `P
 | `DupeProjected`, `DupeParked` | The projected health in percent of a download judged from a sample (dead or doomed), and the share of its tried articles that arrived when it was kept as a donor. |
 | `DupeFleet` | The member's rank in its `appendfleet` call. |
 | `DupeHeld`, `DupeProbing` | `yes` on a copy of a fleet held in Downloads (paused, priority -100), and while the fleet's probe has not classified it yet. |
+| `DupeFleetMember` | `yes` on every copy a fleet of copies grouped by name added, from the moment it is added. |
 | `DupeFleetOrder`, `DupeFleetPrimary` | The copy's place in its fleet (`0` the primary, `1` the copy failover takes next; a copy still being probed is never `1`), and the primary's NZBID. |
 | `DupeEase` | How easy the copy is to borrow into: `0` bare or split files, `1` stored archive, `2` compressed, `3` encrypted. |
 

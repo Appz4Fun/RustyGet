@@ -1670,6 +1670,48 @@ fn a_rename_onto_a_given_name_waits_for_the_rollback_and_survives() {
 }
 
 #[test]
+fn file_io_through_a_write_permit_never_waits_for_target_naming() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900188;
+    let context = bound_session(&fx, &set, id);
+    let entry = active_streaming_session(id).unwrap();
+    let file_id = set.main.as_ref().unwrap().recoverable_file_ids[0];
+    let target = fx.0.join("missing-target.bin");
+    let other = fx.0.join("completed.part01.rar");
+    std::fs::write(&other, b"x").unwrap();
+    // While the admission names its missing target (holding the naming lock), a completion
+    // or cleanup removes a file through perform_io: it must finish, not wait for the lock.
+    let finished = std::cell::Cell::new(None);
+    let calls = std::cell::Cell::new(0);
+    let io_during_naming = || {
+        calls.set(calls.get() + 1);
+        if calls.get() == 3 {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let source =
+                crate::parlive::source_write_context(id, 41, &fx.0, b"completed.part01.rar")
+                    .unwrap();
+            let path = other.clone();
+            std::thread::spawn(move || {
+                let _ = sender.send(source.perform_io(|| std::fs::remove_file(&path)).is_ok());
+            });
+            finished.set(receiver.recv_timeout(std::time::Duration::from_secs(5)).ok());
+        }
+        false
+    };
+    let files =
+        open_live_repair_targets(id, &entry, &[(target.clone(), file_id)], io_during_naming)
+            .unwrap();
+    assert_eq!(finished.get(), Some(true), "perform_io hung behind the naming lock");
+    assert!(!other.exists());
+    drop(files);
+    drop(entry);
+    drop(context);
+    streaming_session_forget(id);
+    crate::parlive::forget_download_writes(id);
+}
+
+#[test]
 fn stale_repair_temps_of_earlier_daemons_are_removed() {
     let fx = Fixture::new();
     let stale = fx.0.join(".rustyget-repair-1-00000000deadbeef-7.tmp");

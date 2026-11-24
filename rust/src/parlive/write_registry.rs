@@ -231,10 +231,9 @@ impl SourceWriteContext {
     /// and leaves live PAR's sources valid.
     #[track_caller]
     pub fn perform_io<T>(&self, action: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<T> {
-        // Removals and moves in the job folder never interleave with a live repair naming
-        // (or rolling back) its targets there.
-        let naming = target_naming_lock(self.job);
-        let _naming = naming.lock().unwrap_or_else(|e| e.into_inner());
+        // No target naming lock here: the permit already excludes a live repair admission
+        // (its write barrier drains permits and grants none while up), and taking the lock
+        // before waiting for a permit would invert the admission's barrier-then-lock order.
         let _permit = self.permit().map_err(|_| {
             std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
@@ -511,11 +510,14 @@ pub(crate) fn create_repair_temp(
     repair_root(coordinator, path)?.create_temp_exclusive()
 }
 
-/// Per-download lock around naming live repair targets and around every rename, hard link
-/// or removal in the download's folder (the direct renamer, file completion, cleanup), so a
-/// file moved onto a target name can never land between a rollback's identity check and its
-/// unlink. Holders never take the queue lock or the cache flush lock while holding it; the
-/// movers may hold those while they wait for it.
+/// Per-download lock around naming live repair targets (and rolling them back) and around
+/// the renames and hard links in the download's folder that take no write permit: the
+/// direct renamer's (`rename_file_on_disk`, `try_create_hard_link_host`). A file moved onto
+/// a target name can never land between a rollback's identity check and its unlink. Moves
+/// through `SourceWriteContext::perform_io` are excluded by their permit instead (an
+/// admission's write barrier grants none), so they never take this lock. An admission
+/// holding it takes no queue lock, cache flush lock or permit; the direct renamer may hold
+/// the queue lock while it waits for it.
 pub(crate) fn target_naming_lock(job: i32) -> Arc<std::sync::Mutex<()>> {
     static LOCKS: std::sync::LazyLock<
         std::sync::Mutex<std::collections::HashMap<i32, std::sync::Weak<std::sync::Mutex<()>>>>,

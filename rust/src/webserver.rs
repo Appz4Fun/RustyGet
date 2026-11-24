@@ -31,6 +31,18 @@ pub enum Header<'a> {
     AuthToken(&'a [u8]),
     ForwardedFor(&'a [u8]),
     IfNoneMatch(&'a [u8]),
+    /// the Host the browser asked for (for the same-origin check)
+    Host(&'a [u8]),
+    /// the page a browser request came from
+    Referer(&'a [u8]),
+    /// the Host a reverse proxy was asked for
+    ForwardedHost(&'a [u8]),
+    /// what the browser says about where the request comes from
+    SecFetchSite(&'a [u8]),
+    /// another Sec-Fetch-* header: only browsers send these
+    SecFetchOther,
+    /// RFC 7239 Forwarded (its host= is the browser's host behind a proxy)
+    Forwarded(&'a [u8]),
     KeepAlive,
     /// the empty line: the headers end
     End,
@@ -83,6 +95,18 @@ pub fn header(buffer: &[u8], auth_info_empty: bool) -> Header<'_> {
         Header::ForwardedFor(value(17))
     } else if prefix(line, "If-None-Match: ") {
         Header::IfNoneMatch(value(15))
+    } else if prefix(line, "Host: ") {
+        Header::Host(value(6))
+    } else if prefix(line, "Referer: ") {
+        Header::Referer(value(9))
+    } else if prefix(line, "X-Forwarded-Host: ") {
+        Header::ForwardedHost(value(18))
+    } else if prefix(line, "Sec-Fetch-Site: ") {
+        Header::SecFetchSite(value(16))
+    } else if prefix(line, "Sec-Fetch-") {
+        Header::SecFetchOther
+    } else if prefix(line, "Forwarded: ") {
+        Header::Forwarded(value(11))
     } else if prefix(line, "Connection: keep-alive") {
         Header::KeepAlive
     } else if line.is_empty() {
@@ -270,6 +294,12 @@ pub fn format_options_response(keep_alive: bool, origin: &[u8], version: &[u8]) 
     let mut out = Vec::with_capacity(320);
     out.extend_from_slice(b"HTTP/1.1 200 OK\r\nConnection: ");
     out.extend_from_slice(if keep_alive { b"keep-alive" } else { b"close" });
+    if origin.is_empty() {
+        out.extend_from_slice(b"\r\nContent-Length: 0\r\nServer: RustyGet-");
+        out.extend_from_slice(version);
+        out.extend_from_slice(b"\r\n\r\n");
+        return truncate_bstring_1024(out);
+    }
     out.extend_from_slice(
         b"\r\n\
 Content-Length: 0\r\n\
@@ -353,19 +383,18 @@ pub fn format_body_response_header(
     });
     out.extend_from_slice(b"Connection: ");
     out.extend_from_slice(if keep_alive { b"keep-alive" } else { b"close" });
-    out.extend_from_slice(
-        b"\r\n\
-Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
-Access-Control-Allow-Origin: ",
-    );
-    out.extend_from_slice(origin);
-    out.extend_from_slice(
-        b"\r\n\
+    out.extend_from_slice(b"\r\n");
+    if !origin.is_empty() {
+        out.extend_from_slice(b"Access-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Origin: ");
+        out.extend_from_slice(origin);
+        out.extend_from_slice(
+            b"\r\n\
 Access-Control-Allow-Credentials: true\r\n\
 Access-Control-Max-Age: 86400\r\n\
-Access-Control-Allow-Headers: Content-Type, Authorization\r\n\
-Set-Cookie: Auth-Type=",
-    );
+Access-Control-Allow-Headers: Content-Type, Authorization\r\n",
+        );
+    }
+    out.extend_from_slice(b"Set-Cookie: Auth-Type=");
     out.extend_from_slice(if form_auth { b"form" } else { b"http" });
     out.extend_from_slice(b"; SameSite=Lax\r\nSet-Cookie: Auth-Token=");
     out.extend_from_slice(auth_token);
@@ -471,6 +500,156 @@ pub const HM_OPTIONS: i32 = 2;
 const ERR_HTTP_BAD_REQUEST: &[u8] = b"400 Bad Request";
 const ERR_HTTP_NOT_FOUND: &[u8] = b"404 Not Found";
 const ERR_HTTP_SERVICE_UNAVAILABLE: &[u8] = b"503 Service Unavailable";
+
+/// Is `url` (an Origin or Referer value) on `host`, the Host the browser
+/// sent: the same scheme-less authority, compared without case?
+pub fn same_origin(url: &[u8], host: &[u8]) -> bool {
+    if host.is_empty() {
+        return false;
+    }
+    let lower = url.to_ascii_lowercase();
+    let rest = if lower.starts_with(b"http://") {
+        &url[7..]
+    } else if lower.starts_with(b"https://") {
+        &url[8..]
+    } else {
+        return false;
+    };
+    let authority = &rest[..find_byte(rest, b'/').unwrap_or(rest.len())];
+    authority.eq_ignore_ascii_case(host.trim_ascii())
+}
+
+/// The host part of a Host header or URL authority, without the port and
+/// without the brackets of an IPv6 literal, in lower case.
+fn host_name_of(authority: &[u8]) -> Vec<u8> {
+    let a = authority.trim_ascii();
+    let host = if let Some(rest) = a.strip_prefix(b"[") {
+        &rest[..find_byte(rest, b']').unwrap_or(rest.len())]
+    } else {
+        match a.iter().rposition(|&b| b == b':') {
+            // one colon: "name:port"; more: an IPv6 literal without brackets
+            Some(i) if a.iter().filter(|&&b| b == b':').count() == 1 => &a[..i],
+            _ => a,
+        }
+    };
+    // "localhost." is localhost: a fully qualified name may end in a dot
+    let host = host.strip_suffix(b".").unwrap_or(host);
+    host.to_ascii_lowercase()
+}
+
+/// The host= of the first element of an RFC 7239 Forwarded header.
+fn forwarded_header_host(value: &[u8]) -> Vec<u8> {
+    let first = value.split(|&b| b == b',').next().unwrap_or_default();
+    for pair in first.split(|&b| b == b';') {
+        let pair = pair.trim_ascii();
+        if pair.len() > 5 && pair[..5].eq_ignore_ascii_case(b"host=") {
+            let v = &pair[5..];
+            let v = v.strip_prefix(b"\"").and_then(|v| v.strip_suffix(b"\"")).unwrap_or(v);
+            return v.to_vec();
+        }
+    }
+    Vec::new()
+}
+
+/// Logs a refused API call, at most one line per 10 seconds (with how many
+/// were refused in between): a page retrying can't flood the log.
+fn log_refusal(text: &[u8], log_msg: &mut dyn FnMut(i32, &[u8])) {
+    static LAST: std::sync::Mutex<Option<(std::time::Instant, u32)>> = std::sync::Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = std::time::Instant::now();
+    match *last {
+        Some((at, ref mut skipped)) if now.duration_since(at) < std::time::Duration::from_secs(10) => {
+            *skipped = skipped.saturating_add(1);
+        }
+        prev => {
+            let mut w = text.to_vec();
+            if let Some((_, n)) = prev.filter(|&(_, n)| n > 0) {
+                w.extend_from_slice(format!(" ({n} similar refusals suppressed since the last report)").as_bytes());
+            }
+            *last = Some((now, 0));
+            drop(last);
+            log_msg(1, &w);
+        }
+    }
+}
+
+/// Is `name` one of ControlHostnames (separated by commas, semicolons or
+/// spaces; "*.example.com" matches its subdomains)?
+fn in_host_list(name: &[u8], list: &[u8]) -> bool {
+    !name.is_empty()
+        && list
+            .split(|&b| matches!(b, b',' | b';' | b' ' | b'\t'))
+            .map(<[u8]>::trim_ascii)
+            .filter(|e| !e.is_empty())
+            .any(|e| {
+                let e = e.to_ascii_lowercase();
+                let e = e.strip_suffix(b".").unwrap_or(&e).to_vec();
+                match e.strip_prefix(b"*.") {
+                    Some(domain) => name.len() > domain.len() + 1 && name.ends_with(domain) && name[name.len() - domain.len() - 1] == b'.',
+                    None => name == e.as_slice(),
+                }
+            })
+}
+
+/// May a request without real credentials name this Host? An IP literal,
+/// localhost, ControlIP or a name in ControlHostnames. Anything else could
+/// be a DNS rebinding attack: a web site whose name now points at this
+/// computer. No Host header (an old tool) is fine.
+pub fn host_allowed(host: &[u8], control_ip: &[u8], control_hostnames: &[u8]) -> bool {
+    if host.trim_ascii().is_empty() {
+        return true;
+    }
+    let name = host_name_of(host);
+    let text = String::from_utf8_lossy(&name);
+    text.parse::<std::net::IpAddr>().is_ok()
+        || name == b"localhost"
+        || name.ends_with(b".localhost")
+        || (!control_ip.is_empty() && name == host_name_of(control_ip))
+        || in_host_list(&name, control_hostnames)
+}
+
+/// Is the Origin or Referer `url` one of ControlHostnames?
+fn url_in_host_list(url: &[u8], list: &[u8]) -> bool {
+    let lower = url.to_ascii_lowercase();
+    let rest = if lower.starts_with(b"http://") {
+        &url[7..]
+    } else if lower.starts_with(b"https://") {
+        &url[8..]
+    } else {
+        return false;
+    };
+    in_host_list(&host_name_of(&rest[..find_byte(rest, b'/').unwrap_or(rest.len())]), list)
+}
+
+/// The 403 answer to an API call refused without real credentials, saying
+/// why and what to do (the web page shows the text).
+pub fn format_refusal_response(reason: &[u8], keep_alive: bool, version: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let mut body = Vec::with_capacity(400);
+    body.extend_from_slice(b"RustyGet refused this request: ");
+    body.extend_from_slice(reason);
+    body.extend_from_slice(
+        b" Set a password in Settings > Security (ControlPassword), or add the host name you open RustyGet with to ControlHostnames. Behind a reverse proxy, set a password.",
+    );
+    let mut header = Vec::with_capacity(256);
+    header.extend_from_slice(b"HTTP/1.1 403 Forbidden\r\nConnection: ");
+    header.extend_from_slice(if keep_alive { b"keep-alive" } else { b"close" });
+    header.extend_from_slice(b"\r\nContent-Length: ");
+    header.extend_from_slice(body.len().to_string().as_bytes());
+    header.extend_from_slice(b"\r\nContent-Type: text/plain; charset=utf-8\r\nServer: RustyGet-");
+    header.extend_from_slice(version);
+    header.extend_from_slice(b"\r\n\r\n");
+    (header, body)
+}
+
+/// Does a browser request come from another site? An Origin that is not the
+/// daemon's own (Host) one, "null" included, or without an Origin a Referer
+/// from elsewhere. Requests from scripts and tools send neither.
+pub fn cross_site(origin: &[u8], referer: &[u8], host: &[u8]) -> bool {
+    if !origin.is_empty() {
+        return !same_origin(origin, host);
+    }
+    !referer.is_empty() && !same_origin(referer, host)
+}
 const MAX_UNCOMPRESSED_SIZE: usize = 500;
 
 static SERVER_AUTH_TOKENS: std::sync::OnceLock<[[u8; 48]; 3]> = std::sync::OnceLock::new();
@@ -535,7 +714,52 @@ pub fn gzip_compress_body(body: &[u8]) -> Option<Vec<u8>> {
 /// configuration file kept there holds passwords).
 pub(crate) fn web_file_is_forbidden(path: &[u8]) -> bool {
     let base = &path[crate::paths::base_file_name(path)..];
-    base.len() >= 5 && base[base.len() - 5..].eq_ignore_ascii_case(b".conf")
+    // ".conf" anywhere: rustyget.conf, its backups (rustyget.conf.bak-...) and
+    // the file being saved (.rustyget.conf.saving-...)
+    base.windows(5).any(|w| w.eq_ignore_ascii_case(b".conf"))
+        || base.windows(5).any(|w| w.eq_ignore_ascii_case(b".bak-"))
+        || base.windows(8).any(|w| w.eq_ignore_ascii_case(b".saving-"))
+        || (base.len() >= 4 && base[base.len() - 4..].eq_ignore_ascii_case(b".bak"))
+}
+
+mod bundle {
+    include!(concat!(env!("OUT_DIR"), "/webui_bundle.rs"));
+}
+
+/// A file of the web interface built into the binary (`rel` without the
+/// leading `/`, e.g. "index.html" or "lib/jquery.min.js").
+pub(crate) fn embedded_file(rel: &[u8]) -> Option<&'static [u8]> {
+    bundle::FILES
+        .iter()
+        .find(|(name, _)| name.as_bytes() == rel)
+        .map(|(_, data)| *data)
+}
+
+/// Is a web interface built in?
+pub(crate) fn has_embedded_webui() -> bool {
+    embedded_file(b"index.html").is_some()
+}
+
+/// Is WebDir set to a folder that can be read? Then its files are served
+/// (and the built-in ones only for a file it does not have); otherwise the
+/// built-in web interface is.
+pub(crate) fn web_dir_usable(web_dir: &[u8]) -> bool {
+    if web_dir.is_empty() || web_dir.contains(&0) {
+        return false;
+    }
+    std::fs::read_dir(crate::cleanup::bytes_to_path_buf(web_dir)).is_ok()
+}
+
+/// A built-in file with the trailing NUL the callers expect.
+fn load_embedded_file(rel: &[u8]) -> Option<Vec<u8>> {
+    if web_file_is_forbidden(rel) {
+        return None;
+    }
+    let data = embedded_file(rel)?;
+    let mut buf = Vec::with_capacity(data.len() + 1);
+    buf.extend_from_slice(data);
+    buf.push(0);
+    Some(buf)
 }
 
 /// Loads a static file from WebDir (with a trailing NUL), but never a `.conf`
@@ -595,6 +819,10 @@ pub struct WebServeConfig<'a> {
     pub form_auth: bool,
     pub gzip_enabled: bool,
     pub debug_build: bool,
+    /// ControlIP, a Host requests without real credentials may name
+    pub control_ip: &'a [u8],
+    /// ControlHostnames: other names RustyGet is opened with
+    pub control_hostnames: &'a [u8],
 }
 
 /// Serves a single HTTP request starting after the 4-byte `signature` (`"POST"`, `"GET "`, `"OPTI"`).
@@ -646,6 +874,12 @@ where
     let mut auth_token = [0u8; TOKEN_SIZE];
     let mut origin: Vec<u8> = Vec::new();
     let mut forwarded_for: Vec<u8> = Vec::new();
+    let mut host_hdr: Vec<u8> = Vec::new();
+    let mut referer: Vec<u8> = Vec::new();
+    let mut forwarded_host: Vec<u8> = Vec::new();
+    let mut sec_fetch_site: Vec<u8> = Vec::new();
+    let mut sec_fetch_any = false;
+    let mut forwarded_rfc: Vec<u8> = Vec::new();
     let mut old_etag: Vec<u8> = Vec::new();
     let mut keep_alive = false;
     let mut content_len: i32 = 0;
@@ -694,6 +928,15 @@ where
                 }
                 Header::ForwardedFor(v) => forwarded_for = c_bytes(v).to_vec(),
                 Header::IfNoneMatch(v) => old_etag = c_bytes(v).to_vec(),
+                Header::Host(v) => host_hdr = c_bytes(v).to_vec(),
+                Header::Referer(v) => referer = c_bytes(v).to_vec(),
+                Header::ForwardedHost(v) => forwarded_host = c_bytes(v).to_vec(),
+                Header::SecFetchSite(v) => {
+                    sec_fetch_site = c_bytes(v).to_vec();
+                    sec_fetch_any = true;
+                }
+                Header::SecFetchOther => sec_fetch_any = true,
+                Header::Forwarded(v) => forwarded_rfc = forwarded_header_host(c_bytes(v)),
                 Header::KeepAlive => keep_alive = true,
                 Header::End => break,
                 Header::Other => {}
@@ -748,6 +991,34 @@ where
         return false;
     }
 
+    // CORS: never reflect another site's Origin (with credentials it would
+    // let that site read the answers); the daemon's own pages need nothing
+    // (behind a reverse proxy the browser's host is X-Forwarded-Host)
+    // (an Origin or Referer named in ControlHostnames is the daemon's own too)
+    if forwarded_host.trim_ascii().is_empty() {
+        forwarded_host = forwarded_rfc;
+    } else if let Some(i) = find_byte(&forwarded_host, b',') {
+        // a chain of proxies: the first one is the browser's
+        forwarded_host.truncate(i);
+    }
+    // only a browser sends Origin, Referer or Sec-Fetch-*: API tools
+    // (Sonarr, scripts) send none and are never refused here
+    let browser_like = !origin.is_empty() || !referer.is_empty() || sec_fetch_any;
+    let listed = |u: &[u8]| !u.is_empty() && url_in_host_list(u, cfg.control_hostnames);
+    // X-Forwarded-Host and Forwarded are set by whoever sends the request
+    // (a page's fetch() can add them, and many proxies pass them on): they
+    // only ever make a request stricter, never lift a check. Behind a proxy
+    // the browser's own name belongs in ControlHostnames.
+    let from_page = (!origin.is_empty() || !referer.is_empty())
+        && (!cross_site(&origin, &referer, &host_hdr)
+            || (if origin.is_empty() { listed(&referer) } else { listed(&origin) }));
+    let from_elsewhere = (cross_site(&origin, &referer, &host_hdr)
+        && !(if origin.is_empty() { listed(&referer) } else { listed(&origin) }))
+        || sec_fetch_site.trim_ascii().eq_ignore_ascii_case(b"cross-site");
+    if !origin.is_empty() && !same_origin(&origin, &host_hdr) && !listed(&origin) {
+        origin.clear();
+    }
+
     if http_method == HM_OPTIONS {
         let hdr = format_options_response(keep_alive, &origin, cfg.version);
         let mut msg = Vec::with_capacity(15 + hdr.len());
@@ -758,6 +1029,7 @@ where
         return keep_alive;
     }
 
+    let mut url_credentials = false;
     match parse_url(&url) {
         Url::Redirect(target) => {
             let hdr = format_redirect_response(c_bytes(&target), keep_alive, cfg.version);
@@ -773,6 +1045,7 @@ where
             auth: maybe_auth,
         } => {
             if let Some(a) = maybe_auth {
+                url_credentials = true;
                 let n = a.len().min(AUTH_INFO_SIZE - 1);
                 auth_info.fill(0);
                 auth_info[..n].copy_from_slice(&a[..n]);
@@ -786,6 +1059,52 @@ where
     }
 
     let rpc_request = crate::rpcroute::protocol(&url) != crate::rpcroute::RP_UNDEFINED;
+    // Without real credentials (no password, the stock one anybody can look
+    // up, or an address in AuthorizedIP) any web page could drive the daemon
+    // through the browser. Then an API call must name a Host this computer
+    // answers to (no DNS rebinding) and must not come from another site.
+    let password = cfg.credentials.control_password.unwrap_or_default();
+    let ip_ok = cfg.credentials.authorized_ip.is_some_and(|a| !a.is_empty())
+        && is_authorized_ip(cfg.credentials.authorized_ip.unwrap_or_default(), cfg.remote_addr, lower);
+    let weak = password.is_empty() || password == b"tegbzn6789" || ip_ok;
+    if rpc_request && weak && browser_like {
+        let allowed = |h: &[u8]| host_allowed(h, cfg.control_ip, cfg.control_hostnames);
+        let bad_name = |h: &[u8]| {
+            let mut w = b"it names the host \"".to_vec();
+            w.extend_from_slice(&host_name_of(h));
+            w.extend_from_slice(b"\", which is not this computer's address or a name in ControlHostnames, and no password protects RustyGet (a web site could be using that name to reach it).");
+            w
+        };
+        let named = |h: &[u8]| !h.trim_ascii().is_empty() && in_host_list(&host_name_of(h), cfg.control_hostnames);
+        let fetch_site = sec_fetch_site.trim_ascii().to_ascii_lowercase();
+        let why: Option<Vec<u8>> = if !allowed(&host_hdr) {
+            Some(bad_name(&host_hdr))
+        } else if !forwarded_host.trim_ascii().is_empty() && !allowed(&forwarded_host) {
+            Some(bad_name(&forwarded_host))
+        } else if from_elsewhere {
+            Some(b"it comes from another web site, and no password protects RustyGet.".to_vec())
+        } else if !from_page
+            && ((fetch_site == b"same-origin" && !named(&host_hdr)) || fetch_site == b"same-site")
+        {
+            // (same-site: a sibling subdomain, which a listed Host name
+            // does not vouch for)
+            // a page behind a proxy that rewrites Host (nginx's default)
+            // looks just like RustyGet's own page without Origin or Referer
+            Some(b"the browser did not show that it comes from RustyGet's own page (no Origin or Referer), and no password protects RustyGet; a web site behind a reverse proxy could look the same.".to_vec())
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            let mut w = b"Refused an API call: ".to_vec();
+            w.extend_from_slice(&why);
+            w.extend_from_slice(if url_credentials { b" (credentials in the URL)" } else { b"" });
+            log_refusal(&w, &mut log_msg);
+            let (hdr, body) = format_refusal_response(&why, keep_alive, cfg.version);
+            let _ = send_all(&hdr);
+            let _ = send_all(&body);
+            return keep_alive;
+        }
+    }
     let check = check_credentials(
         &cfg.credentials,
         cfg.remote_addr,
@@ -1022,7 +1341,9 @@ where
         return keep_alive;
     }
 
-    if cfg.web_dir.is_empty() {
+    // WebDir when it holds the web interface, else the one built in
+    let embedded = !web_dir_usable(cfg.web_dir);
+    if embedded && !has_embedded_webui() {
         send_error(
             ERR_HTTP_SERVICE_UNAVAILABLE,
             true,
@@ -1065,7 +1386,12 @@ where
             disk_filename.push(crate::paths::PATH_SEPARATOR);
             disk_filename.extend_from_slice(part);
 
-            let Some(buf) = load_web_file(&disk_filename, cfg.config_file) else {
+            let loaded = if embedded {
+                load_embedded_file(part)
+            } else {
+                load_web_file(&disk_filename, cfg.config_file).or_else(|| load_embedded_file(part))
+            };
+            let Some(buf) = loaded else {
                 let mut w = Vec::with_capacity(32 + part.len());
                 w.extend_from_slice(b"Web-Server: ");
                 w.extend_from_slice(ERR_HTTP_NOT_FOUND);
@@ -1119,7 +1445,15 @@ where
             log_msg(0, &dbg);
         }
 
-        let Some(mut buf) = load_web_file(&filename, cfg.config_file) else {
+        let mut rel = url.strip_prefix(b"/").unwrap_or(&url).to_vec();
+        rel.extend_from_slice(def_res);
+        let loaded = if embedded {
+            load_embedded_file(&rel)
+        } else {
+            // WebDir's own file first; one it lacks (an empty WebDir) comes built in
+            load_web_file(&filename, cfg.config_file).or_else(|| load_embedded_file(&rel))
+        };
+        let Some(mut buf) = loaded else {
             let base = &filename[crate::paths::base_file_name(&filename)..];
             let ignorable = web_is_ignorable_404(base);
             send_error(
@@ -1284,6 +1618,79 @@ mod tests {
     }
 
     #[test]
+    fn other_sites_are_never_given_cors_access() {
+        assert!(same_origin(b"http://127.0.0.1:6789", b"127.0.0.1:6789"));
+        assert!(same_origin(b"HTTPS://NAS.local:6789/x", b"nas.local:6789"));
+        assert!(!same_origin(b"http://evil.example", b"127.0.0.1:6789"));
+        assert!(!same_origin(b"null", b"127.0.0.1:6789"));
+        assert!(!same_origin(b"http://127.0.0.1:6789", b""));
+        assert!(!cross_site(b"", b"", b"127.0.0.1:6789"), "tools send neither");
+        assert!(!cross_site(b"http://127.0.0.1:6789", b"", b"127.0.0.1:6789"));
+        assert!(cross_site(b"http://evil.example", b"", b"127.0.0.1:6789"));
+        assert!(cross_site(b"null", b"", b"127.0.0.1:6789"));
+        assert!(cross_site(b"", b"http://evil.example/page", b"127.0.0.1:6789"));
+        assert!(!cross_site(b"", b"http://127.0.0.1:6789/", b"127.0.0.1:6789"));
+        let none = String::from_utf8(format_options_response(true, b"", b"1")).unwrap();
+        assert!(!none.contains("Access-Control"), "{none}");
+        let body = String::from_utf8(format_body_response_header(false, true, b"", false, b"t", 1, None, false, None, b"1")).unwrap();
+        assert!(!body.contains("Access-Control"), "{body}");
+        let own = String::from_utf8(format_body_response_header(false, true, b"http://a:1", false, b"t", 1, None, false, None, b"1")).unwrap();
+        assert!(own.contains("Access-Control-Allow-Origin: http://a:1\r\n"), "{own}");
+        // DNS rebinding: without real credentials only this computer's names
+        for ok in [&b"127.0.0.1:6789"[..], b"[::1]:6789", b"::1", b"192.168.1.5", b"localhost:6789", b"app.localhost",
+            b"nas.lan:6789", b"NZB.Example.COM", b"x.home.example", b""] {
+            assert!(host_allowed(ok, b"nas.lan", b"nzb.example.com, *.home.example"), "{}", String::from_utf8_lossy(ok));
+        }
+        for bad in [&b"evil.example"[..], b"evil.example:6789", b"home.example", b"localhost.evil.example", b"nzb.example.com.evil"] {
+            assert!(!host_allowed(bad, b"nas.lan", b"nzb.example.com, *.home.example"), "{}", String::from_utf8_lossy(bad));
+        }
+        assert!(!host_allowed(b"nas.lan", b"0.0.0.0", b""));
+        // a trailing dot is the same name; IPv6 zone ids are refused
+        assert!(host_allowed(b"localhost.:6789", b"", b""));
+        assert!(host_allowed(b"nzb.example.com.", b"", b"nzb.example.com"));
+        assert!(host_allowed(b"nzb.example.com", b"", b"nzb.example.com."));
+        assert!(!host_allowed(b"[fe80::1%25en0]:6789", b"", b""));
+        assert_eq!(forwarded_header_host(b"for=1.2.3.4;host=\"evil.example\";proto=https, host=x"), b"evil.example");
+        assert_eq!(forwarded_header_host(b"For=1.2.3.4; Host=nzb.example.com"), b"nzb.example.com");
+        assert_eq!(forwarded_header_host(b"for=1.2.3.4"), b"");
+        assert_eq!(header(b"Sec-Fetch-Mode: cors", true), Header::SecFetchOther);
+        assert_eq!(header(b"Forwarded: host=a", true), Header::Forwarded(b"host=a"));
+        assert!(url_in_host_list(b"https://nzb.example.com/x", b"nzb.example.com"));
+        assert!(!url_in_host_list(b"https://evil.example/x", b"nzb.example.com"));
+        let (head, body) = format_refusal_response(b"it comes from another web site.", true, b"1");
+        assert!(String::from_utf8_lossy(&head).starts_with("HTTP/1.1 403 Forbidden\r\n"));
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("Settings > Security") && body.contains("ControlHostnames"), "{body}");
+        assert_eq!(header(b"Sec-Fetch-Site: cross-site", true), Header::SecFetchSite(b"cross-site"));
+        assert_eq!(header(b"Host: 127.0.0.1:6789", true), Header::Host(b"127.0.0.1:6789"));
+        assert_eq!(header(b"Referer: http://x/", true), Header::Referer(b"http://x/"));
+    }
+
+    #[test]
+    fn the_web_interface_is_built_in_and_config_copies_are_never_served() {
+        assert!(has_embedded_webui());
+        let index = embedded_file(b"index.html").unwrap();
+        assert!(index.windows(8).any(|w| w == b"setup.js"));
+        assert!(embedded_file(b"lib/jquery.min.js").is_some());
+        assert!(embedded_file(b"../rustyget.conf").is_none());
+        assert!(!web_dir_usable(b""));
+        assert!(!web_dir_usable(b"/nonexistent/webui"));
+        let dir = std::env::temp_dir().join(format!("rg-webdir-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(web_dir_usable(dir.to_str().unwrap().as_bytes()), "a readable folder");
+        std::fs::write(dir.join("file"), b"x").unwrap();
+        assert!(!web_dir_usable(dir.join("file").to_str().unwrap().as_bytes()), "a file is not a folder");
+        let _ = std::fs::remove_dir_all(&dir);
+        for name in [&b"rustyget.conf"[..], b"x/RUSTYGET.CONF", b"rustyget.conf.bak-20261123-101010", b".rustyget.conf.saving-42",
+            b"my.cfg.bak-20261123-101010", b"settings.ini.bak", b".my.cfg.saving-7"] {
+            assert!(web_file_is_forbidden(name), "{}", String::from_utf8_lossy(name));
+            assert!(load_embedded_file(name).is_none());
+        }
+        assert!(!web_file_is_forbidden(b"config.js"));
+        assert_eq!(load_embedded_file(b"index.html").unwrap().last(), Some(&0));
+    }
+
+    #[test]
     fn test_web_functions() {
         assert!(web_is_safe_url_chars(b"/index.html?a+1_2-3"));
         assert!(!web_is_safe_url_chars(b"/../secret"));
@@ -1354,6 +1761,8 @@ mod tests {
                 form_auth: false,
                 gzip_enabled,
                 debug_build: false,
+                control_ip: b"127.0.0.1",
+                control_hostnames: b"",
             };
             let lower = Lower::Fold(&ascii);
             let mut out = Vec::new();

@@ -309,6 +309,11 @@ var Status = (new function($)
 				function(){RPC.call('pausepost', [],
 				function(){RPC.call('pausescan', [], Refresher.update)})});
 		}
+		else if (typeof Setup !== 'undefined' && Setup.blocked())
+		{
+			// nothing can download before setup is done: say what is missing
+			Setup.explainBlocked();
+		}
 		else
 		{
 			// resume all activities

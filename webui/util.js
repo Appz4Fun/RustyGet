@@ -905,6 +905,12 @@ var RPC = (new function($)
 					{
 						res = _this.connectErrorMessage;
 					}
+					else if (xhr.status === 403 && xhr.responseText)
+					{
+						// the daemon says why it refused (no password, an unknown host
+						// name or another site) and what to do
+						res = Util.textToHtml(xhr.responseText);
+					}
 					else
 					{
 						res = 'Invalid Status: ' + xhr.status;

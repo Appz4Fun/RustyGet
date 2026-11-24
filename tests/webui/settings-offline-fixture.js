@@ -21,7 +21,10 @@ async function installOfflineModel(page, base) {
       const rpc = route.request().postDataJSON();
       const result = { loadconfig: options, config: options, configtemplates: [{ Name: '', Template: template }],
         backbones: { Backbones: [], Host: '', Match: 'skipped', Provider: null, Matches: [] },
-        parpresetdetect: { Running: false, CPUs: 8, Presets: { large: { ParBuffer: 1024, ParThreads: 0, ParPauseQueue: false } } } }[rpc.method];
+        parpresetdetect: { Running: false, CPUs: 8, Presets: { large: { ParBuffer: 1024, ParThreads: 0, ParPauseQueue: false } } },
+        // Settings checks folders as they are typed: every fixture folder is usable
+        checkpath: { Path: String((rpc.params || [])[0] || ''), State: 'ok', Message: 'This folder exists and RustyGet can write to it.' },
+        checkconfig: [] }[rpc.method];
       assert.notEqual(result, undefined, 'Offline fixture must account for every read RPC: ' + rpc.method);
       return route.fulfill({ contentType: 'application/json', json: { result, id: rpc.id } });
     }

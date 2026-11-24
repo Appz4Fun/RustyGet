@@ -6,7 +6,7 @@
 //! passed as `--cfg rustyget_tier="..."`, and linked into the binary.
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The `-C target-cpu` value in the flags cargo hands rustc, if any.
@@ -31,6 +31,7 @@ fn main() {
     println!("cargo:rerun-if-changed=tiercheck.rs");
     println!("cargo:rerun-if-changed=build.rs");
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
+    bundle_webui(&out);
     let target = env::var("TARGET").expect("TARGET");
     let rustc = env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
     let obj = out.join("rustyget_tiercheck.o");
@@ -69,4 +70,44 @@ fn main() {
         // room to rewrite load commands after linking, as the C++ link did
         println!("cargo:rustc-link-arg-bins=-Wl,-headerpad_max_install_names");
     }
+}
+
+/// Collects the files under `dir` (relative names with `/`), sorted.
+fn collect(dir: &Path, prefix: &str, out: &mut Vec<(String, PathBuf)>) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut entries: Vec<_> = rd.filter_map(Result::ok).collect();
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for e in entries {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue;
+        }
+        let path = e.path();
+        let rel = format!("{prefix}{name}");
+        if path.is_dir() {
+            collect(&path, &format!("{rel}/"), out);
+        } else if path.is_file() && !name.to_ascii_lowercase().contains(".conf") {
+            out.push((rel, path));
+        }
+    }
+}
+
+/// Builds the web interface into the binary (`$OUT_DIR/webui_bundle.rs`), so
+/// it is there when WebDir is empty or cannot be read. A tree without
+/// `webui/` builds an empty bundle.
+fn bundle_webui(out: &Path) {
+    let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let webui = manifest.join("..").join("webui");
+    println!("cargo:rerun-if-changed={}", webui.display());
+    let mut files = Vec::new();
+    collect(&webui, "", &mut files);
+    let mut code = String::from("pub(crate) static FILES: &[(&str, &[u8])] = &[\n");
+    for (rel, path) in &files {
+        let abs = path.canonicalize().unwrap_or_else(|_| path.clone());
+        code.push_str(&format!("    ({rel:?}, include_bytes!({:?})),\n", abs.display().to_string()));
+    }
+    code.push_str("];\n");
+    std::fs::write(out.join("webui_bundle.rs"), code).expect("write webui_bundle.rs");
 }

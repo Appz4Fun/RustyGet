@@ -4,7 +4,7 @@
 use crate::cstr;
 use std::collections::BTreeMap;
 use std::ffi::{c_int, CStr, CString};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Write};
 use std::path::PathBuf;
 
 #[cfg(unix)]
@@ -19,6 +19,18 @@ fn bytes_to_path(bytes: &[u8]) -> PathBuf {
 }
 
 static CONFIG_WRITE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Holds off every other read and write of the configuration file.
+pub(crate) fn lock_config_writes() -> std::sync::MutexGuard<'static, ()> {
+    CONFIG_WRITE_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The longest configuration line read; a longer one is skipped (and the
+/// loader warns about it).
+pub const MAX_CONFIG_LINE: usize = 64 * 1024;
+
+/// The most of a configuration file `loadconfig` reads.
+const MAX_CONFIG_FILE: u64 = 64 * 1024 * 1024;
 
 /// Computes `ScriptConfig::CipherBaseline` from `(name, value)` pairs.
 pub fn script_config_cipher_baseline(entries: &[(&[u8], &[u8])]) -> Vec<u8> {
@@ -45,6 +57,7 @@ fn script_config_cipher_baseline_cstrings(entries: &[(CString, CString)]) -> Vec
 /// and `ConvertOldOptions` (`ScriptConfig::LoadConfigUnlocked`).
 pub fn script_config_parse_bytes(raw: &[u8]) -> Vec<(CString, CString)> {
     let mut entries = Vec::new();
+    let raw = normalize_line_ends(raw);
     for raw_line in raw.split_inclusive(|&b| b == b'\n') {
         let nul_trimmed = match raw_line.iter().position(|&b| b == 0) {
             Some(pos) => &raw_line[..pos],
@@ -52,7 +65,7 @@ pub fn script_config_parse_bytes(raw: &[u8]) -> Vec<(CString, CString)> {
         };
         let trimmed_len = crate::util::trim_right_line(nul_trimmed);
         let line = &nul_trimmed[..trimmed_len];
-        if line.is_empty() || line[0] == b'#' {
+        if line.is_empty() || line[0] == b'#' || line.len() > MAX_CONFIG_LINE {
             continue;
         }
         if let Some((raw_name, raw_val)) = crate::options::options_split_option_string(line) {
@@ -67,7 +80,7 @@ pub fn script_config_parse_bytes(raw: &[u8]) -> Vec<(CString, CString)> {
 
 fn script_config_load_unlocked(filename: &[u8]) -> Option<Vec<(CString, CString)>> {
     let path = bytes_to_path(filename);
-    let mut file = std::fs::File::open(&path).ok()?;
+    let file = std::fs::File::open(&path).ok()?;
     let meta = file.metadata().ok()?;
     if meta.is_dir() {
         return None;
@@ -75,8 +88,8 @@ fn script_config_load_unlocked(filename: &[u8]) -> Option<Vec<(CString, CString)
     if meta.len() == 0 {
         return Some(Vec::new());
     }
-    let mut raw = Vec::with_capacity(meta.len() as usize);
-    file.read_to_end(&mut raw).ok()?;
+    let mut raw = Vec::with_capacity(meta.len().min(MAX_CONFIG_FILE) as usize);
+    file.take(MAX_CONFIG_FILE).read_to_end(&mut raw).ok()?;
     Some(script_config_parse_bytes(&raw))
 }
 
@@ -91,6 +104,7 @@ pub fn script_config_load(filename: &[u8]) -> Option<Vec<(CString, CString)>> {
 /// occurrence's value), dropping orphaned/duplicate option lines, preserving comments
 /// with guaranteed trailing `\n`, and appending new options at the end.
 pub fn script_config_merge_bytes(raw: &[u8], entries: &[(&[u8], &[u8])]) -> Vec<u8> {
+    let raw = &*normalize_line_ends(raw);
     let mut values: Vec<(&[u8], &[u8])> = Vec::with_capacity(entries.len());
     for &(name, val) in entries {
         if let Some(existing) = values
@@ -141,12 +155,14 @@ pub fn script_config_merge_bytes(raw: &[u8], entries: &[(&[u8], &[u8])]) -> Vec<
                     }
                 }
             }
-        } else {
-            out.extend_from_slice(line);
-            if !line.ends_with(b"\n") {
-                out.push(b'\n');
-            }
+        } else if let Some(kept) = blank_or_comment(line) {
+            // as the loader reads it: a comment starts with "#", a blank line
+            // has nothing else (indented comments and tabs are tidied)
+            out.extend_from_slice(kept);
+            out.push(b'\n');
         }
+        // anything else is not an option line: the loader would complain
+        // about it on every start, so a save leaves it out
     }
 
     for &(name, val) in entries {
@@ -166,6 +182,63 @@ pub fn script_config_merge_bytes(raw: &[u8], entries: &[(&[u8], &[u8])]) -> Vec<
     out
 }
 
+/// The lines of `raw` a save would leave out because they are not settings:
+/// broken lines and options RustyGet does not know (line number, text).
+pub fn dropped_lines(raw: &[u8]) -> Vec<(usize, Vec<u8>)> {
+    let raw = normalize_line_ends(raw);
+    let mut out = Vec::new();
+    for (i, raw_line) in raw.split_inclusive(|&b| b == b'\n').enumerate() {
+        let line = match raw_line.iter().position(|&b| b == 0) {
+            Some(pos) => &raw_line[..pos],
+            None => raw_line,
+        };
+        if blank_or_comment(line).is_some() {
+            continue;
+        }
+        let mut trimmed = line;
+        while trimmed.last().is_some_and(|&b| matches!(b, b'\n' | b'\r' | b' ')) {
+            trimmed = &trimmed[..trimmed.len() - 1];
+        }
+        let keep = trimmed.contains(&b'=')
+            && crate::options::options_split_option_string(trimmed).is_some_and(|(name, _)| {
+                let c = cstr::to_cstring(name.trim_ascii());
+                crate::options::validate_option_name(&c, &mut || crate::firstrun::known_option(&c.to_string_lossy()))
+                    != crate::options::NameCheck::Invalid
+            });
+        if !keep {
+            out.push((i + 1, trimmed.to_vec()));
+        }
+    }
+    out
+}
+
+/// A blank line or a comment as a save keeps it (without its line end), or
+/// `None` for anything else.
+fn blank_or_comment(line: &[u8]) -> Option<&[u8]> {
+    let mut end = line.len();
+    while end > 0 && matches!(line[end - 1], b'\n' | b'\r') {
+        end -= 1;
+    }
+    let body = &line[..end];
+    let t = body.trim_ascii_start();
+    if t.is_empty() {
+        Some(b"")
+    } else if t[0] == b'#' {
+        Some(t)
+    } else {
+        None
+    }
+}
+
+/// Why a save did not happen.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SaveError {
+    /// the news server settings changed since the caller read them
+    Conflict,
+    /// the reason, in plain words
+    Failed(String),
+}
+
 /// End-to-end implementation of `ScriptConfig::SaveConfig`.
 /// Returns `(saved, conflict)`.
 pub fn script_config_save(
@@ -173,43 +246,68 @@ pub fn script_config_save(
     entries: &[(&[u8], &[u8])],
     cipher_baseline: Option<&[u8]>,
 ) -> (bool, bool) {
+    match script_config_save_checked(filename, entries, cipher_baseline) {
+        Ok(()) => (true, false),
+        Err(SaveError::Conflict) => (false, true),
+        Err(SaveError::Failed(_)) => (false, false),
+    }
+}
+
+/// Saves `entries` into the configuration file: the current file is copied
+/// to a backup first (`<file>.bak-<date>-<time>`, the last ten kept), then
+/// replaced with the merged text in one step.
+pub fn script_config_save_checked(
+    filename: &[u8],
+    entries: &[(&[u8], &[u8])],
+    cipher_baseline: Option<&[u8]>,
+) -> Result<(), SaveError> {
     let _guard = CONFIG_WRITE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let path = bytes_to_path(filename);
     if let Some(expected) = cipher_baseline {
         let Some(current) = script_config_load_unlocked(filename) else {
-            return (false, false);
+            return Err(SaveError::Failed(format!("{} can't be read", path.display())));
         };
         let actual = script_config_cipher_baseline_cstrings(&current);
         if actual.as_slice() != expected {
-            return (false, true);
+            return Err(SaveError::Conflict);
         }
     }
 
-    let path = bytes_to_path(filename);
-    let Ok(mut file) = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&path)
-    else {
-        return (false, false);
+    let failed = |what: &str, e: &std::io::Error| {
+        SaveError::Failed(format!("{} can't be {what}: {}", path.display(), crate::firstrun::plain_io(e)))
     };
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .open(&path)
+        .map_err(|e| failed("opened", &e))?;
     if file.metadata().map_or(true, |m| m.is_dir()) {
-        return (false, false);
+        return Err(SaveError::Failed(format!("{} is a folder, not a file", path.display())));
     }
-
     let mut raw = Vec::new();
-    if file.read_to_end(&mut raw).is_err() {
-        return (false, false);
-    }
+    file.read_to_end(&mut raw).map_err(|e| failed("read", &e))?;
+    drop(file);
 
     let merged = script_config_merge_bytes(&raw, entries);
-    if file.seek(SeekFrom::Start(0)).is_err() {
-        return (false, false);
+    // a file RustyGet may not write is left alone, whatever its folder allows
+    crate::firstrun::config_writable(Some(&path)).map_err(SaveError::Failed)?;
+    if let Err(why) = crate::firstrun::backup_config(&path) {
+        // a backup that can't be made never blocks the save
+        crate::log::log_active_bytes(
+            1,
+            format!("No backup copy of the settings could be made before saving ({why}); saving anyway").as_bytes(),
+        );
     }
-    if file.write_all(&merged).is_err() || file.flush().is_err() {
-        return (false, false);
+    crate::firstrun::write_config_atomically(&path, &merged).map_err(SaveError::Failed)
+}
+
+/// Text with old Mac line ends (CR only, no LF) read with LF line ends;
+/// anything else unchanged.
+pub fn normalize_line_ends(raw: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    if !raw.contains(&b'\n') && raw.contains(&b'\r') {
+        std::borrow::Cow::Owned(raw.iter().map(|&b| if b == b'\r' { b'\n' } else { b }).collect())
+    } else {
+        std::borrow::Cow::Borrowed(raw)
     }
-    let _ = file.set_len(merged.len() as u64);
-    (true, false)
 }
 
 #[repr(C)]
@@ -608,6 +706,15 @@ pub fn script_config_commit_cipher_patch(
     let _guard = CONFIG_WRITE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
+        let path = bytes_to_path(filename);
+        if std::fs::read(&path).is_ok_and(|now| now == expected) {
+            if let Err(why) = crate::firstrun::backup_config(&path) {
+                crate::log::log_active_bytes(
+                    1,
+                    format!("No backup copy of the settings could be made before the cipher change ({why})").as_bytes(),
+                );
+            }
+        }
         cipher_atomic::commit_patch_unlocked(
             filename,
             expected,
@@ -685,6 +792,15 @@ pub fn build_cipher_baseline(names: &[&[u8]], values: &[&[u8]]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_save_lists_the_lines_it_would_drop() {
+        let raw = b"# kept\n\nArticleTimeout=soon\nNotAnOption=1\nthis line is broken\nServer1.Host=x\nFeed2.Name=y\r\n";
+        let dropped = dropped_lines(raw);
+        let lines: Vec<(usize, &[u8])> = dropped.iter().map(|(n, t)| (*n, t.as_slice())).collect();
+        assert_eq!(lines, vec![(4, &b"NotAnOption=1"[..]), (5, &b"this line is broken"[..])]);
+        assert!(dropped_lines(b"").is_empty());
+    }
 
     #[test]
     fn test_script_config_merge_and_parse() {

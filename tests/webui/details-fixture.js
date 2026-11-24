@@ -183,7 +183,14 @@ async function installDetailsFixture(page, base, writes = [], hooks = {}) {
       Presets: { low: { ParBuffer: 64, ParThreads: 1, ParPauseQueue: true }, medium: { ParBuffer: 256, ParThreads: 6, ParPauseQueue: false },
         large: { ParBuffer: 1024, ParThreads: 0, ParPauseQueue: false }, uber: { ParBuffer: 4096, ParThreads: 14, ParPauseQueue: false },
         detect: { ParBuffer: 4096, ParThreads: 0, ParPauseQueue: false } } },
-    readurl: JSON.stringify({ 'stable-version': '26.3', 'testing-version': '26.3' }), listfiles: [], viewfeed: []
+    readurl: JSON.stringify({ 'stable-version': '26.3', 'testing-version': '26.3' }), listfiles: [], viewfeed: [],
+    // set up: no guide and no banner in these checks
+    setupstatus: { ConfigFile: './fixture/rustyget.conf', ConfigCreated: false, ConfigWritable: true, ConfigProblem: '',
+      PasswordSet: true, PasswordIsStock: false, ControlUsername: 'rustyget', Servers: 1, PathProblems: [], Warnings: [],
+      MoreWarnings: 0, SetupComplete: true },
+    checkpath: { Path: './fixture', State: 'ok', Message: 'This folder exists and RustyGet can write to it.' },
+    // nothing in the fixture file would be dropped by a save
+    checkconfig: []
   };
   await page.route('**/*', async route => {
     const request = route.request();

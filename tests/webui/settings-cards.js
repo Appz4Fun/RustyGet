@@ -186,7 +186,8 @@ const DUPE_OPTIONS = ['DupeCheck', 'DupeWatch', 'DupeArticleFallback', 'DupeStre
         await page.waitForFunction(n => n.some(w => w.method === 'saveconfig'), writes, { polling: 100, timeout: 5000 }).catch(() => {});
         await page.waitForTimeout(500);
         const save = writes.find(w => w.method === 'saveconfig');
-        assert(save, 'saveconfig was sent');
+        assert(save, 'saveconfig was sent; settings the page refuses: ' + await page.evaluate(() =>
+          Array.from(document.querySelectorAll('.config-invalid')).map(e => e.id + ' ' + e.textContent).join(' | ')));
         const values = Object.fromEntries(save.params[0].map(o => [o.Name, o.Value]));
         assert.equal(values.DupeCheckConcurrency, '9');
         assert.equal(values.DupeCheck, 'yes');

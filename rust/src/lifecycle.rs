@@ -891,6 +891,16 @@ pub(crate) fn daemon_cmdline_options_inputs() -> Option<(
     ))
 }
 
+/// Server or daemon mode on the parsed command line.
+pub(crate) fn daemon_cmdline_server_mode() -> bool {
+    DAEMON_INSTANCE
+        .cmdline
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|(_, cmd)| cmd.server_mode || cmd.daemon_mode))
+        .unwrap_or(false)
+}
+
 #[cfg(unix)]
 static DAEMON_FRONTEND: std::sync::Mutex<Option<std::sync::Arc<crate::ffi::FrontendHandle>>> =
     std::sync::Mutex::new(None);
@@ -1761,6 +1771,17 @@ Fix them in Settings > Paths (or in the config file), then save and reload.",
             ws.set_pause_download(true);
             ws.set_pause_post_process(true);
             ws.set_pause_scan(true);
+        }
+    }
+    if cmd.client_operation == 0 && (cmd.server_mode || cmd.daemon_mode) && crate::firstrun::no_usable_server() {
+        // nothing can download without a news server: say what to do
+        dm_emit_active_log(
+            3,
+            b"Downloading is paused: no news server is set up. Add one in the web interface \
+(the setup guide, or Settings > News servers), test it, then save.",
+        );
+        if let Some(ws) = crate::ffi::active_workstate() {
+            ws.set_pause_download(true);
         }
     }
     if let Some(sp) = crate::net::active_server_pool() {

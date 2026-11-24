@@ -1486,7 +1486,18 @@ pub fn find_default_config_file(
 
 /// Reads a configuration file line by line, trimming CR/LF and skipping blank/comment lines,
 /// invoking `on_line(line_no, trimmed_line)` for each non-skipped line (`Options::LoadConfigFile`).
-pub fn load_config_file_lines(path: &CStr, mut on_line: impl FnMut(i32, &CStr)) -> bool {
+pub fn load_config_file_lines(path: &CStr, on_line: impl FnMut(i32, &CStr)) -> bool {
+    load_config_file_lines_ex(path, on_line, |_, _| {})
+}
+
+/// [`load_config_file_lines`], with `on_too_long(line_no, length)` for a line
+/// longer than [`crate::configfile::MAX_CONFIG_LINE`], which is skipped
+/// (it is never held in memory whole).
+pub fn load_config_file_lines_ex(
+    path: &CStr,
+    mut on_line: impl FnMut(i32, &CStr),
+    mut on_too_long: impl FnMut(i32, usize),
+) -> bool {
     #[cfg(unix)]
     let os_path = {
         use std::os::unix::ffi::OsStrExt;
@@ -1498,27 +1509,74 @@ pub fn load_config_file_lines(path: &CStr, mut on_line: impl FnMut(i32, &CStr)) 
     let Ok(file) = std::fs::File::open(os_path) else {
         return false;
     };
+    if file.metadata().is_ok_and(|m| m.is_dir()) {
+        return false;
+    }
     use std::io::BufRead;
-    let mut reader = std::io::BufReader::new(file);
+    let max = crate::configfile::MAX_CONFIG_LINE;
+    let mut file_reader = std::io::BufReader::with_capacity(max + 2, file);
+    // a file with old Mac line ends (CR only) is read line by line too
+    let cr_only = file_reader
+        .fill_buf()
+        .is_ok_and(|head| !head.contains(&b'\n') && head.contains(&b'\r'));
+    let mut reader: Box<dyn BufRead> = if cr_only {
+        use std::io::Read as _;
+        let mut all = Vec::new();
+        if file_reader.take(64 * 1024 * 1024).read_to_end(&mut all).is_err() {
+            return false;
+        }
+        let all = crate::configfile::normalize_line_ends(&all).into_owned();
+        Box::new(std::io::Cursor::new(all))
+    } else {
+        Box::new(file_reader)
+    };
     let mut raw = Vec::new();
     let mut line_no = 0i32;
     loop {
         raw.clear();
-        match reader.read_until(b'\n', &mut raw) {
-            Ok(0) | Err(_) => break,
-            Ok(_) => {
-                line_no += 1;
-                if let Some(nul) = raw.iter().position(|&b| b == 0) {
-                    raw.truncate(nul);
-                }
-                let (trimmed_len, skip) = options_trim_and_check_config_line(&raw);
-                if skip {
-                    continue;
-                }
-                let c_line = cstring(raw[..trimmed_len].to_vec());
-                on_line(line_no, &c_line);
+        // read one line, keeping at most `max` + 2 bytes of it
+        let mut total = 0usize;
+        let mut newline = false;
+        loop {
+            let chunk = match reader.fill_buf() {
+                Ok(c) => c,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            };
+            if chunk.is_empty() {
+                break;
+            }
+            let (take, found) = match chunk.iter().position(|&b| b == b'\n') {
+                Some(i) => (i + 1, true),
+                None => (chunk.len(), false),
+            };
+            let room = (max + 2).saturating_sub(raw.len());
+            raw.extend_from_slice(&chunk[..take.min(room)]);
+            total += take;
+            reader.consume(take);
+            if found {
+                newline = true;
+                break;
             }
         }
+        if total == 0 {
+            break;
+        }
+        line_no = line_no.saturating_add(1);
+        let content_len = total - usize::from(newline);
+        if content_len > max {
+            on_too_long(line_no, content_len);
+            continue;
+        }
+        if let Some(nul) = raw.iter().position(|&b| b == 0) {
+            raw.truncate(nul);
+        }
+        let (trimmed_len, skip) = options_trim_and_check_config_line(&raw);
+        if skip {
+            continue;
+        }
+        let c_line = cstring(raw[..trimmed_len].to_vec());
+        on_line(line_no, &c_line);
     }
     true
 }
@@ -1740,10 +1798,35 @@ const COMMAND_VALUES: [i32; 26] = [
 /// (option DupeWatch).
 pub const DUPE_WATCH_DELAY_SEC: i32 = 20;
 
+/// The words a yes/no option accepts (even positions mean yes, odd no).
+pub(crate) fn bool_value_names() -> &'static [&'static CStr] {
+    &BOOL_NAMES
+}
+
+/// The words a choice option accepts besides those its description lists
+/// (`option` as [`crate::firstrun::canonical_name`] gives it).
+pub(crate) fn known_enum_names(option: &str) -> Option<&'static [&'static CStr]> {
+    Some(match option {
+        "outputmode" => &OUTPUT_MODE_NAMES,
+        "dupearticlefallback" => &DUPE_ARTICLE_FALLBACK_NAMES,
+        "server1.certverification" | "feed1.certverification" => &CERT_VERIF_NAMES,
+        "server1.ipversion" => &IP_VERSION_NAMES,
+        "nzbdirarchiveaction" => &ARCHIVE_ACTION_NAMES,
+        "parcheck" => &PAR_CHECK_NAMES,
+        "parscan" => &PAR_SCAN_NAMES,
+        "poststrategy" => &POST_STRATEGY_NAMES,
+        "filenaming" => &FILE_NAMING_NAMES,
+        "dupehealthpreset" => &DUPE_HEALTH_PRESET_NAMES,
+        "healthcheck" => &HEALTH_CHECK_NAMES,
+        "infotarget" | "warningtarget" | "errortarget" | "debugtarget" | "detailtarget" => &TARGET_NAMES,
+        _ => return None,
+    })
+}
+
 /// Emits all default option `(name, value)` pairs for `Options::InitDefaults`.
 pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &CStr)) {
     let output_mode = if disable_curses { c"color" } else { c"curses" };
-    let defaults: [(&CStr, &CStr); 132] = [
+    let defaults: [(&CStr, &CStr); 133] = [
         (c"MainDir", c"~/downloads"),
         (c"WebDir", c""),
         (c"ConfigTemplate", c""),
@@ -1784,6 +1867,7 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"AddUsername", c""),
         (c"AddPassword", c""),
         (c"ControlPort", c"6789"),
+        (c"ControlHostnames", c""),
         (c"FormAuth", c"no"),
         (c"JsonP", c"no"),
         (c"SecureControl", c"no"),
@@ -2296,12 +2380,16 @@ pub trait OptionsHost {
             return parsed_val;
         }
         self.set_config_line(line_no);
+        let used = norm_idx.and_then(|i| argn.get(i)).map_or(&b""[..], |n| n.to_bytes());
         let msg = format_bytes_msg(&[
             b"Invalid value for option \"",
             opt_name.to_bytes(),
             b"\": \"",
-            val.to_bytes(),
-            b"\"",
+            &printable(val.to_bytes()),
+            b"\". Using \"",
+            used,
+            b"\" instead; pick one of: ",
+            &choice_list(argn),
         ]);
         self.config_error(&msg);
         if let Some(idx) = norm_idx {
@@ -2328,8 +2416,10 @@ pub trait OptionsHost {
                 b"Invalid value for option \"",
                 opt_name.to_bytes(),
                 b"\": \"",
-                val.to_bytes(),
-                b"\"",
+                &printable(val.to_bytes()),
+                b"\" is not a whole number. Using the default \"",
+                def_val.to_bytes(),
+                b"\" instead",
             ]);
             self.config_error(&msg);
             self.set_entry_raw_value(opt_name, def_val);
@@ -2340,6 +2430,33 @@ pub trait OptionsHost {
     fn parse_bool_value(&mut self, opt_name: &CStr) -> bool {
         self.parse_enum_value(opt_name, &BOOL_NAMES, &BOOL_VALUES) != 0
     }
+}
+
+/// Bytes of a configuration line made safe to show: control characters and
+/// bytes that are not UTF-8 become "?", and a long text is cut at 80 characters.
+pub fn printable(bytes: &[u8]) -> Vec<u8> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut out = String::new();
+    for (i, c) in text.chars().enumerate() {
+        if i == 80 {
+            out.push_str("...");
+            break;
+        }
+        out.push(if c.is_control() || c == '\u{fffd}' { '?' } else { c });
+    }
+    out.into_bytes()
+}
+
+/// "a, b, c" from a value list, each value once (aliases share a number).
+fn choice_list(argn: &[&CStr]) -> Vec<u8> {
+    let mut seen: Vec<&[u8]> = Vec::new();
+    for n in argn {
+        let b = n.to_bytes();
+        if !seen.iter().any(|s| s.eq_ignore_ascii_case(b)) {
+            seen.push(b);
+        }
+    }
+    seen.join(&b", "[..])
 }
 
 /// The one warning for a path option that cannot be used: which option, its
@@ -2382,6 +2499,11 @@ pub(crate) fn note_path_warning(option: &[u8], value: &[u8]) {
     if !g.iter().any(|(o, _)| o.as_slice() == option) {
         g.push((option.to_vec(), value.to_vec()));
     }
+}
+
+/// Every path warned about at start-up: (option, value).
+pub(crate) fn path_warning_list() -> Vec<(Vec<u8>, Vec<u8>)> {
+    path_warnings().clone()
 }
 
 /// The value `option` had when it was warned about, if it was.
@@ -3207,8 +3329,18 @@ pub fn init_servers_host<H: OptionsHost>(
                 cert_verif_level as u32,
             );
         } else {
-            let msg =
-                cstring(format!("Server definition not complete for \"Server{}\"", n).into_bytes());
+            let missing: Vec<String> = [("Host", nhost.is_some()), ("Port", nport.is_some()), ("Connections", nconnections.is_some())]
+                .iter()
+                .filter(|(_, set)| !set)
+                .map(|(f, _)| format!("Server{n}.{f}"))
+                .collect();
+            let msg = cstring(
+                format!(
+                    "Server definition not complete for \"Server{n}\": add {} (this server is not used until then)",
+                    missing.join(" and ")
+                )
+                .into_bytes(),
+            );
             host.config_error(&msg);
         }
 
@@ -3968,7 +4100,11 @@ impl<'a> RustOptions<'a> {
         let converted =
             split_and_convert_option_string(option, |var_name| self.get_option(var_name).map(|c| c.into_bytes()));
         let Some((optname, optvalue)) = converted else {
-            let msg = format_bytes_msg(&[b"Invalid option \"", option.to_bytes(), b"\""]);
+            let msg = format_bytes_msg(&[
+                b"Invalid option \"",
+                &printable(option.to_bytes()),
+                b"\": not a \"Name=value\" line, ignored",
+            ]);
             self.config_error(&msg);
             return false;
         };
@@ -3998,7 +4134,11 @@ impl<'a> RustOptions<'a> {
             }
             NameCheck::Removed => true,
             NameCheck::Invalid => {
-                let msg = format_bytes_msg(&[b"Invalid option \"", optname.to_bytes(), b"\""]);
+                let msg = format_bytes_msg(&[
+                    b"Invalid option \"",
+                    &printable(optname.to_bytes()),
+                    b"\": RustyGet has no such option, the line is ignored",
+                ]);
                 self.config_error(&msg);
                 false
             }
@@ -4296,6 +4436,17 @@ pub struct NzbgetRsOptions {
     other_config_errors: std::sync::atomic::AtomicBool,
     mode_flags: std::sync::atomic::AtomicU8,
     config_line: i32,
+    /// a missing configuration file may be created (server and daemon mode)
+    create_missing_config: bool,
+    /// this start wrote the configuration file
+    just_created: bool,
+    /// the password it got (told once, then forgotten)
+    created_password: String,
+    /// the configuration file is being read: its problems are counted
+    loading: bool,
+    /// problems in the file reported / left out (after [`MAX_LINE_REPORTS`])
+    line_reports: usize,
+    line_reports_dropped: usize,
     scalars: NzbgetRsParsedOptions,
     out_scalars: *mut NzbgetRsParsedOptions,
     cb_ctx: *mut std::ffi::c_void,
@@ -4452,22 +4603,57 @@ impl NzbgetRsOptions {
         }
     }
 
-    fn emit_diag(&self, op: c_int, msg: &CStr) {
+    fn emit_diag(&mut self, op: c_int, msg: &CStr) {
         let mut trunc = msg.to_bytes().to_vec();
         if trunc.len() > 1023 {
             trunc.truncate(1023);
         }
-        let base: &[u8] = match self.strs[OptStr::ConfigFile].as_deref() {
-            Some(cf) => {
-                let raw = cf.to_bytes();
-                &raw[crate::paths::base_file_name(raw)..]
+        if self.loading && self.config_line > 0 {
+            if self.line_reports >= MAX_LINE_REPORTS {
+                self.line_reports_dropped += 1;
+                return;
             }
-            None => b"<noconfig>",
+            self.line_reports += 1;
+        }
+        // "/path/rustyget.conf:12: what is wrong, and what is used instead"
+        let file: &[u8] = match self.strs[OptStr::ConfigFile].as_deref() {
+            Some(cf) => cf.to_bytes(),
+            None => b"(no configuration file)",
         };
-        let line_s = self.config_line.to_string();
-        let formatted = format_bytes_msg(&[base, b"(", line_s.as_bytes(), b"): ", &trunc]);
+        let formatted = if self.config_line > 0 {
+            let line_s = self.config_line.to_string();
+            format_bytes_msg(&[file, b":", line_s.as_bytes(), b": ", &trunc])
+        } else {
+            format_bytes_msg(&[file, b": ", &trunc])
+        };
+        if matches!(op, 1 | 2) {
+            crate::firstrun::note_problem(formatted.to_bytes());
+        }
         let ptrs = [formatted.as_ptr()];
         self.emit_host(op, &[], &ptrs, 1);
+    }
+
+    /// Prints `msg` only (no log).
+    fn tell_screen(&self, msg: &str) {
+        if !self.default_diag_sink {
+            return;
+        }
+        let c = crate::firstrun::cstring_lossy(msg);
+        unsafe {
+            libc::printf(c"%s\n".as_ptr(), c.as_ptr());
+        }
+    }
+
+    /// Prints `msg` and logs it as information.
+    fn tell(&self, msg: &str) {
+        if !self.default_diag_sink {
+            return;
+        }
+        let c = crate::firstrun::cstring_lossy(msg);
+        unsafe {
+            libc::printf(c"%s\n".as_ptr(), c.as_ptr());
+        }
+        crate::log::log_active_bytes(crate::log::MK_INFO, msg.as_bytes());
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4514,6 +4700,9 @@ impl NzbgetRsOptions {
 
         init_defaults_with(disable_curses, |name, val| self.set_option(name, val));
 
+        if self.daemon_subsystems && !no_disk_access {
+            crate::firstrun::begin_load();
+        }
         self.init_opt_file();
         if self.fatal_error {
             return;
@@ -4523,7 +4712,11 @@ impl NzbgetRsOptions {
             self.set_option_string(opt);
         }
 
-        if self.strs[OptStr::ConfigFile].is_none() && !no_config {
+        if self.strs[OptStr::ConfigFile].is_none() && !no_config && self.create_missing_config {
+            // creating one failed: run on the built-in defaults
+            let p = [c"RustyGet runs on its built-in defaults; settings can't be saved until it has a configuration file".as_ptr()];
+            self.emit_host(2, &[], &p, 1);
+        } else if self.strs[OptStr::ConfigFile].is_none() && !no_config {
             let p0 = [c"No configuration-file found".as_ptr()];
             self.emit_host(0, &[], &p0, 1);
             let p1 = [
@@ -4589,6 +4782,70 @@ impl NzbgetRsOptions {
         init_categories_host(self, no_disk, dest_dir.as_deref());
         init_scheduler_host(self);
         init_feeds_host(self);
+        self.tell_how_to_open();
+    }
+
+    /// After a new configuration file, or with the stock password: where to
+    /// open the web interface (and how to sign in).
+    fn tell_how_to_open(&mut self) {
+        if !self.create_missing_config || self.no_disk_access {
+            return;
+        }
+        let get = |s: &mut Self, n: &CStr| {
+            s.get_option(n).map_or_else(String::new, |v| String::from_utf8_lossy(v.to_bytes()).into_owned())
+        };
+        let address = crate::firstrun::web_address(&get(self, c"ControlIP"), self.scalars.control_port);
+        let password = get(self, c"ControlPassword");
+        let user = get(self, c"ControlUsername");
+        if self.just_created {
+            self.tell(&format!("Open the web interface to finish setting up RustyGet: {address}"));
+            // the password goes to the screen only, never into the log file
+            let pw = std::mem::take(&mut self.created_password);
+            self.tell_screen(&format!(
+                "Sign in with user \"{user}\" and password \"{pw}\" (it is ControlPassword in the configuration file; the setup guide can change it)"
+            ));
+            crate::log::log_active_bytes(
+                crate::log::MK_INFO,
+                format!("Sign in with user \"{user}\" and the password printed when RustyGet started (ControlPassword in the configuration file)").as_bytes(),
+            );
+            if crate::firstrun::in_container() {
+                self.tell_screen(
+                    "Running in a container: the web interface listens on all interfaces of the container (publish the port to reach it), and the password above is in the container's log (docker logs)",
+                );
+            }
+        } else if password == crate::firstrun::STOCK_PASSWORD {
+            self.tell(&format!(
+                "Web interface: {address} (user \"{user}\", password \"{password}\", the stock password: change it in Settings > Security)"
+            ));
+        } else if password.is_empty() && crate::firstrun::no_usable_server_in(self.server_hosts()) {
+            self.tell(&format!("Open the web interface to finish setting up RustyGet: {address}"));
+        }
+    }
+
+    /// (host, active) for each news server in the options.
+    fn server_hosts(&self) -> Vec<(Vec<u8>, bool)> {
+        let mut out: Vec<(Vec<u8>, Vec<u8>, bool)> = Vec::new();
+        for e in &self.opt_entries {
+            let name = e.name.to_bytes().to_ascii_lowercase();
+            let value = e.value.as_deref().map_or(&b""[..], CStr::to_bytes);
+            if !name.starts_with(b"server") {
+                continue;
+            }
+            if let Some(p) = name.strip_suffix(b".host") {
+                out.push((p.to_vec(), value.to_vec(), true));
+            }
+        }
+        for e in &self.opt_entries {
+            let name = e.name.to_bytes().to_ascii_lowercase();
+            if let Some(p) = name.strip_suffix(b".active") {
+                let v = e.value.as_deref().map_or(&b""[..], CStr::to_bytes);
+                let off = BOOL_NAMES.iter().enumerate().any(|(i, n)| i % 2 == 1 && n.to_bytes().eq_ignore_ascii_case(v));
+                if let Some(entry) = out.iter_mut().find(|(q, _, _)| q.as_slice() == p) {
+                    entry.2 = !off;
+                }
+            }
+        }
+        out.into_iter().map(|(_, h, a)| (h, a)).collect()
     }
 
     fn init_opt_file(&mut self) {
@@ -4602,12 +4859,48 @@ impl NzbgetRsOptions {
             {
                 self.strs[OptStr::ConfigFile] = Some(cstring(found));
                 found_by_search = true;
+            } else if self.create_missing_config && !self.no_disk_access {
+                // none anywhere: write one from the built-in template
+                let path = crate::firstrun::default_config_path();
+                let hidden = |p: &[u8]| match std::fs::symlink_metadata(crate::cleanup::bytes_to_path_buf(p)) {
+                    Err(e) => e.kind() != std::io::ErrorKind::NotFound && e.raw_os_error() != Some(libc::ENOTDIR),
+                    Ok(_) => false,
+                };
+                // a folder RustyGet may not look into could hide the user's
+                // file: loading it then stops with the reason
+                if hidden(&path) || self.create_config_at(&path, false) {
+                    self.strs[OptStr::ConfigFile] = Some(cstring(path));
+                }
             }
         }
 
         if let Some(cf) = self.strs[OptStr::ConfigFile].clone() {
             let exp1 = cstring(crate::fsops::expand_file_name(cf.to_bytes()));
-            let exp2 = cstring(crate::fsops::expand_home_path_auto(Some(&exp1)));
+            let mut exp2 = cstring(crate::fsops::expand_home_path_auto(Some(&exp1)));
+            if self.create_missing_config && !self.no_disk_access {
+                let path = crate::cleanup::bytes_to_path_buf(exp2.to_bytes());
+                match std::fs::metadata(&path) {
+                    Ok(m) if m.is_dir() => {
+                        // a folder: the configuration file in it
+                        let inner = path.join("rustyget.conf");
+                        let inner_b = crate::cleanup::os_str_to_bytes(inner.as_os_str()).to_vec();
+                        let note = format!(
+                            "{} is a folder; RustyGet uses the configuration file {} in it",
+                            path.display(),
+                            inner.display()
+                        );
+                        if inner.exists() || self.create_config_at(&inner_b, true) {
+                            exp2 = cstring(inner_b);
+                            self.config_warn(&crate::firstrun::cstring_lossy(&note));
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        let b = exp2.to_bytes().to_vec();
+                        self.create_config_at(&b, true);
+                    }
+                    _ => {}
+                }
+            }
             self.strs[OptStr::ConfigFile] = Some(exp2.clone());
             self.set_option(c"ConfigFile", &exp2);
             self.load_config_file(&exp2);
@@ -4627,27 +4920,164 @@ impl NzbgetRsOptions {
         }
     }
 
+    /// Writes a new configuration file at `path` from the built-in template
+    /// with safe defaults, and says where it is. False when it can't.
+    fn create_config_at(&mut self, path: &[u8], asked: bool) -> bool {
+        let p = crate::cleanup::bytes_to_path_buf(path);
+        if let Some(why) = crate::firstrun::looks_unmounted(&p) {
+            let msg = format!(
+                "Not creating the configuration file {}: {why} RustyGet runs on its built-in defaults; mount the drive (or start with -c <another file>) and restart",
+                p.display()
+            );
+            crate::firstrun::set_problem(&msg);
+            let c = crate::firstrun::cstring_lossy(&msg);
+            let ptrs = [c.as_ptr()];
+            self.emit_host(2, &[], &ptrs, 1);
+            return false;
+        }
+        let port = crate::firstrun::pick_control_port("127.0.0.1", crate::firstrun::DEFAULT_CONTROL_PORT);
+        let password = crate::firstrun::random_password();
+        match crate::firstrun::create_config_file(&p, &crate::firstrun::first_run_config(port, &password)) {
+            Ok(()) => {
+                self.just_created = true;
+                self.created_password = password;
+                crate::firstrun::mark_created();
+                self.tell(&format!("RustyGet created a new configuration file: {}", p.display()));
+                if asked {
+                    // the -c file did not exist: say so where it is seen
+                    let msg = format!(
+                        "The configuration file {} did not exist, so RustyGet created a new one there with default settings. If you expected your own settings, check the path given with -c",
+                        p.display()
+                    );
+                    self.config_warn(&crate::firstrun::cstring_lossy(&msg));
+                }
+                if port != crate::firstrun::DEFAULT_CONTROL_PORT {
+                    self.tell(&format!(
+                        "Port {} is in use, so the web interface uses port {port}",
+                        crate::firstrun::DEFAULT_CONTROL_PORT
+                    ));
+                }
+                true
+            }
+            Err(why) => {
+                let msg = format!(
+                    "Could not create the configuration file {}: {why}. RustyGet runs on its built-in defaults; start it with -c <file> to name a file it can write",
+                    p.display()
+                );
+                crate::firstrun::set_problem(&msg);
+                let c = crate::firstrun::cstring_lossy(&msg);
+                let ptrs = [c.as_ptr()];
+                self.emit_host(2, &[], &ptrs, 1);
+                false
+            }
+        }
+    }
+
     fn load_config_file(&mut self, cf: &CStr) {
         self.set_option(c"ConfigFile", cf);
         self.config_line = 0;
-        let ok = load_config_file_lines(cf, |line_no, line| {
+        self.loading = true;
+        self.line_reports = 0;
+        self.line_reports_dropped = 0;
+        let mut seen: std::collections::HashMap<Vec<u8>, i32> = std::collections::HashMap::new();
+        let mut too_long: Vec<(i32, usize)> = Vec::new();
+        let ok = load_config_file_lines_ex(
+            cf,
+            |line_no, line| {
+                self.config_line = line_no;
+                if let Some((name, _)) = options_split_option_string(line.to_bytes()) {
+                    let key = name.trim_ascii().to_ascii_lowercase();
+                    if let Some(first) = seen.get(&key) {
+                        let msg = format_bytes_msg(&[
+                            b"Option \"",
+                            &printable(name.trim_ascii()),
+                            b"\" is set again (first on line ",
+                            first.to_string().as_bytes(),
+                            b"); using the value from this line",
+                        ]);
+                        self.config_warn(&msg);
+                    } else {
+                        seen.insert(key, line_no);
+                    }
+                }
+                self.set_option_string(line);
+            },
+            |line_no, len| too_long.push((line_no, len)),
+        );
+        for (line_no, len) in too_long {
             self.config_line = line_no;
-            self.set_option_string(line);
-        });
+            let msg = cstring(
+                format!(
+                    "Line is too long ({len} bytes, at most {} are read), ignored",
+                    crate::configfile::MAX_CONFIG_LINE
+                )
+                .into_bytes(),
+            );
+            self.config_error(&msg);
+        }
+        self.config_line = 0;
+        self.loading = false;
+        if self.line_reports_dropped > 0 {
+            let msg = cstring(
+                format!(
+                    "{} more problems in the file were not listed; the options on those lines use their defaults",
+                    self.line_reports_dropped
+                )
+                .into_bytes(),
+            );
+            self.config_warn(&msg);
+        }
         if !ok {
+            let path = crate::cleanup::bytes_to_path_buf(cf.to_bytes());
+            let why = match std::fs::metadata(&path) {
+                Ok(m) if m.is_dir() => "it is a folder".to_owned(),
+                Ok(_) => match std::fs::File::open(&path) {
+                    Ok(_) => "it can't be read".to_owned(),
+                    Err(e) => crate::firstrun::plain_io(&e),
+                },
+                Err(e) => crate::firstrun::plain_io(&e),
+            };
+            // only "there is nothing there" means missing; "not allowed to
+            // look" (EACCES and the like) may hide the user's file, and stops
+            let missing = match std::fs::symlink_metadata(&path) {
+                Ok(_) => false,
+                Err(e) => e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ENOTDIR),
+            };
+            if self.create_missing_config && missing {
+                // nothing there at all (it could not be created either): defaults
+                let text = format!(
+                    "There is no configuration file {}: {why}. RustyGet runs on its built-in defaults; start it with -c <file> to name one it can write",
+                    path.display()
+                );
+                crate::firstrun::set_problem(&text);
+                self.config_error(&crate::firstrun::cstring_lossy(&text));
+                return;
+            }
+            // a file that exists but can't be read is never replaced by the
+            // defaults: RustyGet stops and says what to fix
+            let text = format!(
+                "Could not read the configuration file {}: {why}. RustyGet does not start on its defaults instead of your settings: fix the file's permissions (or start with -c <another file>)",
+                path.display()
+            );
+            let p0 = [crate::firstrun::cstring_lossy(&text)];
+            let ptrs = [p0[0].as_ptr()];
+            self.emit_host(0, &[], &ptrs, 1);
             let msg = format_bytes_msg(&[b"Could not open file ", cf.to_bytes()]);
             self.config_error(&msg);
             self.fatal_error = true;
             return;
         }
-        self.config_line = 0;
     }
 
     fn set_option_string(&mut self, option: &CStr) -> bool {
         let converted =
             split_and_convert_option_string(option, |var_name| self.get_option(var_name).map(|c| c.into_bytes()));
         let Some((optname, optvalue)) = converted else {
-            let msg = format_bytes_msg(&[b"Invalid option \"", option.to_bytes(), b"\""]);
+            let msg = format_bytes_msg(&[
+                b"Invalid option \"",
+                &printable(option.to_bytes()),
+                b"\": not a \"Name=value\" line, ignored",
+            ]);
             self.config_error(&msg);
             return false;
         };
@@ -4677,7 +5107,11 @@ impl NzbgetRsOptions {
             }
             NameCheck::Removed => true,
             NameCheck::Invalid => {
-                let msg = format_bytes_msg(&[b"Invalid option \"", optname.to_bytes(), b"\""]);
+                let msg = format_bytes_msg(&[
+                    b"Invalid option \"",
+                    &printable(optname.to_bytes()),
+                    b"\": RustyGet has no such option, the line is ignored",
+                ]);
                 self.config_error(&msg);
                 false
             }
@@ -5132,6 +5566,12 @@ pub(crate) unsafe fn new_options(
         other_config_errors: std::sync::atomic::AtomicBool::new(false),
         mode_flags: std::sync::atomic::AtomicU8::new(0),
         config_line: 0,
+        create_missing_config: daemon_snap.is_some() && daemon_server_mode(),
+        just_created: false,
+        created_password: String::new(),
+        loading: false,
+        line_reports: 0,
+        line_reports_dropped: 0,
         scalars: NzbgetRsParsedOptions::with_defaults(),
         out_scalars,
         cb_ctx,
@@ -5167,6 +5607,23 @@ pub(crate) unsafe fn new_options(
         );
     }
     arc
+}
+
+/// Problems in a configuration file listed one by one, before the rest are
+/// only counted.
+const MAX_LINE_REPORTS: usize = 100;
+
+/// Server or daemon mode on the command line (a missing configuration file
+/// is created only then).
+fn daemon_server_mode() -> bool {
+    #[cfg(unix)]
+    {
+        crate::lifecycle::daemon_cmdline_server_mode()
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
 }
 
 /// [`new_options`] as a raw handle for [`nzbget_rs_options_free`].

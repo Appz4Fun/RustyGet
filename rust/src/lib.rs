@@ -18,6 +18,7 @@ pub mod cleanup;
 pub mod cmdline;
 pub(crate) mod collection;
 pub mod configfile;
+pub mod firstrun;
 pub mod crc;
 pub mod decode;
 pub mod deadvolume;

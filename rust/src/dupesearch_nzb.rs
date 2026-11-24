@@ -4494,9 +4494,8 @@ mod tests {
         assert!(fleet_member_skip_reason(false, 7, false).is_some());
     }
 
-    /// F6: timeouts are never evidence: a copy whose checks only timed out is
-    /// unknown (unverified, -1) and not complete, never dead or 0% alive; the
-    /// errors don't water down the share of the articles that did answer.
+    /// B1: a cut check keeps what it measured once articles were found, and
+    /// stays unknown with none.
     #[test]
     fn a_cut_check_keeps_what_it_measured() {
         // a cut check (some sampled articles never answered) keeps what was
@@ -4632,6 +4631,9 @@ mod tests {
         assert_eq!((h.present, h.missing), (0, 10));
     }
 
+    /// F6: timeouts are never evidence: a copy whose checks only timed out is
+    /// unknown (unverified, -1) and not complete, never dead or 0% alive; the
+    /// errors don't water down the share of the articles that did answer.
     #[test]
     fn timeouts_leave_a_fleet_copy_unverified() {
         assert_eq!(eval_fleet_member_health(true, true, 0, 0, 20, 5, 80), (-1, false, false));

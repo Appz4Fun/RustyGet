@@ -7349,6 +7349,21 @@ def _watch_taken_over(api, pick_id, backup_id):
     return bool(back), pick_h
 
 
+def scenario_watchsearchedkey(daemon, t):
+    """Review of 76a80014: DupeSearch writes ``dupes:<title>`` onto every
+    download it searches. Such an ordinary download (no fleet: no DupeFleet,
+    not held or probing, no held copy of its key) still gets the backup pass,
+    which carries DupeSearch's retry and re-ranks; only real fleets that stay
+    in Downloads are left to their probe."""
+    ids = ['ws-pick-%d@x' % i for i in range(40)]
+    daemon.fake_nntp.alive = set()
+    api = daemon.wait_ready()
+    _ds_append(api, DS_TITLE, _fake_nzb_ids(ids, 400_000).decode(), 'dupes:show.s01e01.1080p.web.h264.grp', 100)
+    checked = _watch_wait(t, 'checking the backups of ' + DS_TITLE)
+    ok = checked >= 1
+    return ('watchsearchedkey', ok, 'backup_pass_logs=%d' % checked)
+
+
 def scenario_watchdeadpick(daemon, t):
     """DupeWatch without DupeSearch: a pick with nothing left on any server
     drops below its backups and the whole backup in history takes its place."""
@@ -13225,6 +13240,7 @@ SCENARIOS = {
     'fleetkindslowcheck': scenario_fleetkindslowcheck,
     'watchforcepick': scenario_watchforcepick,
     'watchdeadpick': scenario_watchdeadpick,
+    'watchsearchedkey': scenario_watchsearchedkey,
     'watchswap': scenario_watchswap,
     'watchborrow': scenario_watchborrow,
     'watchfleet': scenario_watchfleet,
@@ -13504,6 +13520,7 @@ SCENARIO_OPTIONS = {
     'allheadstwin': PROD_OPTIONS,
     'watchforcepick': ['DupeArticleFallback=no', 'DupeWatch=yes', 'DupeBodyChecks=0', 'DupeHealthMin=40', 'DupeHealthMax=40'],
     'watchdeadpick': ['DupeArticleFallback=no', 'DupeWatch=yes', 'DupeBodyChecks=0', 'DupeHealthMin=40', 'DupeHealthMax=40'],
+    'watchsearchedkey': ['DupeArticleFallback=no', 'DupeWatch=yes', 'DupeBodyChecks=0', 'DupeHealthMin=40', 'DupeHealthMax=40'],
     'watchfleet': ['DupeArticleFallback=no', 'DupeWatch=yes', 'DupeBodyChecks=0', 'DupeHealthMin=40', 'DupeHealthMax=40'],
     'watchswap': ['DupeArticleFallback=no', 'DupeWatch=yes', 'DupeBodyChecks=0', 'DupeHealthMin=40', 'DupeHealthMax=40'],
     'watchborrow': ['DupeArticleFallback=live', 'DupeBorrowFirst=yes', 'DupeWatch=yes', 'DupeBodyChecks=0', 'DupeHealthMin=40', 'DupeHealthMax=40'],
@@ -13927,7 +13944,7 @@ SCENARIO_FIRST_FAIL_PROXY = {'recheckfailed': ((b'?5=', b'?10=', b'?15='),),
 # scenarios with a FakeNewznab indexer (DupeSearchUrl points to it)
 
 # scenarios with a FakeNntp news server in place of nserv
-SCENARIO_FAKE_NNTP = {'fleetprimaryease', 'dropfleetasync', 'droppasswordlogs', 'dropdune', 'fleetnzbpassword', 'fleettimeoutunverified', 'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchborrow', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetkindsingle', 'fleetkindlater', 'fleetintake', 'fleetintakelater', 'fleetencryptedlast', 'fleetencryptedheadless', 'fleetlockedlast', 'fleetencryptedpassword', 'fleetkindslowcheck', 'fleettwinvolumes', 'fleetalldead', 'fleetshutdown'}
+SCENARIO_FAKE_NNTP = {'watchsearchedkey', 'fleetprimaryease', 'dropfleetasync', 'droppasswordlogs', 'dropdune', 'fleetnzbpassword', 'fleettimeoutunverified', 'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchborrow', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetkindsingle', 'fleetkindlater', 'fleetintake', 'fleetintakelater', 'fleetencryptedlast', 'fleetencryptedheadless', 'fleetlockedlast', 'fleetencryptedpassword', 'fleetkindslowcheck', 'fleettwinvolumes', 'fleetalldead', 'fleetshutdown'}
 
 
 # --------------------------------------------------------------------------- #

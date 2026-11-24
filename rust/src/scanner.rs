@@ -1048,9 +1048,6 @@ fn keep_priority(files: &[Vec<u8>], priority: c_int) {
     }
 }
 
-/// Whether a fleet call from NzbDir did nothing with its copies, so they go
-/// back for the next scan: nothing was added and the reply says the key was
-/// busy, the program stops, or no member came through.
 /// Longest line [`fleet_summary_lines`] writes: a log line is cut at 1023
 /// bytes, which lost the outcome of the later copies of a big fleet.
 pub const FLEET_SUMMARY_LINE_MAX: usize = 900;
@@ -1092,7 +1089,7 @@ pub fn fleet_summary_lines(
         head.extend_from_slice(format!("{n} ").as_bytes());
         head.extend_from_slice(status);
     }
-    head.truncate(FLEET_SUMMARY_LINE_MAX);
+    truncate_utf8(&mut head, FLEET_SUMMARY_LINE_MAX);
     let mut lines = vec![head];
     let mut prefix = b"Fleet ".to_vec();
     prefix.extend_from_slice(key);
@@ -1113,7 +1110,7 @@ pub fn fleet_summary_lines(
             line.extend_from_slice(b"; ");
         }
         line.extend_from_slice(&item);
-        line.truncate(FLEET_SUMMARY_LINE_MAX);
+        truncate_utf8(&mut line, FLEET_SUMMARY_LINE_MAX);
     }
     if line.len() > prefix.len() {
         lines.push(line);
@@ -1121,6 +1118,22 @@ pub fn fleet_summary_lines(
     lines
 }
 
+/// `v` cut to at most `max` bytes, never inside a UTF-8 sequence (names are
+/// bytes and may not be UTF-8: only continuation bytes are backed over).
+fn truncate_utf8(v: &mut Vec<u8>, max: usize) {
+    if v.len() <= max {
+        return;
+    }
+    let mut end = max;
+    while end > 0 && (v[end] & 0xC0) == 0x80 {
+        end -= 1;
+    }
+    v.truncate(end);
+}
+
+/// Whether a fleet call from NzbDir did nothing with its copies, so they go
+/// back for the next scan: nothing was added and the reply says the key was
+/// busy, the program stops, or no member came through.
 pub fn fleet_never_ran(reason: &[u8], any_added: bool) -> bool {
     !any_added && matches!(reason, b"KEY_BUSY" | b"SHUTDOWN" | b"NO_MEMBERS" | b"")
 }
@@ -2537,6 +2550,10 @@ mod tests {
             assert!(all.contains(&format!("FraMeSToR_{i}.nzb ")), "copy {i} listed");
         }
         assert!(all.contains("FraMeSToR_16.nzb SAME_POSTING"));
+        // a name longer than a line is cut, never inside a UTF-8 character
+        let long = ("é".repeat(600) + ".nzb").into_bytes();
+        let cut = super::fleet_summary_lines(key, b"", 9, &[(long, 9, b"BACKUP".to_vec())]);
+        assert!(cut.iter().all(|l| std::str::from_utf8(l).is_ok() && l.len() <= super::FLEET_SUMMARY_LINE_MAX));
         let none = super::fleet_summary_lines(key, b"KEY_BUSY", 0, &[]);
         assert_eq!(none.len(), 1);
         assert!(String::from_utf8_lossy(&none[0]).contains("from NzbDir: KEY_BUSY; 0 cop(ies)"));

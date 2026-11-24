@@ -455,6 +455,25 @@ branch `fleet-e2e-fixes` fixes them:
   (`DonorOptions::dead_extra`) before it is called dead, and carries
   `DupeAliveSample` ("dead (0/40 sampled)").
 
+Review fixes (76a80014 review):
+
+- The backup pass skips only real fleets: a `dupes:` key alone is what
+  DupeSearch writes onto every download it searches, so it also needs a
+  fleet's rank (`DupeFleet`), its hold or probe marks, or a copy of its key
+  held beside it (`pick_fleet_marked`); ordinary searched downloads keep their
+  retry and re-ranks (functional `watchsearchedkey`).
+- The 512 MiB switch guard reads the per-article counters
+  (`leader_downloaded_bytes`): the finished-file sizes stay 0 for a single
+  big file until it completes.
+- A cut copy leads early only with at least ten answers; an early leader that
+  fails its health check or is deleted during the probe hands the lead to the
+  next healthy probed copy at once; the reply names a leader only when it
+  succeeded, else says why nothing downloads; the probe's findings are never
+  written onto a copy the user deleted (`fleet_history_writable`).
+- The icon subset is pinned (`revision`, `sha256`, `font_size`, checked by
+  `fleet-downloads.js`) and `docs/rust-migration/dependency-sources.json`
+  records its new bytes; the NzbDir summary never cuts a UTF-8 character.
+
 ## Done when (acceptance tests)
 
 | Done when | Test |

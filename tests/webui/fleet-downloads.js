@@ -161,7 +161,12 @@ function fleetHistory(history) {
         });
       };
       await check('the toggle shows an icon, not its name', async () => {
-        const icons = require('../../webui/lib/material-symbols-rounded.json').icon_names;
+        const subset = require('../../webui/lib/material-symbols-rounded.json');
+        const icons = subset.icon_names;
+        // the font is pinned: its bytes are the ones the json records
+        const ttf = require('node:fs').readFileSync(path.join(__dirname, '../../webui/lib/material-symbols-rounded.ttf'));
+        assert.equal(require('node:crypto').createHash('sha256').update(ttf).digest('hex'), subset.sha256, 'font hash');
+        assert.equal(ttf.length, subset.font_size, 'font size');
         for (const name of ['chevron_right', 'expand_more']) {
           assert(icons.includes(name), `${name} is in the bundled font subset`);
         }

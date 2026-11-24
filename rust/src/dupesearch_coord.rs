@@ -902,9 +902,40 @@ fn member_place(in_history: bool) -> &'static str {
 /// nzb with a `dupes:` key in DupeMode SCORE while the duplicate check is on;
 /// [`crate::fleethold`] `holds_in_queue`), queued or filed: its probe and
 /// fleethold own its alive share, order and failover, so the older backup
-/// pass of DupeSearch/DupeWatch leaves it alone (B2).
-pub fn fleet_owns_pick(dupe_check: bool, kind: i32, dupe_mode: DupeMode, dupe_key: &[u8]) -> bool {
-    dupe_check && kind == 0 && dupe_mode == DupeMode::Score && is_group_key(dupe_key)
+/// pass of DupeSearch/DupeWatch leaves it alone (B2). The key alone is not
+/// enough: DupeSearch writes `dupes:<title>` onto every download it searches,
+/// and those keep their retries and re-ranks. `fleet_marked` says the download
+/// really is a fleet's copy: a fleet's rank (`DupeFleet`), held or probing
+/// by its fleet, or a copy of its key held or ranked in the queue beside it
+/// ([`pick_fleet_marked`]).
+pub fn fleet_owns_pick(dupe_check: bool, kind: i32, dupe_mode: DupeMode, dupe_key: &[u8], fleet_marked: bool) -> bool {
+    fleet_marked && dupe_check && kind == 0 && dupe_mode == DupeMode::Score && is_group_key(dupe_key)
+}
+
+/// [`fleet_owns_pick`]'s `fleet_marked` for `pick`: it carries a fleet's rank
+/// (`DupeFleet`) or its fleet's hold or probe marks, or another queued copy
+/// of its key does (the daemon-side join holds the copies that lose).
+fn pick_fleet_marked(host_ctx: *mut c_void, host_cb: DupeHostFn, dq_ptr: usize, pick: &NzbSnap) -> bool {
+    let Some(qh) = crate::ffi::queue_host() else {
+        return pick.has_dupe_fleet;
+    };
+    let marked = |s: &NzbSnap| {
+        s.has_dupe_fleet
+            || crate::fleethold::is_held(&qh, s.ptr)
+            || crate::fleethold::is_probing(&qh, s.ptr)
+    };
+    if marked(pick) {
+        return true;
+    }
+    let (q_len, _) = dq_counts(host_ctx, host_cb, dq_ptr);
+    (0..q_len).any(|i| {
+        let p = dq_queue_at(host_ctx, host_cb, dq_ptr, i);
+        if p.is_none() || p == pick.ptr {
+            return false;
+        }
+        let s = inspect_nzb(host_ctx, host_cb, p, false);
+        s.kind == 0 && s.dupe_key.eq_ignore_ascii_case(&pick.dupe_key) && marked(&s)
+    })
 }
 
 /// Seconds a fleet of copies grouped by name may spend checking each copy:
@@ -1027,10 +1058,47 @@ pub fn pick_lead(views: &[LeadView], current: Option<(usize, u8)>) -> Option<usi
     }
 }
 
+/// What a primary has downloaded, for [`fleet_switch_allowed`]: the largest of
+/// its per-article counters (`DownloadedSize`, the current success and
+/// failure sizes) and the finished files' sizes. The finished-file sizes alone
+/// stay 0 for a single 69 GB file until it completes (review of 76a80014).
+pub fn leader_downloaded_bytes(downloaded_size: i64, current_articles: i64, finished_files: i64) -> i64 {
+    downloaded_size.max(current_articles).max(finished_files).max(0)
+}
+
 /// Whether a primary that has downloaded `downloaded` bytes may still give
 /// way to an easier copy ([`FLEET_SWITCH_MAX_BYTES`]).
 pub fn fleet_switch_allowed(downloaded: i64) -> bool {
     downloaded < FLEET_SWITCH_MAX_BYTES
+}
+
+/// Whether the probe's findings may be written onto a fleet copy already in
+/// history: filed as DELETED/DUPE by its primary's success, or the primary
+/// itself; never a copy the user deleted or one that failed.
+pub fn fleet_history_writable(delete_status: DeleteStatus) -> bool {
+    matches!(delete_status, DeleteStatus::Dupe | DeleteStatus::None)
+}
+
+/// Whether the copy released early as its fleet's primary (`id`) is gone from
+/// the lead: no longer queued, being deleted, filed, or held again (parked on
+/// its health check while the fleet is probed).
+fn fleet_leader_gone(host_ctx: *mut c_void, host_cb: DupeHostFn, id: i32) -> bool {
+    with_guarded_queue(host_ctx, host_cb, |dq_ptr| {
+        let Some(qh) = crate::ffi::queue_host() else {
+            return false;
+        };
+        let ptr = qh.queue_find_by_id(dq_ptr, id);
+        if ptr.is_none() {
+            return true;
+        }
+        let q = qh.nzb_snap(ptr, false);
+        leader_gone(q.deleting, q.delete_status, crate::fleethold::is_held(&qh, ptr))
+    })
+}
+
+/// [`fleet_leader_gone`] for a queued copy's state.
+pub fn leader_gone(deleting: bool, delete_status: DeleteStatus, held: bool) -> bool {
+    deleting || delete_status != DeleteStatus::None || held
 }
 
 /// B1c: releases `new_id` as its fleet's primary while the other copies are
@@ -1068,7 +1136,12 @@ fn fleet_lead_release(
         }
         if old_ptr.is_some() && !crate::fleethold::is_held(&qh, old_ptr) {
             let old_q = qh.nzb_snap(old_ptr, false);
-            if !fleet_switch_allowed(old_q.success_size + old_q.failed_size) {
+            let downloaded = leader_downloaded_bytes(
+                old_q.downloaded_size,
+                old_q.current_success_size + old_q.current_failed_size,
+                old_q.success_size + old_q.failed_size,
+            );
+            if !fleet_switch_allowed(downloaded) {
                 return false;
             }
             crate::fleethold::hold_host(
@@ -2987,7 +3060,8 @@ impl NzbgetRsDupeSearch {
         // shares, order and failover are theirs. This pass re-sampled every
         // copy after each primary change, wrote DupeAlive=0 over a 17% donor,
         // demoted picks still being probed and ran for a copy just deleted.
-        if fleet_owns_pick(opts.dupe_check, pick.kind, pick.dupe_mode, &pick.dupe_key) {
+        let fleet_marked = is_group_key(&pick.dupe_key) && pick_fleet_marked(host_ctx, host_cb, dq_ptr, &pick);
+        if fleet_owns_pick(opts.dupe_check, pick.kind, pick.dupe_mode, &pick.dupe_key, fleet_marked) {
             let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             g.rank_pending.remove(&nzb_id);
             return false;
@@ -6296,18 +6370,25 @@ fn fleet_apply_member(
         let Some((ptr_, in_history)) = dq_find_nzb(host_ctx, host_cb, dq_ptr, nzb_id) else {
             return 0;
         };
+        if in_history {
+            // the primary, released while this copy was still probed (B1c),
+            // succeeded and filed it as DELETED/DUPE (or it is that primary):
+            // it keeps what the probe found. A copy the user deleted, or one
+            // filed as a failure, is left as it is.
+            if fleet_history_writable(qh.nzb_snap(ptr_, false).delete_status) {
+                for (k, v) in params {
+                    qh.nzb_set_param(ptr_, k, Some(v));
+                }
+                qh.nzb_set_param(ptr_, crate::fleethold::PROBING_PARAM, None);
+                qh.dq_history_changed(dq_ptr);
+                qh.dq_save(dq_ptr);
+            }
+            return nzb_id;
+        }
         for (k, v) in params {
             qh.nzb_set_param(ptr_, k, Some(v));
         }
         qh.nzb_set_param(ptr_, crate::fleethold::PROBING_PARAM, None);
-        if in_history {
-            // the primary, released while this copy was still probed (B1c),
-            // succeeded and filed it as DELETED/DUPE: it keeps what the probe
-            // found, as a donor in history
-            qh.dq_history_changed(dq_ptr);
-            qh.dq_save(dq_ptr);
-            return nzb_id;
-        }
         qh.nzb_set_int(ptr_, crate::queuesubsys_host::NZB_INT_DUPE_SCORE, score);
         qh.nzb_set_int(ptr_, crate::queuesubsys_host::NZB_INT_CHANGED, 1);
         qh.dq_save_changed(dq_ptr);
@@ -7383,6 +7464,11 @@ pub unsafe fn fleet_append(
         // switch was refused (the leader had downloaded too much)
         let mut leader: Option<(usize, u8, i32)> = None;
         let mut switch_closed = false;
+        // early leaders that failed (parked on health) or were deleted while
+        // the fleet was still probed: never led again by this probe
+        let mut failed_leads: BTreeSet<usize> = BTreeSet::new();
+        // the last copy released early (it may have finished before the probe)
+        let mut last_leader = 0i32;
         let usable_ref = &usable;
         let summaries_ref = &summaries;
         let candidates_ref = &candidates;
@@ -7581,6 +7667,15 @@ pub unsafe fn fleet_append(
                     fleet_log(ctx_addr as *mut c_void, host_cb, MK_INFO, &msg);
                     key_guard = None;
                 }
+                if let Some((idx, _, id)) = leader {
+                    if holds && fleet_leader_gone(ctx_addr as *mut c_void, host_cb, id) {
+                        // the early leader failed or was deleted: the next
+                        // healthy probed copy leads now, not after the probe
+                        failed_leads.insert(idx);
+                        leader = None;
+                        switch_closed = false;
+                    }
+                }
                 if holds && !switch_closed && !donor_stopping() && !http_stopped() {
                     let health = health_slots.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     let mut views: Vec<LeadView> = Vec::new();
@@ -7595,7 +7690,7 @@ pub unsafe fn fleet_append(
                         ) else {
                             continue;
                         };
-                        if id <= 0 {
+                        if id <= 0 || failed_leads.contains(&i) {
                             continue;
                         }
                         let (alive, dead, _) = eval_fleet_member_health(
@@ -7623,8 +7718,10 @@ pub unsafe fn fleet_append(
                         let ease = crate::donorkind::primary_ease(packing, head, pw);
                         views.push(LeadView {
                             idx: i,
+                            // a cut check counts only with at least ten answers
                             healthy: !dead
                                 && !locked
+                                && cut_settled(cut, &h)
                                 && alive >= 0
                                 && alive.saturating_mul(10) >= crate::dupesearch_nzb::FLEET_HEALTHY_ALIVE_PERMILLE,
                             ease,
@@ -7660,6 +7757,7 @@ pub unsafe fn fleet_append(
                             );
                             if released {
                                 leader = Some((pick, view.ease, id));
+                                last_leader = id;
                             } else {
                                 // kept (downloaded too much), gone, or another
                                 // submission's copy downloads: the end of the
@@ -7675,7 +7773,7 @@ pub unsafe fn fleet_append(
                 std::thread::sleep(Duration::from_millis(200));
             }
         });
-        lead_id = leader.map_or(0, |(_, _, id)| id);
+        lead_id = last_leader;
         for (i, a) in pre_added.iter().enumerate() {
             match a.load(Ordering::SeqCst) {
                 0 => {}
@@ -8203,8 +8301,19 @@ pub unsafe fn fleet_append(
         disk_found
     });
 
-    if chosen == 0 && reason.is_empty() && lead_id != 0 {
-        // the primary released during the probe has finished already
+    // the primary released during the probe finished already: it is the one
+    // chosen. A leader that failed or was deleted is not: the reply then says
+    // why nothing downloads (ALL_DEAD, INCOMPLETE, ...)
+    let lead_succeeded = lead_id != 0
+        && with_guarded_queue(host_ctx, host_cb, |dq_ptr| {
+            dq_find_nzb(host_ctx, host_cb, dq_ptr, lead_id).is_some_and(|(p, in_hist)| {
+                in_hist && {
+                    let s = inspect_nzb(host_ctx, host_cb, p, false);
+                    s.dupe_success && s.delete_status == DeleteStatus::None
+                }
+            })
+        });
+    if chosen == 0 && reason.is_empty() && lead_succeeded {
         chosen = lead_id;
         for entry in &mut out_entries {
             if entry.nzb_id == lead_id {
@@ -8316,6 +8425,25 @@ mod tests {
         assert_eq!(pick_lead(&[v(1, true, 1, 980), v(2, true, 1, 1000), v(0, true, 2, 1000)], None), Some(2));
         assert!(fleet_switch_allowed(0) && fleet_switch_allowed(FLEET_SWITCH_MAX_BYTES - 1));
         assert!(!fleet_switch_allowed(FLEET_SWITCH_MAX_BYTES));
+        // review: a big single-file leader has finished no file after 600 MB,
+        // but its per-article counters count them: no switch
+        let mb = 1024 * 1024;
+        assert!(!fleet_switch_allowed(leader_downloaded_bytes(600 * mb, 0, 0)));
+        assert!(!fleet_switch_allowed(leader_downloaded_bytes(0, 600 * mb, 0)));
+        assert!(fleet_switch_allowed(leader_downloaded_bytes(40 * mb, 40 * mb, 0)));
+        assert_eq!(leader_downloaded_bytes(0, 0, 700 * mb), 700 * mb);
+        // review: an early leader parked on health or deleted during the
+        // probe gives the lead to the next healthy probed copy
+        assert!(leader_gone(false, DeleteStatus::None, true));
+        assert!(leader_gone(true, DeleteStatus::None, false));
+        assert!(leader_gone(false, DeleteStatus::Manual, false));
+        assert!(!leader_gone(false, DeleteStatus::None, false));
+        // review: params are never written onto a copy the user deleted
+        assert!(fleet_history_writable(DeleteStatus::Dupe) && fleet_history_writable(DeleteStatus::None));
+        assert!(!fleet_history_writable(DeleteStatus::Manual) && !fleet_history_writable(DeleteStatus::Health));
+        let v = |idx, healthy, ease, alive| LeadView { idx, healthy, ease, alive };
+        // with the failed leader (0) left out, the next healthy copy leads
+        assert_eq!(pick_lead(&[v(2, true, 3, 1000)], None), Some(2));
     }
 
     /// B1a: a copy's check is cut only when its budget ran out with sampled
@@ -8347,11 +8475,14 @@ mod tests {
     /// probe and fleethold, and says "queued" for a queued backup.
     #[test]
     fn the_backup_pass_leaves_held_fleets_alone() {
-        assert!(fleet_owns_pick(true, 0, DupeMode::Score, b"dupes:dune.part.two.2024"));
-        assert!(!fleet_owns_pick(false, 0, DupeMode::Score, b"dupes:dune.part.two.2024"));
-        assert!(!fleet_owns_pick(true, 0, DupeMode::All, b"dupes:dune.part.two.2024"));
-        assert!(!fleet_owns_pick(true, 0, DupeMode::Score, b"imdb=tt15239678"));
-        assert!(!fleet_owns_pick(true, 1, DupeMode::Score, b"dupes:x"));
+        assert!(fleet_owns_pick(true, 0, DupeMode::Score, b"dupes:dune.part.two.2024", true));
+        assert!(!fleet_owns_pick(false, 0, DupeMode::Score, b"dupes:dune.part.two.2024", true));
+        assert!(!fleet_owns_pick(true, 0, DupeMode::All, b"dupes:dune.part.two.2024", true));
+        assert!(!fleet_owns_pick(true, 0, DupeMode::Score, b"imdb=tt15239678", true));
+        assert!(!fleet_owns_pick(true, 1, DupeMode::Score, b"dupes:x", true));
+        // review: DupeSearch writes dupes:<title> onto every download it
+        // searches; without a fleet's marks it keeps its retry and re-ranks
+        assert!(!fleet_owns_pick(true, 0, DupeMode::Score, b"dupes:some.show.s01e01", false));
         assert_eq!(member_place(false), "queued");
         assert_eq!(member_place(true), "in history");
     }

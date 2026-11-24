@@ -16,7 +16,14 @@ rustyget (unreleased)
       or add the name to ControlHostnames. A proxy that rewrites Host without
       X-Forwarded-Host can't be told apart from another site behind the same
       proxy, so RustyGet behind a reverse proxy should always have a password.
-      Refusals are logged at most once per 10 seconds.
+      X-Forwarded-Host and Forwarded can only make a call stricter (a page
+      can set them itself); behind a proxy, list the browser's host name in
+      ControlHostnames. Refusals are logged at most once per 10 seconds, with
+      a count of the ones suppressed.
+    - Known limits without a password: an old browser that sends no
+      Sec-Fetch-* headers, or a browser set to send no Referer, can't always
+      be told apart from RustyGet's own page. Set a password to be fully
+      protected.
     - With no configuration file, "rustyget -s" / "-D" writes
       ~/.config/rustyget/rustyget.conf with a random password, printed once on
       the console (in a container: in docker logs; there it listens on all

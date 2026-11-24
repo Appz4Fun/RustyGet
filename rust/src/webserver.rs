@@ -564,7 +564,7 @@ fn log_refusal(text: &[u8], log_msg: &mut dyn FnMut(i32, &[u8])) {
         prev => {
             let mut w = text.to_vec();
             if let Some((_, n)) = prev.filter(|&(_, n)| n > 0) {
-                w.extend_from_slice(format!(" ({n} more refused before this one)").as_bytes());
+                w.extend_from_slice(format!(" ({n} similar refusals suppressed since the last report)").as_bytes());
             }
             *last = Some((now, 0));
             drop(last);
@@ -1005,15 +1005,17 @@ where
     // (Sonarr, scripts) send none and are never refused here
     let browser_like = !origin.is_empty() || !referer.is_empty() || sec_fetch_any;
     let listed = |u: &[u8]| !u.is_empty() && url_in_host_list(u, cfg.control_hostnames);
+    // X-Forwarded-Host and Forwarded are set by whoever sends the request
+    // (a page's fetch() can add them, and many proxies pass them on): they
+    // only ever make a request stricter, never lift a check. Behind a proxy
+    // the browser's own name belongs in ControlHostnames.
     let from_page = (!origin.is_empty() || !referer.is_empty())
         && (!cross_site(&origin, &referer, &host_hdr)
-            || !cross_site(&origin, &referer, &forwarded_host)
             || (if origin.is_empty() { listed(&referer) } else { listed(&origin) }));
     let from_elsewhere = (cross_site(&origin, &referer, &host_hdr)
-        && cross_site(&origin, &referer, &forwarded_host)
         && !(if origin.is_empty() { listed(&referer) } else { listed(&origin) }))
         || sec_fetch_site.trim_ascii().eq_ignore_ascii_case(b"cross-site");
-    if !origin.is_empty() && !same_origin(&origin, &host_hdr) && !same_origin(&origin, &forwarded_host) && !listed(&origin) {
+    if !origin.is_empty() && !same_origin(&origin, &host_hdr) && !listed(&origin) {
         origin.clear();
     }
 
@@ -1081,11 +1083,11 @@ where
             Some(bad_name(&forwarded_host))
         } else if from_elsewhere {
             Some(b"it comes from another web site, and no password protects RustyGet.".to_vec())
-        } else if matches!(fetch_site.as_slice(), b"same-origin" | b"same-site")
-            && !from_page
-            && !named(&host_hdr)
-            && !named(&forwarded_host)
+        } else if !from_page
+            && ((fetch_site == b"same-origin" && !named(&host_hdr)) || fetch_site == b"same-site")
         {
+            // (same-site: a sibling subdomain, which a listed Host name
+            // does not vouch for)
             // a page behind a proxy that rewrites Host (nginx's default)
             // looks just like RustyGet's own page without Origin or Referer
             Some(b"the browser did not show that it comes from RustyGet's own page (no Origin or Referer), and no password protects RustyGet; a web site behind a reverse proxy could look the same.".to_vec())

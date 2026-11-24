@@ -11885,6 +11885,20 @@ def scenario_garbageconfig(daemon, t):
             code, _ = _post_rpc_raw(port, origin, None, host=host, extra=extra)
             if code != want:
                 problems.append('AuthorizedIP origin=%s host=%s -> %s' % (origin, host, code))
+        # forwarded headers only ever make a call stricter: a same-origin
+        # fetch can set X-Forwarded-Host itself, so a listed name there lifts
+        # nothing; a listed real Host does, but not for same-site (a sibling
+        # subdomain) unless the Referer shows RustyGet's own page
+        get = '/jsonrpc/version'
+        for host, site, referer, extra, want in (
+                (None, 'same-origin', None, {'X-Forwarded-Host': 'nzb.example.com'}, 403),
+                (None, 'same-origin', None, {'Forwarded': 'host=nzb.example.com'}, 403),
+                ('nzb.example.com', 'same-origin', None, None, 200),
+                ('nzb.example.com', 'same-site', None, None, 403),
+                ('nzb.example.com', 'same-site', 'https://nzb.example.com/', None, 200)):
+            code, _ = _post_rpc_raw(port, None, referer, host=host, path=get, method='GET', fetch_site=site, extra=extra)
+            if code != want:
+                problems.append('AuthorizedIP host=%s site=%s referer=%s %s -> %s' % (host, site, referer, extra, code))
         try:
             _jrpc(port, 'shutdown')
         except Exception:

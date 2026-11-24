@@ -275,19 +275,73 @@ fn cache_unlock_flush() {
     CACHE_FLUSHING.store(false, Ordering::Release);
     let mut locked = CACHE_FLUSH_LOCK.0.lock().unwrap_or_else(|e| e.into_inner());
     *locked = false;
-    CACHE_FLUSH_LOCK.1.notify_one();
+    // Every waiter: one woken by `notify_one` might be a cancelled live repair helper that
+    // leaves without the lock, and the waiter it took the wakeup from would sleep on.
+    CACHE_FLUSH_LOCK.1.notify_all();
 }
 
-pub(crate) fn with_live_cache_fence<T>(action: impl FnOnce() -> T) -> T {
+/// Takes the flush lock unless `cancelled` turns true while waiting for it (checked before
+/// and every 50 ms while waiting). False when cancelled: the lock is not held then.
+fn cache_lock_flush_unless(cancelled: &dyn Fn() -> bool) -> bool {
+    let mut locked = CACHE_FLUSH_LOCK.0.lock().unwrap_or_else(|e| e.into_inner());
+    while *locked {
+        if cancelled() {
+            // Pass on a wakeup this waiter may have taken.
+            CACHE_FLUSH_LOCK.1.notify_all();
+            return false;
+        }
+        locked = CACHE_FLUSH_LOCK
+            .1
+            .wait_timeout(locked, std::time::Duration::from_millis(50))
+            .unwrap_or_else(|e| e.into_inner())
+            .0;
+    }
+    if cancelled() {
+        CACHE_FLUSH_LOCK.1.notify_all();
+        return false;
+    }
+    *locked = true;
+    CACHE_FLUSHING.store(true, Ordering::Release);
+    true
+}
+
+/// The flush lock as a fence for a live repair helper that may be cancelled while it waits:
+/// a cancelled wait gives up (`None`) instead of blocking, so a caller that cancels the
+/// helper under the queue lock never waits on a flusher that waits for that lock.
+pub(crate) fn with_live_cache_fence_unless<T>(
+    cancelled: impl Fn() -> bool,
+    action: impl FnOnce() -> T,
+) -> Option<T> {
     struct Fence;
     impl Drop for Fence {
         fn drop(&mut self) {
             cache_unlock_flush();
         }
     }
-    cache_lock_flush();
+    if !cache_lock_flush_unless(&cancelled) {
+        return None;
+    }
     let _fence = Fence;
-    action()
+    Some(action())
+}
+
+/// Takes the flush lock the plain way (as the flusher and the downloaders do) and releases it.
+#[cfg(test)]
+pub(crate) fn lock_and_unlock_cache_flush_for_test() {
+    cache_lock_flush();
+    cache_unlock_flush();
+}
+
+#[cfg(test)]
+pub(crate) fn hold_cache_flush_lock_for_test() -> impl Drop {
+    struct Held;
+    impl Drop for Held {
+        fn drop(&mut self) {
+            cache_unlock_flush();
+        }
+    }
+    cache_lock_flush();
+    Held
 }
 
 fn cache_effective_limit() -> usize {
@@ -652,14 +706,19 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
                         crate::paths::PATH_SEPARATOR,
                         &f.filename,
                     );
-                    return Some((fp, info_name, write_context));
+                    // Identity for live PAR's flush report, decided once here: copied only
+                    // when a session runs now (one starting mid-flush catches up from the
+                    // completion replay).
+                    let live = crate::parchecker::streaming_session_has_session(nzb.id)
+                        .then(|| (nzb.id, f.id, f.filename.clone(), f.hash16k.clone()));
+                    return Some((fp, info_name, write_context, live));
                 }
             }
         }
         None
     });
 
-    let Some((file_ptr, info_name, write_context)) = selected else {
+    let Some((file_ptr, info_name, write_context, live)) = selected else {
         CACHE_FILE_INFO.store(0, Ordering::SeqCst);
         cache_unlock_flush();
         crate::log::log_active_bytes(MK_DEBUG, b"Checking cache... nothing to flush");
@@ -719,6 +778,33 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
         },
     );
 
+    // Live PAR: articles that waited for their bytes to reach the file can be read there
+    // now. Only those written in place (DirectWrite), up to the first failed write.
+    if let Some((nzb_id, file_id, name, hash16k)) = live
+        .as_ref()
+        .filter(|_| direct_write && !skip_disk_write && flushed_articles > 0)
+    {
+        let written = usize::try_from(flushed_articles).unwrap_or(0).min(items.len());
+        let all: i64 = items[..written]
+            .iter()
+            .map(|item| i64::from(item.segment_size))
+            .sum();
+        let good = if all == flushed_size { written } else { written - 1 };
+        let ranges: Vec<(u64, u64)> = items[..good]
+            .iter()
+            .filter_map(|item| {
+                Some((
+                    u64::try_from(item.segment_offset).ok()?,
+                    u64::try_from(item.segment_size).ok()?,
+                ))
+            })
+            .collect();
+        crate::parchecker::streaming_session_articles_committed(
+            *nzb_id,
+            (Some(*file_id), name, hash16k),
+            &ranges,
+        );
+    }
     let skip_after = qh.file_cache_flush_finish(file_ptr, flushed_articles)
         || crate::options::active_options().is_some_and(|o| o.scalars().skip_write != 0);
     cache_unlock_flush();
@@ -2769,7 +2855,7 @@ impl NzbgetRsArticleDownloader {
             article_ptr: self.article_ptr,
             status: self.status.load(Ordering::SeqCst),
             has_content_analyzer: w.has_analyzer,
-            analyzed_par_file: w.analyzer.as_ref().is_some_and(|ca| ca.par_file),
+            analyzed_par_file: w.analyzer.as_ref().is_some_and(|ca| ca.par_file()),
             has_article_filename: has_afn,
             decoded_file_size: w.decoded_file_size,
             downloaded_size: w.downloaded_size as i64,
@@ -2786,8 +2872,8 @@ impl NzbgetRsArticleDownloader {
         if w.parcheck_enabled {
             if let Some(ref mut ca) = w.analyzer {
                 let h = ca.finish();
-                par_out = ca.par_file;
-                let set_id = ca.par_set_id;
+                par_out = ca.par_file();
+                let set_id = ca.par_set_id();
                 w.hash16k_c = h;
                 if let Some(id) = set_id {
                     w.par_set_id_c = id;

@@ -99,6 +99,13 @@ pub struct NzbgetRsRpcNzbInfoInput<'a> {
     pub dupe_recovered_bytes: i64,
     pub dupe_recovered_holes: c_int,
     pub live_repairing: c_int,
+    /// Live PAR progress in permille (verified slices of all slices), -1 without a session.
+    pub live_repair_progress: c_int,
+    /// The step of the live repair call running now ("matrix", "decode", ...), empty when
+    /// none runs, and that step's done and total units (total 0 when unknown).
+    pub live_repair_step: &'a CStr,
+    pub live_repair_done: c_int,
+    pub live_repair_total: c_int,
     pub health: c_int,
     pub critical_health: c_int,
     pub dupe_key: &'a CStr,
@@ -1075,6 +1082,7 @@ fn write_nzb_info_fields(out: &mut Vec<u8>, json: bool, nzb: &RpcNzbInfo<'_>) {
     let dupe_mode_str = table_get(&DUPE_MODE_NAMES, n.dupe_mode, "SCORE");
 
     let live_repair_str = bool_str(json, n.live_repairing != 0);
+    let live_repair_step_enc = encode_str(json, n.live_repair_step.to_bytes());
     let deleted_str = bool_str(json, n.delete_status != 0);
 
     out.reserve(2048);
@@ -1112,6 +1120,10 @@ fn write_nzb_info_fields(out: &mut Vec<u8>, json: bool, nzb: &RpcNzbInfo<'_>) {
             \"DupeRecoveredBytesHi\" : {},\n\
             \"DupeRecoveredHoles\" : {},\n\
             \"LiveRepairing\" : {},\n\
+            \"LiveRepairProgress\" : {},\n\
+            \"LiveRepairStep\" : \"{}\",\n\
+            \"LiveRepairDone\" : {},\n\
+            \"LiveRepairTotal\" : {},\n\
             \"Health\" : {},\n\
             \"CriticalHealth\" : {},\n\
             \"DupeKey\" : \"{}\",\n\
@@ -1160,6 +1172,10 @@ fn write_nzb_info_fields(out: &mut Vec<u8>, json: bool, nzb: &RpcNzbInfo<'_>) {
             dupe_hi,
             n.dupe_recovered_holes,
             live_repair_str,
+            n.live_repair_progress,
+            live_repair_step_enc,
+            n.live_repair_done,
+            n.live_repair_total,
             n.health,
             n.critical_health,
             dupe_key_enc,
@@ -1211,6 +1227,10 @@ fn write_nzb_info_fields(out: &mut Vec<u8>, json: bool, nzb: &RpcNzbInfo<'_>) {
             <member><name>DupeRecoveredBytesHi</name><value><i4>{}</i4></value></member>\n\
             <member><name>DupeRecoveredHoles</name><value><i4>{}</i4></value></member>\n\
             <member><name>LiveRepairing</name><value><boolean>{}</boolean></value></member>\n\
+            <member><name>LiveRepairProgress</name><value><i4>{}</i4></value></member>\n\
+            <member><name>LiveRepairStep</name><value><string>{}</string></value></member>\n\
+            <member><name>LiveRepairDone</name><value><i4>{}</i4></value></member>\n\
+            <member><name>LiveRepairTotal</name><value><i4>{}</i4></value></member>\n\
             <member><name>Health</name><value><i4>{}</i4></value></member>\n\
             <member><name>CriticalHealth</name><value><i4>{}</i4></value></member>\n\
             <member><name>DupeKey</name><value><string>{}</string></value></member>\n\
@@ -1259,6 +1279,10 @@ fn write_nzb_info_fields(out: &mut Vec<u8>, json: bool, nzb: &RpcNzbInfo<'_>) {
             dupe_hi,
             n.dupe_recovered_holes,
             live_repair_str,
+            n.live_repair_progress,
+            live_repair_step_enc,
+            n.live_repair_done,
+            n.live_repair_total,
             n.health,
             n.critical_health,
             dupe_key_enc,

@@ -4,13 +4,13 @@
 //! the header on the piece that completes it, before QueueCoordinator reads
 //! the PAR flag. Reset keeps the identity already found, as in C++.
 
-use md5::block_api::Md5Core;
-use md5::digest::{block_api::CoreProxy, common::hazmat::SerializableState};
+#[cfg(test)]
 use md5::{Digest, Md5};
 
+#[cfg(test)]
 const HEADER: usize = 64;
+#[cfg(test)]
 const MAGIC: &[u8; 8] = b"PAR2\0PKT";
-const LIMIT: i32 = 16 * 1024;
 
 /// Par2::MD5Hash::print: the bytes from last to first, upper-case hex.
 pub(crate) fn print(hash: &[u8]) -> [u8; 33] {
@@ -28,88 +28,35 @@ pub(crate) fn print(hash: &[u8]) -> [u8; 33] {
     out
 }
 
-// OPEN ITEM (par-rs): `par_rs::LegacyHeadAnalyzer` (par-rs #82, unchanged at 4b03a90) ports
-// this exactly and passes the tests below, but it allocates on the per-piece path, which
-// tests/renameanalyzer_allocations.rs forbids (501 allocations in 100 reset/append/finish
-// rounds; 0 here). `reset` builds a `Vec::with_capacity(64)` MD5 buffer, `finish` clones that
-// buffer to pad it, and the first `append` grows the `signature` Vec. par-rs needs fixed
-// `[u8; 64]` buffers (with a length) for both and an in-place padded final block; then this
-// type becomes `pub use par_rs::LegacyHeadAnalyzer as Analyzer` with `print` kept here.
-pub struct Analyzer {
-    md5: Md5,
-    signature: [u8; HEADER],
-    data_size: i32,
-    pub par_file: bool,
-    pub par_set_id: Option<[u8; 33]>,
-}
-
-impl Default for Analyzer {
-    fn default() -> Self {
-        Analyzer {
-            md5: Md5::new(),
-            signature: [0; HEADER],
-            data_size: 0,
-            par_file: false,
-            par_set_id: None,
-        }
-    }
-}
+/// `par_rs::LegacyHeadAnalyzer` (par-rs #82/#90: the exact legacy behaviour, no allocations),
+/// printed the way nzbget prints it: digests and set ids byte-reversed, upper-case hex.
+#[derive(Default)]
+pub struct Analyzer(par_rs::LegacyHeadAnalyzer);
 
 impl Analyzer {
     /// Reset: a new MD5 and size (what was found and the header bytes stay)
     pub fn reset(&mut self) {
-        self.md5 = Md5::new();
-        self.data_size = 0;
+        self.0.reset();
     }
 
     /// Append; true when it (re)recognized a PAR2 packet header
     pub fn append(&mut self, buf: &[u8]) -> bool {
-        let len = buf.len() as i32;
-        let size = self.data_size;
-        // (size_t)m_dataSize: an overflowed (negative) size reads as huge
-        let header_ready = if (size as usize) < HEADER {
-            let n = buf.len().min(HEADER - size as usize);
-            self.signature[size as usize..size as usize + n].copy_from_slice(&buf[..n]);
-            size as usize + n == HEADER
-        } else {
-            true
-        };
-        let mut matched = false;
-        if header_ready && &self.signature[..8] == MAGIC {
-            self.par_file = true;
-            self.par_set_id = Some(print(&self.signature[32..48]));
-            matched = true;
-        }
-        // Match the legacy 32-bit arithmetic, including the subtraction after
-        // the cumulative size wraps. Widening this subtraction changes hashing.
-        let rem = len.min(LIMIT.wrapping_sub(size));
-        if rem > 0 {
-            self.md5.update(&buf[..rem as usize]);
-        }
-        self.data_size = self.data_size.wrapping_add(len);
-        matched
+        self.0.append(buf)
     }
 
     /// Finish: the MD5 of the first 16 KiB, printed
     pub fn finish(&mut self) -> [u8; 33] {
-        let hash = self.md5.clone().finalize();
-        // Par2::MD5Context::Final replaces the chaining words with the digest,
-        // but retains the byte count and buffered input. Neither finalize_reset
-        // nor simply finalizing a clone preserves subsequent Finish/Append calls.
-        // Md5Core serializes four little-endian words followed by its block count.
-        let (core, buffer) = self.md5.clone().decompose();
-        let mut state = core.serialize();
-        state[..16].copy_from_slice(&hash);
-        // libpar2 also byte-swaps its live state when printing on big endian.
-        #[cfg(target_endian = "big")]
-        for word in state[..16].as_chunks_mut::<4>().0 {
-            word.reverse();
-        }
-        self.md5 = Md5::compose(
-            Md5Core::deserialize(&state).expect("valid MD5 core state"),
-            buffer,
-        );
-        print(&hash)
+        print(&self.0.finish())
+    }
+
+    /// Whether the file starts with a PAR2 packet header.
+    pub fn par_file(&self) -> bool {
+        self.0.par_file()
+    }
+
+    /// The set id of that header, printed.
+    pub fn par_set_id(&self) -> Option<[u8; 33]> {
+        self.0.par_set_id().map(|id| print(&id.0))
     }
 }
 
@@ -126,10 +73,10 @@ mod tests {
         }
         let mut a = Analyzer::default();
         assert!(a.append(&header));
-        assert!(a.par_file);
+        assert!(a.par_file());
         assert!(a.append(b"more"));
         assert_eq!(
-            a.par_set_id.as_ref(),
+            a.par_set_id().as_ref(),
             Some(b"0F0E0D0C0B0A09080706050403020100\0")
         );
         let mut b = Analyzer::default();
@@ -138,20 +85,8 @@ mod tests {
         assert_eq!(&b.finish(), b"7E42F8EC980980E904B2008FD98C1DD4\0");
     }
 
-    #[test]
-    fn size_wrap_keeps_legacy_md5_window() {
-        let mut a = Analyzer {
-            data_size: i32::MAX,
-            ..Analyzer::default()
-        };
-        a.append(b"x");
-        assert_eq!(a.data_size, i32::MIN);
-        a.append(&[b'y'; 16 * 1024]);
-        a.append(b"y");
-        a.append(b"z");
-        // The wrapped subtraction is negative through INT_MIN + 16384.
-        assert_eq!(a.finish(), print(&Md5::digest(b"z")));
-    }
+    // The 32-bit size wrap is covered by par-rs
+    // (`hasher::legacy_head::tests::size_wrap_keeps_the_legacy_window`).
 
     #[test]
     fn reset_preserves_par_recognition_and_empty_inputs() {
@@ -168,13 +103,13 @@ mod tests {
         assert!(a.append(&header));
         assert!(a.append(b""));
         assert_eq!(
-            a.par_set_id.as_ref(),
+            a.par_set_id().as_ref(),
             Some(b"0F0E0D0C0B0A09080706050403020100\0")
         );
         a.reset();
-        assert!(a.par_file);
+        assert!(a.par_file());
         assert_eq!(
-            a.par_set_id.as_ref(),
+            a.par_set_id().as_ref(),
             Some(b"0F0E0D0C0B0A09080706050403020100\0")
         );
     }
@@ -192,9 +127,9 @@ mod tests {
                 a.append(&bytes),
                 "complete PAR2 header in one piece must be visible immediately"
             );
-            assert!(a.par_file);
+            assert!(a.par_file());
             assert_eq!(
-                a.par_set_id.as_ref(),
+                a.par_set_id().as_ref(),
                 Some(b"0F0E0D0C0B0A09080706050403020100\0")
             );
             assert_eq!(a.finish(), print(&Md5::digest(&bytes)));
@@ -208,9 +143,9 @@ mod tests {
         for split in [HEADER - 1, 47] {
             let mut a = Analyzer::default();
             assert!(!a.append(&header[..split]));
-            assert!(!a.par_file);
+            assert!(!a.par_file());
             assert!(a.append(&header[split..]));
-            assert!(a.par_file);
+            assert!(a.par_file());
             assert_eq!(a.finish(), print(&Md5::digest(header)));
         }
     }
@@ -222,11 +157,11 @@ mod tests {
         for length in 0..HEADER {
             let mut a = Analyzer::default();
             assert!(!a.append(&header[..length]));
-            assert!(!a.par_file);
+            assert!(!a.par_file());
         }
         let mut a = Analyzer::default();
         assert!(!a.append(&[b'x'; 2472]));
-        assert!(!a.par_file);
+        assert!(!a.par_file());
     }
 
     #[test]
@@ -241,7 +176,7 @@ mod tests {
             bytes[..HEADER].copy_from_slice(&header);
             a.reset();
             assert!(a.append(&bytes));
-            assert!(a.par_file);
+            assert!(a.par_file());
         }
 
         // 2. SplitHeaderIsVisibleOnItsCompletingPiece
@@ -249,9 +184,9 @@ mod tests {
             let mut a = Analyzer::default();
             a.reset();
             assert!(!a.append(&header[..split]));
-            assert!(!a.par_file);
+            assert!(!a.par_file());
             assert!(a.append(&header[split..]));
-            assert!(a.par_file);
+            assert!(a.par_file());
         }
 
         // 3. CommittedParIndexIsVisibleFromOneAppend
@@ -265,14 +200,14 @@ mod tests {
         let mut a = Analyzer::default();
         a.reset();
         assert!(a.append(&bytes));
-        assert!(a.par_file);
+        assert!(a.par_file());
 
         // 4. PartialAndNonParDataCannotAuthorizeBorrowing
         for size in 0..HEADER {
             let mut a = Analyzer::default();
             a.reset();
             assert!(!a.append(&header[..size]));
-            assert!(!a.par_file);
+            assert!(!a.par_file());
         }
         for byte in 0..8 {
             let mut invalid = header;
@@ -280,7 +215,7 @@ mod tests {
             let mut a = Analyzer::default();
             a.reset();
             assert!(!a.append(&invalid));
-            assert!(!a.par_file);
+            assert!(!a.par_file());
         }
     }
 }

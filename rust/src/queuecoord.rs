@@ -1409,6 +1409,15 @@ fn automatic_live_par_repair(opts: &crate::queuesubsys_host::GlobalOptsSnap) -> 
         && crate::options::active_options().is_some_and(|o| o.scalars().par_repair != 0)
 }
 
+/// The file a download's articles are written into while it downloads (its DirectWrite
+/// output, `<dest>/<id>.out.tmp`), once created. Live PAR reads a slice back from it when
+/// RAM no longer holds the slice's bytes. `None` without DirectWrite: each article then
+/// waits in a file of its own until the download completes.
+fn live_written_file(file: &crate::queuesubsys_host::FileSnap) -> Option<std::path::PathBuf> {
+    (file.output_initialized && !file.output_filename.is_empty())
+        .then(|| crate::fsops::path(&file.output_filename).to_path_buf())
+}
+
 /// Live par2 syndromes while downloading: automatic repair plus the
 /// `LiveParRepair` switch. Without it no live session starts and repair runs
 /// after the download; damage tracking and recovery-volume unpausing
@@ -1600,6 +1609,9 @@ impl NzbgetRsQueueCoordinator {
         if let Some(metrics) = &self.callback_metrics {
             metrics.emit_after_join();
         }
+        // Live repair helpers were cancelled with their sessions at stop; give them a
+        // bounded moment to leave the files before the final cleanup.
+        crate::postproc::live_par_helpers_wait(std::time::Duration::from_secs(10));
         crate::parchecker::streaming_sessions_forget_all();
         host.coord_dq_final();
         host.log(
@@ -2867,12 +2879,15 @@ impl NzbgetRsQueueCoordinator {
             Ok(ptr)
         };
         let pool = crate::parchecker::effective_live_pool_bytes();
-        let metadata = prepare_live_start(&file.path, &file.base_dir, pool, writers)?;
+        let mut metadata = prepare_live_start(&file.path, &file.base_dir, pool, writers)?;
         let catalog = metadata.catalog_required_bytes()?;
+        let mut hint = crate::parchecker::LivePlanHint::default();
         let facts = host.with_locked_queue(|dq| {
             let ptr = check_stamp(dq)?;
+            hint = Self::live_plan_hint(host, ptr, &file.name);
             host.live_namespace_capture(ptr, file.nzb_id, &file.base_dir, catalog, pool)
         })?;
+        metadata.set_plan_hint(hint);
         let mut prepared = metadata.finish_tracked(&file.path, facts, &attempt)?;
         if root_identity()? != root {
             return Err(RepairError::Cancelled);
@@ -2887,6 +2902,51 @@ impl NzbgetRsQueueCoordinator {
         })?;
         installed.finish(file.nzb_id);
         Ok(())
+    }
+
+    /// The recovery volumes of the set of `par_name` in the queue and the job's failures so
+    /// far, for sizing live PAR's recovery slots. The caller holds the queue lock.
+    fn live_plan_hint(
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        ptr: NzbRef,
+        par_name: &[u8],
+    ) -> crate::parchecker::LivePlanHint {
+        let nzb = host.nzb_snap(ptr, false);
+        let positive = |v: i64| u64::try_from(v).unwrap_or(0);
+        let failed = positive(nzb.current_failed_size - nzb.par_current_failed_size);
+        let succeeded = positive(nzb.current_success_size - nzb.par_current_success_size);
+        let mut hint = crate::parchecker::LivePlanHint {
+            volumes: Vec::new(),
+            failed_bytes: failed,
+            failed_articles: positive(i64::from(nzb.current_failed_articles)),
+            done_bytes: failed + succeeded,
+            total_bytes: positive(nzb.size - nzb.par_size),
+        };
+        for i in 0..host.nzb_file_len(ptr).min(4096) {
+            let file = host.file_snap(host.nzb_file_at(ptr, i));
+            if file.deleted
+                || !crate::parparser::same_par_collection(
+                    par_name,
+                    &file.filename,
+                    file.filename_confirmed,
+                )
+            {
+                continue;
+            }
+            let Some((first_exponent, count)) = crate::parchecker::volume_range(&file.filename)
+            else {
+                continue;
+            };
+            hint.volumes.push(crate::parchecker::LiveQueuedVolume {
+                id: file.id as u64,
+                first_exponent,
+                count,
+                size: positive(file.size),
+                articles: u32::try_from(file.total_articles).unwrap_or(0),
+                paused: file.paused,
+            });
+        }
+        hint
     }
 
     fn drain_live_par_completed_files(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
@@ -3129,13 +3189,15 @@ impl NzbgetRsQueueCoordinator {
                             && part.segment_size > 0
                             && part.segment_offset >= 0
                         {
+                            let written = live_written_file(&file);
                             if let Some(Err(_error)) =
-                                crate::parchecker::streaming_session_defer_article_for_queue(
+                                crate::parchecker::streaming_session_defer_committed_article(
                                     id,
                                     (Some(file.id), &file.filename, &file.hash16k),
                                     part.segment_offset as u64,
                                     part.segment_size as u64,
                                     part.crc,
+                                    written.as_deref(),
                                     || {
                                         host.article_cache_snapshot_segment(
                                             file.ptr,
@@ -3185,6 +3247,7 @@ impl NzbgetRsQueueCoordinator {
                 Some(Err(_))
             );
             crate::parchecker::streaming_session_kick_backfill(id);
+            let polled = crate::parchecker::streaming_session_poll(id, false);
             host.with_locked_queue(|dq| {
                 let ptr = host.queue_find_by_id(dq, id);
                 if ptr.is_none() || !live_par_syndromes(&host.opts()) {
@@ -3194,6 +3257,24 @@ impl NzbgetRsQueueCoordinator {
                 let nzb = host.nzb_snap(ptr, false);
                 if nzb.deleting {
                     return;
+                }
+                if let Some(st) = polled {
+                    let snapshot = crate::liveparlog::Snapshot {
+                        verified: st.verified,
+                        damaged: st.damaged,
+                        not_arrived: st.unarrived + st.partially_arrived,
+                        total: st.total,
+                        recovery_ready: st.ready_recovery,
+                        recovery_in_flight: st.unpaused_in_flight,
+                        recovery_needed: st.needed_recovery_blocks,
+                        repair_possible: st.early_cutover_possible,
+                    };
+                    if let Some(tail) = crate::liveparlog::line_if_due(id, snapshot) {
+                        let mut msg = b"Live par2 for ".to_vec();
+                        msg.extend_from_slice(&nzb.name);
+                        msg.extend_from_slice(tail.as_bytes());
+                        host.nzb_print_message(ptr, crate::queuesubsys_host::MK_DETAIL, &msg);
+                    }
                 }
                 if failed || crate::parchecker::streaming_session_last_error(id).is_some() {
                     Self::report_live_par_warning(host, ptr, id);
@@ -3393,9 +3474,10 @@ impl NzbgetRsQueueCoordinator {
                     && crate::parchecker::streaming_session_has_session(nzb.id)
                 {
                     if live_par_syndromes(&opts) {
-                        if let Some(Err(_error)) = crate::parchecker::streaming_session_defer_article_for_queue(
+                        let written = live_written_file(&file);
+                        if let Some(Err(_error)) = crate::parchecker::streaming_session_defer_committed_article(
                             nzb.id, (Some(file.id), &file.filename, &file.hash16k), art.segment_offset as u64,
-                            art.segment_size as u64, art.crc,
+                            art.segment_size as u64, art.crc, written.as_deref(),
                             || host.article_cache_snapshot_segment(file.ptr, art.ptr, art.segment_size as usize),
                         ) {
                             Self::report_live_par_warning(host, nzb.ptr, nzb.id);

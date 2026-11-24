@@ -73,7 +73,10 @@ pub(crate) fn resources(
             max_staging_bytes: working,
             solve_mem_limit_bytes: solve,
             solve_threads: 1,
-            fold_threads: 0,
+            // Fold off the thread that hands articles over; par-rs bounds the queue by
+            // `max_working_bytes` (and drops to inline folding when a slice is too large
+            // for a queued job to fit).
+            fold_threads: 2,
             // Re-reading verified slices for new slots runs on its own thread
             // (`streaming_session_kick_backfill`), never under the queue lock.
             defer_backfill: true,
@@ -339,9 +342,14 @@ pub(crate) use write_control::{
 #[cfg(all(test, unix))]
 mod physical_ownership_tests;
 mod source_identity;
+#[cfg(test)]
+pub(crate) use source_identity::{own_temp_prefix_for_test, FORCE_NO_LINKS};
 mod write_registry;
 pub(crate) use write_registry::{
-    donor_write_context, download_writes, forget_download_writes, open_repair_target,
+    create_repair_temp, donor_write_context, download_writes, forget_download_writes,
+    name_repair_temp, open_repair_target, remove_named_repair_target, remove_stale_repair_temps,
+    repair_root_is_current, repair_target_name_is_free, unlink_repair_temp, with_target_naming,
+    target_naming_lock, NamingLeft, TargetNaming,
     repair_target_is_current, source_write_context, SourceWriteContext,
 };
 

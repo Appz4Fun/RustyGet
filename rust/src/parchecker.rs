@@ -59,7 +59,8 @@ pub use par_rs::stream::{
     SyndromeBank,
 };
 pub use par_rs::streaming::{
-    ArticleOutcome, EarlyRepairReport, LiveIoStats, LiveStatus, QueuedVolume, SessionOptions,
+    ArticleOutcome, EarlyRepairReport, LiveIoStats, LiveRepairProgress, LiveRepairStep,
+    LiveStatus, QueuedVolume, SessionOptions,
     SliceEvent, SliceState, StreamingParSession, UnpauseAction, VolumeStatus,
 };
 pub use par_rs::twin::{
@@ -185,9 +186,35 @@ struct ActiveStreamingSession {
     /// captures failed, not only the first failure.
     refusals: Mutex<Vec<(String, u64)>>,
     stop_logged: AtomicBool,
+    /// Where each file's bytes are written and the articles that wait for theirs to get
+    /// there; see [`CommittedSources`].
+    committed: Mutex<CommittedSources>,
+    /// Rises with every step a live repair helper takes before par-rs's repair call (the
+    /// cache fence passed, a target opened, an article folded by the drain), so a helper
+    /// that is busy admitting its repair is not taken for a stuck one.
+    admission_progress: AtomicU64,
     // Drop last, after the session, queue and all owned metadata. Grows with
     // the syndrome slots as damage appears (see `grow_for_damage`).
     budget: Mutex<SessionBudgetLease>,
+}
+
+/// Live repair's None path: an article whose bytes RAM cannot supply is handed to par-rs
+/// without them (`on_article_finished(.., None)`) once they are in the file, and par-rs
+/// reads the slice from that file when the slice is complete. The file is the job's
+/// DirectWrite output (`<dest>/<id>.out.tmp`) or the completed file under its current
+/// (possibly obfuscated) name, given to par-rs with `set_target_path`.
+///
+/// A cache miss means the article reached its file, so it is handed over at once. An
+/// article refused while still in the cache (RAM staging full, or the snapshot queue full)
+/// waits here until the article cache writes it out
+/// (`streaming_session_articles_committed`); one never flushed before its file completes
+/// is covered by the completion replay.
+#[derive(Default)]
+struct CommittedSources {
+    /// The file each queue file's bytes are written into, and whether par-rs knows it.
+    paths: HashMap<FileId, (PathBuf, bool)>,
+    /// Articles (offset, size, CRC32) waiting for the cache to write them out.
+    awaiting: HashMap<FileId, Vec<(u64, u64, u32)>>,
 }
 
 struct DeferredArticle {
@@ -196,6 +223,8 @@ struct DeferredArticle {
     crc32: u32,
     size: u64,
     bytes: Option<Vec<u8>>,
+    /// Without `bytes`: the article is in its file (par-rs reads it there), not lost.
+    committed: bool,
 }
 
 // Keep both payload ownership and its reservation through the actual fold.
@@ -235,6 +264,13 @@ impl LiveArticleLease {
                 article.offset,
                 data,
                 article.crc32,
+            ),
+            None if article.committed => self.entry.session.on_article_finished(
+                &article.file_id,
+                article.offset,
+                article.size,
+                article.crc32,
+                None,
             ),
             None => self
                 .entry
@@ -307,6 +343,156 @@ fn build_streaming_session(
     budget: SessionBudgetLease,
     writers: Arc<WriteCoordinator>,
 ) -> Result<Arc<ActiveStreamingSession>, RepairError> {
+    build_streaming_session_with(set, base_dir, options, budget, writers, None)
+}
+
+/// What the queue knows when live PAR starts, to size the recovery slots up front
+/// ([`live_recovery_plan`]).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct LivePlanHint {
+    /// The set's recovery volumes in the queue.
+    pub volumes: Vec<LiveQueuedVolume>,
+    /// Source bytes and articles that failed so far.
+    pub failed_bytes: u64,
+    pub failed_articles: u64,
+    /// Source bytes downloaded (good or failed) so far, and in all.
+    pub done_bytes: u64,
+    pub total_bytes: u64,
+}
+
+/// A `.volXX+YY.par2` file in the queue.
+#[derive(Clone, Debug)]
+pub(crate) struct LiveQueuedVolume {
+    pub id: u64,
+    pub first_exponent: u32,
+    pub count: u32,
+    pub size: u64,
+    pub articles: u32,
+    pub paused: bool,
+}
+
+/// Damaged slices expected by the end of the download: the failures so far, projected
+/// over the rest of it. Each failed article damages the slices its bytes cover plus at most
+/// one more where it straddles a slice boundary.
+pub(crate) fn expected_damaged_slices(hint: &LivePlanHint, slice_size: u64) -> u64 {
+    if slice_size == 0 {
+        return 0;
+    }
+    let done = hint.done_bytes.max(1);
+    let total = hint.total_bytes.max(done);
+    let project = |value: u64| {
+        u64::try_from(u128::from(value) * u128::from(total) / u128::from(done)).unwrap_or(u64::MAX)
+    };
+    project(hint.failed_bytes)
+        .div_ceil(slice_size)
+        .saturating_add(project(hint.failed_articles))
+}
+
+/// Recovery slots to plan for `expected` damaged slices: 20% more, at least 2 more. Live
+/// folding costs memory bandwidth per slot (slots x slice bytes for every slice that
+/// arrives), so the plan follows the expected damage, not the free memory; more damage
+/// grows the slots later (`grow_for_damage`).
+pub(crate) fn planned_recovery_slots(expected: u64) -> u64 {
+    expected
+        .saturating_add(expected.div_ceil(5).max(2))
+        .min(65535)
+}
+
+/// The recovery exponents to give syndrome slots before any source slice arrives, so none
+/// is back-filled: those of the volumes the live session's selector unpauses first (paused,
+/// fewest blocks first, `select_more_pars`), planned with par-rs's
+/// `plan_recovery_articles`, for the expected damage plus margin. RustyGet fetches whole
+/// volumes, so each volume is planned whole. Without known volumes, the first exponents
+/// (volumes count up from exponent 0).
+pub(crate) fn live_recovery_plan(
+    hint: &LivePlanHint,
+    slice_size: u64,
+    loaded: &HashSet<u32>,
+) -> par_rs::recovery_plan::RecoveryArticlePlan {
+    use par_rs::recovery_plan::{plan_recovery_articles, RecoveryVolume};
+    let needed = planned_recovery_slots(expected_damaged_slices(hint, slice_size)) as u32;
+    let mut paused: Vec<&LiveQueuedVolume> = hint
+        .volumes
+        .iter()
+        .filter(|v| v.paused && v.count > 0)
+        .collect();
+    paused.sort_by_key(|v| (v.count, v.id));
+    let counts: Vec<i32> = paused
+        .iter()
+        .map(|v| i32::try_from(v.count).unwrap_or(i32::MAX))
+        .collect();
+    let (selected, _) = select_more_pars(&counts, i32::try_from(needed).unwrap_or(i32::MAX));
+    let volumes: Vec<RecoveryVolume> = selected
+        .into_iter()
+        .filter_map(|i| paused.get(i))
+        .map(|v| {
+            let size = v.size.max(1);
+            let articles = u64::from(v.articles.max(1)).min(size);
+            RecoveryVolume {
+                id: v.id,
+                first_exponent: v.first_exponent,
+                count: v.count,
+                layout: None,
+                article_ends: (1..=articles).map(|k| size * k / articles).collect(),
+                fetched: Vec::new(),
+            }
+        })
+        .collect();
+    let mut plan = plan_recovery_articles(&volumes, loaded, needed);
+    let mut next = 0u32;
+    while plan.exponents.len() < needed as usize && next < 65535 {
+        if !loaded.contains(&next) && !plan.exponents.contains(&next) {
+            plan.exponents.push(next);
+        }
+        next += 1;
+    }
+    plan.exponents.sort_unstable();
+    plan.exponents.truncate(needed as usize);
+    plan
+}
+
+/// Creates the engine sized by a recovery plan (`StreamingParSession::with_recovery_plan`):
+/// syndrome slots for the loaded and planned exponents, no more, and the lease shrunk to
+/// match; `grow_for_damage` adds slots when damage outgrows the plan.
+fn build_planned_streaming_session(
+    set: &PacketSet,
+    base_dir: &Path,
+    options: SessionOptions,
+    mut budget: SessionBudgetLease,
+    writers: Arc<WriteCoordinator>,
+    hint: &LivePlanHint,
+) -> Result<Arc<ActiveStreamingSession>, RepairError> {
+    let main = set.main.as_ref().ok_or(RepairError::NoMainPacket)?;
+    let slice_size = main.slice_size.max(1);
+    let loaded: HashSet<u32> = set.recovery.keys().copied().collect();
+    let plan = live_recovery_plan(hint, slice_size, &loaded);
+    let slots = (loaded.len() + plan.exponents.len()).max(1) as u64;
+    let syndrome_ram = slots
+        .saturating_mul(slice_size)
+        .min(options.max_syndrome_bytes)
+        .max(slice_size);
+    // The reservation paid two slices (syndrome and output) for every slot the options
+    // allowed; give back what the plan does not use, so growth pays for itself.
+    let unused = options.max_syndrome_bytes.saturating_sub(syndrome_ram);
+    budget.shrink_by(unused.saturating_mul(2));
+    build_streaming_session_with(
+        set,
+        base_dir,
+        options,
+        budget,
+        writers,
+        Some((&plan, syndrome_ram)),
+    )
+}
+
+fn build_streaming_session_with(
+    set: &PacketSet,
+    base_dir: &Path,
+    options: SessionOptions,
+    budget: SessionBudgetLease,
+    writers: Arc<WriteCoordinator>,
+    plan: Option<(&par_rs::recovery_plan::RecoveryArticlePlan, u64)>,
+) -> Result<Arc<ActiveStreamingSession>, RepairError> {
     let main = set.main.as_ref().ok_or(RepairError::NoMainPacket)?;
     let mut lengths = HashMap::new();
     let mut target_names = HashMap::new();
@@ -329,8 +515,22 @@ fn build_streaming_session(
         })
         .map_err(|_| live_error("live PAR generation", "exhausted"))?;
     let article_byte_limit = options.max_working_bytes;
+    let session = match plan {
+        Some((plan, syndrome_ram)) => {
+            let slots = usize::try_from(syndrome_ram / main.slice_size.max(1)).unwrap_or(usize::MAX);
+            StreamingParSession::with_recovery_plan_limits(
+                set,
+                base_dir,
+                options,
+                plan,
+                syndrome_ram,
+                slots,
+            )?
+        }
+        None => StreamingParSession::new(set, base_dir, options)?,
+    };
     Ok(Arc::new(ActiveStreamingSession {
-        session: StreamingParSession::new(set, base_dir, options)?,
+        session,
         generation: SessionGeneration(generation),
         writers,
         budget: Mutex::new(budget),
@@ -353,6 +553,8 @@ fn build_streaming_session(
         warning_reported: AtomicBool::new(false),
         refusals: Mutex::new(Vec::new()),
         stop_logged: AtomicBool::new(false),
+        committed: Mutex::new(CommittedSources::default()),
+        admission_progress: AtomicU64::new(0),
     }))
 }
 
@@ -410,7 +612,121 @@ fn ensure_registry_generation(
 }
 
 impl ActiveStreamingSession {
-    /// A back-fill is pending, none runs, and no retry delay is in force.
+    fn note_admission_progress(&self) {
+        self.admission_progress.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// File `id`'s bytes are written into `path` now. Only noted (callers may hold the
+    /// queue lock); [`Self::apply_target_paths`] tells par-rs.
+    fn note_written(&self, id: FileId, path: &Path) {
+        let mut sources = self.committed.lock().unwrap_or_else(|e| e.into_inner());
+        if sources.paths.get(&id).is_none_or(|(known, _)| known != path) {
+            sources.paths.insert(id, (path.to_path_buf(), false));
+        }
+    }
+
+    /// Tells par-rs where the files noted since last time are (`set_target_path`). It waits
+    /// for a repair under way, so callers hold the operation lock (no RustyGet repair runs)
+    /// and never call it from a repair's slice callback.
+    fn apply_target_paths(&self) -> Result<(), RepairError> {
+        let pending: Vec<(FileId, PathBuf)> = self
+            .committed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .paths
+            .iter()
+            .filter(|(_, (_, applied))| !applied)
+            .map(|(id, (path, _))| (*id, path.clone()))
+            .collect();
+        for (id, path) in pending {
+            self.session.set_target_path(&id, &path)?;
+            let mut sources = self.committed.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((current, applied)) = sources.paths.get_mut(&id) {
+                if *current == path {
+                    *applied = true;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The written file of `id` is known.
+    fn has_written_file(&self, id: &FileId) -> bool {
+        self.committed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .paths
+            .contains_key(id)
+    }
+
+    /// An article RAM cannot take while it is still in the cache: hand it over without its
+    /// bytes once the cache writes it out. False when no written file is known for `id`
+    /// (the completion replay covers it then).
+    fn await_commit(&self, id: FileId, offset: u64, size: u64, crc32: u32) -> bool {
+        let mut sources = self.committed.lock().unwrap_or_else(|e| e.into_inner());
+        if !sources.paths.contains_key(&id) {
+            return false;
+        }
+        let awaiting = sources.awaiting.entry(id).or_default();
+        if awaiting.len() >= 4096 {
+            return false;
+        }
+        awaiting.push((offset, size, crc32));
+        drop(sources);
+        self.metrics
+            .awaited_commits
+            .fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
+    /// Articles of `id` at `ranges` are in its file now: queue the waiting ones among them
+    /// for par-rs to read there.
+    fn committed_ranges(&self, id: FileId, ranges: &[(u64, u64)]) -> usize {
+        let ready: Vec<(u64, u64, u32)> = {
+            let mut sources = self.committed.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(awaiting) = sources.awaiting.get_mut(&id) else {
+                return 0;
+            };
+            let (ready, waiting): (Vec<_>, Vec<_>) = awaiting.drain(..).partition(|&(o, n, _)| {
+                ranges.iter().any(|&(offset, size)| offset <= o && o + n <= offset + size)
+            });
+            *awaiting = waiting;
+            ready
+        };
+        let mut queue = self.articles.lock().unwrap_or_else(|e| e.into_inner());
+        for &(offset, size, crc32) in &ready {
+            queue.pending.push_back(DeferredArticle {
+                file_id: id,
+                offset,
+                crc32,
+                size,
+                bytes: None,
+                committed: true,
+            });
+        }
+        ready.len()
+    }
+
+    /// File `id` completed: its completion replay covers what waits, and par-rs reads it at
+    /// `path` from now on.
+    fn file_completed(&self, id: FileId, path: &Path) {
+        let mut sources = self.committed.lock().unwrap_or_else(|e| e.into_inner());
+        sources.awaiting.remove(&id);
+        sources.paths.insert(id, (path.to_path_buf(), false));
+    }
+
+    /// Articles still waiting for the cache, for the log.
+    fn awaiting_commits(&self) -> usize {
+        self.committed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .awaiting
+            .values()
+            .map(Vec::len)
+            .sum()
+    }
+
+    /// A back-fill is pending, none runs, and no retry delay is in force.    /// A back-fill is pending, none runs, and no retry delay is in force.
     fn backfill_due(&self) -> bool {
         self.session.needs_backfill()
             && !self.backfill_running.load(Ordering::Acquire)
@@ -849,12 +1165,33 @@ pub(crate) fn streaming_session_defer_article(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn streaming_session_defer_article_for_queue(
     nzb_id: i32,
     identity: (Option<i32>, &[u8], &[u8]),
     offset: u64,
     size: u64,
     crc32: u32,
+    snapshot: impl FnOnce() -> Option<Vec<u8>>,
+) -> Option<Result<(), RepairError>> {
+    streaming_session_defer_committed_article(
+        nzb_id, identity, offset, size, crc32, None, snapshot,
+    )
+}
+
+/// Captures a finished article for live PAR, with `written`: the file the article's
+/// bytes were written into (the job's DirectWrite file). When RAM cannot supply the bytes
+/// (the article cache dropped them, or the snapshot queue is full) the article's slices are
+/// parked and read back whole from that file once every byte of them is on disk, instead of
+/// refusing the article. Does no I/O: the caller may hold the daemon queue lock.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn streaming_session_defer_committed_article(
+    nzb_id: i32,
+    identity: (Option<i32>, &[u8], &[u8]),
+    offset: u64,
+    size: u64,
+    crc32: u32,
+    written: Option<&Path>,
     snapshot: impl FnOnce() -> Option<Vec<u8>>,
 ) -> Option<Result<(), RepairError>> {
     let entry = active_streaming_session(nzb_id)?;
@@ -867,6 +1204,9 @@ pub(crate) fn streaming_session_defer_article_for_queue(
                 "live article snapshot",
                 "invalid accepted range",
             ));
+        }
+        if let Some(path) = written {
+            entry.note_written(id, path);
         }
         let mut queue = entry.articles.lock().unwrap_or_else(|e| e.into_inner());
         let next = queue.bytes.checked_add(size);
@@ -884,19 +1224,41 @@ pub(crate) fn streaming_session_defer_article_for_queue(
             limit = entry.article_byte_limit.load(Ordering::Acquire);
         }
         if queue.pending.len() >= 4096 || next.is_none_or(|n| n > limit) {
+            drop(queue);
+            if entry.await_commit(id, offset, size, crc32) {
+                return Ok(());
+            }
             return Err(RepairError::StreamingMemoryLimit {
                 context: "live article snapshots",
                 required_bytes: next.unwrap_or(u64::MAX),
                 limit_bytes: limit,
             });
         }
-        let bytes = snapshot().ok_or_else(|| {
+        let Some(bytes) = snapshot() else {
             entry.metrics.cache_misses.fetch_add(1, Ordering::Relaxed);
-            live_error(
+            // Not in the cache any more: the article reached its file. par-rs reads it
+            // there once its slice is complete.
+            if entry.has_written_file(&id) && queue.pending.len() < 4096 {
+                queue.pending.push_back(DeferredArticle {
+                    file_id: id,
+                    offset,
+                    crc32,
+                    size,
+                    bytes: None,
+                    committed: true,
+                });
+                entry
+                    .metrics
+                    .committed_articles
+                    .fetch_add(1, Ordering::Relaxed);
+                return Ok(());
+            }
+            drop(queue);
+            return Err(live_error(
                 "live article cache",
                 "cache bytes unavailable; committed replay required",
-            )
-        })?;
+            ));
+        };
         if bytes.len() as u64 != size || bytes.capacity() as u64 > size {
             return Err(live_error(
                 "live article snapshot",
@@ -911,6 +1273,7 @@ pub(crate) fn streaming_session_defer_article_for_queue(
             crc32,
             size,
             bytes: Some(bytes),
+            committed: false,
         });
         entry
             .metrics
@@ -975,6 +1338,7 @@ pub(crate) fn streaming_session_defer_failure_for_queue(
             size,
             crc32: 0,
             bytes: None,
+            committed: false,
         });
         Ok(())
     })()))
@@ -1017,6 +1381,7 @@ fn drain_live_articles_locked(
 ) -> Result<usize, RepairError> {
     entry.record((|| {
         let mut count = 0;
+        entry.apply_target_paths()?;
         loop {
             ensure_current_generation(nzb_id, entry)?;
             let Some(article) = take_live_article(entry) else {
@@ -1024,17 +1389,84 @@ fn drain_live_articles_locked(
             };
             let mut result = entry.timed(nzb_id, || article.fold());
             // Staging that a loan of free ParBuffer enlarges enough takes the article after
-            // all: not a refusal. A shortfall no loan covers is refused and reported.
+            // all: not a refusal. A shortfall no loan covers parks the article's slices,
+            // read back whole from its file once complete; without a known file it is
+            // refused and reported.
             if matches!(&result, Err(error) if entry.lend_memory(error)) {
                 result = entry.timed(nzb_id, || article.fold());
             }
+            let parked = matches!(&result, Err(RepairError::StreamingMemoryLimit { .. }))
+                && article.article.as_ref().is_some_and(|a| {
+                    a.bytes.is_some() && entry.await_commit(a.file_id, a.offset, a.size, a.crc32)
+                });
+            // The file was renamed (completed) before par-rs learned its new path: an article
+            // read from its file, or a slice par-rs completes from the file, finds nothing
+            // there. Its completion replay covers it: no warning, and the drain goes on.
+            let renamed = article
+                .article
+                .as_ref()
+                .is_some_and(|a| renamed_away(&result, a.bytes.is_none() && a.committed));
+            let parked = parked || renamed;
             drop(article);
+            if parked {
+                count += 1;
+                continue;
+            }
             let outcome = result?;
             ensure_current_generation(nzb_id, entry)?;
             entry.unpause(outcome.unpause.as_ref());
+            entry.note_admission_progress();
             count += 1;
         }
     })())
+}
+
+/// An article's fold failed only because its file was renamed away: any I/O error for one
+/// par-rs reads from its file (`committed`), a missing file for one from RAM (par-rs may
+/// complete its slice from the file).
+fn renamed_away<T>(result: &Result<T, RepairError>, committed: bool) -> bool {
+    match result {
+        Err(RepairError::Io { source, .. }) => {
+            committed || source.kind() == std::io::ErrorKind::NotFound
+        }
+        _ => false,
+    }
+}
+
+/// Queue file `identity` of job `nzb_id` is at `path` now (completed, possibly renamed since):
+/// par-rs reads and back-fills it there (`set_target_path`, applied before the next fold or
+/// repair). Metadata only; callers may hold the queue lock.
+pub(crate) fn streaming_session_note_file_path(
+    nzb_id: i32,
+    identity: (Option<i32>, &[u8], &[u8]),
+    path: &Path,
+) {
+    let Some(entry) = active_streaming_session(nzb_id) else {
+        return;
+    };
+    if let Ok(id) = live_source_id(&entry, identity.0, identity.1, identity.2) {
+        entry.note_written(id, path);
+    }
+}
+
+/// Articles of a queue file reached its file: the article cache wrote them out. Those that
+/// waited for it (RAM could not take them) are handed to par-rs, which reads them there.
+/// Metadata only; the cache thread calls it after its write.
+pub(crate) fn streaming_session_articles_committed(
+    nzb_id: i32,
+    identity: (Option<i32>, &[u8], &[u8]),
+    ranges: &[(u64, u64)],
+) {
+    let Some(entry) = active_streaming_session(nzb_id) else {
+        return;
+    };
+    if entry.session.is_cancelled() || ranges.is_empty() {
+        return;
+    }
+    let Ok(id) = live_source_id(&entry, identity.0, identity.1, identity.2) else {
+        return;
+    };
+    entry.committed_ranges(id, ranges);
 }
 
 /// Jobs with queued work, copied under the registry lock without doing repair work.
@@ -1072,7 +1504,8 @@ pub(crate) fn streaming_session_pending_article_jobs() -> Vec<i32> {
                 .unwrap_or_else(|e| e.into_inner())
                 .is_empty();
             let backfill = entry.backfill_due();
-            (queued || warning || unpause || backfill).then_some(id)
+            let poll = live_poll_due(id);
+            (queued || warning || unpause || backfill || poll).then_some(id)
         })
         .collect()
 }
@@ -1323,6 +1756,7 @@ pub(crate) fn streaming_session_process_completed_file_with_start(
         };
         let queue_id = file.queued_id.and_then(|id| i32::try_from(id).ok());
         let id = live_source_id(&entry, queue_id, &file.name, &file.hash16k)?;
+        entry.file_completed(id, &file.path);
         let length = entry.file_lengths[&id];
         if length > i64::MAX as u64 {
             return Err(live_error(
@@ -1528,7 +1962,14 @@ fn streaming_session_start_bounded_with_context(
             limit_bytes: effective_pool_bytes,
         });
     }
-    let entry = build_streaming_session(&set, base_dir, limits.options, budget, writers)?;
+    let entry = build_planned_streaming_session(
+        &set,
+        base_dir,
+        limits.options,
+        budget,
+        writers,
+        &LivePlanHint::default(),
+    )?;
     entry.session.on_recovery_volume_arrived(par2_path, None)?;
     *entry.par_name.lock().unwrap_or_else(|e| e.into_inner()) = par2_path
         .file_name()
@@ -1543,6 +1984,7 @@ pub(crate) struct PreparedLiveMetadata {
     options: SessionOptions,
     writers: Arc<WriteCoordinator>,
     budget: SessionBudgetLease,
+    hint: LivePlanHint,
 }
 
 pub(crate) struct PreparedLiveSession {
@@ -1698,10 +2140,15 @@ pub(crate) fn prepare_live_start(
         options: limits.options,
         writers,
         budget,
+        hint: LivePlanHint::default(),
     })
 }
 
 impl PreparedLiveMetadata {
+    /// The queue's recovery volumes and failures so far, to plan the recovery slots.
+    pub fn set_plan_hint(&mut self, hint: LivePlanHint) {
+        self.hint = hint;
+    }
     pub fn catalog_required_bytes(&self) -> Result<usize, RepairError> {
         live_namespace::NamespaceProof::catalog_required_bytes(&self.set)
     }
@@ -1735,12 +2182,13 @@ impl PreparedLiveMetadata {
             return Err(RepairError::Cancelled);
         }
         let proof = live_namespace::NamespaceProof::prepare(&self.set, facts)?;
-        let entry = build_streaming_session(
+        let entry = build_planned_streaming_session(
             &self.set,
             &self.base_dir,
             self.options,
             self.budget,
             self.writers,
+            &self.hint,
         )?;
         // Register before the potentially long recovery arrival scan/fold.
         let startup = attempt
@@ -2285,7 +2733,16 @@ pub(crate) fn streaming_session_kick_backfill(nzb_id: i32) {
             // Charged directly, not through `timed`, whose repair-stat delta could pick up a
             // foreground repair running at the same time.
             let started = std::time::Instant::now();
+            let reread = worker.session.io_stats().backfill_bytes_read;
             let backfilled = worker.session.backfill_pending().is_ok();
+            let reread = worker.session.io_stats().backfill_bytes_read.saturating_sub(reread);
+            if reread > 0 {
+                let message = format!(
+                    "Live PAR (job {nzb_id}): back-fill re-read {:.1} MB for recovery slots added after the plan",
+                    reread as f64 / (1024.0 * 1024.0)
+                );
+                crate::log::log_active_bytes(crate::queuesubsys_host::MK_DETAIL, message.as_bytes());
+            }
             LIVE_PAR_TIME
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -2298,6 +2755,143 @@ pub(crate) fn streaming_session_kick_backfill(nzb_id: i32) {
         });
     if spawned.is_err() {
         entry.backfill_running.store(false, Ordering::Release);
+    }
+}
+
+/// How often each job's live status is polled ([`streaming_session_poll`]).
+pub(crate) const LIVE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The last polled status of each job's live session, with its time.
+static LIVE_POLLS: LazyLock<
+    Mutex<HashMap<i32, (std::time::Instant, LiveStatus, SessionGeneration)>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Drops job `nzb_id`'s last poll when it belongs to the session `generation` that ended.
+fn forget_live_poll(nzb_id: i32, generation: SessionGeneration) {
+    let mut polls = LIVE_POLLS.lock().unwrap_or_else(|e| e.into_inner());
+    if polls
+        .get(&nzb_id)
+        .is_some_and(|(_, _, polled)| *polled == generation)
+    {
+        polls.remove(&nzb_id);
+    }
+}
+
+/// A poll of job `nzb_id`'s live status is due.
+fn live_poll_due(nzb_id: i32) -> bool {
+    LIVE_POLLS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&nzb_id)
+        .is_none_or(|(at, _, _)| at.elapsed() >= LIVE_POLL_INTERVAL)
+}
+
+/// Polls `status()` of job `nzb_id`'s live session, at most every [`LIVE_POLL_INTERVAL`]
+/// unless `force`: keeps it for the RPC progress field
+/// ([`streaming_session_progress_permille`]) and decides between fetching and repairing.
+/// While recovery blocks are short (`needed_recovery_blocks`), it grows the recovery slots
+/// and asks the session's selector for more volumes (queued for unpausing). Once
+/// `early_cutover_possible`, the caller repairs now
+/// (`postproc::direct_unpack_try_live_par_repair`). Returns the status when polled.
+pub(crate) fn streaming_session_poll(nzb_id: i32, force: bool) -> Option<LiveStatus> {
+    let entry = active_streaming_session(nzb_id)?;
+    if entry.session.is_cancelled() || (!force && !live_poll_due(nzb_id)) {
+        return None;
+    }
+    let mut status = entry.session.status();
+    if status.needed_recovery_blocks > 0 {
+        let action = entry.session.request_unpause();
+        entry.unpause(action.as_ref());
+        status = entry.session.status();
+    }
+    LIVE_POLLS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(nzb_id, (std::time::Instant::now(), status.clone(), entry.generation));
+    Some(status)
+}
+
+/// Live repair progress of job `nzb_id` in permille: slices verified (or already rebuilt)
+/// of all slices, from the last poll; -1 without a live session.
+pub(crate) fn streaming_session_progress_permille(nzb_id: i32) -> i32 {
+    let polled = LIVE_POLLS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&nzb_id)
+        .map(|(_, status, _)| status.clone());
+    let status = match polled {
+        Some(status) if active_streaming_session(nzb_id).is_some() => status,
+        _ => return -1,
+    };
+    live_progress_permille(&status)
+}
+
+fn live_progress_permille(status: &LiveStatus) -> i32 {
+    if status.total == 0 {
+        return 0;
+    }
+    (status.verified.min(status.total) as u64 * 1000 / status.total as u64) as i32
+}
+
+/// The par2 names of job `nzb_id`'s files that still need a repair, when the download has
+/// ended for the set (every slice arrived or failed) and the ready recovery covers every
+/// damaged slice: the live repair can finish the job right now. `None` otherwise.
+pub(crate) fn streaming_session_download_end_targets(nzb_id: i32) -> Option<Vec<Vec<u8>>> {
+    let entry = active_streaming_session(nzb_id)?;
+    if ensure_current_generation(nzb_id, &entry).is_err() {
+        return None;
+    }
+    let status = entry.session.status();
+    // Folds still queued do not matter: the repair applies them before its solve.
+    if !status.early_cutover_possible
+        || status.damaged == 0
+        || status.unarrived + status.partially_arrived > 0
+    {
+        return None;
+    }
+    let mut names: Vec<Vec<u8>> = entry
+        .target_names
+        .iter()
+        .filter(|(id, _)| {
+            !matches!(
+                entry.session.volume_status(id),
+                Ok(VolumeStatus::CompleteAndVerified)
+            )
+        })
+        .map(|(_, name)| par_rs::filenames::os_str_bytes(name.as_os_str()).to_vec())
+        .collect();
+    names.sort_unstable();
+    (!names.is_empty()).then_some(names)
+}
+
+/// Live progress of the repair call running on job `nzb_id`'s session (par-rs #104): its
+/// step, the step's done and total units, and the session's work counter, which rises while
+/// a repair makes progress. `None` without a session.
+pub(crate) fn streaming_session_repair_progress(nzb_id: i32) -> Option<LiveRepairProgress> {
+    Some(active_streaming_session(nzb_id)?.session.repair_progress())
+}
+
+/// Job `nzb_id`'s live repair admission counter (see `admission_progress`).
+pub(crate) fn streaming_session_admission_progress(nzb_id: i32) -> Option<u64> {
+    Some(
+        active_streaming_session(nzb_id)?
+            .admission_progress
+            .load(Ordering::Relaxed),
+    )
+}
+
+/// The name of a live repair step, for the RPC and the log; empty when idle.
+pub(crate) fn live_repair_step_name(step: LiveRepairStep) -> &'static str {
+    match step {
+        LiveRepairStep::Idle => "",
+        LiveRepairStep::PayloadWait => "waiting",
+        LiveRepairStep::Backfill => "backfill",
+        LiveRepairStep::Matrix => "matrix",
+        LiveRepairStep::Decode => "decode",
+        LiveRepairStep::Sync => "sync",
+        LiveRepairStep::Refold => "refold",
+        LiveRepairStep::Verify => "verify",
+        _ => "repair",
     }
 }
 
@@ -2356,6 +2950,174 @@ pub(crate) fn streaming_session_can_schedule_repair(nzb_id: i32) -> bool {
         });
     let unknown = status.unarrived + status.partially_arrived + status.damaged;
     unknown as u64 <= (status.ready_recovery as u64).saturating_add(queued_upper_bound)
+}
+
+/// Missing repair targets one admission created: each under a temporary name until the
+/// admission succeeds, then under its target name. On failure the temporary names are
+/// removed, and the target names already given only while each still points at the file
+/// this admission created (checked right before the unlink), so a file the direct renamer
+/// moves to a target's name meanwhile is never removed.
+struct CreatedTargets<'a> {
+    writers: &'a WriteCoordinator,
+    /// (temporary name, target path, index into the admitted files)
+    temps: Vec<(std::ffi::CString, PathBuf, usize)>,
+    /// Target names given, with the file each one was given to.
+    named: Vec<(PathBuf, std::fs::File)>,
+}
+
+impl CreatedTargets<'_> {
+    /// Gives every created file its target name, never replacing a file that has the name
+    /// (see `parlive::name_repair_temp`), updating `files` where the name had to be created
+    /// directly. Every name is checked free first.
+    fn name_all(
+        &mut self,
+        files: &mut [par_rs::RepairTargetFile],
+    ) -> Result<(), RepairError> {
+        let unproven = || live_error("live target admission", "target ownership unproven");
+        for (_, path, _) in &self.temps {
+            if !crate::parlive::repair_target_name_is_free(self.writers, path)
+                .map_err(|_| unproven())?
+            {
+                return Err(unproven());
+            }
+        }
+        let mut modes = [0usize; 3];
+        while let Some((temp, path, index)) = self.temps.first().cloned() {
+            let file = &mut files[index].file;
+            // The handle that records a given name, taken before anything changes.
+            let Ok(handle) = file.try_clone() else {
+                return Err(unproven());
+            };
+            match crate::parlive::name_repair_temp(self.writers, &temp, &path) {
+                Ok(naming) => {
+                    self.temps.remove(0);
+                    let named = match naming {
+                        crate::parlive::TargetNaming::Linked => {
+                            modes[0] += 1;
+                            handle
+                        }
+                        crate::parlive::TargetNaming::Renamed => {
+                            modes[1] += 1;
+                            handle
+                        }
+                        crate::parlive::TargetNaming::Created(created) => {
+                            modes[2] += 1;
+                            let Ok(named) = created.try_clone() else {
+                                // The name exists and is this file: record it to roll back.
+                                self.named.push((path, created));
+                                return Err(unproven());
+                            };
+                            *file = created;
+                            named
+                        }
+                    };
+                    self.named.push((path, named));
+                }
+                Err((_, left)) => {
+                    match left {
+                        crate::parlive::NamingLeft::Temp => {}
+                        crate::parlive::NamingLeft::Named => {
+                            // Linked, but the temporary name stayed: both names are this file.
+                            self.named.push((path.clone(), handle));
+                        }
+                        crate::parlive::NamingLeft::Nothing => {
+                            self.temps.remove(0);
+                        }
+                    }
+                    return Err(unproven());
+                }
+            }
+        }
+        if modes.iter().sum::<usize>() > 0 {
+            let message = format!(
+                "Live PAR: created {} missing repair target(s): {} by hard link, {} by rename, {} directly (no hard links on this filesystem)",
+                modes.iter().sum::<usize>(),
+                modes[0],
+                modes[1],
+                modes[2],
+            );
+            crate::log::log_active_bytes(crate::queuesubsys_host::MK_DETAIL, message.as_bytes());
+        }
+        Ok(())
+    }
+
+    fn keep(mut self) {
+        self.temps.clear();
+        self.named.clear();
+    }
+}
+
+impl Drop for CreatedTargets<'_> {
+    fn drop(&mut self) {
+        for (temp, path, _) in self.temps.drain(..) {
+            let _ = crate::parlive::unlink_repair_temp(self.writers, &temp, &path);
+        }
+        for (path, file) in self.named.drain(..) {
+            let _ = crate::parlive::remove_named_repair_target(self.writers, &path, &file);
+        }
+    }
+}
+
+/// Opens the repair targets under the write barrier. An existing file is opened as it is;
+/// a missing one is created under a temporary name, and named as the target only once every
+/// target is open, the session is still current and the download folder is still the one
+/// bound (before the targets are checked or published). On any error, cancellation
+/// included, the temporary names are removed and the target names already given are
+/// removed only while they still point at the files created here, so a cancelled or refused
+/// repair leaves no empty file behind and never removes another file.
+fn open_live_repair_targets(
+    nzb_id: i32,
+    entry: &ActiveStreamingSession,
+    targets: &[(PathBuf, FileId)],
+    cancelled: impl Fn() -> bool,
+) -> Result<Vec<par_rs::RepairTargetFile>, RepairError> {
+    let unproven = || live_error("live target admission", "target ownership unproven");
+    // Declared before `created`, so a rollback (its drop) still runs under the lock.
+    let naming = crate::parlive::target_naming_lock(nzb_id);
+    let mut naming_guard = None;
+    let mut created = CreatedTargets {
+        writers: &entry.writers,
+        temps: Vec::new(),
+        named: Vec::new(),
+    };
+    let mut files = Vec::with_capacity(targets.len());
+    for (path, file_id) in targets {
+        if cancelled() {
+            return Err(RepairError::Cancelled);
+        }
+        let file = match crate::parlive::open_repair_target(&entry.writers, path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let (file, temp) = crate::parlive::create_repair_temp(&entry.writers, path)
+                    .map_err(|_| unproven())?;
+                created.temps.push((temp, path.clone(), files.len()));
+                file
+            }
+            Err(_) => return Err(unproven()),
+        };
+        entry.note_admission_progress();
+        files.push(par_rs::RepairTargetFile {
+            file_id: *file_id,
+            file,
+        });
+    }
+    if cancelled() {
+        return Err(RepairError::Cancelled);
+    }
+    if let Some((_, path, _)) = created.temps.first() {
+        // From the free-name check through naming and any rollback, no rename, link or
+        // removal in the folder (the direct renamer, file completion) can interleave.
+        // Nothing below takes the queue lock or the cache flush lock.
+        naming_guard = Some(naming.lock().unwrap_or_else(|e| e.into_inner()));
+        crate::parlive::repair_root_is_current(&entry.writers, path).map_err(|_| unproven())?;
+    }
+    created.name_all(&mut files)?;
+    if cancelled() {
+        return Err(RepairError::Cancelled);
+    }
+    created.keep();
+    drop(naming_guard);
+    Ok(files)
 }
 
 /// Captured under the queue lock; it owns the original session and admitted metadata.
@@ -2478,19 +3240,28 @@ impl LiveRepairRequest {
                 }
             }
         }
-        let ownership = crate::articledl::with_live_cache_fence(|| {
+        // Cancelled while waiting for the cache fence (the job was deleted or stopped): give
+        // up rather than block, since the canceller may hold the queue lock that the cache
+        // flusher holding the fence waits for.
+        let cancelled = || {
+            self.entry.session.is_cancelled()
+                || !self.entry.writers.is_current_generation(self.entry.generation)
+        };
+        let ownership = crate::articledl::with_live_cache_fence_unless(cancelled, || {
             self.entry
                 .writers
                 .begin_repair(self.entry.generation, self.targets, self.charge)
         })
+        .ok_or(RepairError::Cancelled)?
         .map_err(|_| RepairError::Cancelled)?;
+        self.entry.note_admission_progress();
         // Writers are drained: bind the actual target inodes under the barrier.
-        let mut files = Vec::with_capacity(paths.len());
-        for (path, (_, file_id)) in paths.iter().zip(&self.ids) {
-            let file = crate::parlive::open_repair_target(&self.entry.writers, path)
-                .map_err(|_| live_error("live target admission", "target ownership unproven"))?;
-            files.push(par_rs::RepairTargetFile { file_id: *file_id, file });
-        }
+        let targets: Vec<(PathBuf, FileId)> = paths
+            .iter()
+            .zip(&self.ids)
+            .map(|(path, (_, file_id))| (path.clone(), *file_id))
+            .collect();
+        let files = open_live_repair_targets(self.nzb_id, &self.entry, &targets, cancelled)?;
         Ok(TargetWriteLease {
             nzb_id: self.nzb_id,
             ids: self.ids,
@@ -2637,6 +3408,10 @@ pub fn streaming_session_has_session(nzb_id: i32) -> bool {
 /// Drops the [`StreamingParSession`] for `nzb_id`.
 #[track_caller]
 pub fn streaming_session_forget(nzb_id: i32) {
+    LIVE_POLLS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&nzb_id);
     if let Some(old) = active_streaming_session(nzb_id) {
         let at = std::panic::Location::caller();
         old.note_stop(nzb_id, &format!("forgotten from {}:{}", at.file(), at.line()));
@@ -2867,6 +3642,55 @@ impl QuickVerifier for CallbackQuickVerifier<'_> {
     }
 }
 
+/// The batch fallback, for when live repair did not finish the job during the download:
+/// write only the missing blocks into the damaged files (no full-size backup copies), keep
+/// recovery volumes out of the page cache so the files extracted next stay cached, and when
+/// a post-repair check runs, read back only the slices the repair wrote.
+fn configure_batch_repairer(repairer: &mut Par2Repairer) {
+    repairer.set_in_place_repair(true);
+    repairer.set_uncached_recovery_reads(true);
+    repairer.set_verify_rebuilt_slices_only(true);
+}
+
+/// The one-line phase split of a batch repair (`repair_timings`, par-rs #79), in seconds,
+/// and the files it repaired in place.
+fn batch_repair_timing_line(
+    timings: &par_rs::repairer::RepairTimings,
+    in_place: &[par_rs::repairer::InPlaceRepair],
+    name: &str,
+    ok: bool,
+) -> String {
+    let secs = |d: std::time::Duration| format!("{:.2}", d.as_secs_f64());
+    let blocks: u64 = in_place.iter().map(|f| u64::from(f.blocks_written)).sum();
+    format!(
+        "PAR repair {} for {name}: verify {} s, backups {} s, plan {} s, reconstruct {} s, sync {} s, total {} s; {} file(s) repaired in place ({blocks} block(s) written)",
+        if ok { "timings" } else { "timings (failed)" },
+        secs(timings.verify),
+        secs(timings.backups),
+        secs(timings.plan),
+        secs(timings.reconstruct),
+        secs(timings.sync),
+        secs(timings.total),
+        in_place.len(),
+    )
+}
+
+fn log_batch_repair(repairer: &Par2Repairer, base_dir: &Path, ok: bool) {
+    let name = base_dir
+        .file_name()
+        .map_or_else(|| base_dir.display().to_string(), |n| n.to_string_lossy().into_owned());
+    let in_place = repairer.in_place_repairs();
+    let line = batch_repair_timing_line(&repairer.repair_timings(), in_place, &name, ok);
+    crate::log::log_active_bytes(crate::queuesubsys_host::MK_INFO, line.as_bytes());
+    for file in in_place {
+        let msg = format!(
+            "Rewrote {} of {} blocks of {} in place",
+            file.blocks_written, file.block_count, file.target_filename
+        );
+        crate::log::log_active_bytes(crate::queuesubsys_host::MK_DETAIL, msg.as_bytes());
+    }
+}
+
 /// Stateful post-download repairer backing `ParChecker.cpp`.
 pub struct RustParRepairer {
     pub repairer: Par2Repairer,
@@ -2902,7 +3726,8 @@ impl RustParRepairer {
             ignore_extensions,
             ..RepairOptions::default()
         };
-        let repairer = Par2Repairer::new(&base_dir, options);
+        let mut repairer = Par2Repairer::new(&base_dir, options);
+        configure_batch_repairer(&mut repairer);
         Self {
             repairer,
             base_dir,
@@ -3029,7 +3854,9 @@ impl RustParRepairer {
                 })
                 .cloned()
                 .collect();
-            match self.repairer.repair(&mut obs) {
+            let result = self.repairer.repair(&mut obs);
+            log_batch_repair(&self.repairer, &self.base_dir, result.is_ok());
+            match result {
                 Ok(RepairResult::NotNeeded) => ParResult::Success,
                 Ok(RepairResult::Repaired { mut leftovers, .. }) => {
                     for name in &repaired_filenames {
@@ -3372,6 +4199,30 @@ fn map_repair_error(err: RepairError) -> ParResult {
 }
 
 /// Computes `(threads_to_use, mem_to_use_mb)` for `Repairer::Repairer`.
+/// Threads for a batch repair. `ParThreads` from 1 to the logical CPU count is kept. With
+/// `ParThreads=0`, or more threads than logical CPUs (the "uber" preset asks for two more;
+/// a 6C/12T i7-8700K repaired no faster with 14 than with 12): the physical cores while
+/// downloads or extraction share the CPU (6 threads cost 5-14% wall time there and save
+/// 36% CPU), every logical CPU when the repair runs alone.
+pub fn batch_repair_threads(par_threads: i32, logical: i32, physical: i32, busy: bool) -> i32 {
+    let logical = logical.max(1);
+    if par_threads > 0 && par_threads <= logical {
+        return par_threads;
+    }
+    if busy {
+        physical.clamp(1, logical)
+    } else {
+        logical
+    }
+}
+
+/// Whether downloads or extraction share the CPU with a repair starting now.
+pub(crate) fn repair_shares_cpu() -> bool {
+    let downloading = crate::statmeter::active_statmeter()
+        .is_some_and(|sm| sm.current_download_speed() > 0);
+    downloading || crate::postproc::extraction_running()
+}
+
 pub fn calc_repairer_resources(
     par_threads: i32,
     cpu_cores: i32,
@@ -3497,7 +4348,121 @@ mod tests {
     }
 
     #[test]
+    fn live_plan_follows_expected_damage() {
+        let hint = |failed_bytes, failed_articles, done_bytes, total_bytes| LivePlanHint {
+            volumes: Vec::new(),
+            failed_bytes,
+            failed_articles,
+            done_bytes,
+            total_bytes,
+        };
+        // Nothing failed: no damage expected, a margin of 2 slots.
+        assert_eq!(expected_damaged_slices(&hint(0, 0, 0, 1 << 30), 1 << 20), 0);
+        assert_eq!(planned_recovery_slots(0), 2);
+        // 2 articles (1.5 MB) failed in the first quarter: 4x over the whole download,
+        // each article's slices plus a boundary slice.
+        let h = hint(3 << 19, 2, 1 << 28, 1 << 30);
+        assert_eq!(expected_damaged_slices(&h, 1 << 20), 6 + 8);
+        assert_eq!(planned_recovery_slots(14), 14 + 3);
+        assert_eq!(planned_recovery_slots(100), 120);
+        assert_eq!(planned_recovery_slots(u64::MAX), 65535);
+        assert_eq!(expected_damaged_slices(&h, 0), 0);
+    }
+
+    #[test]
+    fn live_plan_takes_the_volumes_the_selector_unpauses_first() {
+        let volume = |id, first_exponent, count, paused| LiveQueuedVolume {
+            id,
+            first_exponent,
+            count,
+            size: u64::from(count) * 1000,
+            articles: count * 2,
+            paused,
+        };
+        let mut hint = LivePlanHint {
+            volumes: vec![
+                volume(10, 0, 1, true),
+                volume(11, 1, 2, true),
+                volume(12, 3, 4, true),
+                volume(13, 7, 8, true),
+            ],
+            ..LivePlanHint::default()
+        };
+        // 2 slots for no damage yet: the smallest volume that covers them (vol01+2), as
+        // the session's selector unpauses it.
+        let plan = live_recovery_plan(&hint, 1000, &HashSet::new());
+        assert_eq!(plan.exponents, vec![1, 2]);
+        // 5 damaged slices so far, half way: 10 expected, 12 planned.
+        hint.failed_bytes = 5000;
+        hint.done_bytes = 50_000;
+        hint.total_bytes = 100_000;
+        let plan = live_recovery_plan(&hint, 1000, &HashSet::new());
+        assert_eq!(plan.exponents.len(), 12);
+        assert!(plan.exponents.windows(2).all(|w| w[0] < w[1]));
+        // Exponents already loaded get their slots anyway and are not planned twice.
+        let loaded: HashSet<u32> = [0, 1, 2].into_iter().collect();
+        hint.failed_bytes = 0;
+        let plan = live_recovery_plan(&hint, 1000, &loaded);
+        assert_eq!(plan.exponents.len(), 2);
+        assert!(plan.exponents.iter().all(|e| !loaded.contains(e)));
+        // No volume known: the first exponents.
+        let plan = live_recovery_plan(&LivePlanHint::default(), 1000, &HashSet::new());
+        assert_eq!(plan.exponents, vec![0, 1]);
+    }
+
+    #[test]
+    fn live_repair_steps_have_rpc_names() {
+        assert_eq!(live_repair_step_name(LiveRepairStep::Idle), "");
+        assert_eq!(live_repair_step_name(LiveRepairStep::Matrix), "matrix");
+        assert_eq!(live_repair_step_name(LiveRepairStep::Decode), "decode");
+        assert_eq!(live_repair_step_name(LiveRepairStep::Sync), "sync");
+        assert_eq!(live_repair_step_name(LiveRepairStep::PayloadWait), "waiting");
+    }
+
+    #[test]
+    fn renamed_away_tolerates_only_the_rename_window() {
+        let io = |kind| -> Result<(), RepairError> {
+            Err(RepairError::Io {
+                context: "reading".into(),
+                source: std::io::Error::from(kind),
+            })
+        };
+        assert!(renamed_away(&io(std::io::ErrorKind::NotFound), false));
+        assert!(renamed_away(&io(std::io::ErrorKind::UnexpectedEof), true));
+        assert!(!renamed_away(&io(std::io::ErrorKind::UnexpectedEof), false));
+        assert!(!renamed_away(&Err::<(), _>(RepairError::Cancelled), true));
+        assert!(!renamed_away(&Ok::<(), RepairError>(()), true));
+    }
+
+    #[test]
+    fn batch_repair_timing_line_has_every_phase() {
+        let timings = par_rs::repairer::RepairTimings::default();
+        let line = batch_repair_timing_line(&timings, &[], "job", true);
+        for phase in ["verify", "backups", "plan", "reconstruct", "sync", "total"] {
+            assert!(line.contains(&format!("{phase} 0.00 s")), "{line}");
+        }
+        assert!(line.contains("0 file(s) repaired in place"));
+        assert!(batch_repair_timing_line(&timings, &[], "job", false).contains("(failed)"));
+    }
+
+    #[test]
+    fn batch_repairer_is_configured_for_in_place_uncached_repair() {
+        let dir = std::env::temp_dir();
+        let repairer = RustParRepairer::new(dir, 1, 16, true, false, Vec::new());
+        // The options themselves are private to par-rs; the timings start empty and the
+        // in-place list is empty before any repair.
+        assert!(repairer.repairer.in_place_repairs().is_empty());
+        assert_eq!(repairer.repairer.repair_timings().total, std::time::Duration::ZERO);
+    }
+
+    #[test]
     fn test_repairer_resources() {
+        assert_eq!(batch_repair_threads(0, 12, 6, true), 6);
+        assert_eq!(batch_repair_threads(0, 12, 6, false), 12);
+        assert_eq!(batch_repair_threads(14, 12, 6, false), 12);
+        assert_eq!(batch_repair_threads(14, 12, 6, true), 6);
+        assert_eq!(batch_repair_threads(4, 12, 6, true), 4);
+        assert_eq!(batch_repair_threads(0, 0, 0, true), 1);
         assert_eq!(calc_repairer_resources(0, 8, false, 0, 250), (8, 250));
         assert_eq!(calc_repairer_resources(4, 8, false, 0, 0), (4, 16));
         assert_eq!(calc_repairer_resources(0, 0, true, 8, 250), (1, 16));
@@ -3648,6 +4613,8 @@ mod tests {
         entry.articles.lock().unwrap().bytes -= limit - 10;
         // Pending volume unpauses are drained even with no article queued.
         let _ = streaming_session_take_warning(nzb_id);
+        // A fresh status poll is not due again for a few seconds.
+        assert!(streaming_session_poll(nzb_id, true).is_some());
         assert!(!streaming_session_pending_article_jobs().contains(&nzb_id));
         entry.pending_unpause_ids.lock().unwrap().push(77);
         assert!(streaming_session_pending_article_jobs().contains(&nzb_id));

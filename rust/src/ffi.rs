@@ -2466,6 +2466,13 @@ unsafe fn emit_rpc_nzb(
     let c_category = cstr::to_cstring(&n.category);
     let c_dupe_key = cstr::to_cstring(&n.dupe_key);
     let c_text_status = cstr::to_cstring(&n.text_status);
+    let repair = crate::parchecker::streaming_session_repair_progress(n.id);
+    let c_live_step = cstr::to_cstring(
+        repair
+            .map_or("", |progress| crate::parchecker::live_repair_step_name(progress.step))
+            .as_bytes(),
+    );
+    let clamp = |value: u64| c_int::try_from(value).unwrap_or(c_int::MAX);
 
     let f = crate::xmlrpc_format::NzbgetRsRpcNzbInfoInput {
         id: n.id,
@@ -2494,6 +2501,10 @@ unsafe fn emit_rpc_nzb(
         dupe_recovered_bytes: n.dupe_recovered_bytes,
         dupe_recovered_holes: n.dupe_recovered_holes,
         live_repairing: c_int::from(n.has_live_repair_thread),
+        live_repair_progress: crate::parchecker::streaming_session_progress_permille(n.id),
+        live_repair_step: &c_live_step,
+        live_repair_done: repair.map_or(0, |progress| clamp(progress.done)),
+        live_repair_total: repair.map_or(0, |progress| clamp(progress.total)),
         health: n.health,
         critical_health: n.critical_health_exact,
         dupe_key: &c_dupe_key,

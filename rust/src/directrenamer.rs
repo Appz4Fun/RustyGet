@@ -731,7 +731,12 @@ fn try_create_hard_link_host(
     let c_old = cstr::to_cstring(old_output_filename);
     let c_final = cstr::to_cstring(&final_output_filename);
     let mut errmsg = Vec::new();
-    if crate::fsops::create_hard_link(&c_old, &c_final, &crate::fsops::posix_stat, &mut errmsg) {
+    // Under the download's target naming lock: never between a live repair rollback's
+    // identity check and its unlink (`parlive::target_naming_lock`).
+    let linked = crate::parlive::with_target_naming(host.nzb_snap(nzb_ptr, false).id, || {
+        crate::fsops::create_hard_link(&c_old, &c_final, &crate::fsops::posix_stat, &mut errmsg)
+    });
+    if linked {
         if file_ptr.is_some() {
             host.file_set_str(
                 file_ptr,
@@ -918,8 +923,14 @@ fn rename_file_on_disk(
 
     let c_old = cstr::to_cstring(old_full);
     let c_new = cstr::to_cstring(new_full);
-    if !crate::fsops::move_file(&c_old, &c_new) {
-        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    // Under the download's target naming lock (see `parlive::target_naming_lock`).
+    let (moved, move_errno) =
+        crate::parlive::with_target_naming(host.nzb_snap(nzb_ptr, false).id, || {
+            let moved = crate::fsops::move_file(&c_old, &c_new);
+            (moved, std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
+        });
+    if !moved {
+        let errno = move_errno;
         let sys_err = crate::fsops::error_message(errno);
         let mut msg = b"Failed to rename file ".to_vec();
         msg.extend_from_slice(old_name);

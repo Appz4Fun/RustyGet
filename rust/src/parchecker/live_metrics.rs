@@ -12,6 +12,10 @@ pub(super) struct LiveMetricCounters {
     pub captured_bytes: AtomicU64,
     pub capture_refusals: AtomicU64,
     pub cache_misses: AtomicU64,
+    /// Cache misses handed to par-rs without bytes (read from their written file).
+    pub committed_articles: AtomicU64,
+    /// Articles RAM could not take that waited for the cache to write them out.
+    pub awaited_commits: AtomicU64,
     pub writer_wait_ns: AtomicU64,
     pub operation_wait_ns: AtomicU64,
     report_sequence: AtomicU64,
@@ -106,6 +110,30 @@ impl ActiveStreamingSession {
     }
 }
 
+impl ActiveStreamingSession {
+    /// Per-job I/O of live repair (`io_stats`): source bytes read back from disk (par-rs's
+    /// reads for articles RAM did not hold, plus RustyGet's completion replays), back-fill
+    /// re-reads (0 when the recovery slots were planned up front), recovery bytes.
+    pub(super) fn io_stats_line(&self, nzb_id: i32) -> String {
+        let io = self.session.io_stats();
+        let replay = self.catchup_source_bytes.load(Ordering::Relaxed);
+        let mb = |bytes: u64| format!("{:.1}", bytes as f64 / (1024.0 * 1024.0));
+        format!(
+            "Live PAR (job {nzb_id}) I/O: source_bytes_read {} MB (par-rs {} MB, RustyGet replay {} MB), backfill_bytes_read {} MB, recovery_bytes_read {} MB, ram_bytes_verified {} MB; {} cache miss(es), {} article(s) read from their file by par-rs, {} waited for the cache flush, {} still waiting",
+            mb(io.source_bytes_read.saturating_add(replay)),
+            mb(io.source_bytes_read),
+            mb(replay),
+            mb(io.backfill_bytes_read),
+            mb(io.recovery_bytes_read),
+            mb(io.ram_bytes_verified),
+            self.metrics.cache_misses.load(Ordering::Relaxed),
+            self.metrics.committed_articles.load(Ordering::Relaxed),
+            self.metrics.awaited_commits.load(Ordering::Relaxed),
+            self.awaiting_commits(),
+        )
+    }
+}
+
 impl LiveMetricCounters {
     pub(super) fn report_nzb_id(&self) -> i32 {
         self.report_nzb_id.load(Ordering::Relaxed)
@@ -114,6 +142,8 @@ impl LiveMetricCounters {
 
 impl Drop for ActiveStreamingSession {
     fn drop(&mut self) {
+        // No registry lookup (the registry lock may be held): match by generation.
+        forget_live_poll(self.metrics.report_nzb_id(), self.generation);
         // No writer-gate lookup here: replacement can drop an entry under that
         // gate. Only installed/reported cohorts produce a disposal footer.
         if self.metrics.report_sequence.load(Ordering::Acquire) != 0 {
@@ -123,6 +153,8 @@ impl Drop for ActiveStreamingSession {
                 let message = format!("Live PAR (job {nzb_id}) refusals: {summary}");
                 crate::log::log_active_bytes(crate::queuesubsys_host::MK_DETAIL, message.as_bytes());
             }
+            let message = self.io_stats_line(nzb_id);
+            crate::log::log_active_bytes(crate::queuesubsys_host::MK_DETAIL, message.as_bytes());
         }
     }
 }

@@ -400,7 +400,14 @@ fn damaged_recovery_volume_still_delivers_its_good_blocks() {
     assert!(!streaming_session_process_completed_file(id, |_| Ok(()))
         .unwrap()
         .unwrap());
-    assert_eq!(streaming_session_status(id).unwrap().ready_recovery, 3);
+    // Slots follow the planned exponents (no damage: 0, 1, 2): the two good blocks of
+    // vol03+3 are absorbed or, without a slot, kept as turned away for growth.
+    let entry = active_streaming_session(id).unwrap();
+    assert!(
+        entry.session.status().ready_recovery + entry.session.turned_away_recovery_slices()
+            >= 3
+    );
+    drop(entry);
     streaming_session_forget(id);
 }
 
@@ -737,7 +744,7 @@ fn live_target_rejects_replacement_after_source_attestation() {
 fn cancelled_target_lease_never_publishes_a_hold_release() {
     let fx = Fixture::new();
     let set = fx.set();
-    let id = -1900141;
+    let id = -1900191;
     streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 << 20).unwrap();
     let fid = set.main.as_ref().unwrap().recoverable_file_ids[0];
     let target = fx.0.join(set.file_descs[&fid].local_name());
@@ -767,7 +774,7 @@ fn cancelled_target_lease_never_publishes_a_hold_release() {
 #[test]
 fn live_cancellation_and_hold_publication_share_one_fence() {
     let fx = Fixture::new();
-    let id = -1900142;
+    let id = -1900192;
     streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 << 20).unwrap();
     let entry = active_streaming_session(id).unwrap();
     let gate = Arc::clone(&entry.writers);
@@ -1359,5 +1366,476 @@ fn live_busy_completion_ticket_survives_until_later_tick() {
         .unwrap());
     assert!(!streaming_session_pending_completed_jobs().contains(&id));
     assert!(active_streaming_session(id).is_some());
+    streaming_session_forget(id);
+}
+
+/// Copies each source of the fixture to `<n>.out.tmp` (a DirectWrite file under another
+/// name than its par2 name) and returns `(par2 name, written path, bytes)` per file.
+fn written_copies(fx: &Fixture, set: &PacketSet) -> Vec<(Vec<u8>, PathBuf, Vec<u8>)> {
+    let written = fx.0.join("written");
+    std::fs::create_dir_all(&written).unwrap();
+    let mut out = Vec::new();
+    for (n, file_id) in set.main.as_ref().unwrap().recoverable_file_ids.iter().enumerate() {
+        let desc = &set.file_descs[file_id];
+        let bytes = std::fs::read(fx.0.join(desc.local_name())).unwrap();
+        let path = written.join(format!("{n}.out.tmp"));
+        std::fs::write(&path, &bytes).unwrap();
+        out.push((desc.name.clone(), path, bytes));
+    }
+    out
+}
+
+/// Defers `bytes[from..to]` of a file as articles of `article` bytes that RAM no longer
+/// holds (every snapshot misses), naming the file they were written into.
+fn defer_uncached(
+    id: i32,
+    name: &[u8],
+    path: &Path,
+    bytes: &[u8],
+    (from, to): (usize, usize),
+    article: usize,
+) {
+    let mut offset = from;
+    while offset < to {
+        let end = (offset + article).min(to);
+        streaming_session_defer_committed_article(
+            id,
+            (None, name, &[]),
+            offset as u64,
+            (end - offset) as u64,
+            crc32fast::hash(&bytes[offset..end]),
+            Some(path),
+            || None,
+        )
+        .unwrap()
+        .unwrap();
+        offset = end;
+    }
+}
+
+/// The repair's temporary files left in `dir`.
+fn repair_temps(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(".rustyget-repair-"))
+        .collect()
+}
+
+#[test]
+fn a_failed_target_admission_removes_only_its_temporary_files() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900184;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 << 20).unwrap();
+    let ids = &set.main.as_ref().unwrap().recoverable_file_ids;
+    let desc = &set.file_descs[&ids[0]];
+    // Bind the physical root as a repair admission does.
+    let context = crate::parlive::source_write_context(id, 40, &fx.0, &desc.name).unwrap();
+    context.attest_existing_source().unwrap();
+    let entry = active_streaming_session(id).unwrap();
+    let existing = fx.0.join(desc.local_name());
+    let before = std::fs::read(&existing).unwrap();
+    let first = fx.0.join("missing-one.bin");
+    let second = fx.0.join("missing-two.bin");
+    let targets = vec![
+        (first.clone(), ids[0]),
+        (existing.clone(), ids[0]),
+        (second.clone(), ids[0]),
+    ];
+    // Cancelled after the last target opened: no target name was given, no temp is left.
+    let calls = std::cell::Cell::new(0);
+    let cancel_at_end = || {
+        calls.set(calls.get() + 1);
+        calls.get() > 3
+    };
+    assert!(matches!(
+        open_live_repair_targets(id, &entry, &targets, cancel_at_end),
+        Err(RepairError::Cancelled)
+    ));
+    assert!(!first.exists() && !second.exists());
+    assert!(repair_temps(&fx.0).is_empty());
+    assert_eq!(std::fs::read(&existing).unwrap(), before);
+    // Refused part way (a target outside the root): its temps go too.
+    let outside = std::env::temp_dir().join("rustyget-outside-root.bin");
+    let refused = vec![(first.clone(), ids[0]), (outside.clone(), ids[0])];
+    assert!(open_live_repair_targets(id, &entry, &refused, || false).is_err());
+    assert!(!first.exists() && !outside.exists());
+    assert!(repair_temps(&fx.0).is_empty());
+    // The direct renamer moves a completed file to a target's name while the admission
+    // runs: it is never replaced or removed, the admission fails, and its temp goes.
+    let swap = vec![(first.clone(), ids[0])];
+    let moved = std::cell::Cell::new(false);
+    let move_in = || {
+        if !moved.get() && !repair_temps(&fx.0).is_empty() {
+            std::fs::write(&first, b"the real movie").unwrap();
+            moved.set(true);
+        }
+        false
+    };
+    assert!(open_live_repair_targets(id, &entry, &swap, move_in).is_err());
+    assert_eq!(std::fs::read(&first).unwrap(), b"the real movie");
+    assert!(repair_temps(&fx.0).is_empty());
+    std::fs::remove_file(&first).unwrap();
+    // Current: all open; the missing ones get their names (the same files), no temps stay.
+    let files = open_live_repair_targets(id, &entry, &targets, || false).unwrap();
+    assert_eq!(files.len(), 3);
+    assert!(first.exists() && second.exists());
+    assert!(repair_temps(&fx.0).is_empty());
+    use std::os::unix::fs::MetadataExt;
+    assert_eq!(
+        files[0].file.metadata().unwrap().ino(),
+        std::fs::metadata(&first).unwrap().ino()
+    );
+    assert_eq!(files[0].file.metadata().unwrap().nlink(), 1);
+    drop(files);
+    drop(entry);
+    drop(context);
+    streaming_session_forget(id);
+    crate::parlive::forget_download_writes(id);
+}
+
+/// Serializes the tests that force the no-hard-links fallback.
+static NO_LINKS: Mutex<()> = Mutex::new(());
+
+struct NoLinks<'a>(#[allow(dead_code)] std::sync::MutexGuard<'a, ()>);
+impl NoLinks<'_> {
+    fn force() -> Self {
+        let guard = NO_LINKS.lock().unwrap_or_else(|e| e.into_inner());
+        crate::parlive::FORCE_NO_LINKS.store(true, Ordering::Relaxed);
+        Self(guard)
+    }
+}
+impl Drop for NoLinks<'_> {
+    fn drop(&mut self) {
+        crate::parlive::FORCE_NO_LINKS.store(false, Ordering::Relaxed);
+    }
+}
+
+/// A live session on the fixture with its physical root bound, as a repair admission
+/// binds it; the caller forgets it.
+fn bound_session(fx: &Fixture, set: &PacketSet, id: i32) -> crate::parlive::SourceWriteContext {
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 << 20).unwrap();
+    let desc = &set.file_descs[&set.main.as_ref().unwrap().recoverable_file_ids[0]];
+    let context = crate::parlive::source_write_context(id, 40, &fx.0, &desc.name).unwrap();
+    context.attest_existing_source().unwrap();
+    context
+}
+
+#[test]
+fn without_hard_links_a_missing_target_is_created_directly() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900185;
+    let context = bound_session(&fx, &set, id);
+    let entry = active_streaming_session(id).unwrap();
+    let file_id = set.main.as_ref().unwrap().recoverable_file_ids[0];
+    let target = fx.0.join("direct.bin");
+    let _no_links = NoLinks::force();
+    // exFAT-like: no link, no no-replace rename: the name is created directly.
+    let files = open_live_repair_targets(id, &entry, &[(target.clone(), file_id)], || false).unwrap();
+    use std::os::unix::fs::MetadataExt;
+    assert_eq!(
+        files[0].file.metadata().unwrap().ino(),
+        std::fs::metadata(&target).unwrap().ino()
+    );
+    assert!(repair_temps(&fx.0).is_empty());
+    drop(files);
+    std::fs::remove_file(&target).unwrap();
+    // Cancelled after the name was created: removed, it is still this admission's file.
+    let calls = std::cell::Cell::new(0);
+    let cancel_after_naming = || {
+        calls.set(calls.get() + 1);
+        calls.get() >= 3
+    };
+    assert!(matches!(
+        open_live_repair_targets(id, &entry, &[(target.clone(), file_id)], cancel_after_naming),
+        Err(RepairError::Cancelled)
+    ));
+    assert!(!target.exists());
+    assert!(repair_temps(&fx.0).is_empty());
+    // The name was replaced (the direct renamer moved the real file there) before the
+    // cancel: the real file is never removed.
+    let calls = std::cell::Cell::new(0);
+    let replace_then_cancel = || {
+        calls.set(calls.get() + 1);
+        if calls.get() == 3 {
+            std::fs::remove_file(&target).unwrap();
+            std::fs::write(&target, b"the real movie").unwrap();
+        }
+        calls.get() >= 3
+    };
+    assert!(open_live_repair_targets(id, &entry, &[(target.clone(), file_id)], replace_then_cancel).is_err());
+    assert_eq!(std::fs::read(&target).unwrap(), b"the real movie");
+    drop(entry);
+    drop(context);
+    streaming_session_forget(id);
+    crate::parlive::forget_download_writes(id);
+}
+
+#[test]
+fn a_late_failure_removes_the_target_names_this_admission_gave() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900186;
+    let context = bound_session(&fx, &set, id);
+    let entry = active_streaming_session(id).unwrap();
+    let file_id = set.main.as_ref().unwrap().recoverable_file_ids[0];
+    let one = fx.0.join("named-one.bin");
+    let two = fx.0.join("named-two.bin");
+    let targets = vec![(one.clone(), file_id), (two.clone(), file_id)];
+    // Cancelled after both names were given (calls: 2 targets, after the loop, after naming).
+    let calls = std::cell::Cell::new(0);
+    let cancel_after_naming = || {
+        calls.set(calls.get() + 1);
+        calls.get() >= 4
+    };
+    assert!(matches!(
+        open_live_repair_targets(id, &entry, &targets, cancel_after_naming),
+        Err(RepairError::Cancelled)
+    ));
+    assert!(!one.exists() && !two.exists());
+    assert!(repair_temps(&fx.0).is_empty());
+    // A target name taken before naming: nothing is named, the other file is kept.
+    std::fs::write(&two, b"already here").unwrap();
+    let calls = std::cell::Cell::new(0);
+    let occupy_second = || {
+        calls.set(calls.get() + 1);
+        false
+    };
+    // `two` exists, so it is opened as it is; take `one` after it was created as a temp.
+    let occupy = vec![(one.clone(), file_id)];
+    let taken = std::cell::Cell::new(false);
+    let take_name = || {
+        if !taken.get() && !repair_temps(&fx.0).is_empty() {
+            std::fs::write(&one, b"someone").unwrap();
+            taken.set(true);
+        }
+        occupy_second()
+    };
+    assert!(open_live_repair_targets(id, &entry, &occupy, take_name).is_err());
+    assert_eq!(std::fs::read(&one).unwrap(), b"someone");
+    assert_eq!(std::fs::read(&two).unwrap(), b"already here");
+    assert!(repair_temps(&fx.0).is_empty());
+    drop(entry);
+    drop(context);
+    streaming_session_forget(id);
+    crate::parlive::forget_download_writes(id);
+}
+
+#[test]
+fn a_rename_onto_a_given_name_waits_for_the_rollback_and_survives() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900187;
+    let context = bound_session(&fx, &set, id);
+    let entry = active_streaming_session(id).unwrap();
+    let file_id = set.main.as_ref().unwrap().recoverable_file_ids[0];
+    let target = fx.0.join("movie.mkv");
+    let obfuscated = fx.0.join("abc123");
+    std::fs::write(&obfuscated, b"the completed movie").unwrap();
+    // The admission names the target, then is cancelled (the direct renamer joined); the
+    // renamer moves the completed file onto that name at once, under the naming lock.
+    let renamer = std::cell::RefCell::new(None);
+    let calls = std::cell::Cell::new(0);
+    let cancel_and_rename = || {
+        calls.set(calls.get() + 1);
+        if calls.get() == 3 {
+            let (target, obfuscated) = (target.clone(), obfuscated.clone());
+            *renamer.borrow_mut() = Some(std::thread::spawn(move || {
+                crate::parlive::with_target_naming(id, || {
+                    // The rollback has finished: the name it gave is gone, not this file.
+                    let rolled_back = !target.exists();
+                    std::fs::rename(&obfuscated, &target).unwrap();
+                    rolled_back
+                })
+            }));
+            // Give the renamer time to block on the lock the rollback holds.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        calls.get() >= 3
+    };
+    assert!(matches!(
+        open_live_repair_targets(id, &entry, &[(target.clone(), file_id)], cancel_and_rename),
+        Err(RepairError::Cancelled)
+    ));
+    let rolled_back_first = renamer.borrow_mut().take().unwrap().join().unwrap();
+    assert!(rolled_back_first, "the rename ran inside the rollback");
+    assert_eq!(std::fs::read(&target).unwrap(), b"the completed movie");
+    drop(entry);
+    drop(context);
+    streaming_session_forget(id);
+    crate::parlive::forget_download_writes(id);
+}
+
+#[test]
+fn file_io_through_a_write_permit_never_waits_for_target_naming() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900188;
+    let context = bound_session(&fx, &set, id);
+    let entry = active_streaming_session(id).unwrap();
+    let file_id = set.main.as_ref().unwrap().recoverable_file_ids[0];
+    let target = fx.0.join("missing-target.bin");
+    let other = fx.0.join("completed.part01.rar");
+    std::fs::write(&other, b"x").unwrap();
+    // While the admission names its missing target (holding the naming lock), a completion
+    // or cleanup removes a file through perform_io: it must finish, not wait for the lock.
+    let finished = std::cell::Cell::new(None);
+    let calls = std::cell::Cell::new(0);
+    let io_during_naming = || {
+        calls.set(calls.get() + 1);
+        if calls.get() == 3 {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let source =
+                crate::parlive::source_write_context(id, 41, &fx.0, b"completed.part01.rar")
+                    .unwrap();
+            let path = other.clone();
+            std::thread::spawn(move || {
+                let _ = sender.send(source.perform_io(|| std::fs::remove_file(&path)).is_ok());
+            });
+            finished.set(receiver.recv_timeout(std::time::Duration::from_secs(5)).ok());
+        }
+        false
+    };
+    let files =
+        open_live_repair_targets(id, &entry, &[(target.clone(), file_id)], io_during_naming)
+            .unwrap();
+    assert_eq!(finished.get(), Some(true), "perform_io hung behind the naming lock");
+    assert!(!other.exists());
+    drop(files);
+    drop(entry);
+    drop(context);
+    streaming_session_forget(id);
+    crate::parlive::forget_download_writes(id);
+}
+
+#[test]
+fn stale_repair_temps_of_earlier_daemons_are_removed() {
+    let fx = Fixture::new();
+    let stale = fx.0.join(".rustyget-repair-1-00000000deadbeef-7.tmp");
+    // The same pid as this process, but an earlier process's token (a container restart).
+    let same_pid = fx.0.join(format!(
+        ".rustyget-repair-{}-00000000deadbeef-7.tmp",
+        std::process::id()
+    ));
+    let dir = fx.0.join(".rustyget-repair-2-00000000deadbeef-7.tmp");
+    let own = fx.0.join(format!(
+        "{}7.tmp",
+        crate::parlive::own_temp_prefix_for_test()
+    ));
+    let other = fx.0.join(".rustyget-repair-notes.txt");
+    std::fs::write(&stale, b"").unwrap();
+    std::fs::write(&same_pid, b"").unwrap();
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(&own, b"").unwrap();
+    std::fs::write(&other, b"").unwrap();
+    assert_eq!(crate::parlive::remove_stale_repair_temps(&fx.0), 2);
+    assert!(!stale.exists() && !same_pid.exists());
+    assert!(dir.is_dir(), "never a directory");
+    assert!(own.exists(), "this process's own may be in use");
+    assert!(other.exists());
+}
+
+#[test]
+fn live_cache_miss_is_read_by_par_rs_from_the_written_file() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900180;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 * 1024 * 1024)
+        .unwrap();
+    let files = written_copies(&fx, &set);
+    // Every article misses the cache: no refusal, no error; par-rs reads each slice from
+    // the DirectWrite file (set_target_path) once the slice is complete.
+    for (name, path, bytes) in &files {
+        defer_uncached(id, name, path, bytes, (0, bytes.len()), 1000);
+    }
+    assert!(
+        streaming_session_last_error(id).is_none(),
+        "a cache miss must not be a refusal"
+    );
+    streaming_session_drain_articles(id).unwrap().unwrap();
+    let status = streaming_session_status(id).unwrap();
+    assert_eq!(status.verified, status.total);
+    let total: u64 = files.iter().map(|(_, _, bytes)| bytes.len() as u64).sum();
+    let stats = streaming_session_io_stats(id).unwrap();
+    assert!(stats.source_bytes_read >= total, "par-rs read the slices from their files");
+    let metrics = streaming_session_metrics(id).unwrap();
+    assert_eq!(metrics.capture_refusals, 0);
+    assert!(metrics.cache_misses > 0);
+    let entry = active_streaming_session(id).unwrap();
+    assert!(entry.io_stats_line(id).contains("0 still waiting"));
+    drop(entry);
+    streaming_session_forget(id);
+}
+
+#[test]
+fn live_article_ram_refused_waits_for_the_cache_flush() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900181;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 * 1024 * 1024)
+        .unwrap();
+    let files = written_copies(&fx, &set);
+    let entry = active_streaming_session(id).unwrap();
+    // RAM refused every article while it was still in the cache: they wait.
+    for (name, path, bytes) in &files {
+        let file_id = entry.session.file_id_by_name(name).unwrap();
+        entry.note_written(file_id, path);
+        let mut offset = 0;
+        while offset < bytes.len() {
+            let end = (offset + 1000).min(bytes.len());
+            let crc = crc32fast::hash(&bytes[offset..end]);
+            assert!(entry.await_commit(file_id, offset as u64, (end - offset) as u64, crc));
+            offset = end;
+        }
+    }
+    streaming_session_drain_articles(id).unwrap().unwrap();
+    assert_eq!(streaming_session_status(id).unwrap().verified, 0);
+    assert!(entry.awaiting_commits() > 0);
+    // The cache writes them out: par-rs reads them from their file.
+    for (name, _, bytes) in &files {
+        streaming_session_articles_committed(id, (None, name, &[]), &[(0, bytes.len() as u64)]);
+    }
+    streaming_session_drain_articles(id).unwrap().unwrap();
+    let status = streaming_session_status(id).unwrap();
+    assert_eq!(status.verified, status.total);
+    assert_eq!(entry.awaiting_commits(), 0);
+    drop(entry);
+    streaming_session_forget(id);
+}
+
+#[test]
+fn live_session_plans_recovery_slots_for_the_expected_damage() {
+    let fx = Fixture::new();
+    let id = -1900182;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 * 1024 * 1024)
+        .unwrap();
+    // No failures known yet: the margin of 2 slots, allocated up front.
+    let entry = active_streaming_session(id).unwrap();
+    assert_eq!(entry.session.max_syndrome_slots(), 2);
+    assert_eq!(entry.session.status().syndrome_slots, 2);
+    drop(entry);
+    streaming_session_forget(id);
+}
+
+#[test]
+fn live_cache_miss_with_wrong_downloaded_bytes_is_damage() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900183;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 * 1024 * 1024)
+        .unwrap();
+    let files = written_copies(&fx, &set);
+    let (name, path, bytes) = &files[0];
+    let mut wrong = bytes.clone();
+    for byte in wrong.iter_mut().step_by(97) {
+        *byte ^= 0x5a;
+    }
+    std::fs::write(path, &wrong).unwrap();
+    defer_uncached(id, name, path, &wrong, (0, wrong.len()), 1000);
+    streaming_session_drain_articles(id).unwrap().unwrap();
+    assert!(streaming_session_status(id).unwrap().damaged > 0);
     streaming_session_forget(id);
 }

@@ -1,16 +1,22 @@
 rustyget (unreleased)
   - Important notes (upgrading):
     - Without a real password (ControlPassword empty, the stock "tegbzn6789",
-      or an address let in by AuthorizedIP), an API call must name this
+      or an address let in by AuthorizedIP), an API call made by a web
+      browser (it sends Origin, Referer or Sec-Fetch-* headers) must name this
       computer's address, localhost, ControlIP or a name in the new option
-      ControlHostnames, and must come from RustyGet's own page. Other web sites
-      can no longer control RustyGet through your browser (including by DNS
-      rebinding). If you open RustyGet without a password through a reverse
-      proxy or a host name (for example nginx's default proxy_pass, which sends
-      Host: 127.0.0.1 while the browser is on nzb.example.com), the page now
-      answers 403 and says why: set a password (Settings > Security), or add
-      the name to ControlHostnames. Tools that call the API directly (no
-      Origin or Referer) work as before.
+      ControlHostnames (in Host and in X-Forwarded-Host / Forwarded), and must
+      show that it comes from RustyGet's own page. Other web sites can no
+      longer control RustyGet through your browser, including by DNS
+      rebinding. API tools that send none of those headers, such as Sonarr or
+      Radarr calling http://nzbget:6789/jsonrpc, work exactly as before.
+    - If you open RustyGet in a browser without a password through a host
+      name or a reverse proxy (for example nginx's default proxy_pass, which
+      sends Host: 127.0.0.1 while the browser is on nzb.example.com), the page
+      may now answer 403 and says why: set a password (Settings > Security),
+      or add the name to ControlHostnames. A proxy that rewrites Host without
+      X-Forwarded-Host can't be told apart from another site behind the same
+      proxy, so RustyGet behind a reverse proxy should always have a password.
+      Refusals are logged at most once per 10 seconds.
     - With no configuration file, "rustyget -s" / "-D" writes
       ~/.config/rustyget/rustyget.conf with a random password, printed once on
       the console (in a container: in docker logs; there it listens on all

@@ -4862,7 +4862,13 @@ impl NzbgetRsOptions {
             } else if self.create_missing_config && !self.no_disk_access {
                 // none anywhere: write one from the built-in template
                 let path = crate::firstrun::default_config_path();
-                if self.create_config_at(&path, false) {
+                let hidden = |p: &[u8]| match std::fs::symlink_metadata(crate::cleanup::bytes_to_path_buf(p)) {
+                    Err(e) => e.kind() != std::io::ErrorKind::NotFound && e.raw_os_error() != Some(libc::ENOTDIR),
+                    Ok(_) => false,
+                };
+                // a folder RustyGet may not look into could hide the user's
+                // file: loading it then stops with the reason
+                if hidden(&path) || self.create_config_at(&path, false) {
                     self.strs[OptStr::ConfigFile] = Some(cstring(path));
                 }
             }
@@ -5031,7 +5037,13 @@ impl NzbgetRsOptions {
                 },
                 Err(e) => crate::firstrun::plain_io(&e),
             };
-            if self.create_missing_config && std::fs::symlink_metadata(&path).is_err() {
+            // only "there is nothing there" means missing; "not allowed to
+            // look" (EACCES and the like) may hide the user's file, and stops
+            let missing = match std::fs::symlink_metadata(&path) {
+                Ok(_) => false,
+                Err(e) => e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ENOTDIR),
+            };
+            if self.create_missing_config && missing {
                 // nothing there at all (it could not be created either): defaults
                 let text = format!(
                     "There is no configuration file {}: {why}. RustyGet runs on its built-in defaults; start it with -c <file> to name one it can write",

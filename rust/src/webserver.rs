@@ -39,6 +39,10 @@ pub enum Header<'a> {
     ForwardedHost(&'a [u8]),
     /// what the browser says about where the request comes from
     SecFetchSite(&'a [u8]),
+    /// another Sec-Fetch-* header: only browsers send these
+    SecFetchOther,
+    /// RFC 7239 Forwarded (its host= is the browser's host behind a proxy)
+    Forwarded(&'a [u8]),
     KeepAlive,
     /// the empty line: the headers end
     End,
@@ -99,6 +103,10 @@ pub fn header(buffer: &[u8], auth_info_empty: bool) -> Header<'_> {
         Header::ForwardedHost(value(18))
     } else if prefix(line, "Sec-Fetch-Site: ") {
         Header::SecFetchSite(value(16))
+    } else if prefix(line, "Sec-Fetch-") {
+        Header::SecFetchOther
+    } else if prefix(line, "Forwarded: ") {
+        Header::Forwarded(value(11))
     } else if prefix(line, "Connection: keep-alive") {
         Header::KeepAlive
     } else if line.is_empty() {
@@ -524,7 +532,45 @@ fn host_name_of(authority: &[u8]) -> Vec<u8> {
             _ => a,
         }
     };
+    // "localhost." is localhost: a fully qualified name may end in a dot
+    let host = host.strip_suffix(b".").unwrap_or(host);
     host.to_ascii_lowercase()
+}
+
+/// The host= of the first element of an RFC 7239 Forwarded header.
+fn forwarded_header_host(value: &[u8]) -> Vec<u8> {
+    let first = value.split(|&b| b == b',').next().unwrap_or_default();
+    for pair in first.split(|&b| b == b';') {
+        let pair = pair.trim_ascii();
+        if pair.len() > 5 && pair[..5].eq_ignore_ascii_case(b"host=") {
+            let v = &pair[5..];
+            let v = v.strip_prefix(b"\"").and_then(|v| v.strip_suffix(b"\"")).unwrap_or(v);
+            return v.to_vec();
+        }
+    }
+    Vec::new()
+}
+
+/// Logs a refused API call, at most one line per 10 seconds (with how many
+/// were refused in between): a page retrying can't flood the log.
+fn log_refusal(text: &[u8], log_msg: &mut dyn FnMut(i32, &[u8])) {
+    static LAST: std::sync::Mutex<Option<(std::time::Instant, u32)>> = std::sync::Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = std::time::Instant::now();
+    match *last {
+        Some((at, ref mut skipped)) if now.duration_since(at) < std::time::Duration::from_secs(10) => {
+            *skipped = skipped.saturating_add(1);
+        }
+        prev => {
+            let mut w = text.to_vec();
+            if let Some((_, n)) = prev.filter(|&(_, n)| n > 0) {
+                w.extend_from_slice(format!(" ({n} more refused before this one)").as_bytes());
+            }
+            *last = Some((now, 0));
+            drop(last);
+            log_msg(1, &w);
+        }
+    }
 }
 
 /// Is `name` one of ControlHostnames (separated by commas, semicolons or
@@ -537,6 +583,7 @@ fn in_host_list(name: &[u8], list: &[u8]) -> bool {
             .filter(|e| !e.is_empty())
             .any(|e| {
                 let e = e.to_ascii_lowercase();
+                let e = e.strip_suffix(b".").unwrap_or(&e).to_vec();
                 match e.strip_prefix(b"*.") {
                     Some(domain) => name.len() > domain.len() + 1 && name.ends_with(domain) && name[name.len() - domain.len() - 1] == b'.',
                     None => name == e.as_slice(),
@@ -581,7 +628,7 @@ pub fn format_refusal_response(reason: &[u8], keep_alive: bool, version: &[u8]) 
     body.extend_from_slice(b"RustyGet refused this request: ");
     body.extend_from_slice(reason);
     body.extend_from_slice(
-        b" Set a password in Settings > Security (ControlPassword), or add the host name you open RustyGet with to ControlHostnames.",
+        b" Set a password in Settings > Security (ControlPassword), or add the host name you open RustyGet with to ControlHostnames. Behind a reverse proxy, set a password.",
     );
     let mut header = Vec::with_capacity(256);
     header.extend_from_slice(b"HTTP/1.1 403 Forbidden\r\nConnection: ");
@@ -831,6 +878,8 @@ where
     let mut referer: Vec<u8> = Vec::new();
     let mut forwarded_host: Vec<u8> = Vec::new();
     let mut sec_fetch_site: Vec<u8> = Vec::new();
+    let mut sec_fetch_any = false;
+    let mut forwarded_rfc: Vec<u8> = Vec::new();
     let mut old_etag: Vec<u8> = Vec::new();
     let mut keep_alive = false;
     let mut content_len: i32 = 0;
@@ -882,7 +931,12 @@ where
                 Header::Host(v) => host_hdr = c_bytes(v).to_vec(),
                 Header::Referer(v) => referer = c_bytes(v).to_vec(),
                 Header::ForwardedHost(v) => forwarded_host = c_bytes(v).to_vec(),
-                Header::SecFetchSite(v) => sec_fetch_site = c_bytes(v).to_vec(),
+                Header::SecFetchSite(v) => {
+                    sec_fetch_site = c_bytes(v).to_vec();
+                    sec_fetch_any = true;
+                }
+                Header::SecFetchOther => sec_fetch_any = true,
+                Header::Forwarded(v) => forwarded_rfc = forwarded_header_host(c_bytes(v)),
                 Header::KeepAlive => keep_alive = true,
                 Header::End => break,
                 Header::Other => {}
@@ -941,7 +995,20 @@ where
     // let that site read the answers); the daemon's own pages need nothing
     // (behind a reverse proxy the browser's host is X-Forwarded-Host)
     // (an Origin or Referer named in ControlHostnames is the daemon's own too)
+    if forwarded_host.trim_ascii().is_empty() {
+        forwarded_host = forwarded_rfc;
+    } else if let Some(i) = find_byte(&forwarded_host, b',') {
+        // a chain of proxies: the first one is the browser's
+        forwarded_host.truncate(i);
+    }
+    // only a browser sends Origin, Referer or Sec-Fetch-*: API tools
+    // (Sonarr, scripts) send none and are never refused here
+    let browser_like = !origin.is_empty() || !referer.is_empty() || sec_fetch_any;
     let listed = |u: &[u8]| !u.is_empty() && url_in_host_list(u, cfg.control_hostnames);
+    let from_page = (!origin.is_empty() || !referer.is_empty())
+        && (!cross_site(&origin, &referer, &host_hdr)
+            || !cross_site(&origin, &referer, &forwarded_host)
+            || (if origin.is_empty() { listed(&referer) } else { listed(&origin) }));
     let from_elsewhere = (cross_site(&origin, &referer, &host_hdr)
         && cross_site(&origin, &referer, &forwarded_host)
         && !(if origin.is_empty() { listed(&referer) } else { listed(&origin) }))
@@ -998,14 +1065,30 @@ where
     let ip_ok = cfg.credentials.authorized_ip.is_some_and(|a| !a.is_empty())
         && is_authorized_ip(cfg.credentials.authorized_ip.unwrap_or_default(), cfg.remote_addr, lower);
     let weak = password.is_empty() || password == b"tegbzn6789" || ip_ok;
-    if rpc_request && weak {
-        let why: Option<Vec<u8>> = if !host_allowed(&host_hdr, cfg.control_ip, cfg.control_hostnames) {
+    if rpc_request && weak && browser_like {
+        let allowed = |h: &[u8]| host_allowed(h, cfg.control_ip, cfg.control_hostnames);
+        let bad_name = |h: &[u8]| {
             let mut w = b"it names the host \"".to_vec();
-            w.extend_from_slice(&host_name_of(&host_hdr));
+            w.extend_from_slice(&host_name_of(h));
             w.extend_from_slice(b"\", which is not this computer's address or a name in ControlHostnames, and no password protects RustyGet (a web site could be using that name to reach it).");
-            Some(w)
+            w
+        };
+        let named = |h: &[u8]| !h.trim_ascii().is_empty() && in_host_list(&host_name_of(h), cfg.control_hostnames);
+        let fetch_site = sec_fetch_site.trim_ascii().to_ascii_lowercase();
+        let why: Option<Vec<u8>> = if !allowed(&host_hdr) {
+            Some(bad_name(&host_hdr))
+        } else if !forwarded_host.trim_ascii().is_empty() && !allowed(&forwarded_host) {
+            Some(bad_name(&forwarded_host))
         } else if from_elsewhere {
             Some(b"it comes from another web site, and no password protects RustyGet.".to_vec())
+        } else if matches!(fetch_site.as_slice(), b"same-origin" | b"same-site")
+            && !from_page
+            && !named(&host_hdr)
+            && !named(&forwarded_host)
+        {
+            // a page behind a proxy that rewrites Host (nginx's default)
+            // looks just like RustyGet's own page without Origin or Referer
+            Some(b"the browser did not show that it comes from RustyGet's own page (no Origin or Referer), and no password protects RustyGet; a web site behind a reverse proxy could look the same.".to_vec())
         } else {
             None
         };
@@ -1013,7 +1096,7 @@ where
             let mut w = b"Refused an API call: ".to_vec();
             w.extend_from_slice(&why);
             w.extend_from_slice(if url_credentials { b" (credentials in the URL)" } else { b"" });
-            log_msg(1, &w);
+            log_refusal(&w, &mut log_msg);
             let (hdr, body) = format_refusal_response(&why, keep_alive, cfg.version);
             let _ = send_all(&hdr);
             let _ = send_all(&body);
@@ -1560,6 +1643,16 @@ mod tests {
             assert!(!host_allowed(bad, b"nas.lan", b"nzb.example.com, *.home.example"), "{}", String::from_utf8_lossy(bad));
         }
         assert!(!host_allowed(b"nas.lan", b"0.0.0.0", b""));
+        // a trailing dot is the same name; IPv6 zone ids are refused
+        assert!(host_allowed(b"localhost.:6789", b"", b""));
+        assert!(host_allowed(b"nzb.example.com.", b"", b"nzb.example.com"));
+        assert!(host_allowed(b"nzb.example.com", b"", b"nzb.example.com."));
+        assert!(!host_allowed(b"[fe80::1%25en0]:6789", b"", b""));
+        assert_eq!(forwarded_header_host(b"for=1.2.3.4;host=\"evil.example\";proto=https, host=x"), b"evil.example");
+        assert_eq!(forwarded_header_host(b"For=1.2.3.4; Host=nzb.example.com"), b"nzb.example.com");
+        assert_eq!(forwarded_header_host(b"for=1.2.3.4"), b"");
+        assert_eq!(header(b"Sec-Fetch-Mode: cors", true), Header::SecFetchOther);
+        assert_eq!(header(b"Forwarded: host=a", true), Header::Forwarded(b"host=a"));
         assert!(url_in_host_list(b"https://nzb.example.com/x", b"nzb.example.com"));
         assert!(!url_in_host_list(b"https://evil.example/x", b"nzb.example.com"));
         let (head, body) = format_refusal_response(b"it comes from another web site.", true, b"1");

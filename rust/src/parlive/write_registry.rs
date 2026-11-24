@@ -507,16 +507,89 @@ pub(crate) fn create_repair_temp(
     repair_root(coordinator, path)?.create_temp_exclusive()
 }
 
-/// Gives the temporary file the name of `path` (never replacing anything), then drops its
-/// temporary name.
-pub(crate) fn link_repair_temp(
+/// How a missing repair target got its name.
+#[derive(Debug)]
+pub(crate) enum TargetNaming {
+    /// The temporary file was hard-linked to the name, and its temporary name dropped.
+    Linked,
+    /// The temporary file was renamed to the name without replacing anything.
+    Renamed,
+    /// The filesystem can neither (exFAT, FAT, smbfs): the temporary file was dropped and
+    /// the name created directly; this is the file to use.
+    Created(std::fs::File),
+}
+
+/// Whether the name of `path` is free in the download folder.
+pub(crate) fn repair_target_name_is_free(
+    coordinator: &WriteCoordinator,
+    path: &Path,
+) -> std::io::Result<bool> {
+    repair_root(coordinator, path)?.leaf_is_free(path.file_name().ok_or_else(refused)?)
+}
+
+/// The download folder is still the one live PAR bound (not moved or replaced).
+pub(crate) fn repair_root_is_current(
+    coordinator: &WriteCoordinator,
+    path: &Path,
+) -> std::io::Result<()> {
+    repair_root(coordinator, path)?.is_current()
+}
+
+/// Gives the temporary file the name of `path`, never replacing anything: a hard link
+/// (then its temporary name is dropped), else a no-replace rename, else, where the
+/// filesystem supports neither, a direct exclusive create of the name (the temporary file
+/// is dropped first). On an error after the name was given, the name is still the file
+/// (`Linked` with its temporary name left); the caller removes the name only while it still
+/// points at that file.
+pub(crate) fn name_repair_temp(
     coordinator: &WriteCoordinator,
     temp: &std::ffi::CStr,
     path: &Path,
-) -> std::io::Result<()> {
+) -> Result<TargetNaming, (std::io::Error, bool)> {
+    let root = repair_root(coordinator, path).map_err(|e| (e, false))?;
+    let leaf = path.file_name().ok_or_else(|| (refused(), false))?;
+    match root.link_temp(temp, leaf) {
+        Ok(()) => {
+            return root
+                .unlink_temp(temp)
+                .map(|()| TargetNaming::Linked)
+                .map_err(|e| (e, true));
+        }
+        Err(error) if !super::source_identity::unsupported_link(&error) => {
+            return Err((error, false));
+        }
+        Err(_) => {}
+    }
+    match root.rename_temp_noreplace(temp, leaf) {
+        Ok(()) => return Ok(TargetNaming::Renamed),
+        Err(error) if !super::source_identity::unsupported_link(&error) => {
+            return Err((error, false));
+        }
+        Err(_) => {}
+    }
+    root.unlink_temp(temp).map_err(|e| (e, false))?;
+    root.create_leaf_exclusive(leaf)
+        .map(TargetNaming::Created)
+        .map_err(|e| (e, false))
+}
+
+/// Removes repair target `path` only while its name still points at `file` (a name this
+/// admission gave); anything else under the name is left alone.
+pub(crate) fn remove_named_repair_target(
+    coordinator: &WriteCoordinator,
+    path: &Path,
+    file: &std::fs::File,
+) -> std::io::Result<bool> {
     let root = repair_root(coordinator, path)?;
-    root.link_temp(temp, path.file_name().ok_or_else(refused)?)?;
-    root.unlink_temp(temp)
+    let leaf = std::ffi::CString::new(path.file_name().ok_or_else(refused)?.as_encoded_bytes())
+        .map_err(|_| refused())?;
+    root.unlink_leaf_if_same(&leaf, file)
+}
+
+/// Removes temporary repair files an earlier daemon process left in `dir` (see
+/// `SourceRoot::remove_stale_repair_temps`).
+pub(crate) fn remove_stale_repair_temps(dir: &Path) -> usize {
+    super::source_identity::remove_stale_repair_temps_in(dir, None)
 }
 
 /// Removes a temporary repair file by its temporary name only.

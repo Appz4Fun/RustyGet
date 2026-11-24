@@ -724,6 +724,9 @@ impl NzbgetRsParChecker {
             *mem_to_use = mem;
 
             let dest_dir = self.dest_dir();
+            // Temporary live-repair files an earlier daemon left (killed mid-admission).
+            #[cfg(unix)]
+            crate::parlive::remove_stale_repair_temps(crate::fsops::path(&dest_dir));
             let mut r = RustParRepairer::new(
                 crate::fsops::path(&dest_dir).to_path_buf(),
                 threads,

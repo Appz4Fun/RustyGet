@@ -62,7 +62,7 @@ impl SourceRoot {
         if !meta.is_dir() {
             return Err(refused());
         }
-        Ok(Self {
+        let bound = Self {
             directory,
             identity: RootIdentity {
                 device: meta.dev(),
@@ -70,7 +70,10 @@ impl SourceRoot {
             },
             spelling: root.to_owned(),
             _charge: charge,
-        })
+        };
+        // Temporary repair files an earlier daemon left behind (it was killed mid-admission).
+        bound.remove_stale_repair_temps();
+        Ok(bound)
     }
     pub fn is_current(&self) -> io::Result<()> {
         let other = std::fs::OpenOptions::new()
@@ -169,6 +172,10 @@ impl SourceRoot {
     /// anything already has that name: nothing is ever replaced.
     pub fn link_temp(&self, temp: &std::ffi::CStr, leaf: &std::ffi::OsStr) -> io::Result<()> {
         let leaf = checked_leaf(leaf)?;
+        #[cfg(test)]
+        if FORCE_NO_LINKS.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(io::Error::from_raw_os_error(libc::EPERM));
+        }
         let rc = unsafe {
             libc::linkat(
                 self.directory.as_raw_fd(),
@@ -184,6 +191,132 @@ impl SourceRoot {
         Ok(())
     }
 
+    /// Renames the file at temporary name `temp` to `leaf`, failing when anything already has
+    /// that name (Linux `renameat2(RENAME_NOREPLACE)`, macOS `renameatx_np(RENAME_EXCL)`):
+    /// for filesystems without hard links. Unsupported elsewhere.
+    pub fn rename_temp_noreplace(
+        &self,
+        temp: &std::ffi::CStr,
+        leaf: &std::ffi::OsStr,
+    ) -> io::Result<()> {
+        let leaf = checked_leaf(leaf)?;
+        #[cfg(test)]
+        if FORCE_NO_LINKS.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
+        }
+        let dir = self.directory.as_raw_fd();
+        #[cfg(target_os = "linux")]
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                dir,
+                temp.as_ptr(),
+                dir,
+                leaf.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            ) as libc::c_int
+        };
+        #[cfg(target_os = "macos")]
+        let rc = unsafe { libc::renameatx_np(dir, temp.as_ptr(), dir, leaf.as_ptr(), libc::RENAME_EXCL) };
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let rc = {
+            let _ = (dir, &leaf);
+            return Err(io::Error::from_raw_os_error(libc::ENOTSUP));
+        };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Creates `leaf` directly in the root directory, failing if anything already has that
+    /// name (`O_CREAT | O_EXCL | O_NOFOLLOW` through the directory handle): the last resort
+    /// on filesystems that can neither link nor rename without replacing.
+    pub fn create_leaf_exclusive(&self, leaf: &std::ffi::OsStr) -> io::Result<File> {
+        let leaf = checked_leaf(leaf)?;
+        self.is_current()?;
+        let fd = unsafe {
+            libc::openat(
+                self.directory.as_raw_fd(),
+                leaf.as_ptr(),
+                libc::O_CLOEXEC
+                    | libc::O_NOFOLLOW
+                    | libc::O_NONBLOCK
+                    | libc::O_RDWR
+                    | libc::O_CREAT
+                    | libc::O_EXCL,
+                0o666 as libc::c_uint,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let file = unsafe { File::from_raw_fd(fd) };
+        if let Err(error) = FileIdentity::of(&file) {
+            let _ = self.unlink_leaf_if_same(leaf.as_c_str(), &file);
+            return Err(error);
+        }
+        Ok(file)
+    }
+
+    /// Removes `leaf` only while that name still is `file` (same device and inode, by
+    /// `fstatat` without following links, checked right before the `unlinkat` through the
+    /// directory handle). Anything else under the name is left alone. True when removed.
+    pub fn unlink_leaf_if_same(&self, leaf: &std::ffi::CStr, file: &File) -> io::Result<bool> {
+        use std::os::unix::fs::MetadataExt;
+        let ours = file.metadata()?;
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        let rc = unsafe {
+            libc::fstatat(
+                self.directory.as_raw_fd(),
+                leaf.as_ptr(),
+                &mut stat,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if stat.st_dev as u64 != ours.dev() || stat.st_ino as u64 != ours.ino() {
+            return Ok(false);
+        }
+        let rc = unsafe { libc::unlinkat(self.directory.as_raw_fd(), leaf.as_ptr(), 0) };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(true)
+    }
+
+    /// Whether `leaf` names nothing in the root directory (`fstatat` without following).
+    pub fn leaf_is_free(&self, leaf: &std::ffi::OsStr) -> io::Result<bool> {
+        let leaf = checked_leaf(leaf)?;
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        let rc = unsafe {
+            libc::fstatat(
+                self.directory.as_raw_fd(),
+                leaf.as_ptr(),
+                &mut stat,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if rc == 0 {
+            return Ok(false);
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::NotFound {
+            Ok(true)
+        } else {
+            Err(error)
+        }
+    }
+
+    /// Removes temporary repair files that earlier daemon processes left in the root
+    /// directory: regular files named `.rustyget-repair-<pid>-<n>.tmp` of another pid (this
+    /// process's own may belong to an admission under way). Never a directory or a link.
+    pub fn remove_stale_repair_temps(&self) -> usize {
+        remove_stale_repair_temps_in(&self.spelling, Some(&self.directory))
+    }
+
     /// Removes the temporary name `temp` (`unlinkat`); only names `create_temp_exclusive`
     /// made are ever passed here.
     pub fn unlink_temp(&self, temp: &std::ffi::CStr) -> io::Result<()> {
@@ -196,6 +329,72 @@ impl SourceRoot {
         }
         Ok(())
     }
+}
+
+/// Makes link and no-replace rename fail as on a filesystem without hard links (tests).
+#[cfg(test)]
+pub(crate) static FORCE_NO_LINKS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Whether an error from `linkat` or a no-replace rename means the filesystem cannot do it
+/// (exFAT, FAT, smbfs), rather than that the name is taken.
+pub(crate) fn unsupported_link(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::ENOTSUP | libc::EPERM | libc::EINVAL | libc::EXDEV | libc::ENOSYS)
+    ) || error.raw_os_error() == Some(libc::EOPNOTSUPP)
+}
+
+/// See [`SourceRoot::remove_stale_repair_temps`]; `directory` is the folder's handle when
+/// one is open, else the folder is opened here.
+pub(crate) fn remove_stale_repair_temps_in(dir: &Path, directory: Option<&File>) -> usize {
+    let opened;
+    let directory = match directory {
+        Some(directory) => directory,
+        None => {
+            let Ok(file) = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW)
+                .open(dir)
+            else {
+                return 0;
+            };
+            opened = file;
+            &opened
+        }
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let own = format!(".rustyget-repair-{}-", std::process::id());
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let text = name.to_string_lossy();
+        if !text.starts_with(".rustyget-repair-") || !text.ends_with(".tmp") || text.starts_with(&own)
+        {
+            continue;
+        }
+        let Ok(leaf) = CString::new(name.as_encoded_bytes()) else {
+            continue;
+        };
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        let rc = unsafe {
+            libc::fstatat(
+                directory.as_raw_fd(),
+                leaf.as_ptr(),
+                &mut stat,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if rc != 0 || (stat.st_mode & libc::S_IFMT) != libc::S_IFREG {
+            continue;
+        }
+        if unsafe { libc::unlinkat(directory.as_raw_fd(), leaf.as_ptr(), 0) } == 0 {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 /// A plain file name, as `open_leaf` accepts one.

@@ -2952,42 +2952,109 @@ pub(crate) fn streaming_session_can_schedule_repair(nzb_id: i32) -> bool {
     unknown as u64 <= (status.ready_recovery as u64).saturating_add(queued_upper_bound)
 }
 
-/// Missing repair targets one admission created, each under a temporary name until the
-/// admission succeeds. Only temporary names are ever removed: a target's own name is never
-/// unlinked, so a file the direct renamer moves there meanwhile cannot be lost.
+/// Missing repair targets one admission created: each under a temporary name until the
+/// admission succeeds, then under its target name. On failure the temporary names are
+/// removed, and the target names already given only while each still points at the file
+/// this admission created (checked right before the unlink), so a file the direct renamer
+/// moves to a target's name meanwhile is never removed.
 struct CreatedTargets<'a> {
     writers: &'a WriteCoordinator,
-    /// (temporary name, target path)
-    created: Vec<(std::ffi::CString, PathBuf)>,
+    /// (temporary name, target path, index into the admitted files)
+    temps: Vec<(std::ffi::CString, PathBuf, usize)>,
+    /// Target names given, with the file each one was given to.
+    named: Vec<(PathBuf, std::fs::File)>,
 }
 
 impl CreatedTargets<'_> {
-    /// Gives every created file its target name (`linkat`, never replacing a file that has
-    /// the name), dropping the temporary names.
-    fn link_all(mut self) -> Result<(), RepairError> {
+    /// Gives every created file its target name, never replacing a file that has the name
+    /// (see `parlive::name_repair_temp`), updating `files` where the name had to be created
+    /// directly. Every name is checked free first.
+    fn name_all(
+        &mut self,
+        files: &mut [par_rs::RepairTargetFile],
+    ) -> Result<(), RepairError> {
         let unproven = || live_error("live target admission", "target ownership unproven");
-        while let Some((temp, path)) = self.created.first().cloned() {
-            crate::parlive::link_repair_temp(self.writers, &temp, &path).map_err(|_| unproven())?;
-            self.created.remove(0);
+        for (_, path, _) in &self.temps {
+            if !crate::parlive::repair_target_name_is_free(self.writers, path)
+                .map_err(|_| unproven())?
+            {
+                return Err(unproven());
+            }
+        }
+        let mut modes = [0usize; 3];
+        while let Some((temp, path, index)) = self.temps.first().cloned() {
+            let file = &mut files[index].file;
+            match crate::parlive::name_repair_temp(self.writers, &temp, &path) {
+                Ok(naming) => {
+                    self.temps.remove(0);
+                    let named = match naming {
+                        crate::parlive::TargetNaming::Linked => {
+                            modes[0] += 1;
+                            file.try_clone()
+                        }
+                        crate::parlive::TargetNaming::Renamed => {
+                            modes[1] += 1;
+                            file.try_clone()
+                        }
+                        crate::parlive::TargetNaming::Created(created) => {
+                            modes[2] += 1;
+                            *file = created;
+                            file.try_clone()
+                        }
+                    };
+                    let Ok(named) = named else {
+                        return Err(unproven());
+                    };
+                    self.named.push((path, named));
+                }
+                Err((_, named)) => {
+                    if named {
+                        // Linked, but the temporary name stayed: the name is this file.
+                        if let Ok(handle) = file.try_clone() {
+                            self.named.push((path.clone(), handle));
+                        }
+                    }
+                    return Err(unproven());
+                }
+            }
+        }
+        if modes.iter().sum::<usize>() > 0 {
+            let message = format!(
+                "Live PAR: created {} missing repair target(s): {} by hard link, {} by rename, {} directly (no hard links on this filesystem)",
+                modes.iter().sum::<usize>(),
+                modes[0],
+                modes[1],
+                modes[2],
+            );
+            crate::log::log_active_bytes(crate::queuesubsys_host::MK_DETAIL, message.as_bytes());
         }
         Ok(())
+    }
+
+    fn keep(mut self) {
+        self.temps.clear();
+        self.named.clear();
     }
 }
 
 impl Drop for CreatedTargets<'_> {
     fn drop(&mut self) {
-        for (temp, path) in self.created.drain(..) {
+        for (temp, path, _) in self.temps.drain(..) {
             let _ = crate::parlive::unlink_repair_temp(self.writers, &temp, &path);
+        }
+        for (path, file) in self.named.drain(..) {
+            let _ = crate::parlive::remove_named_repair_target(self.writers, &path, &file);
         }
     }
 }
 
 /// Opens the repair targets under the write barrier. An existing file is opened as it is;
 /// a missing one is created under a temporary name, and named as the target only once every
-/// target is open and the session is still current (before the targets are checked or
-/// published). On any error, cancellation included, only the temporary names are removed,
-/// so a cancelled or refused repair leaves no empty file behind and never removes a file
-/// that has a target's name.
+/// target is open, the session is still current and the download folder is still the one
+/// bound (before the targets are checked or published). On any error, cancellation
+/// included, the temporary names are removed and the target names already given are
+/// removed only while they still point at the files created here, so a cancelled or refused
+/// repair leaves no empty file behind and never removes another file.
 fn open_live_repair_targets(
     entry: &ActiveStreamingSession,
     targets: &[(PathBuf, FileId)],
@@ -2996,7 +3063,8 @@ fn open_live_repair_targets(
     let unproven = || live_error("live target admission", "target ownership unproven");
     let mut created = CreatedTargets {
         writers: &entry.writers,
-        created: Vec::new(),
+        temps: Vec::new(),
+        named: Vec::new(),
     };
     let mut files = Vec::with_capacity(targets.len());
     for (path, file_id) in targets {
@@ -3008,7 +3076,7 @@ fn open_live_repair_targets(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let (file, temp) = crate::parlive::create_repair_temp(&entry.writers, path)
                     .map_err(|_| unproven())?;
-                created.created.push((temp, path.clone()));
+                created.temps.push((temp, path.clone(), files.len()));
                 file
             }
             Err(_) => return Err(unproven()),
@@ -3022,7 +3090,14 @@ fn open_live_repair_targets(
     if cancelled() {
         return Err(RepairError::Cancelled);
     }
-    created.link_all()?;
+    if let Some((_, path, _)) = created.temps.first() {
+        crate::parlive::repair_root_is_current(&entry.writers, path).map_err(|_| unproven())?;
+    }
+    created.name_all(&mut files)?;
+    if cancelled() {
+        return Err(RepairError::Cancelled);
+    }
+    created.keep();
     Ok(files)
 }
 

@@ -1496,6 +1496,152 @@ fn a_failed_target_admission_removes_only_its_temporary_files() {
     crate::parlive::forget_download_writes(id);
 }
 
+/// Serializes the tests that force the no-hard-links fallback.
+static NO_LINKS: Mutex<()> = Mutex::new(());
+
+struct NoLinks<'a>(#[allow(dead_code)] std::sync::MutexGuard<'a, ()>);
+impl NoLinks<'_> {
+    fn force() -> Self {
+        let guard = NO_LINKS.lock().unwrap_or_else(|e| e.into_inner());
+        crate::parlive::FORCE_NO_LINKS.store(true, Ordering::Relaxed);
+        Self(guard)
+    }
+}
+impl Drop for NoLinks<'_> {
+    fn drop(&mut self) {
+        crate::parlive::FORCE_NO_LINKS.store(false, Ordering::Relaxed);
+    }
+}
+
+/// A live session on the fixture with its physical root bound, as a repair admission
+/// binds it; the caller forgets it.
+fn bound_session(fx: &Fixture, set: &PacketSet, id: i32) -> crate::parlive::SourceWriteContext {
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 << 20).unwrap();
+    let desc = &set.file_descs[&set.main.as_ref().unwrap().recoverable_file_ids[0]];
+    let context = crate::parlive::source_write_context(id, 40, &fx.0, &desc.name).unwrap();
+    context.attest_existing_source().unwrap();
+    context
+}
+
+#[test]
+fn without_hard_links_a_missing_target_is_created_directly() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900185;
+    let context = bound_session(&fx, &set, id);
+    let entry = active_streaming_session(id).unwrap();
+    let file_id = set.main.as_ref().unwrap().recoverable_file_ids[0];
+    let target = fx.0.join("direct.bin");
+    let _no_links = NoLinks::force();
+    // exFAT-like: no link, no no-replace rename: the name is created directly.
+    let files = open_live_repair_targets(&entry, &[(target.clone(), file_id)], || false).unwrap();
+    use std::os::unix::fs::MetadataExt;
+    assert_eq!(
+        files[0].file.metadata().unwrap().ino(),
+        std::fs::metadata(&target).unwrap().ino()
+    );
+    assert!(repair_temps(&fx.0).is_empty());
+    drop(files);
+    std::fs::remove_file(&target).unwrap();
+    // Cancelled after the name was created: removed, it is still this admission's file.
+    let calls = std::cell::Cell::new(0);
+    let cancel_after_naming = || {
+        calls.set(calls.get() + 1);
+        calls.get() >= 3
+    };
+    assert!(matches!(
+        open_live_repair_targets(&entry, &[(target.clone(), file_id)], cancel_after_naming),
+        Err(RepairError::Cancelled)
+    ));
+    assert!(!target.exists());
+    assert!(repair_temps(&fx.0).is_empty());
+    // The name was replaced (the direct renamer moved the real file there) before the
+    // cancel: the real file is never removed.
+    let calls = std::cell::Cell::new(0);
+    let replace_then_cancel = || {
+        calls.set(calls.get() + 1);
+        if calls.get() == 3 {
+            std::fs::remove_file(&target).unwrap();
+            std::fs::write(&target, b"the real movie").unwrap();
+        }
+        calls.get() >= 3
+    };
+    assert!(open_live_repair_targets(&entry, &[(target.clone(), file_id)], replace_then_cancel).is_err());
+    assert_eq!(std::fs::read(&target).unwrap(), b"the real movie");
+    drop(entry);
+    drop(context);
+    streaming_session_forget(id);
+    crate::parlive::forget_download_writes(id);
+}
+
+#[test]
+fn a_late_failure_removes_the_target_names_this_admission_gave() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900186;
+    let context = bound_session(&fx, &set, id);
+    let entry = active_streaming_session(id).unwrap();
+    let file_id = set.main.as_ref().unwrap().recoverable_file_ids[0];
+    let one = fx.0.join("named-one.bin");
+    let two = fx.0.join("named-two.bin");
+    let targets = vec![(one.clone(), file_id), (two.clone(), file_id)];
+    // Cancelled after both names were given (calls: 2 targets, after the loop, after naming).
+    let calls = std::cell::Cell::new(0);
+    let cancel_after_naming = || {
+        calls.set(calls.get() + 1);
+        calls.get() >= 4
+    };
+    assert!(matches!(
+        open_live_repair_targets(&entry, &targets, cancel_after_naming),
+        Err(RepairError::Cancelled)
+    ));
+    assert!(!one.exists() && !two.exists());
+    assert!(repair_temps(&fx.0).is_empty());
+    // A target name taken before naming: nothing is named, the other file is kept.
+    std::fs::write(&two, b"already here").unwrap();
+    let calls = std::cell::Cell::new(0);
+    let occupy_second = || {
+        calls.set(calls.get() + 1);
+        false
+    };
+    // `two` exists, so it is opened as it is; take `one` after it was created as a temp.
+    let occupy = vec![(one.clone(), file_id)];
+    let taken = std::cell::Cell::new(false);
+    let take_name = || {
+        if !taken.get() && !repair_temps(&fx.0).is_empty() {
+            std::fs::write(&one, b"someone").unwrap();
+            taken.set(true);
+        }
+        occupy_second()
+    };
+    assert!(open_live_repair_targets(&entry, &occupy, take_name).is_err());
+    assert_eq!(std::fs::read(&one).unwrap(), b"someone");
+    assert_eq!(std::fs::read(&two).unwrap(), b"already here");
+    assert!(repair_temps(&fx.0).is_empty());
+    drop(entry);
+    drop(context);
+    streaming_session_forget(id);
+    crate::parlive::forget_download_writes(id);
+}
+
+#[test]
+fn stale_repair_temps_of_earlier_daemons_are_removed() {
+    let fx = Fixture::new();
+    let stale = fx.0.join(".rustyget-repair-1-7.tmp");
+    let dir = fx.0.join(".rustyget-repair-2-7.tmp");
+    let own = fx.0.join(format!(".rustyget-repair-{}-7.tmp", std::process::id()));
+    let other = fx.0.join(".rustyget-repair-notes.txt");
+    std::fs::write(&stale, b"").unwrap();
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(&own, b"").unwrap();
+    std::fs::write(&other, b"").unwrap();
+    assert_eq!(crate::parlive::remove_stale_repair_temps(&fx.0), 1);
+    assert!(!stale.exists());
+    assert!(dir.is_dir(), "never a directory");
+    assert!(own.exists(), "this process's own may be in use");
+    assert!(other.exists());
+}
+
 #[test]
 fn live_cache_miss_is_read_by_par_rs_from_the_written_file() {
     let fx = Fixture::new();

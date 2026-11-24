@@ -231,6 +231,10 @@ impl SourceWriteContext {
     /// and leaves live PAR's sources valid.
     #[track_caller]
     pub fn perform_io<T>(&self, action: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<T> {
+        // Removals and moves in the job folder never interleave with a live repair naming
+        // (or rolling back) its targets there.
+        let naming = target_naming_lock(self.job);
+        let _naming = naming.lock().unwrap_or_else(|e| e.into_inner());
         let _permit = self.permit().map_err(|_| {
             std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
@@ -507,6 +511,43 @@ pub(crate) fn create_repair_temp(
     repair_root(coordinator, path)?.create_temp_exclusive()
 }
 
+/// Per-download lock around naming live repair targets and around every rename, hard link
+/// or removal in the download's folder (the direct renamer, file completion, cleanup), so a
+/// file moved onto a target name can never land between a rollback's identity check and its
+/// unlink. Holders never take the queue lock or the cache flush lock while holding it; the
+/// movers may hold those while they wait for it.
+pub(crate) fn target_naming_lock(job: i32) -> Arc<std::sync::Mutex<()>> {
+    static LOCKS: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<i32, std::sync::Weak<std::sync::Mutex<()>>>>,
+    > = std::sync::LazyLock::new(Default::default);
+    let mut locks = LOCKS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(lock) = locks.get(&job).and_then(std::sync::Weak::upgrade) {
+        return lock;
+    }
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    let lock = Arc::new(std::sync::Mutex::new(()));
+    locks.insert(job, Arc::downgrade(&lock));
+    lock
+}
+
+/// Runs `action` (a rename or link in download `job`'s folder) under its target naming lock.
+pub(crate) fn with_target_naming<T>(job: i32, action: impl FnOnce() -> T) -> T {
+    let lock = target_naming_lock(job);
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    action()
+}
+
+/// What an error of [`name_repair_temp`] left behind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NamingLeft {
+    /// The temporary file, under its temporary name only.
+    Temp,
+    /// The target name points at the temporary file (linked; its temporary name stayed).
+    Named,
+    /// Nothing: the temporary name is already gone.
+    Nothing,
+}
+
 /// How a missing repair target got its name.
 #[derive(Debug)]
 pub(crate) enum TargetNaming {
@@ -545,32 +586,33 @@ pub(crate) fn name_repair_temp(
     coordinator: &WriteCoordinator,
     temp: &std::ffi::CStr,
     path: &Path,
-) -> Result<TargetNaming, (std::io::Error, bool)> {
-    let root = repair_root(coordinator, path).map_err(|e| (e, false))?;
-    let leaf = path.file_name().ok_or_else(|| (refused(), false))?;
+) -> Result<TargetNaming, (std::io::Error, NamingLeft)> {
+    let root = repair_root(coordinator, path).map_err(|e| (e, NamingLeft::Temp))?;
+    let leaf = path.file_name().ok_or_else(|| (refused(), NamingLeft::Temp))?;
     match root.link_temp(temp, leaf) {
         Ok(()) => {
             return root
                 .unlink_temp(temp)
                 .map(|()| TargetNaming::Linked)
-                .map_err(|e| (e, true));
+                .map_err(|e| (e, NamingLeft::Named));
         }
         Err(error) if !super::source_identity::unsupported_link(&error) => {
-            return Err((error, false));
+            return Err((error, NamingLeft::Temp));
         }
         Err(_) => {}
     }
     match root.rename_temp_noreplace(temp, leaf) {
         Ok(()) => return Ok(TargetNaming::Renamed),
         Err(error) if !super::source_identity::unsupported_link(&error) => {
-            return Err((error, false));
+            return Err((error, NamingLeft::Temp));
         }
         Err(_) => {}
     }
-    root.unlink_temp(temp).map_err(|e| (e, false))?;
+    root.unlink_temp(temp).map_err(|e| (e, NamingLeft::Temp))?;
+    // The temporary name is gone from here on: nothing for the caller to unlink.
     root.create_leaf_exclusive(leaf)
         .map(TargetNaming::Created)
-        .map_err(|e| (e, false))
+        .map_err(|e| (e, NamingLeft::Nothing))
 }
 
 /// Removes repair target `path` only while its name still points at `file` (a name this

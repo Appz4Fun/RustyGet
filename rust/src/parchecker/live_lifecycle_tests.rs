@@ -1451,7 +1451,7 @@ fn a_failed_target_admission_removes_only_its_temporary_files() {
         calls.get() > 3
     };
     assert!(matches!(
-        open_live_repair_targets(&entry, &targets, cancel_at_end),
+        open_live_repair_targets(id, &entry, &targets, cancel_at_end),
         Err(RepairError::Cancelled)
     ));
     assert!(!first.exists() && !second.exists());
@@ -1460,7 +1460,7 @@ fn a_failed_target_admission_removes_only_its_temporary_files() {
     // Refused part way (a target outside the root): its temps go too.
     let outside = std::env::temp_dir().join("rustyget-outside-root.bin");
     let refused = vec![(first.clone(), ids[0]), (outside.clone(), ids[0])];
-    assert!(open_live_repair_targets(&entry, &refused, || false).is_err());
+    assert!(open_live_repair_targets(id, &entry, &refused, || false).is_err());
     assert!(!first.exists() && !outside.exists());
     assert!(repair_temps(&fx.0).is_empty());
     // The direct renamer moves a completed file to a target's name while the admission
@@ -1474,12 +1474,12 @@ fn a_failed_target_admission_removes_only_its_temporary_files() {
         }
         false
     };
-    assert!(open_live_repair_targets(&entry, &swap, move_in).is_err());
+    assert!(open_live_repair_targets(id, &entry, &swap, move_in).is_err());
     assert_eq!(std::fs::read(&first).unwrap(), b"the real movie");
     assert!(repair_temps(&fx.0).is_empty());
     std::fs::remove_file(&first).unwrap();
     // Current: all open; the missing ones get their names (the same files), no temps stay.
-    let files = open_live_repair_targets(&entry, &targets, || false).unwrap();
+    let files = open_live_repair_targets(id, &entry, &targets, || false).unwrap();
     assert_eq!(files.len(), 3);
     assert!(first.exists() && second.exists());
     assert!(repair_temps(&fx.0).is_empty());
@@ -1534,7 +1534,7 @@ fn without_hard_links_a_missing_target_is_created_directly() {
     let target = fx.0.join("direct.bin");
     let _no_links = NoLinks::force();
     // exFAT-like: no link, no no-replace rename: the name is created directly.
-    let files = open_live_repair_targets(&entry, &[(target.clone(), file_id)], || false).unwrap();
+    let files = open_live_repair_targets(id, &entry, &[(target.clone(), file_id)], || false).unwrap();
     use std::os::unix::fs::MetadataExt;
     assert_eq!(
         files[0].file.metadata().unwrap().ino(),
@@ -1550,7 +1550,7 @@ fn without_hard_links_a_missing_target_is_created_directly() {
         calls.get() >= 3
     };
     assert!(matches!(
-        open_live_repair_targets(&entry, &[(target.clone(), file_id)], cancel_after_naming),
+        open_live_repair_targets(id, &entry, &[(target.clone(), file_id)], cancel_after_naming),
         Err(RepairError::Cancelled)
     ));
     assert!(!target.exists());
@@ -1566,7 +1566,7 @@ fn without_hard_links_a_missing_target_is_created_directly() {
         }
         calls.get() >= 3
     };
-    assert!(open_live_repair_targets(&entry, &[(target.clone(), file_id)], replace_then_cancel).is_err());
+    assert!(open_live_repair_targets(id, &entry, &[(target.clone(), file_id)], replace_then_cancel).is_err());
     assert_eq!(std::fs::read(&target).unwrap(), b"the real movie");
     drop(entry);
     drop(context);
@@ -1592,7 +1592,7 @@ fn a_late_failure_removes_the_target_names_this_admission_gave() {
         calls.get() >= 4
     };
     assert!(matches!(
-        open_live_repair_targets(&entry, &targets, cancel_after_naming),
+        open_live_repair_targets(id, &entry, &targets, cancel_after_naming),
         Err(RepairError::Cancelled)
     ));
     assert!(!one.exists() && !two.exists());
@@ -1614,7 +1614,7 @@ fn a_late_failure_removes_the_target_names_this_admission_gave() {
         }
         occupy_second()
     };
-    assert!(open_live_repair_targets(&entry, &occupy, take_name).is_err());
+    assert!(open_live_repair_targets(id, &entry, &occupy, take_name).is_err());
     assert_eq!(std::fs::read(&one).unwrap(), b"someone");
     assert_eq!(std::fs::read(&two).unwrap(), b"already here");
     assert!(repair_temps(&fx.0).is_empty());
@@ -1625,18 +1625,72 @@ fn a_late_failure_removes_the_target_names_this_admission_gave() {
 }
 
 #[test]
+fn a_rename_onto_a_given_name_waits_for_the_rollback_and_survives() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900187;
+    let context = bound_session(&fx, &set, id);
+    let entry = active_streaming_session(id).unwrap();
+    let file_id = set.main.as_ref().unwrap().recoverable_file_ids[0];
+    let target = fx.0.join("movie.mkv");
+    let obfuscated = fx.0.join("abc123");
+    std::fs::write(&obfuscated, b"the completed movie").unwrap();
+    // The admission names the target, then is cancelled (the direct renamer joined); the
+    // renamer moves the completed file onto that name at once, under the naming lock.
+    let renamer = std::cell::RefCell::new(None);
+    let calls = std::cell::Cell::new(0);
+    let cancel_and_rename = || {
+        calls.set(calls.get() + 1);
+        if calls.get() == 3 {
+            let (target, obfuscated) = (target.clone(), obfuscated.clone());
+            *renamer.borrow_mut() = Some(std::thread::spawn(move || {
+                crate::parlive::with_target_naming(id, || {
+                    // The rollback has finished: the name it gave is gone, not this file.
+                    let rolled_back = !target.exists();
+                    std::fs::rename(&obfuscated, &target).unwrap();
+                    rolled_back
+                })
+            }));
+            // Give the renamer time to block on the lock the rollback holds.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        calls.get() >= 3
+    };
+    assert!(matches!(
+        open_live_repair_targets(id, &entry, &[(target.clone(), file_id)], cancel_and_rename),
+        Err(RepairError::Cancelled)
+    ));
+    let rolled_back_first = renamer.borrow_mut().take().unwrap().join().unwrap();
+    assert!(rolled_back_first, "the rename ran inside the rollback");
+    assert_eq!(std::fs::read(&target).unwrap(), b"the completed movie");
+    drop(entry);
+    drop(context);
+    streaming_session_forget(id);
+    crate::parlive::forget_download_writes(id);
+}
+
+#[test]
 fn stale_repair_temps_of_earlier_daemons_are_removed() {
     let fx = Fixture::new();
-    let stale = fx.0.join(".rustyget-repair-1-7.tmp");
-    let dir = fx.0.join(".rustyget-repair-2-7.tmp");
-    let own = fx.0.join(format!(".rustyget-repair-{}-7.tmp", std::process::id()));
+    let stale = fx.0.join(".rustyget-repair-1-00000000deadbeef-7.tmp");
+    // The same pid as this process, but an earlier process's token (a container restart).
+    let same_pid = fx.0.join(format!(
+        ".rustyget-repair-{}-00000000deadbeef-7.tmp",
+        std::process::id()
+    ));
+    let dir = fx.0.join(".rustyget-repair-2-00000000deadbeef-7.tmp");
+    let own = fx.0.join(format!(
+        "{}7.tmp",
+        crate::parlive::own_temp_prefix_for_test()
+    ));
     let other = fx.0.join(".rustyget-repair-notes.txt");
     std::fs::write(&stale, b"").unwrap();
+    std::fs::write(&same_pid, b"").unwrap();
     std::fs::create_dir(&dir).unwrap();
     std::fs::write(&own, b"").unwrap();
     std::fs::write(&other, b"").unwrap();
-    assert_eq!(crate::parlive::remove_stale_repair_temps(&fx.0), 1);
-    assert!(!stale.exists());
+    assert_eq!(crate::parlive::remove_stale_repair_temps(&fx.0), 2);
+    assert!(!stale.exists() && !same_pid.exists());
     assert!(dir.is_dir(), "never a directory");
     assert!(own.exists(), "this process's own may be in use");
     assert!(other.exists());

@@ -343,12 +343,13 @@ pub(crate) use write_control::{
 mod physical_ownership_tests;
 mod source_identity;
 #[cfg(test)]
-pub(crate) use source_identity::FORCE_NO_LINKS;
+pub(crate) use source_identity::{own_temp_prefix_for_test, FORCE_NO_LINKS};
 mod write_registry;
 pub(crate) use write_registry::{
     create_repair_temp, donor_write_context, download_writes, forget_download_writes,
     name_repair_temp, open_repair_target, remove_named_repair_target, remove_stale_repair_temps,
-    repair_root_is_current, repair_target_name_is_free, unlink_repair_temp, TargetNaming,
+    repair_root_is_current, repair_target_name_is_free, unlink_repair_temp, with_target_naming,
+    target_naming_lock, NamingLeft, TargetNaming,
     repair_target_is_current, source_write_context, SourceWriteContext,
 };
 

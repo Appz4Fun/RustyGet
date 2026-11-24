@@ -2984,34 +2984,44 @@ impl CreatedTargets<'_> {
         let mut modes = [0usize; 3];
         while let Some((temp, path, index)) = self.temps.first().cloned() {
             let file = &mut files[index].file;
+            // The handle that records a given name, taken before anything changes.
+            let Ok(handle) = file.try_clone() else {
+                return Err(unproven());
+            };
             match crate::parlive::name_repair_temp(self.writers, &temp, &path) {
                 Ok(naming) => {
                     self.temps.remove(0);
                     let named = match naming {
                         crate::parlive::TargetNaming::Linked => {
                             modes[0] += 1;
-                            file.try_clone()
+                            handle
                         }
                         crate::parlive::TargetNaming::Renamed => {
                             modes[1] += 1;
-                            file.try_clone()
+                            handle
                         }
                         crate::parlive::TargetNaming::Created(created) => {
                             modes[2] += 1;
+                            let Ok(named) = created.try_clone() else {
+                                // The name exists and is this file: record it to roll back.
+                                self.named.push((path, created));
+                                return Err(unproven());
+                            };
                             *file = created;
-                            file.try_clone()
+                            named
                         }
-                    };
-                    let Ok(named) = named else {
-                        return Err(unproven());
                     };
                     self.named.push((path, named));
                 }
-                Err((_, named)) => {
-                    if named {
-                        // Linked, but the temporary name stayed: the name is this file.
-                        if let Ok(handle) = file.try_clone() {
+                Err((_, left)) => {
+                    match left {
+                        crate::parlive::NamingLeft::Temp => {}
+                        crate::parlive::NamingLeft::Named => {
+                            // Linked, but the temporary name stayed: both names are this file.
                             self.named.push((path.clone(), handle));
+                        }
+                        crate::parlive::NamingLeft::Nothing => {
+                            self.temps.remove(0);
                         }
                     }
                     return Err(unproven());
@@ -3056,11 +3066,15 @@ impl Drop for CreatedTargets<'_> {
 /// removed only while they still point at the files created here, so a cancelled or refused
 /// repair leaves no empty file behind and never removes another file.
 fn open_live_repair_targets(
+    nzb_id: i32,
     entry: &ActiveStreamingSession,
     targets: &[(PathBuf, FileId)],
     cancelled: impl Fn() -> bool,
 ) -> Result<Vec<par_rs::RepairTargetFile>, RepairError> {
     let unproven = || live_error("live target admission", "target ownership unproven");
+    // Declared before `created`, so a rollback (its drop) still runs under the lock.
+    let naming = crate::parlive::target_naming_lock(nzb_id);
+    let mut naming_guard = None;
     let mut created = CreatedTargets {
         writers: &entry.writers,
         temps: Vec::new(),
@@ -3091,6 +3105,10 @@ fn open_live_repair_targets(
         return Err(RepairError::Cancelled);
     }
     if let Some((_, path, _)) = created.temps.first() {
+        // From the free-name check through naming and any rollback, no rename, link or
+        // removal in the folder (the direct renamer, file completion) can interleave.
+        // Nothing below takes the queue lock or the cache flush lock.
+        naming_guard = Some(naming.lock().unwrap_or_else(|e| e.into_inner()));
         crate::parlive::repair_root_is_current(&entry.writers, path).map_err(|_| unproven())?;
     }
     created.name_all(&mut files)?;
@@ -3098,6 +3116,7 @@ fn open_live_repair_targets(
         return Err(RepairError::Cancelled);
     }
     created.keep();
+    drop(naming_guard);
     Ok(files)
 }
 
@@ -3242,7 +3261,7 @@ impl LiveRepairRequest {
             .zip(&self.ids)
             .map(|(path, (_, file_id))| (path.clone(), *file_id))
             .collect();
-        let files = open_live_repair_targets(&self.entry, &targets, cancelled)?;
+        let files = open_live_repair_targets(self.nzb_id, &self.entry, &targets, cancelled)?;
         Ok(TargetWriteLease {
             nzb_id: self.nzb_id,
             ids: self.ids,

@@ -135,7 +135,7 @@ impl SourceRoot {
         self.is_current()?;
         for _ in 0..16 {
             let n = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let temp = CString::new(format!(".rustyget-repair-{}-{n}.tmp", std::process::id()))
+            let temp = CString::new(format!("{}{n}.tmp", own_temp_prefix()))
                 .map_err(|_| refused())?;
             let fd = unsafe {
                 libc::openat(
@@ -331,6 +331,33 @@ impl SourceRoot {
     }
 }
 
+/// `.rustyget-repair-<pid>-<token>-`: this process's temporary repair file names. The
+/// random token tells this process's files from those of an earlier one that had the same
+/// pid (containers reuse pids), which are stale.
+fn own_temp_prefix() -> &'static str {
+    static PREFIX: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        use std::hash::{BuildHasher, Hasher};
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u128(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos()),
+        );
+        hasher.write_u32(std::process::id());
+        format!(
+            ".rustyget-repair-{}-{:016x}-",
+            std::process::id(),
+            hasher.finish()
+        )
+    });
+    &PREFIX
+}
+
+#[cfg(test)]
+pub(crate) fn own_temp_prefix_for_test() -> &'static str {
+    own_temp_prefix()
+}
+
 /// Makes link and no-replace rename fail as on a filesystem without hard links (tests).
 #[cfg(test)]
 pub(crate) static FORCE_NO_LINKS: std::sync::atomic::AtomicBool =
@@ -366,7 +393,7 @@ pub(crate) fn remove_stale_repair_temps_in(dir: &Path, directory: Option<&File>)
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
     };
-    let own = format!(".rustyget-repair-{}-", std::process::id());
+    let own = own_temp_prefix();
     let mut removed = 0;
     for entry in entries.flatten() {
         let name = entry.file_name();

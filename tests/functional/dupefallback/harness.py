@@ -7354,14 +7354,36 @@ def scenario_watchsearchedkey(daemon, t):
     download it searches. Such an ordinary download (no fleet: no DupeFleet,
     not held or probing, no held copy of its key) still gets the backup pass,
     which carries DupeSearch's retry and re-ranks; only real fleets that stay
-    in Downloads are left to their probe."""
+    in Downloads are left to their probe. Review 2: the duplicate check holds
+    an ordinary backup of such a key (DupeHeld) like a fleet copy; a plain hold
+    is no fleet mark, so the download keeps its pass with a held backup."""
+    key = 'dupes:show.s01e01.1080p.web.h264.grp'
     ids = ['ws-pick-%d@x' % i for i in range(40)]
-    daemon.fake_nntp.alive = set()
+    backup_ids = ['ws-b-%d@x' % i for i in range(40)]
+    daemon.fake_nntp.alive = set(backup_ids)
     api = daemon.wait_ready()
-    _ds_append(api, DS_TITLE, _fake_nzb_ids(ids, 400_000).decode(), 'dupes:show.s01e01.1080p.web.h264.grp', 100)
-    checked = _watch_wait(t, 'checking the backups of ' + DS_TITLE)
-    ok = checked >= 1
-    return ('watchsearchedkey', ok, 'backup_pass_logs=%d' % checked)
+    _ds_append(api, DS_TITLE, _fake_nzb_ids(ids, 400_000).decode(), key, 100)
+    backup = 'Show S01E01 1080p WEB H264-OTHER'
+    _ds_append(api, backup, _fake_nzb_ids(backup_ids, 400_000).decode(), key, 50, paused=False)
+    held = None
+    deadline = time.time() + 30
+    while time.time() < deadline and held is None:
+        g = next((g for g in api.listgroups() if g['NZBName'] == backup), None)
+        if g and _params(g).get('DupeHeld') == 'yes':
+            held = _params(g)
+        time.sleep(0.25)
+    # the backup's add wakes the pick: a pass that starts after the backup is
+    # held proves a plain hold no longer skips it
+    needle = 'checking the backups of ' + DS_TITLE
+    before = _grep_log(t, needle)
+    deadline = time.time() + 90
+    while time.time() < deadline and _grep_log(t, needle) <= before:
+        time.sleep(0.25)
+    checked = _grep_log(t, needle)
+    fleet_marks = held is not None and ('DupeFleet' in held or 'DupeProbing' in held)
+    ok = checked > before and held is not None and not fleet_marks
+    return ('watchsearchedkey', ok, 'backup_pass_logs=%d (before the hold %d) backup_held=%s fleet_marks=%s' % (
+        checked, before, held is not None, fleet_marks))
 
 
 def scenario_watchdeadpick(daemon, t):

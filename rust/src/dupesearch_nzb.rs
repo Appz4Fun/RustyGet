@@ -4541,6 +4541,10 @@ mod tests {
                     .collect())
             }
         }
+        // the stop flag is process-wide: other donor tests stop and reset it
+        let _donor_guard = DONOR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        donor_stop_all();
+        donor_wait_all();
         donor_reset();
         let ids: Vec<String> = (0..400).map(|i| format!("lane{i}@x")).collect();
         let groups = Arc::new(Vec::<String>::new());

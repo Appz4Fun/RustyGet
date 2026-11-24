@@ -905,25 +905,24 @@ fn member_place(in_history: bool) -> &'static str {
 /// pass of DupeSearch/DupeWatch leaves it alone (B2). The key alone is not
 /// enough: DupeSearch writes `dupes:<title>` onto every download it searches,
 /// and those keep their retries and re-ranks. `fleet_marked` says the download
-/// really is a fleet's copy: a fleet's rank (`DupeFleet`), held or probing
-/// by its fleet, or a copy of its key held or ranked in the queue beside it
-/// ([`pick_fleet_marked`]).
+/// really is a fleet's copy: a fleet's rank (`DupeFleet`) or its fleet's
+/// probe mark (`DupeProbing`), on itself or on a copy of its key queued
+/// beside it ([`pick_fleet_marked`]). A plain `DupeHeld` is no fleet mark:
+/// the duplicate check holds every lower-scored `dupes:` backup, ordinary
+/// DupeSearch backups included.
 pub fn fleet_owns_pick(dupe_check: bool, kind: i32, dupe_mode: DupeMode, dupe_key: &[u8], fleet_marked: bool) -> bool {
     fleet_marked && dupe_check && kind == 0 && dupe_mode == DupeMode::Score && is_group_key(dupe_key)
 }
 
-/// [`fleet_owns_pick`]'s `fleet_marked` for `pick`: it carries a fleet's rank
-/// (`DupeFleet`) or its fleet's hold or probe marks, or another queued copy
-/// of its key does (the daemon-side join holds the copies that lose).
+/// [`fleet_owns_pick`]'s `fleet_marked` for `pick`: it carries a fleet's own
+/// marks ([`fleet_own_marks`]), or another queued copy of its key does.
+/// Fleet copies carry `DupeProbing` from the moment they are added and
+/// `DupeFleet` once probed (an early leader gets it when released).
 fn pick_fleet_marked(host_ctx: *mut c_void, host_cb: DupeHostFn, dq_ptr: usize, pick: &NzbSnap) -> bool {
     let Some(qh) = crate::ffi::queue_host() else {
         return pick.has_dupe_fleet;
     };
-    let marked = |s: &NzbSnap| {
-        s.has_dupe_fleet
-            || crate::fleethold::is_held(&qh, s.ptr)
-            || crate::fleethold::is_probing(&qh, s.ptr)
-    };
+    let marked = |s: &NzbSnap| fleet_own_marks(s.has_dupe_fleet, crate::fleethold::is_probing(&qh, s.ptr));
     if marked(pick) {
         return true;
     }
@@ -936,6 +935,13 @@ fn pick_fleet_marked(host_ctx: *mut c_void, host_cb: DupeHostFn, dq_ptr: usize, 
         let s = inspect_nzb(host_ctx, host_cb, p, false);
         s.kind == 0 && s.dupe_key.eq_ignore_ascii_case(&pick.dupe_key) && marked(&s)
     })
+}
+
+/// Whether a copy carries a fleet's own marks: its rank (`DupeFleet`) or the
+/// fleet probe's mark (`DupeProbing`). Not a plain hold (`DupeHeld`), which
+/// ordinary DupeSearch backups get from the duplicate check too.
+pub fn fleet_own_marks(dupe_fleet: bool, probing: bool) -> bool {
+    dupe_fleet || probing
 }
 
 /// Seconds a fleet of copies grouped by name may spend checking each copy:
@@ -1073,10 +1079,11 @@ pub fn fleet_switch_allowed(downloaded: i64) -> bool {
 }
 
 /// Whether the probe's findings may be written onto a fleet copy already in
-/// history: filed as DELETED/DUPE by its primary's success, or the primary
-/// itself; never a copy the user deleted or one that failed.
-pub fn fleet_history_writable(delete_status: DeleteStatus) -> bool {
-    matches!(delete_status, DeleteStatus::Dupe | DeleteStatus::None)
+/// history: filed as DELETED/DUPE by its primary's success, or a copy that
+/// itself succeeded; never a copy the user deleted or one that failed (a
+/// failure keeps DeleteStatus NONE too, so success is checked).
+pub fn fleet_history_writable(delete_status: DeleteStatus, succeeded: bool) -> bool {
+    delete_status == DeleteStatus::Dupe || (delete_status == DeleteStatus::None && succeeded)
 }
 
 /// Whether the copy released early as its fleet's primary (`id`) is gone from
@@ -6375,14 +6382,23 @@ fn fleet_apply_member(
             // succeeded and filed it as DELETED/DUPE (or it is that primary):
             // it keeps what the probe found. A copy the user deleted, or one
             // filed as a failure, is left as it is.
-            if fleet_history_writable(qh.nzb_snap(ptr_, false).delete_status) {
+            let snap = inspect_nzb(host_ctx, host_cb, ptr_, false);
+            if fleet_history_writable(snap.delete_status, snap.dupe_success) {
                 for (k, v) in params {
                     qh.nzb_set_param(ptr_, k, Some(v));
                 }
-                qh.nzb_set_param(ptr_, crate::fleethold::PROBING_PARAM, None);
-                qh.dq_history_changed(dq_ptr);
-                qh.dq_save(dq_ptr);
             }
+            // never left marked held or probing in history, whoever filed it
+            for name in [
+                crate::fleethold::PROBING_PARAM,
+                crate::fleethold::HELD_PARAM,
+                crate::fleethold::HELD_PRIORITY_PARAM,
+                crate::fleethold::HELD_FILES_PARAM,
+            ] {
+                qh.nzb_set_param(ptr_, name, None);
+            }
+            qh.dq_history_changed(dq_ptr);
+            qh.dq_save(dq_ptr);
             return nzb_id;
         }
         for (k, v) in params {
@@ -8304,19 +8320,31 @@ pub unsafe fn fleet_append(
     // the primary released during the probe finished already: it is the one
     // chosen. A leader that failed or was deleted is not: the reply then says
     // why nothing downloads (ALL_DEAD, INCOMPLETE, ...)
-    let lead_succeeded = lead_id != 0
-        && with_guarded_queue(host_ctx, host_cb, |dq_ptr| {
-            dq_find_nzb(host_ctx, host_cb, dq_ptr, lead_id).is_some_and(|(p, in_hist)| {
-                in_hist && {
-                    let s = inspect_nzb(host_ctx, host_cb, p, false);
-                    s.dupe_success && s.delete_status == DeleteStatus::None
-                }
+    // any copy of this fleet that succeeded during the probe counts (an early
+    // leader that failed may have handed over to another that finished)
+    let mut fleet_ids: Vec<i32> = Vec::new();
+    if lead_id != 0 {
+        fleet_ids.push(lead_id);
+    }
+    fleet_ids.extend(out_entries.iter().map(|e| e.nzb_id).filter(|&id| id > 0 && id != lead_id));
+    let succeeded_id = if chosen == 0 && reason.is_empty() && grouped {
+        with_guarded_queue(host_ctx, host_cb, |dq_ptr| {
+            fleet_ids.iter().copied().find(|&id| {
+                dq_find_nzb(host_ctx, host_cb, dq_ptr, id).is_some_and(|(p, in_hist)| {
+                    in_hist && {
+                        let s = inspect_nzb(host_ctx, host_cb, p, false);
+                        s.dupe_success && s.delete_status == DeleteStatus::None
+                    }
+                })
             })
-        });
-    if chosen == 0 && reason.is_empty() && lead_succeeded {
-        chosen = lead_id;
+        })
+    } else {
+        None
+    };
+    if let Some(done_id) = succeeded_id {
+        chosen = done_id;
         for entry in &mut out_entries {
-            if entry.nzb_id == lead_id {
+            if entry.nzb_id == done_id {
                 entry.status = b"QUEUED".to_vec();
             }
         }
@@ -8439,8 +8467,9 @@ mod tests {
         assert!(leader_gone(false, DeleteStatus::Manual, false));
         assert!(!leader_gone(false, DeleteStatus::None, false));
         // review: params are never written onto a copy the user deleted
-        assert!(fleet_history_writable(DeleteStatus::Dupe) && fleet_history_writable(DeleteStatus::None));
-        assert!(!fleet_history_writable(DeleteStatus::Manual) && !fleet_history_writable(DeleteStatus::Health));
+        assert!(fleet_history_writable(DeleteStatus::Dupe, false) && fleet_history_writable(DeleteStatus::None, true));
+        assert!(!fleet_history_writable(DeleteStatus::None, false), "a failure is not written");
+        assert!(!fleet_history_writable(DeleteStatus::Manual, false) && !fleet_history_writable(DeleteStatus::Health, false));
         let v = |idx, healthy, ease, alive| LeadView { idx, healthy, ease, alive };
         // with the failed leader (0) left out, the next healthy copy leads
         assert_eq!(pick_lead(&[v(2, true, 3, 1000)], None), Some(2));
@@ -8483,6 +8512,10 @@ mod tests {
         // review: DupeSearch writes dupes:<title> onto every download it
         // searches; without a fleet's marks it keeps its retry and re-ranks
         assert!(!fleet_owns_pick(true, 0, DupeMode::Score, b"dupes:some.show.s01e01", false));
+        // review 2: a plain hold is no fleet mark (the duplicate check holds
+        // ordinary DupeSearch backups too); DupeFleet or DupeProbing are
+        assert!(!fleet_own_marks(false, false));
+        assert!(fleet_own_marks(true, false) && fleet_own_marks(false, true));
         assert_eq!(member_place(false), "queued");
         assert_eq!(member_place(true), "in history");
     }

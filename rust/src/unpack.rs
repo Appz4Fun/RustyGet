@@ -2224,6 +2224,11 @@ pub fn unpack_controller_cleanup(
     let mut extracted_files: Vec<Vec<u8>> = Vec::new();
     let sep = crate::paths::PATH_SEPARATOR;
 
+    // What a live extraction that never finished (a crash, a kill) left: never moved or kept.
+    if !unpack_dir.is_empty() {
+        crate::livefeed::remove_temp_dir(crate::fsops::path(unpack_dir));
+    }
+
     if unpack_ok && use_temp_unpack_dir {
         let target_dest_dir = if !final_dir.is_empty() {
             final_dir

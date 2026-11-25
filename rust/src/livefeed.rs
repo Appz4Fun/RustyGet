@@ -768,6 +768,9 @@ fn feed_members(
         let Ok(rel) = zipfast::path::sanitize(&name, false) else {
             return Outcome::Declined(format!("{name:?} is not a safe path"));
         };
+        if in_temp_dir(&rel) {
+            return Outcome::Declined(format!("{name:?} is named like RustyGet's temp folder"));
+        }
         if m.is_dir {
             planned.push(Planned {
                 name,
@@ -815,6 +818,13 @@ fn feed_members(
         return Outcome::Declined("no unpack folder".into());
     };
     let _scope = guard.as_ref().map(crate::unpacklimits::Scope::enter);
+    if let Err(e) = std::fs::create_dir_all(&dest) {
+        return Outcome::Failed(format!("cannot create {}: {e}", dest.display()));
+    }
+    let temp_dir = match reset_temp_dir(&dest) {
+        Ok(dir) => dir,
+        Err(e) => return Outcome::Failed(format!("cannot create {}: {e}", dest.display())),
+    };
     let first = String::from_utf8_lossy(&req.set.volumes[0]).into_owned();
     log(4, &format!("Unrar: Extracting from {first}"));
     // Admit and create every output before any byte is written.
@@ -829,9 +839,10 @@ fn feed_members(
         for e in empties {
             let _ = std::fs::remove_file(e);
         }
+        remove_temp_dir(&dest);
         Outcome::Failed(why)
     };
-    for p in planned {
+    for (index, p) in planned.into_iter().enumerate() {
         let target = dest.join(&p.rel);
         if let Err(why) = crate::unpacklimits::check(&target, p.is_dir) {
             log(1, &why);
@@ -852,7 +863,7 @@ fn feed_members(
         } else if let Err(e) = std::fs::create_dir_all(&dest) {
             return fail(&members, &empties, format!("cannot create {}: {e}", dest.display()));
         }
-        let (tmp, file) = match crate::progressive_unpack::create_unique_sibling(&target) {
+        let (tmp, file) = match live_temp(&temp_dir, index) {
             Ok(created) => created,
             Err(e) => return fail(&members, &empties, format!("cannot write {}: {e}", target.display())),
         };
@@ -928,6 +939,7 @@ fn feed_members(
             waiting.idle();
         }
     }
+    remove_temp_dir(&dest);
     set_directory_times(dirs);
     Outcome::Done {
         files: summary.0,
@@ -1039,12 +1051,20 @@ fn join_live(
     if let Err(e) = std::fs::create_dir_all(&dest) {
         return Outcome::Failed(format!("cannot create {}: {e}", dest.display()));
     }
-    let (tmp, out) = match crate::progressive_unpack::create_unique_sibling(&target) {
+    if in_temp_dir(&rel) {
+        return Outcome::Failed(format!("{name:?} is named like RustyGet's temp folder"));
+    }
+    let created = reset_temp_dir(&dest).and_then(|dir| live_temp(&dir, 0));
+    let (tmp, out) = match created {
         Ok(created) => created,
-        Err(e) => return Outcome::Failed(format!("cannot write {}: {e}", target.display())),
+        Err(e) => {
+            remove_temp_dir(&dest);
+            return Outcome::Failed(format!("cannot write {}: {e}", target.display()));
+        }
     };
     let fail = |why: String| {
         let _ = std::fs::remove_file(&tmp);
+        remove_temp_dir(&dest);
         Outcome::Failed(why)
     };
     log(
@@ -1142,6 +1162,7 @@ fn join_live(
     if let Err(e) = finish() {
         return fail(format!("cannot write {}: {e}", target.display()));
     }
+    remove_temp_dir(&dest);
     log(
         0,
         &format!(
@@ -1154,6 +1175,54 @@ fn join_live(
         dirs: 0,
         bytes: size,
     }
+}
+
+/// The folder in an unpack folder holding live outputs until they are complete. A run that ended
+/// without cleaning up (a crash, a kill) leaves it behind: the next live run starts it afresh,
+/// and post-processing removes it before it moves the unpacked files (`unpack.rs`). Members
+/// whose path starts with it are not extracted live, so no output can land on a temp file.
+pub const LIVE_TEMP_DIR: &str = ".rustyget-live";
+
+/// Starts the temp folder of unpack folder `dest` afresh: whatever is under its name is removed
+/// (a link itself, never what it points to).
+fn reset_temp_dir(dest: &Path) -> std::io::Result<PathBuf> {
+    let dir = dest.join(LIVE_TEMP_DIR);
+    remove_temp_dir(dest);
+    std::fs::create_dir(&dir)?;
+    Ok(dir)
+}
+
+/// Removes the temp folder of unpack folder `dest`, if any (best effort).
+pub fn remove_temp_dir(dest: &Path) {
+    let dir = dest.join(LIVE_TEMP_DIR);
+    match std::fs::symlink_metadata(&dir) {
+        Ok(m) if m.is_dir() => {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        Ok(_) => {
+            let _ = std::fs::remove_file(&dir);
+        }
+        Err(_) => {}
+    }
+}
+
+/// A new temp file for output number `index`, opened for reading and writing (compressed
+/// members read their window back from it).
+fn live_temp(dir: &Path, index: usize) -> std::io::Result<(PathBuf, File)> {
+    let tmp = dir.join(format!("{index}.part"));
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&tmp)?;
+    Ok((tmp, file))
+}
+
+/// Whether `rel` (a sanitized member path) lies in the temp folder.
+fn in_temp_dir(rel: &Path) -> bool {
+    rel.components()
+        .next()
+        .is_some_and(|c| c.as_os_str().eq_ignore_ascii_case(LIVE_TEMP_DIR))
 }
 
 /// Copies `len` bytes from the start of `src` to `dst` at `at`. On Linux the kernel copies

@@ -1870,7 +1870,7 @@ fn free_name(target: &Path, taken: &dyn Fn(&Path) -> bool) -> PathBuf {
 }
 
 /// Creates a new, uniquely named file next to `target` without touching any existing path.
-pub(crate) fn create_unique_sibling(target: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
+fn create_unique_sibling(target: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
     use std::sync::atomic::AtomicU64;
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let parent = target.parent().unwrap_or_else(|| Path::new("."));

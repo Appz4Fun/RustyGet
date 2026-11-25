@@ -6647,12 +6647,19 @@ def _live_archive(daemon, t, label, name, tag, volumes, files):
     again = _grep_log(t, 'Executing 7-Zip') + _grep_log(t, 'Joining splitted file')
     used = _grep_log(t, 'Using directly unpacked files')
     left = _left_volumes(t, [v[0] for v in volumes])
+    stray = _stray_temp_files(t)
     ok = (extracted and live >= 1 and du_ok == 1 and declined == 0 and again == 0 and used == 1 and
-          not left and h['Status'].startswith('SUCCESS') and h['UnpackStatus'] == 'SUCCESS')
+          not left and not stray and h['Status'].startswith('SUCCESS') and h['UnpackStatus'] == 'SUCCESS')
     return (label, ok, 'status=%s unpack=%s extracted_ok=%s live=%d du_ok=%d declined=%d extracted_again=%d '
-            'used_direct=%d volumes_left=%s %s' % (
-                h['Status'], h['UnpackStatus'], extracted, live, du_ok, declined, again, used, left,
+            'used_direct=%d volumes_left=%s stray_temp=%s %s' % (
+                h['Status'], h['UnpackStatus'], extracted, live, du_ok, declined, again, used, left, stray,
                 _live_timing(clock, name)))
+
+
+def _stray_temp_files(t):
+    """Temp files of an unpack left in the download's folders."""
+    return sorted(rel for rel in t.find_files('main', 'dst') + t.find_files('main', 'inter')
+                  if '.rustyget-' in rel)
 
 
 def scenario_live7zsplit(daemon, t):
@@ -6667,6 +6674,24 @@ def scenario_live7zsplit(daemon, t):
     volumes = [('Movie.7z.%03d' % (i + 1), p) for i, p in enumerate(pieces)]
     return _live_archive(daemon, t, 'live7zsplit', 'RelL7z', 'l7zA', volumes,
                          [('movie.mkv', movie), ('movie.nfo', nfo)])
+
+
+def scenario_live7zlzma2(daemon, t):
+    """A 7z made by 7-Zip with LZMA2 (multithreaded, so several blocks) and cut into
+    byte pieces by 7-Zip itself (-v), holding a partly compressible movie: its one
+    folder is decoded live as the pieces arrive."""
+    if not generators.HAVE_7Z:
+        return ('live7zlzma2', None, 'SKIP: 7z not installed')
+    rnd = _payload(12_000_000, 7111)
+    movie = b''.join(rnd[i:i + 4096] + bytes(4096) for i in range(0, len(rnd), 4096))
+    with tempfile.TemporaryDirectory(prefix='l7zl-') as workdir:
+        with open(os.path.join(workdir, 'movie.mkv'), 'wb') as f:
+            f.write(movie)
+        subprocess.run([generators.SEVENZIP_PATH, 'a', '-bd', '-m0=LZMA2', '-mx5', '-mmt=4', '-v4m', 'out.7z',
+                        'movie.mkv'], cwd=workdir, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        names = sorted(n for n in os.listdir(workdir) if n.startswith('out.7z.'))
+        volumes = [('Movie' + n[len('out'):], open(os.path.join(workdir, n), 'rb').read()) for n in names]
+    return _live_archive(daemon, t, 'live7zlzma2', 'RelL7L', 'l7lA', volumes, [('movie.mkv', movie)])
 
 
 def scenario_livezipsplit(daemon, t):
@@ -6707,7 +6732,7 @@ def scenario_livesplitjoin(daemon, t):
                   r'the download ended', log)
     placed = (int(m.group(2)), int(m.group(3))) if m else None
     joined_after = _grep_log(t, 'Joining splitted file')
-    left = _left_volumes(t, [v[0] for v in volumes])
+    left = _left_volumes(t, [v[0] for v in volumes]) + _stray_temp_files(t)
     ok = (extracted and placed is not None and placed[0] == len(movie) and joined_after == 0 and not left and
           h['Status'].startswith('SUCCESS') and h['UnpackStatus'] == 'SUCCESS')
     return ('livesplitjoin', ok, 'status=%s unpack=%s extracted_ok=%s placed_live=%s post_download_join_bytes=%d '
@@ -13598,6 +13623,7 @@ SCENARIOS = {
     'parfailuredirectunpackfailed': scenario_parfailuredirectunpackfailed,
     'jointwosets': scenario_jointwosets,
     'live7zsplit': scenario_live7zsplit,
+    'live7zlzma2': scenario_live7zlzma2,
     'livezipsplit': scenario_livezipsplit,
     'livezipz01': scenario_livezipz01,
     'livesplitjoin': scenario_livesplitjoin,
@@ -14048,6 +14074,7 @@ SCENARIO_OPTIONS = {
     'stallquit': ['ArticleTimeout=5', 'ArticleRetries=2', 'ArticleInterval=0', 'DirectWrite=no', 'Server1.Connections=1'],
     'directunpacksimple': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1'],
     'live7zsplit': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1', 'UnpackCleanupDisk=yes', 'DownloadRate=8000'],
+    'live7zlzma2': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1', 'UnpackCleanupDisk=yes', 'DownloadRate=8000'],
     'livezipsplit': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1', 'UnpackCleanupDisk=yes', 'DownloadRate=8000'],
     'livezipz01': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1', 'UnpackCleanupDisk=yes', 'DownloadRate=8000'],
     'livesplitjoin': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1', 'UnpackCleanupDisk=yes', 'DownloadRate=8000'],

@@ -6,7 +6,7 @@ lede = "The same title gets posted many times, by many posters, in many versions
 +++
 
 > [!NOTE] Two layers
-> This page covers the duplicate handling that RustyGet shares with NZBGet: keys, scores, modes, and backups. [Duplicate fleets](duplicate-fleets.md) covers what RustyGet adds on top: borrowing articles between copies, twins and alts, stream repair, and early failover.
+> This page covers RustyGet's basic duplicate handling: keys, scores, modes, and backups. [Duplicate fleets](duplicate-fleets.md) covers what builds on it: borrowing articles between copies, twins and alts, stream repair, and early failover.
 
 ## Why duplicates matter
 
@@ -103,7 +103,7 @@ O(dupescore+:-10000): dupestatus:success | dupestatus:downloading
 `score` and `all` both stop when a successful version is marked good. Set modes with `dupemode` in filter rules, such as `Options(dupemode:all): *`.
 
 > [!NOTE] Force mode in RustyGet
-> In NZBGet a forced download never fails over. In RustyGet with `HealthCheck=dupe`, a forced download fails over to its backups like a scored one, so a client that re-sends a pick in force mode still gets a backup. With any other `HealthCheck` value, force mode works as in NZBGet.
+> With `HealthCheck=dupe`, a forced download fails over to its backups like a scored one, so a client that re-sends a pick in force mode still gets a backup. With any other `HealthCheck` value, a forced download never fails over.
 
 ## Backups and history
 

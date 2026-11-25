@@ -87,7 +87,7 @@ Scheduled tasks run commands at set times. Each `TaskN` has a time (`TaskN.Time`
 - `FetchFeed`, with feed IDs.
 - `Process` runs a program.
 
-RustyGet reports a task with an unknown command as a configuration error and skips that task. NZBGet runs such a task as `PauseDownload` instead.
+RustyGet reports a task with an unknown command as a configuration error and skips that task.
 
 ## Speed limits and quotas
 

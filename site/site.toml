@@ -15,7 +15,7 @@ base_url = "https://rustyget.xbmc4lyfe.com/"
 
 [[nav]]
 title = "Overview"
-pages = ["index", "why", "differences"]
+pages = ["index", "why"]
 
 [[nav]]
 title = "Get started"

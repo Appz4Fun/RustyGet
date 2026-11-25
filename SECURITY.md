@@ -1,6 +1,6 @@
 # Security Policy
 
-If you believe you have found a security vulnerability in NZBGet, please report it to us as described below.
+If you believe you have found a security vulnerability in RustyGet, please report it to us as described below.
 
 ## Reporting Security Issues
 
@@ -14,4 +14,4 @@ Please include the requested information listed below (as much as you can provid
 
 This information will help us review your report faster.
 
-This security policy only applies to the most recent stable branch of NZBGet. Flaws in old versions that are not present in the current stable branch will not be fixed.
+This security policy only applies to the most recent version of RustyGet. Flaws in old versions that are not present in the current version will not be fixed.

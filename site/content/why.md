@@ -1,55 +1,34 @@
 +++
 title = "Why RustyGet"
-description = "Where RustyGet comes from: NZBGet, pull request 850, leaving the fork network, the rewrite in Rust, and what that means for compatibility."
+description = "What duplicate fleets solve, why RustyGet is written in Rust, and how it fits the tools you already use."
 eyebrow = "Overview"
-lede = "RustyGet began as a pull request to NZBGet. When that pull request closed without being merged, the work became its own project: a rewrite of NZBGet in Rust, built around duplicate fleets."
+lede = "A release with a few missing articles shouldn't fail when another posting of it has every one. RustyGet is built around that idea: every copy of a release works as one download."
 +++
 
-## Where it comes from
+## The problem with spares
 
-[NZBGet](https://github.com/nzbgetcom/nzbget) is a Usenet downloader written in C++, known for running fast on small devices. Its original author maintained it for many years, and the NZBGet team carries it on today. RustyGet starts from NZBGet 27.0 and owes it the download engine, the par2 repair, the web interface, and the API.
+The same release usually exists as many postings: reposts, listings on several indexers, and other encodes. A downloader that keeps them only as spares tries them one after another, each from scratch, and a release with a handful of missing articles fails even when another posting has all of them.
 
-## Pull request 850
+RustyGet treats the copies as one **fleet**:
 
-In July 2026, [NZBGet pull request 850](https://github.com/nzbgetcom/nzbget/pull/850) proposed `DupeArticleFallback`: fetching an article that no news server has from a duplicate posting of the same release. NZBGet already kept duplicates as whole backups and could share par2 blocks between them, but nothing in between. A release with a few missing articles failed, even when another posting of it had every one.
+- A missing article is fetched from a matching file in another copy, and checked before it counts.
+- Byte-identical copies, **twins**, lend articles and par2 recovery volumes; the same video in other packaging, an **alt**, lends verified bytes through every container around it.
+- A copy that can't complete hands over to the best backup within seconds, and nothing already downloaded is thrown away.
 
-Over three months the pull request grew to cover the whole duplicate fleet:
-
-- **July:** article fallback with cutover and lead rotation, then byte-level stream repair across packaging and encryption, live repair during the download, and a functional test harness with dozens of scenarios.
-- **September:** par2 first in the `stream` and `live` modes, so a download's own recovery data repairs what it can before donors are used, and a fix for repairs that stalled on unavailable duplicates.
-- **October:** `HealthCheck=dupe` with early failover and a dead-copy probe, `DupeStreamTimeout`, donor search through NZBHydra2, whole-file rebuilds from proven twins, `appendfleet`, a queue format that NZBGet can still read, and about 100 fixes to bugs found along the way, most of them reported upstream.
-
-By October it held 385 commits and about 45,000 added lines, much of it tests, and it had run in daily use since July.
-
-On 2026-10-09 the NZBGet maintainers closed the pull request without merging it, together with the related bug reports. No formal review was submitted, and no reason was given. Early on, a maintainer asked how the direct-write path was tested; the question led to a test that found and fixed a bug. The same maintainer later asked to wait for a stable build before testing. On another pull request, a maintainer said that changes made with AI are hard to review. A change this size is a lot to ask of a volunteer team, and the work went on without them.
-
-## Leaving the fork network
-
-The repository has left GitHub's fork network. It's a standalone project, not a fork of NZBGet:
-
-- It no longer tracks NZBGet's development or sends changes back as pull requests.
-- It's a rewrite, not a patch set: the code moves to Rust, and the design follows duplicate fleets rather than NZBGet's roadmap.
-- It has its own name, documentation, issue tracker, and release plan.
-
-NZBGet's code is licensed under the GNU GPL, and so is RustyGet. Copyright notices stay in place, and credit for the original work stays with its authors.
+See [Duplicate fleets](duplicate-fleets.md) for how it works.
 
 ## Why Rust
 
-The rewrite moves the program to Rust one module at a time, for four reasons:
+- **Memory safety.** Duplicate fleets juggle many postings, threads, and partial files at once. Rust rules out use-after-free crashes and overlapping buffer copies.
+- **Speed where it counts.** par2 repair runs live while the download arrives, and archives unpack as their bytes land, with SIMD paths where a benchmark proves them faster.
+- **One toolchain, no helpers.** Archives, parity, yEnc, compression and XML are handled in-process by Rust libraries, with no external `unrar`, `7z` or `par2` programs.
+- **Tested behavior.** Every change is checked by unit tests and a functional harness with more than 100 end-to-end scenarios.
 
-- **Memory safety.** Duplicate fleets juggle many postings, threads, and partial files at once. Use-after-free crashes and overlapping buffer copies turned up in this work, including one in the original article decoder that the Rust port avoids. Rust rules out that class of bug.
-- **Speed where it counts.** Ports so far include CRC combination at 135 times the speed of the C++ code, and deobfuscation at 16 times.
-- **Proof that nothing changed.** Every port is checked against the old C++ code with differential tests, so behavior stays the same while the code underneath changes.
-- **A healthier codebase.** Cargo, a strong type system, and modern libraries make the code easier to test and to change.
+See [Rust port status](rust-port.md) for details.
 
-See [Rust port status](rust-port.md) for progress.
+## Works with your tools
 
-## What this means for you
-
-- **Today,** RustyGet reads NZBGet's configuration, queue, and history, and answers NZBGet's API. Media managers and the Kodi add-on connect to it as NZBGet.
-- **Over time,** the API may change where NZBGet's behavior is unsafe or in the way. RustyGet may also add a SABnzbd-compatible API, so clients that only speak SABnzbd can use it. [API and compatibility](api.md) tracks both.
-- **Packages** return once the build workflows are rebuilt for the rewrite. Until then, [build from source](install.md).
-
-## The name
-
-RustyGet keeps the "Get" of its roots and adds the language it's moving to. The binary is `rustyget`, and it looks for `rustyget.conf` first and then for `nzbget.conf` in the usual places, so an existing NZBGet setup keeps working. The configuration template in the repository still has its old name, `nzbget.conf`, and installs as `rustyget.conf`.
+- RustyGet answers the widely supported NZBGet-compatible JSON-RPC API, so Sonarr, Radarr and the Kodi add-on connect to it unchanged; in those apps, add it as an **NZBGet** download client.
+- It adds `appendfleet`, so a client can hand over every copy of a release in one call.
+- The API may grow where the old behavior is unsafe or in the way, and RustyGet may add a SABnzbd-compatible API. [API and compatibility](api.md) tracks both.
+- **Packages** come later. Until then, [build from source](install.md).

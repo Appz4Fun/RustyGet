@@ -4,12 +4,12 @@ nav_title = "Rust port"
 description = "How RustyGet moved from C++ to Rust one module at a time, which modules are in Rust, and the C++ that remains."
 eyebrow = "Reference"
 generated = "porting"
-lede = "RustyGet replaces NZBGet's C++ with Rust one module at a time, while the program stays in daily use. Each step keeps the behavior the same, so the rewrite never trades correctness for progress. Almost all of it is done."
+lede = "RustyGet is written in Rust. This page records how the code moved to Rust one module at a time while the program stayed in daily use, each step keeping the behavior the same."
 +++
 
 ## How the port works
 
-The Rust code lives in `rust/`: the library crate `nzbget_rs` and the `rustyget` binary built from it by Cargo. Module by module, the program moved from C++ into Rust behind a C interface, and once the last module moved, the C++ and that interface were deleted.
+The Rust code lives in `rust/`: a library crate and the `rustyget` binary built from it by Cargo. Module by module, the program moved from C++ into Rust behind a C interface, and once the last module moved, the C++ and that interface were deleted.
 
 <ol class="steps">
 <li><strong>Pick a module.</strong> Hot paths first, measured with real downloads. Whole modules are preferred over single functions.</li>

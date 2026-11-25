@@ -27,7 +27,7 @@ When health drops below critical health, `HealthCheck` decides what happens:
 
 | Value | Effect |
 |---|---|
-| `park` | NZBGet's default. Moves the download to history with its files kept, so you can add more par2 files or retry later. |
+| `park` | Moves the download to history with its files kept, so you can add more par2 files or retry later. |
 | `delete` | Deletes the download and moves it to history. With duplicate checks on, the best backup of the title starts. |
 | `pause` | Pauses the download. You start a backup yourself. |
 | `none` | Keeps downloading. Use it when you plan to repair by hand. This is the built-in value when the configuration file leaves `HealthCheck` out. |
@@ -89,7 +89,7 @@ A failed download goes to history, where you can download it again. Besides star
 
 ## Built in instead of extensions
 
-NZBGet left nested archives, file permissions, and finding more copies to extension scripts. RustyGet does them itself, so there's nothing to install:
+RustyGet handles nested archives, file permissions, and finding more copies itself, so there's nothing to install:
 
 Nested archives
 : After unpacking, RustyGet looks for archives inside the extracted files, including obfuscated ones that it recognizes by their RAR or 7-Zip header, and unpacks them too, up to five levels deep. This replaces the Extended Unpacker and Extended Unrar extensions.
@@ -100,4 +100,4 @@ Permissions
 More copies
 : `DupeWatch` looks after a download's backups (dead download, swap, rescue) in the core. This replaces the DupeDonors extension.
 
-RustyGet doesn't run extension scripts. The Extension Manager, the extension options, and the extension API methods that came from NZBGet are gone.
+RustyGet doesn't run extension scripts and has no extension manager: what extensions used to do is built in.

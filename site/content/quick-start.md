@@ -23,7 +23,7 @@ You can add NZB files in several ways:
 
 - **Web interface:** click **Add** and choose a file or paste a URL.
 - **Watched folder:** drop the file into `NzbDir`. A subfolder's name becomes the download's category.
-- **Media managers:** in Sonarr, Radarr, or Lidarr, add a download client of type NZBGet with your host, port, and the `RestrictedUsername` account. Media managers also read the queue, history, and settings and edit the queue, which an `AddUsername` account can't do.
+- **Media managers:** in Sonarr, Radarr, or Lidarr, add RustyGet as a download client of type **NZBGet** (their name for this API) with your host, port, and the `RestrictedUsername` account. Media managers also read the queue, history, and settings and edit the queue, which an `AddUsername` account can't do.
 - **Kodi:** the NeNeTeePee Stream add-on sends a whole fleet of copies at once. See [Streaming with Kodi](kodi.md).
 - **API:** call `append` or `appendfleet`. See [API and compatibility](api.md).
 
@@ -31,7 +31,7 @@ Watch the download in the **Downloads** tab. When it finishes, the **History** t
 
 ## Turn on duplicate fleets
 
-These settings live in **INCOMING NZBS**, **DOWNLOAD QUEUE**, and **CHECK AND REPAIR**. A new installation starts from RustyGet's configuration template, which already sets `HealthCheck=dupe` and `DupeArticleFallback=live`. A configuration file carried over from NZBGet has both off. In that case, turn them on in this order and watch a few downloads after each step.
+These settings live in **INCOMING NZBS**, **DOWNLOAD QUEUE**, and **CHECK AND REPAIR**. A new installation starts from RustyGet's configuration template, which already sets `HealthCheck=dupe` and `DupeArticleFallback=live`. An older configuration file may have both off. In that case, turn them on in this order and watch a few downloads after each step.
 
 | Step | Setting | Section | Effect |
 |---|---|---|---|

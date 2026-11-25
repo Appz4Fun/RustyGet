@@ -2,7 +2,7 @@
 title = "Duplicate fleets"
 description = "How RustyGet uses every copy of a release together: article fallback, twins and alts, par2 from a twin, stream repair, early failover, and fleet submission."
 eyebrow = "Features"
-lede = "NZBGet keeps duplicates as spare downloads: when one fails, the next starts from scratch. RustyGet treats all copies of a release as one fleet. A gap in one copy is filled from another, a dying copy hands over within seconds, and every borrowed article is checked before it counts."
+lede = "RustyGet treats all copies of a release as one fleet. A gap in one copy is filled from another, a dying copy hands over within seconds, and every borrowed article is checked before it counts."
 +++
 
 ## Vocabulary
@@ -35,7 +35,7 @@ Each layer handles what the one before it couldn't. Turn them on in this order.
 
 | Layer | Setting | What it does |
 |---|---|---|
-| Duplicate check | `DupeCheck=yes` | Groups copies by key and keeps backups. Inherited from NZBGet. |
+| Duplicate check | `DupeCheck=yes` | Groups copies by key and keeps backups. |
 | Article fallback | `DupeArticleFallback=article` | Fetches articles that no server has from matching files in other postings. |
 | par2 from a twin | Automatic | Repairs with a twin's recovery volumes when the download's own par2 falls short. |
 | Stream repair | `DupeArticleFallback=stream` | Patches holes with verified bytes from duplicates after the download, even across different packaging. |
@@ -45,7 +45,7 @@ Each layer handles what the one before it couldn't. Turn them on in this order.
 | Look after backups | `DupeWatch=yes` | Without searching: switches a DupeMode FORCE download to SCORE, drops a dead download below its backups, swaps a failing one for a whole backup (copies at least 97.5% alive first, TWINs first among them), and returns the best backup when a download fails with nothing of its key queued. On by default. |
 | Fleet submission | `appendfleet` | Lets a client send every copy at once and have RustyGet pick the best. |
 
-Left out of the configuration file, every new setting keeps NZBGet's behavior, so a configuration carried over from NZBGet changes nothing until you opt in. RustyGet's configuration template, which a new installation starts from, sets `DupeArticleFallback=live`, `DupeStreamDecompress=yes`, and `HealthCheck=dupe`.
+Left out of the configuration file, every fleet setting is off, so an existing configuration changes nothing until you opt in. RustyGet's configuration template, which a new installation starts from, sets `DupeArticleFallback=live`, `DupeStreamDecompress=yes`, and `HealthCheck=dupe`.
 
 ## Article fallback
 

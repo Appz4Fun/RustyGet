@@ -350,7 +350,26 @@ pub fn inner_key_copy_with(
         .collect();
     let first = vols.first()?;
     let mut magic = [0u8; 6];
-    first.read(0, &mut magic).ok()?;
+    if first.read(0, &mut magic).is_err() {
+        // F11: the first volume's first article is gone (C04 and C11 of the
+        // Dune drop on 2026-11-23: 430 for part01 article 1, while the last
+        // volume's head was there). A set named as RAR volumes is keyed from
+        // its last volume alone; the first volume's size comes from another of
+        // its articles (their yEnc headers carry the whole file's size).
+        // OPEN ITEM (zipfast): map::set_identity (#229, c825529) combines the
+        // facts of both ends; adopt it once zipfast is pinned past 21474cf.
+        let first_name = set
+            .members
+            .first()
+            .and_then(|&i| files.get(i as usize))
+            .map(|f| base_name(&f.name).to_ascii_lowercase())
+            .unwrap_or_default();
+        if !crate::filetypes::is_rar_file(&first_name) || vols.len() < 2 {
+            return None;
+        }
+        (1..first.ids.len().min(4)).find_map(|k| first.part(k))?;
+        magic[..4].copy_from_slice(b"Rar!");
+    }
     if magic.starts_with(b"Rar!") {
         // the last volume's first bytes hold its file header, which records
         // the whole file's size and CRC32
@@ -740,6 +759,16 @@ mod tests {
         let c = key_of(&mut mem, "c", "rerar-c");
         let video = crate::twinfields::InnerKey::crc(49156, 0x771f_bd29);
         assert_eq!(inner_key_copy(&a, &mem), Some(video));
+        // F11: the first volume's first article gone (C04 of the Dune drop):
+        // the last volume still gives the key, the first volume's size read
+        // from its second article
+        let mut headless = a.clone();
+        headless[0].ids[0] = b"gone-0".to_vec();
+        assert_eq!(inner_key_copy(&headless, &mem), Some(video));
+        // and the last volume's head gone too: no key, never a guess
+        let mut both = headless.clone();
+        both[2].ids[0] = b"gone-1".to_vec();
+        assert_eq!(inner_key_copy(&both, &mem), None);
         // a re-RAR of the same file records the same size and CRC32
         assert_eq!(inner_key_copy(&c, &mem), Some(video));
         // when the file seen is not most of the set (a second CD packed

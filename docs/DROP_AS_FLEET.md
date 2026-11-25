@@ -396,6 +396,119 @@ held in the queue as a donor, then DELETED/DUPE), `dropallfail` (both copies
 end FAILURE/HEALTH), `dropallfailnonzb` (a held backup needs no nzb-file: it
 completes), `dropnzbdir` (every copy queued in front of the item queued before).
 
+## End-to-end fixes (fleet-e2e-6790, 2026-11-23)
+
+A real drop of the Dune copies on the test server (6790, a LAN NNTP proxy
+that answers a missing article only after 1.3 to 1.8 s) found these; the
+branch `fleet-e2e-fixes` fixes them:
+
+- **B1, the per-copy budget (F7) and a primary that never waits for slow
+  copies.** Each copy's STAT check now runs for at most its own 60 s
+  (`DonorOptions::posting_budget_ms`); what it measured by then is kept, its
+  probe line says it was cut, and the copy carries `DupeAliveCut=yes` (the
+  web interface shows "~N% alive (found/asked sampled, cut short)"). Each
+  copy is asked several requests at once, each on a connection of its own
+  (`DonorOptions::lanes`, `FLEET_PROBE_LANES` = 4), instead of one walker per
+  server whose pipeline shrank to one STAT at a time. A grouped fleet adds its
+  copies, reads their kinds and archive keys and samples their alive shares at
+  once (`fleet_append`, the `grouped` branch); the kind probe takes the copies
+  from one queue (no chunk waits for its slowest copy), healthy copies first
+  and never one proven dead. As soon as a copy is proven healthy and is the
+  easiest to borrow into of the copies probed so far (`pick_lead`), it is
+  released as the primary (`fleet_lead_release`) while the others are still
+  probed; a copy proven healthy later replaces it only when strictly easier
+  to borrow into and only while the primary has downloaded less than
+  `FLEET_SWITCH_MAX_BYTES` (512 MiB); otherwise it is just ranked. The nzb
+  files of a fleet are parsed in parallel (150 MB of XML for that drop).
+- **B2, the older backup pass.** DupeSearch/DupeWatch's "Dupes: checking the
+  backups" pass leaves a fleet that stays in Downloads alone
+  (`dupesearch_coord::fleet_owns_pick`): it re-sampled every copy after each
+  primary change, wrote `DupeAlive=0` over a 17% donor (ranking it under a
+  dead copy), demoted picks still being probed and ran for a copy just
+  deleted. Its log line says "queued" for a queued backup, not "in history".
+- **B3, icons.** The bundled icon subset (`webui/lib/material-symbols-rounded.*`,
+  fetched from Google Fonts with the `icon_names` list in its json) lacked
+  `chevron_right`, `expand_more` and `folder`, so the fleet toggle showed
+  their names as text; they are in it now.
+- **B4, logs.** The NzbDir fleet summary names what downloads first
+  ("downloading #N; 17 cop(ies): 1 QUEUED, 13 BACKUP, 3 SAME_POSTING") and
+  lists the copies over lines of at most 900 bytes instead of one line cut at
+  1023 (`scanner::fleet_summary_lines`). "Error reading diskstate ...
+  queue/19464" came from the failed-article recheck of a download moved to
+  history: it read the article list of a file deleted with the download; it
+  now skips a file whose list is gone (`diskstate_format::active_file_info_exists`).
+- **B5, "next".** Place 1 (`DupeFleetOrder=1`) goes only to a copy failover
+  can take now; while every held copy is still probed, locked or dead the
+  places start at 2 (`fleethold::display_places`).
+- **F4.** `Health` keeps NZBGet's meaning; the API page documents
+  `DupeAlive`, `DupeAliveSample`, `DupeAliveCut`, `DupeProjected`,
+  `DupeParked` and the fleet parameters for clients.
+- **F11.** C04 and C11 got no inner key because the first article of their
+  first volume is gone (430 on the proxy), and the key reader gave up before
+  it read the last volume. A set named as RAR volumes is now keyed from its
+  last volume's head alone, the first volume's size read from another of its
+  articles. C11 lacks its last volume's head too, so it stays unkeyed (never
+  a guess). zipfast `map::set_identity` (c825529) is not pinned yet:
+  `OPEN ITEM (zipfast)`.
+- **A paused server never stalls a probe (F6, F7).** After three failed
+  exchanges in a row a server is paused for 30 s, and a check whose only
+  server was paused slept through the pause inside the copy's budget. The
+  fleet probe sets `DonorOptions::skip_paused`: the paused server's articles
+  are unreached at once, so a copy no server answered is unverified (never
+  dead). A sample the pause cut short counts as cut (`DonorHealthResult::paused`,
+  `DupeAliveCut`): it needs ten real answers to settle, so a copy is never
+  called dead on the few 430s it got before the pause. The background health
+  check asks such a copy once more after the pause, within the fleet's
+  deadline, while the primary downloads; the second check replaces the first
+  only when it measured at least as many articles.
+- **Ten STATs could not tell 0% from 2%.** A copy whose first ten sampled
+  articles are all missing gets 30 more within its budget
+  (`DonorOptions::dead_extra`) before it is called dead, and carries
+  `DupeAliveSample` ("dead (0/40 sampled)").
+
+Review fixes (76a80014 review):
+
+- The backup pass skips only real fleets: a `dupes:` key alone is what
+  DupeSearch writes onto every download it searches, so it also needs a
+  fleet's own marks, its rank (`DupeFleet`), its membership
+  (`DupeFleetMember=yes`, written when a fleet adds the copy and never cleared,
+  so a restart in the middle of a probe keeps it) or the probe's `DupeProbing`,
+  on itself or on a queued copy of its key (`pick_fleet_marked`). A plain
+  `DupeHeld` is no fleet mark: the duplicate check holds ordinary DupeSearch
+  backups too. Ordinary searched downloads keep their retry and re-ranks,
+  with a held backup as well (functional `watchsearchedkey`).
+- The 512 MiB switch guard reads the per-article counters
+  (`leader_downloaded_bytes`): the finished-file sizes stay 0 for a single
+  big file until it completes.
+- A cut copy leads early only with at least ten answers; an early leader that
+  fails its health check or is deleted during the probe hands the lead to the
+  next healthy probed copy at once; the reply names a leader only when it
+  succeeded (any copy of the fleet that finished during the probe), else says
+  why nothing downloads; the probe's findings are written onto a copy in
+  history only when its primary's success filed it or it succeeded itself
+  (`fleet_history_writable`), and no copy in history keeps a hold or probe mark.
+- The kind probe skips only a copy proven 0% alive: a weak donor under
+  DupeMinAlive still gets its kind, lock and inner key
+  (`kind_probe_skips`), so a locked one is never failed over to; its
+  workers wait for the health check while only 0% copies are left, since
+  the check after a pause can still find one alive.
+- `DupeAliveCut=no` replaces an early leader's `yes` once a full check
+  measured its sample. A fleet copy in history that the user deleted or
+  that failed is not reported as added. A fleet owns its picks for the
+  backup pass only while it is open (`fleet_pick_owned`): a fleet that
+  ended with every copy in history is searched by DupeSearch again.
+- An early primary that finished downloading or is in post-processing is
+  never held again for an easier copy (`fleet_leader_switchable`); the
+  easier copy is only ranked.
+- A check the fleet's own deadline cut counts as cut, like one its copy's
+  budget cut. The check after a pause waits until no server is paused (within
+  the fleet's deadline) and does not hold the fleet check lock meanwhile; a
+  pause another walker set after a walker looked is not slept through either
+  (`DonorServer::ask_opts`).
+- The icon subset is pinned (`revision`, `sha256`, `font_size`, checked by
+  `fleet-downloads.js`) and `docs/rust-migration/dependency-sources.json`
+  records its new bytes; the NzbDir summary never cuts a UTF-8 character.
+
 ## Done when (acceptance tests)
 
 | Done when | Test |
@@ -442,6 +555,14 @@ completes), `dropnzbdir` (every copy queued in front of the item queued before).
 | Review C: no password in a key, a log line or a reply; write-back keeps category and priority. | Rust `releasename::tests::an_old_key_with_the_password_is_rebuilt`, `a_password_in_the_name_never_reaches_the_key`, `dupesearch_coord::tests::a_fleet_that_never_ran_keeps_its_uploads_for_the_next_scan`, `scanner::tests::a_kept_priority_is_hidden_and_read_once`; functional `dropjoinrestart` (an old key with the password rebuilt), `droppasswordlogs` (web and NzbDir fleets) |
 | The release parser finds the group behind a copy suffix. | Rust `releasename::tests::copy_suffix_never_hides_the_group`; Playwright `release-names.js` |
 | The name rule strips only a copy suffix. | Rust `releasename::tests::copy_suffixes_strip_only_after_a_group_tag`; web UI `dupe-group.js` (the same cases) |
+| B1: no copy's check exceeds its 60 s; behind a server slow on missing articles the healthy copy downloads within seconds; a cut copy keeps its share. | functional `fleetslowprobe` (nserv `-x 2000`: primary released under 15 s, every probe line at most 61 s, the mostly missing copy cut with `DupeAliveCut`); Rust `dupesearch_nzb::tests::slow_servers_are_asked_in_lanes_within_the_posting_budget`, `dupesearch_coord::tests::the_first_healthy_copy_leads_while_the_others_are_probed`, `a_copy_check_is_cut_only_at_its_budget` |
+| B2: after a failover the probe's alive shares and the failover order stay. | functional `fleetfailoverkeepsalive` (a 27% donor keeps its share and its place above the dead copy, no backup pass); Rust `dupesearch_coord::tests::the_backup_pass_leaves_held_fleets_alone` |
+| B3: the fleet toggle shows an icon. | Playwright `fleet-downloads.js` ("the toggle shows an icon, not its name": both glyphs in the subset, icon-sized) |
+| B4: the NzbDir summary is split, never cut, and names what downloads. | Rust `scanner::tests::a_fleet_summary_is_split_never_cut` |
+| B5: a copy being probed is never "next". | Rust `fleethold::tests::next_is_the_copy_failover_takes`; functional `fleetslowprobe` |
+| F11: a RAR set whose first article is gone is keyed from its last volume. | Rust `dupeintake::tests::a_rar_set_gets_its_key_from_the_last_volume` |
+| A paused server never stalls a copy's check; a sample it cut short is never dead on its few answers and is checked again after the pause. | Rust `dupesearch_nzb::tests::a_paused_server_never_stalls_a_fleet_probe`, `dupesearch_coord::tests::a_copy_a_pause_cut_short_is_checked_again_after_it` |
+| More samples before "dead". | functional `fleetslowprobe` (`DupeAliveSample` 0/N with N > 10); Playwright `fleet-downloads.js` ("dead (0/40 sampled)") |
 
 Run the web UI test with `node tests/webui/dupe-group.js` (plain Node, no
 browser, no daemon) and the functional ones with

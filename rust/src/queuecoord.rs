@@ -2373,16 +2373,7 @@ impl NzbgetRsQueueCoordinator {
         host.nzb_set_param(new_nzb_ptr, PAR_FILES_PARAM, None);
         // a split-off part is not another post of the fleet: drop its fleet
         // identity, as merge does on its destination
-        for param in [
-            b"DupeFiles".as_slice(),
-            b"DupeKind".as_slice(),
-            crate::donorkind::KIND_PARAM,
-            b"DupeSampled".as_slice(),
-            b"DupeSampledOf".as_slice(),
-            crate::twinfields::INNER_KEY_PARAM,
-            crate::dupesearch_coord::FLEET_PARAM,
-            crate::dupesearch_coord::VIDEO_PARAM,
-        ] {
+        for param in SPLIT_DROPPED_PARAMS {
             host.nzb_set_param(new_nzb_ptr, param, None);
         }
 
@@ -6392,6 +6383,21 @@ fn save_partial_state_host(host: &crate::queuesubsys_host::QueueSubsysHost, file
 /// restart (which forgets the per-file recovered count) never counts a file
 /// twice, and a demotion that empties a file drops it from the list.
 pub(crate) const PAR_ARTICLES_PARAM: &[u8] = b"DupeParArticles";
+
+/// The fleet identity a part split off a download does not keep: it is not
+/// another post of the fleet, so neither its labels nor its rank or fleet
+/// membership (`DupeFleetMember` would make it a managed fleet copy forever).
+pub(crate) const SPLIT_DROPPED_PARAMS: [&[u8]; 9] = [
+    b"DupeFiles",
+    b"DupeKind",
+    crate::donorkind::KIND_PARAM,
+    b"DupeSampled",
+    b"DupeSampledOf",
+    crate::twinfields::INNER_KEY_PARAM,
+    crate::dupesearch_coord::FLEET_PARAM,
+    crate::fleethold::MEMBER_PARAM,
+    crate::dupesearch_coord::VIDEO_PARAM,
+];
 pub(crate) const PAR_FILES_PARAM: &[u8] = b"DupeParFiles";
 
 /// Records one par2 article of file `file_id` borrowed from a duplicate
@@ -6533,6 +6539,14 @@ fn downloaded_ranges(
 
 #[cfg(test)]
 mod tests {
+    /// Review of b38a5981: a split-off part drops the fleet's rank and its
+    /// membership, so it never stays a managed fleet copy.
+    #[test]
+    fn a_split_part_leaves_its_fleet() {
+        assert!(super::SPLIT_DROPPED_PARAMS.contains(&crate::fleethold::MEMBER_PARAM));
+        assert!(super::SPLIT_DROPPED_PARAMS.contains(&crate::dupesearch_coord::FLEET_PARAM));
+    }
+
     #[test]
     fn dead_par2_recovery_articles_leave_the_data_projection_alone() {
         // 300 articles failed, 200 of them in par2 files by size: 100 data articles failed.

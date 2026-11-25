@@ -1177,6 +1177,10 @@ var DownloadsUI = (new function($)
 		var probed = DownloadsUI.probedAlive(p);
 		var alive = !isNaN(parked) ? parked : probed >= 0 ? probed / 10 : -1;
 		var cls = 'is-good';
+		// how many sampled articles the probe's share rests on ("0/40"), and
+		// whether its check was cut at the copy's budget (a less sure share)
+		var sample = isNaN(parked) ? DownloadsUI.parameterValue(p, 'DupeAliveSample') : '';
+		var cut = sample !== '' && DownloadsUI.fleetFlag(group, 'DupeAliveCut');
 		if (alive < 0)
 		{
 			parts.push(I18n.translate('fleet_label_unverified'));
@@ -1184,12 +1188,13 @@ var DownloadsUI = (new function($)
 		}
 		else if (alive <= 0)
 		{
-			parts.push(I18n.translate('fleet_label_dead'));
+			parts.push(sample !== '' ? I18n.translate('fleet_label_dead_sampled', sample) : I18n.translate('fleet_label_dead'));
 			cls = 'is-bad';
 		}
 		else
 		{
-			parts.push(I18n.translate('fleet_label_alive', alive.toFixed(1)));
+			parts.push(cut ? I18n.translate('fleet_label_alive_cut', alive.toFixed(1), sample) :
+				I18n.translate('fleet_label_alive', alive.toFixed(1)));
 			cls = alive >= 97.5 ? 'is-good' : 'is-warn';
 		}
 		return { text: parts.join(' · '), cls: cls };

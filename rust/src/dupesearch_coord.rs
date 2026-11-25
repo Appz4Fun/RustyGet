@@ -795,7 +795,10 @@ fn inspect_nzb(
     let marked_alive = qh.nzb_get_param(nzb_ptr, ALIVE_PARAM);
     let owned_key_param = qh.nzb_get_param(nzb_ptr, OWNED_KEY_PARAM);
     let is_donor = marked_alive.is_some() || qh.nzb_get_param(nzb_ptr, DONOR_PARAM).is_some();
-    let has_dupe_fleet = qh.nzb_get_param(nzb_ptr, FLEET_PARAM).is_some();
+    // ranked by its fleet (DupeFleet), or added by a fleet grouped by name
+    // and not ranked yet (DupeFleetMember, durable across a restart)
+    let has_dupe_fleet = qh.nzb_get_param(nzb_ptr, FLEET_PARAM).is_some()
+        || qh.nzb_get_param(nzb_ptr, crate::fleethold::MEMBER_PARAM).is_some();
     NzbSnap {
         ptr: nzb_ptr,
         id: s.id,
@@ -889,6 +892,81 @@ pub fn is_group_key(key: &[u8]) -> bool {
     key.len() > prefix.len() && key[..prefix.len()].eq_ignore_ascii_case(prefix)
 }
 
+/// Where a backup the backup pass checks waits, as its log line says it.
+fn member_place(in_history: bool) -> &'static str {
+    if in_history {
+        "in history"
+    } else {
+        "queued"
+    }
+}
+
+/// Whether a download belongs to a fleet that stays in Downloads (F16: an
+/// nzb with a `dupes:` key in DupeMode SCORE while the duplicate check is on;
+/// [`crate::fleethold`] `holds_in_queue`), queued or filed: its probe and
+/// fleethold own its alive share, order and failover, so the older backup
+/// pass of DupeSearch/DupeWatch leaves it alone (B2). The key alone is not
+/// enough: DupeSearch writes `dupes:<title>` onto every download it searches,
+/// and those keep their retries and re-ranks. `fleet_marked` says the download
+/// really is a fleet's copy: a fleet's rank (`DupeFleet`) or its fleet's
+/// probe mark (`DupeProbing`), on itself or on a copy of its key queued
+/// beside it ([`pick_fleet_marked`]). A plain `DupeHeld` is no fleet mark:
+/// the duplicate check holds every lower-scored `dupes:` backup, ordinary
+/// DupeSearch backups included.
+pub fn fleet_owns_pick(dupe_check: bool, kind: i32, dupe_mode: DupeMode, dupe_key: &[u8], fleet_marked: bool) -> bool {
+    fleet_marked && dupe_check && kind == 0 && dupe_mode == DupeMode::Score && is_group_key(dupe_key)
+}
+
+/// [`fleet_owns_pick`]'s `fleet_marked` for `pick`: it carries a fleet's own
+/// marks ([`fleet_own_marks`]), or another queued copy of its key does.
+/// Fleet copies carry `DupeProbing` from the moment they are added and
+/// `DupeFleet` once probed (an early leader gets it when released).
+fn pick_fleet_marked(host_ctx: *mut c_void, host_cb: DupeHostFn, dq_ptr: usize, pick: &NzbSnap) -> bool {
+    let Some(qh) = crate::ffi::queue_host() else {
+        return pick.has_dupe_fleet;
+    };
+    let marked = |s: &NzbSnap| fleet_param_marks(|n| qh.nzb_get_param(s.ptr, n));
+    let (q_len, _) = dq_counts(host_ctx, host_cb, dq_ptr);
+    let mut pick_queued = false;
+    let other_marked = (0..q_len).any(|i| {
+        let p = dq_queue_at(host_ctx, host_cb, dq_ptr, i);
+        if p.is_none() {
+            return false;
+        }
+        if p == pick.ptr {
+            pick_queued = true;
+            return false;
+        }
+        let s = inspect_nzb(host_ctx, host_cb, p, false);
+        s.kind == 0 && s.dupe_key.eq_ignore_ascii_case(&pick.dupe_key) && marked(&s)
+    });
+    // the fleet owns the pick only while it is open (a copy of it queued):
+    // a fleet that ended with every copy in history (all dead) is searched
+    // again, as before DupeFleetMember was durable
+    fleet_pick_owned(marked(pick), pick_queued, other_marked)
+}
+
+/// [`pick_fleet_marked`]'s rule: the pick's own fleet marks count while it is
+/// queued; a queued, marked copy of its key counts always (the fleet is open).
+pub fn fleet_pick_owned(pick_marked: bool, pick_queued: bool, other_queued_marked: bool) -> bool {
+    (pick_marked && pick_queued) || other_queued_marked
+}
+
+/// Whether a copy carries a fleet's own marks: its rank (`DupeFleet`) or its
+/// fleet membership (`DupeFleetMember`, both read as `has_dupe_fleet`), or the
+/// fleet probe's mark (`DupeProbing`). Not a plain hold (`DupeHeld`), which
+/// ordinary DupeSearch backups get from the duplicate check too.
+pub fn fleet_own_marks(dupe_fleet: bool, probing: bool) -> bool {
+    dupe_fleet || probing
+}
+
+/// [`fleet_own_marks`] from a copy's parameters (`get` returns a parameter's
+/// value): `DupeFleet` or `DupeFleetMember` present, or `DupeProbing=yes`.
+pub fn fleet_param_marks(get: impl Fn(&[u8]) -> Option<Vec<u8>>) -> bool {
+    let probing = get(crate::fleethold::PROBING_PARAM).is_some_and(|v| v.trim_ascii().eq_ignore_ascii_case(b"yes"));
+    fleet_own_marks(get(FLEET_PARAM).is_some() || get(crate::fleethold::MEMBER_PARAM).is_some(), probing)
+}
+
 /// Seconds a fleet of copies grouped by name may spend checking each copy:
 /// the budget is per copy (the user's rule, 2026-11-23), so a slow server or
 /// proxy doesn't run a fleet of fifteen out of one window.
@@ -917,6 +995,245 @@ pub fn group_probe_body_checks(grouped: bool, body_checks: i32) -> i32 {
 /// (F2b): one or two articles at the tail of its smallest volume.
 pub fn group_salvage_budget(largest_article: u64) -> u64 {
     (2 * largest_article.max(1)).min(GROUP_PROBE_BYTES as u64)
+}
+
+/// Requests a grouped fleet's STAT check of one copy sends at once, each on a
+/// connection of its own ([`DonorOptions::lanes`], B1b).
+pub const FLEET_PROBE_LANES: i32 = 4;
+
+/// STATs a grouped fleet adds for a copy whose first ten were all missing, so
+/// that a copy ~2% alive is not called dead from ten samples
+/// ([`DonorOptions::dead_extra`]); taken only within the copy's budget.
+pub const FLEET_DEAD_EXTRA: i32 = 30;
+
+/// A primary released while its fleet is still being probed gives way to a
+/// healthy copy easier to borrow into only while it has downloaded less than
+/// this (B1c); after that the other copy is only ranked.
+pub const FLEET_SWITCH_MAX_BYTES: i64 = 512 * 1024 * 1024;
+
+/// `present/answered` of the sampled articles a copy's alive share rests on.
+pub const ALIVE_SAMPLE_PARAM: &[u8] = b"DupeAliveSample";
+/// `yes` when that sample was cut at the copy's check budget (less sure).
+pub const ALIVE_CUT_PARAM: &[u8] = b"DupeAliveCut";
+
+/// [`ALIVE_SAMPLE_PARAM`]'s value.
+fn alive_sample_value(h: &DonorHealthResult) -> String {
+    format!("{}/{}", h.present.max(0), (h.present + h.missing).max(0))
+}
+
+/// Whether a copy's STAT check measured anything: a server answered at
+/// least one article present or missing. Errors and unreached articles
+/// (a paused or timed-out server) are no evidence (F6).
+pub fn probe_measured(h: &DonorHealthResult) -> bool {
+    h.present + h.missing > 0
+}
+
+/// Whether a copy's STAT check is worth one more try after a server's
+/// pause: it measured nothing, and that was for want of answers (errors or
+/// unreached articles), not for want of articles to ask.
+pub fn probe_retryable(h: &DonorHealthResult) -> bool {
+    h.paused > 0 || (!probe_measured(h) && h.checked > 0 && (h.error > 0 || h.answered() < h.checked))
+}
+
+/// Whether the check after a pause (`again`) replaces the first one
+/// (`first`): it measured something, and at least as much.
+pub fn retry_replaces(first: Option<&DonorHealthResult>, again: &DonorHealthResult) -> bool {
+    probe_measured(again) && first.map_or(true, |f| again.present + again.missing >= f.present + f.missing)
+}
+
+/// Whether a copy's STAT check ran out of its own budget before every
+/// sampled article answered (`elapsed_ms` of `budget_ms`).
+///
+/// A sample a paused server left unsettled ([`DonorHealthResult::paused`])
+/// is cut as well, however early: it needs ten answers to settle
+/// ([`cut_settled`]), and it is checked again after the pause.
+pub fn probe_was_cut(h: &DonorHealthResult, elapsed_ms: i64, budget_ms: i32) -> bool {
+    h.paused > 0 || (h.answered() < h.checked && elapsed_ms + 250 >= i64::from(budget_ms))
+}
+
+/// Whether a copy's STAT check settled enough to judge it, cut or not: a
+/// cut check with at least ten articles answered (the probe's size) still
+/// tells dead (every one missing) from alive; with fewer it stays unknown.
+pub fn cut_settled(cut: bool, h: &DonorHealthResult) -> bool {
+    !cut || h.present + h.missing >= 10
+}
+
+/// Lanes each copy's STAT check gets: half of the smallest server's check
+/// connections shared by the copies checked at once, between 1 and
+/// [`FLEET_PROBE_LANES`], so the lanes never starve the kind probe's reads.
+pub fn fleet_probe_lanes(server_cap: i32, copies: usize) -> i32 {
+    let share = (server_cap.max(1) / 2) as usize / copies.max(1);
+    (share as i32).clamp(1, FLEET_PROBE_LANES)
+}
+
+/// The kind probe's order class of a copy from its STAT check: proven
+/// healthy first, not known yet next, weak after them, and dead never
+/// ([`KIND_CLASS_DEAD`]: its kind ranks nothing).
+pub fn kind_probe_class(alive: i32, dead: bool) -> u8 {
+    if dead {
+        KIND_CLASS_DEAD
+    } else if alive < 0 {
+        1
+    } else if alive.saturating_mul(10) >= crate::dupesearch_nzb::FLEET_HEALTHY_ALIVE_PERMILLE {
+        0
+    } else {
+        2
+    }
+}
+
+/// Whether the kind probe skips a copy: only one proven 0% alive. A weak
+/// donor under DupeMinAlive (`dead` for leading) is still read, so its lock
+/// (encrypted headers) and inner key are known before failover can take it.
+pub fn kind_probe_skips(alive: i32, dead: bool) -> bool {
+    dead && alive == 0
+}
+
+/// [`kind_probe_class`] of a copy proven dead.
+pub const KIND_CLASS_DEAD: u8 = 3;
+
+/// A copy as the early choice of a fleet's primary sees it (B1c): its
+/// candidate index, whether it is healthy (at least 97.5% alive, not locked),
+/// its ease of borrowing into ([`crate::donorkind::primary_ease`]) and alive share.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LeadView {
+    pub idx: usize,
+    pub healthy: bool,
+    pub ease: u8,
+    pub alive: i32,
+}
+
+/// The copy that should download now, among copies whose probe is done: the
+/// healthy one easiest to borrow into (most alive, then the order they came,
+/// on a tie). `current` (index, ease) already downloads: it is kept unless a
+/// healthy copy strictly easier to borrow into is found. None: nothing to do.
+pub fn pick_lead(views: &[LeadView], current: Option<(usize, u8)>) -> Option<usize> {
+    let best = views
+        .iter()
+        .filter(|v| v.healthy)
+        .min_by(|a, b| a.ease.cmp(&b.ease).then(b.alive.cmp(&a.alive)).then(a.idx.cmp(&b.idx)))?;
+    match current {
+        None => Some(best.idx),
+        Some((idx, ease)) if best.idx != idx && best.ease < ease => Some(best.idx),
+        _ => None,
+    }
+}
+
+/// What a primary has downloaded, for [`fleet_switch_allowed`]: the largest of
+/// its per-article counters (`DownloadedSize`, the current success and
+/// failure sizes) and the finished files' sizes. The finished-file sizes alone
+/// stay 0 for a single 69 GB file until it completes (review of 76a80014).
+pub fn leader_downloaded_bytes(downloaded_size: i64, current_articles: i64, finished_files: i64) -> i64 {
+    downloaded_size.max(current_articles).max(finished_files).max(0)
+}
+
+/// Whether a primary that has downloaded `downloaded` bytes may still give
+/// way to an easier copy ([`FLEET_SWITCH_MAX_BYTES`]).
+pub fn fleet_switch_allowed(downloaded: i64) -> bool {
+    downloaded < FLEET_SWITCH_MAX_BYTES
+}
+
+/// Whether the early primary may still be held again for an easier copy:
+/// under [`FLEET_SWITCH_MAX_BYTES`], not in post-processing, and with
+/// something left to download (`left`: remaining bytes not paused). A small
+/// release that finished downloading or is unpacking keeps the lead.
+pub fn fleet_leader_switchable(downloaded: i64, post_processing: bool, left: i64) -> bool {
+    fleet_switch_allowed(downloaded) && !post_processing && left > 0
+}
+
+/// Whether the probe's findings may be written onto a fleet copy already in
+/// history: filed as DELETED/DUPE by its primary's success, or a copy that
+/// itself succeeded; never a copy the user deleted or one that failed (a
+/// failure keeps DeleteStatus NONE too, so success is checked).
+pub fn fleet_history_writable(delete_status: DeleteStatus, succeeded: bool) -> bool {
+    delete_status == DeleteStatus::Dupe || (delete_status == DeleteStatus::None && succeeded)
+}
+
+/// Whether the copy released early as its fleet's primary (`id`) is gone from
+/// the lead: no longer queued, being deleted, filed, or held again (parked on
+/// its health check while the fleet is probed).
+fn fleet_leader_gone(host_ctx: *mut c_void, host_cb: DupeHostFn, id: i32) -> bool {
+    with_guarded_queue(host_ctx, host_cb, |dq_ptr| {
+        let Some(qh) = crate::ffi::queue_host() else {
+            return false;
+        };
+        let ptr = qh.queue_find_by_id(dq_ptr, id);
+        if ptr.is_none() {
+            return true;
+        }
+        let q = qh.nzb_snap(ptr, false);
+        leader_gone(q.deleting, q.delete_status, crate::fleethold::is_held(&qh, ptr))
+    })
+}
+
+/// [`fleet_leader_gone`] for a queued copy's state.
+pub fn leader_gone(deleting: bool, delete_status: DeleteStatus, held: bool) -> bool {
+    deleting || delete_status != DeleteStatus::None || held
+}
+
+/// B1c: releases `new_id` as its fleet's primary while the other copies are
+/// still being probed, with what its probe found written on it (`params`).
+/// `old_id`, the primary released before (0: none), goes back to its hold,
+/// but only while it has downloaded little ([`fleet_switch_allowed`]): false
+/// when it is kept, or when another copy of the key downloads already.
+fn fleet_lead_release(
+    host_ctx: *mut c_void,
+    host_cb: DupeHostFn,
+    key: &[u8],
+    new_id: i32,
+    params: &[(&[u8], &[u8])],
+    old_id: i32,
+) -> bool {
+    with_guarded_queue(host_ctx, host_cb, |dq_ptr| {
+        let Some(qh) = crate::ffi::queue_host() else {
+            return false;
+        };
+        let new_ptr = qh.queue_find_by_id(dq_ptr, new_id);
+        if new_ptr.is_none() {
+            return false;
+        }
+        let new_q = qh.nzb_snap(new_ptr, false);
+        if new_q.deleting || new_q.delete_status != DeleteStatus::None || !crate::fleethold::is_held(&qh, new_ptr) {
+            return false;
+        }
+        let old_ptr = if old_id != 0 { qh.queue_find_by_id(dq_ptr, old_id) } else { NzbRef::NONE };
+        let others_active = crate::fleethold::queued_members(&qh, dq_ptr, key)
+            .iter()
+            .any(|q| q.ptr != new_ptr && q.ptr != old_ptr && !crate::fleethold::is_held(&qh, q.ptr));
+        if others_active {
+            // another submission's copy downloads already
+            return false;
+        }
+        if old_ptr.is_some() && !crate::fleethold::is_held(&qh, old_ptr) {
+            let old_q = qh.nzb_snap(old_ptr, false);
+            let downloaded = leader_downloaded_bytes(
+                old_q.downloaded_size,
+                old_q.current_success_size + old_q.current_failed_size,
+                old_q.success_size + old_q.failed_size,
+            );
+            if !fleet_leader_switchable(downloaded, old_q.has_post_info, old_q.remaining_size - old_q.paused_size) {
+                return false;
+            }
+            crate::fleethold::hold_host(
+                &qh,
+                dq_ptr,
+                &old_q,
+                b"a healthy copy easier to borrow into was found while its fleet is probed",
+            );
+        }
+        for (k, v) in params {
+            qh.nzb_set_param(new_ptr, k, Some(v));
+        }
+        qh.nzb_set_param(new_ptr, crate::fleethold::PROBING_PARAM, None);
+        crate::fleethold::release_host(
+            &qh,
+            dq_ptr,
+            &new_q,
+            b"proven healthy and the easiest to borrow into of the copies probed so far; the others are still being probed",
+        );
+        crate::fleethold::refresh_key_host(&qh, dq_ptr, key);
+        qh.dq_save_changed(dq_ptr);
+        true
+    })
 }
 
 /// The end of a copy's probe log line: its time and its requests.
@@ -1746,139 +2063,140 @@ fn salvage_copy(
     best
 }
 
+/// What the kind probe found of one copy: its par2 file list, its packing,
+/// and the par2 identity salvaged from its volumes when its index was lost.
+type CopyProbe = (
+    crate::twin::Listed,
+    crate::donorkind::Packing,
+    Option<crate::twinfields::Salvaged>,
+);
+
 /// [`probe_copies`] with each copy's salvaged par2 identity (F2b) when its
-/// index was lost.
-#[allow(clippy::type_complexity)]
+/// index was lost. The copies are taken from one queue by as many workers as
+/// there are light connections, so a slow copy (a dead index waiting out its
+/// timeouts) never holds back the copies after it.
 fn probe_copies_salvaged(
     host_ctx: *mut c_void,
     host_cb: DupeHostFn,
     summaries: &[&NzbSummaryData],
     deadline: i64,
-) -> Vec<(
-    crate::twin::Listed,
-    crate::donorkind::Packing,
-    Option<crate::twinfields::Salvaged>,
-)> {
+) -> Vec<CopyProbe> {
     use crate::donorkind::Packing;
     let n = summaries.len();
-    #[allow(clippy::type_complexity)]
-    let slots: Vec<Mutex<(crate::twin::Listed, Packing, Option<crate::twinfields::Salvaged>)>> = (0..n)
+    let slots: Vec<Mutex<CopyProbe>> = (0..n)
         .map(|_| Mutex::new((crate::twin::Listed::default(), Packing::Unknown, None)))
         .collect();
     let ctx_addr = host_ctx as usize;
     // no more at once than there are light connections: the rest queue
     let parallel = crate::light_pool::parallel_jobs_now(FLEET_KIND_PROBE_PARALLEL);
-    for chunk in (0..n).collect::<Vec<_>>().chunks(parallel) {
-        if now_unix_sec() >= deadline || donor_stopping() || http_stopped() {
-            break;
+    let next = AtomicUsize::new(0);
+    std::thread::scope(|s| {
+        for _ in 0..parallel.min(n) {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::SeqCst);
+                if i >= n || now_unix_sec() >= deadline || donor_stopping() || http_stopped() {
+                    break;
+                }
+                let got = probe_one_copy(ctx_addr as *mut c_void, host_cb, summaries[i], deadline);
+                *slots[i].lock().unwrap_or_else(|e| e.into_inner()) = got;
+            });
         }
-        std::thread::scope(|s| {
-            for &i in chunk {
-                let info = summaries[i];
-                let slot = &slots[i];
-                s.spawn(move || {
-                    let ctx = ctx_addr as *mut c_void;
-                    let groups = summary_groups_arc(info);
-                    let mut listed = crate::twin::Listed::default();
-                    let mut salvaged = None;
-                    if !info.par_list.id.is_empty() {
-                        let art = fetch_article_via_host(
-                            ctx,
-                            host_cb,
-                            &info.par_list.id,
-                            &groups,
-                            deadline,
-                        );
-                        if !art.success {
-                            // F2b: the index is lost; its volumes repeat its
-                            // critical packets at their tail
-                            salvaged = salvage_copy(ctx, host_cb, info, &groups, deadline);
-                            let mut msg = b"Fleet probe: the par2 list of ".to_vec();
-                            msg.extend_from_slice(&info.main_name);
-                            match &salvaged {
-                                Some(found) => {
-                                    msg.extend_from_slice(
-                                        format!(
-                                            " is lost; salvaged from its volumes' tail: {} file(s), {}",
-                                            found.sigs.len(),
-                                            if found.complete { "the whole list" } else { "part of the list" }
-                                        )
-                                        .as_bytes(),
-                                    );
-                                    listed.sigs = found.sigs.clone();
-                                    listed.complete = found.complete;
-                                }
-                                None => msg.extend_from_slice(
-                                    b" is lost and its volumes gave no identity: unverified, never dead",
-                                ),
-                            }
-                            fleet_log(std::ptr::null_mut(), host_cb, MK_INFO, &msg);
-                        }
-                        if art.success {
-                            let (sigs, complete) = crate::twin::par2_set(&art.data);
-                            listed.sigs = sigs;
-                            listed.complete = complete;
-                        }
-                        // a volume read for want of an index file carries its
-                        // file list after the recovery data, at its end
-                        let tail = &info.par_list.tail_ids;
-                        if !listed.complete
-                            && info.par_list.id != info.par_index.id
-                            && !tail.is_empty()
-                            && tail.last() != Some(&info.par_list.id)
-                        {
-                            let mut data = Vec::new();
-                            let mut all = true;
-                            for id in tail.iter().filter(|id| **id != info.par_list.id) {
-                                let art =
-                                    fetch_article_via_host(ctx, host_cb, id, &groups, deadline);
-                                if !art.success {
-                                    all = false;
-                                    break;
-                                }
-                                data.extend_from_slice(&art.data);
-                            }
-                            if all {
-                                let (sigs, complete) = crate::twin::par2_set(&data);
-                                if complete {
-                                    listed.sigs = sigs;
-                                    listed.complete = true;
-                                } else if !sigs.is_empty() {
-                                    listed.sigs = crate::twin::merge(&listed.sigs, &sigs);
-                                }
-                            }
-                        }
-                    }
-                    let mut packing = Packing::Unknown;
-                    if let Some(head) = info.heads.iter().max_by_key(|h| h.bytes) {
-                        let art = fetch_article_via_host(ctx, host_cb, &head.id, &groups, deadline);
-                        if art.success {
-                            packing = crate::donorkind::packing_of_head(
-                                &art.data,
-                                &head.name,
-                                summary_password(info),
-                            );
-                        } else if summary_password_known(info)
-                            && crate::donorkind::is_7z_name(&head.name)
-                        {
-                            // a 7-Zip whose nzb carries a password is
-                            // unborrowable whatever its head holds (as
-                            // packing_of_head rules for a read head), so an
-                            // unread head (missing, or no time left) gives the
-                            // same answer instead of "unknown", which ranked
-                            // such a copy ahead of whole encrypted copies
-                            packing = Packing::Unborrowable;
-                        }
-                    }
-                    *slot.lock().unwrap_or_else(|e| e.into_inner()) = (listed, packing, salvaged);
-                });
-            }
-        });
-    }
+    });
     slots
         .into_iter()
         .map(|m| m.into_inner().unwrap_or_else(|e| e.into_inner()))
         .collect()
+}
+
+/// The kind probe of one copy (see [`probe_copies_salvaged`]), until
+/// `deadline` (unix seconds).
+fn probe_one_copy(
+    ctx: *mut c_void,
+    host_cb: DupeHostFn,
+    info: &NzbSummaryData,
+    deadline: i64,
+) -> CopyProbe {
+    use crate::donorkind::Packing;
+    let groups = summary_groups_arc(info);
+    let mut listed = crate::twin::Listed::default();
+    let mut salvaged = None;
+    if !info.par_list.id.is_empty() {
+        let art = fetch_article_via_host(ctx, host_cb, &info.par_list.id, &groups, deadline);
+        if !art.success {
+            // F2b: the index is lost; its volumes repeat its
+            // critical packets at their tail
+            salvaged = salvage_copy(ctx, host_cb, info, &groups, deadline);
+            let mut msg = b"Fleet probe: the par2 list of ".to_vec();
+            msg.extend_from_slice(&info.main_name);
+            match &salvaged {
+                Some(found) => {
+                    msg.extend_from_slice(
+                        format!(
+                            " is lost; salvaged from its volumes' tail: {} file(s), {}",
+                            found.sigs.len(),
+                            if found.complete { "the whole list" } else { "part of the list" }
+                        )
+                        .as_bytes(),
+                    );
+                    listed.sigs = found.sigs.clone();
+                    listed.complete = found.complete;
+                }
+                None => msg.extend_from_slice(
+                    b" is lost and its volumes gave no identity: unverified, never dead",
+                ),
+            }
+            fleet_log(std::ptr::null_mut(), host_cb, MK_INFO, &msg);
+        }
+        if art.success {
+            let (sigs, complete) = crate::twin::par2_set(&art.data);
+            listed.sigs = sigs;
+            listed.complete = complete;
+        }
+        // a volume read for want of an index file carries its
+        // file list after the recovery data, at its end
+        let tail = &info.par_list.tail_ids;
+        if !listed.complete
+            && info.par_list.id != info.par_index.id
+            && !tail.is_empty()
+            && tail.last() != Some(&info.par_list.id)
+        {
+            let mut data = Vec::new();
+            let mut all = true;
+            for id in tail.iter().filter(|id| **id != info.par_list.id) {
+                let art = fetch_article_via_host(ctx, host_cb, id, &groups, deadline);
+                if !art.success {
+                    all = false;
+                    break;
+                }
+                data.extend_from_slice(&art.data);
+            }
+            if all {
+                let (sigs, complete) = crate::twin::par2_set(&data);
+                if complete {
+                    listed.sigs = sigs;
+                    listed.complete = true;
+                } else if !sigs.is_empty() {
+                    listed.sigs = crate::twin::merge(&listed.sigs, &sigs);
+                }
+            }
+        }
+    }
+    let mut packing = Packing::Unknown;
+    if let Some(head) = info.heads.iter().max_by_key(|h| h.bytes) {
+        let art = fetch_article_via_host(ctx, host_cb, &head.id, &groups, deadline);
+        if art.success {
+            packing = crate::donorkind::packing_of_head(&art.data, &head.name, summary_password(info));
+        } else if summary_password_known(info) && crate::donorkind::is_7z_name(&head.name) {
+            // a 7-Zip whose nzb carries a password is
+            // unborrowable whatever its head holds (as
+            // packing_of_head rules for a read head), so an
+            // unread head (missing, or no time left) gives the
+            // same answer instead of "unknown", which ranked
+            // such a copy ahead of whole encrypted copies
+            packing = Packing::Unborrowable;
+        }
+    }
+    (listed, packing, salvaged)
 }
 
 /// Longest a fleet spends opening its copies down to the video at intake.
@@ -2001,49 +2319,22 @@ fn fleet_prints_keyed(
         .collect()
 }
 
-/// Each copy's archive identity only ([`crate::dupeintake::inner_key_copy_with`],
-/// with its nzb's password), in parallel until `deadline` (unix seconds): what
-/// a grouped fleet reads instead of the whole intake.
-fn fleet_keys_only(
-    host_ctx: *mut c_void,
+/// One copy's archive identity ([`crate::dupeintake::inner_key_copy_with`],
+/// with its nzb's password), until `deadline` (unix seconds): what a grouped
+/// fleet reads instead of the whole intake.
+fn key_one_copy(
+    ctx: *mut c_void,
     host_cb: DupeHostFn,
-    summaries: &[&NzbSummaryData],
+    info: &NzbSummaryData,
     deadline: i64,
-) -> Vec<Option<crate::twinfields::InnerKey>> {
-    let n = summaries.len();
-    let slots: Vec<Mutex<Option<crate::twinfields::InnerKey>>> = (0..n).map(|_| Mutex::new(None)).collect();
-    let ctx_addr = host_ctx as usize;
-    // no more at once than there are light connections: the rest queue
-    let parallel = crate::light_pool::parallel_jobs_now(FLEET_KIND_PROBE_PARALLEL);
-    for chunk in (0..n).collect::<Vec<_>>().chunks(parallel) {
-        if now_unix_sec() >= deadline || donor_stopping() || http_stopped() {
-            break;
-        }
-        std::thread::scope(|s| {
-            for &i in chunk {
-                let info = summaries[i];
-                let slot = &slots[i];
-                s.spawn(move || {
-                    let fetch = HostArticles {
-                        ctx: ctx_addr,
-                        cb: host_cb,
-                        groups: summary_groups_arc(info),
-                        deadline,
-                    };
-                    let key = crate::dupeintake::inner_key_copy_with(
-                        &info.data_segments,
-                        &fetch,
-                        summary_password(info),
-                    );
-                    *slot.lock().unwrap_or_else(|e| e.into_inner()) = key;
-                });
-            }
-        });
-    }
-    slots
-        .into_iter()
-        .map(|m| m.into_inner().unwrap_or_else(|e| e.into_inner()))
-        .collect()
+) -> Option<crate::twinfields::InnerKey> {
+    let fetch = HostArticles {
+        ctx: ctx as usize,
+        cb: host_cb,
+        groups: summary_groups_arc(info),
+        deadline,
+    };
+    crate::dupeintake::inner_key_copy_with(&info.data_segments, &fetch, summary_password(info))
 }
 
 /// The intake verdict of each copy and why it is unverified, the fleet's video
@@ -2504,6 +2795,8 @@ struct SearchJob {
     member_locked: Vec<bool>,
     /// whether each member has a password now (`*Unpack:Password`)
     member_password: Vec<bool>,
+    /// whether each member waits in history (else it is queued)
+    member_in_history: Vec<bool>,
     score: i32,
 }
 
@@ -2779,6 +3072,7 @@ impl NzbgetRsDupeSearch {
             if add_member {
                 job.members.push((item.id, qf.clone()));
                 job.member_scores.push(item.dupe_score);
+                job.member_in_history.push(in_history);
                 let qh = crate::ffi::queue_host();
                 job.member_locked.push(
                     qh.as_ref()
@@ -2830,6 +3124,17 @@ impl NzbgetRsDupeSearch {
             return false;
         };
         let mut pick = inspect_nzb(host_ctx, host_cb, pick_ptr, false);
+        // A fleet that stays in Downloads (F16: copies grouped by name, DupeMode
+        // SCORE) is looked after by its own probe and fleethold: its alive
+        // shares, order and failover are theirs. This pass re-sampled every
+        // copy after each primary change, wrote DupeAlive=0 over a 17% donor,
+        // demoted picks still being probed and ran for a copy just deleted.
+        let fleet_marked = is_group_key(&pick.dupe_key) && pick_fleet_marked(host_ctx, host_cb, dq_ptr, &pick);
+        if fleet_owns_pick(opts.dupe_check, pick.kind, pick.dupe_mode, &pick.dupe_key, fleet_marked) {
+            let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            g.rank_pending.remove(&nzb_id);
+            return false;
+        }
         if upkeep_only && pick.dupe_key.is_empty() {
             let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             g.rank_pending.remove(&nzb_id);
@@ -3265,6 +3570,7 @@ impl NzbgetRsDupeSearch {
                     cur.now,
                 ),
                 deadline_ms: 0,
+                ..Default::default()
             }
         };
         let check_summary = |info: &NzbSummaryData| -> DonorHealthResult {
@@ -3939,6 +4245,7 @@ impl NzbgetRsDupeSearch {
             probe: 10,
             budget_ms: init_opts.health_budget_sec * 1000,
             deadline_ms: 0,
+            ..Default::default()
         };
 
         // TWIN (the same post: matching par2 hashes and article counts) and
@@ -4604,11 +4911,12 @@ impl NzbgetRsDupeSearch {
                     state.placed.insert(verified.len() + m_idx, item);
                     let mut mmsg = log_tag().to_vec();
                     push_c_slice(&mut mmsg, &job.name);
-                    mmsg.extend_from_slice(b": duplicate ");
+                    mmsg.extend_from_slice(b": backup ");
                     push_c_slice(&mut mmsg, &member_title);
                     mmsg.extend_from_slice(
                         format!(
-                            " in history: alive={}% ({} of {} articles){}",
+                            " {}: alive={}% ({} of {} articles){}",
+                            member_place(job.member_in_history.get(m_idx).copied().unwrap_or(true)),
                             (100.0 * alive).round() as i32,
                             h.present,
                             h.answered(),
@@ -6128,9 +6436,44 @@ fn fleet_apply_member(
         let Some(qh) = crate::ffi::queue_host() else {
             return 0;
         };
-        let Some((ptr_, false)) = dq_find_nzb(host_ctx, host_cb, dq_ptr, nzb_id) else {
+        let Some((ptr_, in_history)) = dq_find_nzb(host_ctx, host_cb, dq_ptr, nzb_id) else {
             return 0;
         };
+        if in_history {
+            // the primary, released while this copy was still probed (B1c),
+            // succeeded and filed it as DELETED/DUPE (or it is that primary):
+            // it keeps what the probe found. A copy the user deleted, or one
+            // filed as a failure, is left as it is.
+            let snap = inspect_nzb(host_ctx, host_cb, ptr_, false);
+            let writable = fleet_history_writable(snap.delete_status, snap.dupe_success);
+            if writable {
+                for (k, v) in params {
+                    qh.nzb_set_param(ptr_, k, Some(v));
+                }
+            }
+            // never left marked held or probing in history, whoever filed it
+            // its own priority back and the hold's marks gone (as a copy that
+            // leaves the queue is), whoever filed it; the files the hold paused
+            // are resumed first, so a copy returned to the queue from history
+            // never comes back paused
+            if let Some(ids) = qh
+                .nzb_get_param(ptr_, crate::fleethold::HELD_FILES_PARAM)
+                .map(|v| crate::fleethold::parse_held_files(&v))
+            {
+                for i in 0..qh.nzb_file_len(ptr_) {
+                    let f = qh.file_snap(qh.nzb_file_at(ptr_, i));
+                    if ids.contains(&f.id) {
+                        qh.file_set_int(f.ptr, crate::queuesubsys_host::FILE_INT_PAUSED, 0);
+                    }
+                }
+            }
+            crate::fleethold::leave_fleet_host(&qh, ptr_);
+            qh.dq_history_changed(dq_ptr);
+            qh.dq_save(dq_ptr);
+            // a copy the user deleted or one that failed is no backup of the
+            // fleet: the reply reports it as before (not added)
+            return if writable { nzb_id } else { 0 };
+        }
         for (k, v) in params {
             qh.nzb_set_param(ptr_, k, Some(v));
         }
@@ -6600,10 +6943,44 @@ pub unsafe fn fleet_append(
         stored_password: bool,
         // F16: added to the queue held (DupeProbing) before the probe
         pre_added: i32,
+        // its STAT check ran out of its per-copy budget before every sampled
+        // article answered: what was measured is kept, less sure (B1a)
+        cut: bool,
     }
 
     let mut candidates: Vec<FleetCandidate> = Vec::with_capacity(members.len());
-    for (i, slot) in fetched_slots.into_iter().enumerate() {
+    let mut fetched: Vec<(bool, i32, Vec<u8>)> = fetched_slots
+        .into_iter()
+        .map(|m| m.into_inner().unwrap_or_else(|e| e.into_inner()))
+        .collect();
+    for (i, (ok, _, body)) in fetched.iter_mut().enumerate() {
+        if !members[i].url.is_empty() && *ok {
+            members[i].data = std::mem::take(body);
+        }
+    }
+    // the nzb-files are parsed in parallel: a drop of seventeen UHD copies is
+    // 150 MB of XML, which took seconds one after the other
+    let parsed: Vec<Option<NzbSummaryData>> = {
+        let slots: Vec<Mutex<Option<NzbSummaryData>>> = (0..members.len()).map(|_| Mutex::new(None)).collect();
+        let next = AtomicUsize::new(0);
+        let workers = std::thread::available_parallelism().map_or(2, |n| n.get()).clamp(1, 8);
+        std::thread::scope(|s| {
+            for _ in 0..workers.min(members.len()) {
+                s.spawn(|| loop {
+                    let i = next.fetch_add(1, Ordering::SeqCst);
+                    if i >= members.len() {
+                        break;
+                    }
+                    *slots[i].lock().unwrap_or_else(|e| e.into_inner()) = parse_nzb_summary(&members[i].data);
+                });
+            }
+        });
+        slots
+            .into_iter()
+            .map(|m| m.into_inner().unwrap_or_else(|e| e.into_inner()))
+            .collect()
+    };
+    for (i, (slot, parsed)) in fetched.into_iter().zip(parsed).enumerate() {
         let mut cand = FleetCandidate {
             index: i,
             summary: NzbSummaryData::default(),
@@ -6620,17 +6997,17 @@ pub unsafe fn fleet_append(
             encrypted: false,
             stored_password: false,
             pre_added: 0,
+            cut: false,
         };
         if !members[i].url.is_empty() {
-            let (ok, status, body) = slot.into_inner().unwrap_or_else(|e| e.into_inner());
+            let (ok, status, _) = slot;
             if !ok {
                 cand.error = fleet_format_fetch_error(status);
                 candidates.push(cand);
                 continue;
             }
-            members[i].data = body;
         }
-        match parse_nzb_summary(&members[i].data) {
+        match parsed {
             Some(parsed) if !parsed.message_ids.is_empty() => {
                 cand.summary = parsed;
                 summary_take_name_password(&mut cand.summary, &members[i].name);
@@ -6876,46 +7253,7 @@ pub unsafe fn fleet_append(
     // downloads (fleethold::refresh_key_host).
     let holds = grouped && read_host_opts(host_ctx, host_cb).dupe_check;
     let mut probing_guard = holds.then(|| crate::fleethold::ProbingGuard::enter(&dupe_key));
-    if holds {
-        for (n, cand) in candidates.iter_mut().enumerate() {
-            if !cand.error.is_empty() || cand.same_as >= 0 || cand.existing_id != 0 {
-                continue;
-            }
-            let member = &members[cand.index];
-            let prio = priority.to_string().into_bytes();
-            let params: Vec<(&[u8], &[u8])> = vec![
-                (crate::fleethold::HELD_PARAM, b"yes"),
-                (crate::fleethold::PROBING_PARAM, b"yes"),
-                (crate::fleethold::HELD_PRIORITY_PARAM, &prio),
-            ];
-            let id = scanner_add_external_paused(
-                host_ctx,
-                host_cb,
-                &fleet_ensure_nzb_ext(&member.name),
-                &category,
-                crate::fleethold::HELD_PRIORITY,
-                &dupe_key,
-                fleet_calc_member_add_score(running_id, lowest, top, n as i32 + 1),
-                &params,
-                &member.data,
-                true,
-                true,
-            );
-            if id == 0 {
-                cand.error = b"RustyGet could not add the nzb-file".to_vec();
-            } else {
-                cand.pre_added = id;
-            }
-        }
-        let added_now = candidates.iter().filter(|c| c.pre_added != 0).count();
-        let mut msg = b"Fleet ".to_vec();
-        msg.extend_from_slice(&dupe_key);
-        msg.extend_from_slice(
-            format!(": {added_now} copy(ies) added held, probing them in the background").as_bytes(),
-        );
-        fleet_log(host_ctx, host_cb, MK_INFO, &msg);
-        key_guard = None;
-    }
+    // the copies are added held in the probe below, beside their checks (B1)
 
     // TWINs first, then ALTs by how well stream repair can borrow from them.
     // The copies are probed before the health check, with their own share of
@@ -6930,7 +7268,8 @@ pub unsafe fn fleet_append(
     let mut earlier_probed: Vec<(crate::twin::Listed, crate::donorkind::Packing)> = Vec::new();
     // F2b: the par2 identity salvaged from the volumes of a copy whose index is lost
     let mut salvaged: Vec<Option<crate::twinfields::Salvaged>> = vec![None; candidates.len()];
-    {
+    // a grouped fleet probes its kinds beside its health checks, below (B1)
+    if !grouped {
         let usable: Vec<usize> = (0..candidates.len())
             .filter(|&i| {
                 let c = &candidates[i];
@@ -7074,32 +7413,6 @@ pub unsafe fn fleet_append(
         }
     }
 
-    // F11: a grouped fleet skips the payload intake but still reads each
-    // copy's archive identity: the size and CRC32 of the video its last
-    // volume's header records (two articles: the first and the last volume's
-    // first), with the nzb's password for encrypted headers. Equal keys make
-    // a container an alt for TwinCheck; a header-sized difference stays a
-    // likely alt, never another video.
-    if grouped {
-        let usable: Vec<usize> = (0..candidates.len())
-            .filter(|&i| candidates[i].error.is_empty() && candidates[i].same_as < 0)
-            .collect();
-        if !usable.is_empty() {
-            let left_ms = deadline_ms - donor_now_ms() - FINISH_RESERVE_MS;
-            let rounds = usable.len().div_ceil(FLEET_KIND_PROBE_PARALLEL).max(1);
-            let key_deadline = now_unix_sec()
-                + fleet_phase_secs(left_ms, 3, i64::from(GROUP_CHECK_SEC_PER_COPY) * rounds as i64);
-            let summaries: Vec<&NzbSummaryData> =
-                usable.iter().map(|&i| &candidates[i].summary).collect();
-            let keys = fleet_keys_only(host_ctx, host_cb, &summaries, key_deadline);
-            for (&i, key) in usable.iter().zip(keys) {
-                if key.is_some() {
-                    intake_keys[i] = key;
-                }
-            }
-        }
-    }
-
     let mut postings = Vec::new();
     for cand in &candidates {
         if cand.error.is_empty() && cand.same_as < 0 && cand.existing_id == 0 {
@@ -7113,98 +7426,577 @@ pub unsafe fn fleet_append(
 
     let servers = nntp_health_servers(host_ctx, host_cb);
     let mut complete = true;
-    let check_guard = if !servers.is_empty() && !postings.is_empty() {
-        let wait_ms = (deadline_ms - donor_now_ms() - FINISH_RESERVE_MS - 1000).max(0);
-        fleet_check_mutex().try_lock_for(wait_ms)
-    } else {
-        None
-    };
-    if !servers.is_empty() && !postings.is_empty() && check_guard.is_none() {
-        complete = false;
-    }
-    if let Some(_cg) = check_guard {
-        let cur = read_host_opts(host_ctx, host_cb);
-        let check_start = donor_now_ms();
-        let budget_ms = 1000i64.max(deadline_ms - check_start - FINISH_RESERVE_MS) as i32;
-        // STATs cost no bytes and spread over the whole posting, so a dead tail
-        // shows: a group's alive share comes from STATs alone, and BODY reads
-        // are only for the few header and par2 articles whose content the kind
-        // probe needs (probe speed, 2026-11-23)
-        let max_body = group_probe_body_checks(grouped, cur.body_checks);
-        let options = DonorOptions {
-            sample: DonorSampleOptions {
-                percent: cur.health_percent,
-                minimum: cur.health_min,
-                maximum: cur.health_max.min(FLEET_SAMPLE_MAX),
-                body_percent: cur.body_percent,
-                max_body,
-                seed: 0,
-            },
-            probe: 10,
-            budget_ms,
-            deadline_ms: check_start + i64::from(budget_ms),
+    // the copy released as the primary while the others were still probed (B1c)
+    let mut lead_id = 0i32;
+    if !grouped {
+        let check_guard = if !servers.is_empty() && !postings.is_empty() {
+            let wait_ms = (deadline_ms - donor_now_ms() - FINISH_RESERVE_MS - 1000).max(0);
+            fleet_check_mutex().try_lock_for(wait_ms)
+        } else {
+            None
         };
-        let checked_map = Mutex::new(BTreeMap::<usize, DonorHealthResult>::new());
-        // each copy's probe is logged: its time, and the requests it sent, got
-        // answered and saw time out (a timeout is no evidence, F6)
+        if !servers.is_empty() && !postings.is_empty() && check_guard.is_none() {
+            complete = false;
+        }
+        if let Some(_cg) = check_guard {
+            let cur = read_host_opts(host_ctx, host_cb);
+            let check_start = donor_now_ms();
+            let budget_ms = 1000i64.max(deadline_ms - check_start - FINISH_RESERVE_MS) as i32;
+            // STATs cost no bytes and spread over the whole posting, so a dead tail
+            // shows: a group's alive share comes from STATs alone, and BODY reads
+            // are only for the few header and par2 articles whose content the kind
+            // probe needs (probe speed, 2026-11-23)
+            let max_body = group_probe_body_checks(grouped, cur.body_checks);
+            let options = DonorOptions {
+                sample: DonorSampleOptions {
+                    percent: cur.health_percent,
+                    minimum: cur.health_min,
+                    maximum: cur.health_max.min(FLEET_SAMPLE_MAX),
+                    body_percent: cur.body_percent,
+                    max_body,
+                    seed: 0,
+                },
+                probe: 10,
+                budget_ms,
+                deadline_ms: check_start + i64::from(budget_ms),
+                ..Default::default()
+            };
+            let checked_map = Mutex::new(BTreeMap::<usize, DonorHealthResult>::new());
+            // each copy's probe is logged: its time, and the requests it sent, got
+            // answered and saw time out (a timeout is no evidence, F6)
+            let probe_names: BTreeMap<usize, Vec<u8>> = candidates
+                .iter()
+                .map(|c| (c.index, members[c.index].name.clone()))
+                .collect();
+            {
+                struct FleetHoldGuard;
+                impl Drop for FleetHoldGuard {
+                    fn drop(&mut self) {
+                        if let Some(ws) = crate::ffi::active_workstate() {
+                            ws.hold_download_for_fleet(false);
+                        }
+                    }
+                }
+                // a grouped fleet probes beside the primary's download, within its
+                // share of the connections (fleetprobe::probe_share)
+                let _hold = (!grouped).then(|| {
+                    if let Some(ws) = crate::ffi::active_workstate() {
+                        ws.hold_download_for_fleet(true);
+                    }
+                    FleetHoldGuard
+                });
+                donor_check_postings(
+                    &servers,
+                    &postings,
+                    &options,
+                    true,
+                    (postings.len() as i32).min(MAX_PARALLEL),
+                    |key, h| {
+                        if let Ok(idx) = key.parse::<usize>() {
+                            let mut msg = b"Fleet probe of ".to_vec();
+                            msg.extend_from_slice(probe_names.get(&idx).map_or(&[][..], |n| n.as_slice()));
+                            msg.extend_from_slice(
+                                fleet_probe_log_tail(donor_now_ms() - check_start, h).as_bytes(),
+                            );
+                            fleet_log(std::ptr::null_mut(), host_cb, MK_INFO, &msg);
+                            checked_map
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .insert(idx, *h);
+                        }
+                    },
+                );
+            }
+            for (idx, h) in checked_map.into_inner().unwrap_or_else(|e| e.into_inner()) {
+                if idx < candidates.len() {
+                    candidates[idx].health = h;
+                    candidates[idx].checked = true;
+                }
+            }
+            complete = donor_now_ms() - check_start < i64::from(options.budget_ms);
+        }
+    } else {
+        // B1: a grouped fleet adds its copies held, reads each copy's kind
+        // and archive key and samples its alive share all at once, each copy
+        // within its own minute (GROUP_CHECK_SEC_PER_COPY), and its primary
+        // starts as soon as a copy is proven healthy and is the easiest to
+        // borrow into of the copies probed so far (pick_lead), not after the
+        // slowest copy: behind a proxy slow on missing articles a fleet once
+        // waited six minutes with nothing downloading.
+        let n = candidates.len();
+        let pre_added: Vec<AtomicI32> = (0..n).map(|_| AtomicI32::new(0)).collect();
+        let adds_done = AtomicBool::new(!holds);
+        let kinds_done = AtomicBool::new(false);
+        let health_done = AtomicBool::new(false);
+        let check_missed = AtomicBool::new(false);
+        let usable: Vec<usize> = (0..n)
+            .filter(|&i| candidates[i].error.is_empty() && candidates[i].same_as < 0)
+            .collect();
+        let mut summaries: Vec<&NzbSummaryData> = usable.iter().map(|&i| &candidates[i].summary).collect();
+        summaries.extend(earlier.iter().map(|(_, s)| s));
+        #[allow(clippy::type_complexity)]
+        let kind_slots: Vec<Mutex<Option<(CopyProbe, Option<crate::twinfields::InnerKey>)>>> =
+            (0..summaries.len()).map(|_| Mutex::new(None)).collect();
+        // (result, cut at its budget) per candidate index
+        let health_slots = Mutex::new(BTreeMap::<usize, (DonorHealthResult, bool)>::new());
         let probe_names: BTreeMap<usize, Vec<u8>> = candidates
             .iter()
             .map(|c| (c.index, members[c.index].name.clone()))
             .collect();
-        {
-            struct FleetHoldGuard;
-            impl Drop for FleetHoldGuard {
+        let ctx_addr = host_ctx as usize;
+        let overall_deadline =
+            now_unix_sec() + (deadline_ms - donor_now_ms() - FINISH_RESERVE_MS).max(1000) / 1000;
+        let cur = read_host_opts(host_ctx, host_cb);
+        let min_alive = cur.min_alive;
+        let posting_budget_ms = GROUP_CHECK_SEC_PER_COPY * 1000;
+        // the copy leading now: (candidate index, ease, NZBID); and whether a
+        // switch was refused (the leader had downloaded too much)
+        let mut leader: Option<(usize, u8, i32)> = None;
+        let mut switch_closed = false;
+        // early leaders that failed (parked on health) or were deleted while
+        // the fleet was still probed: never led again by this probe
+        let mut failed_leads: BTreeSet<usize> = BTreeSet::new();
+        // the last copy released early (it may have finished before the probe)
+        let mut last_leader = 0i32;
+        let usable_ref = &usable;
+        let summaries_ref = &summaries;
+        let candidates_ref = &candidates;
+        let health_ref = &health_slots;
+        std::thread::scope(|s| {
+            struct Done<'a>(&'a AtomicBool);
+            impl Drop for Done<'_> {
                 fn drop(&mut self) {
-                    if let Some(ws) = crate::ffi::active_workstate() {
-                        ws.hold_download_for_fleet(false);
-                    }
+                    self.0.store(true, Ordering::SeqCst);
                 }
             }
-            // a grouped fleet probes beside the primary's download, within its
-            // share of the connections (fleetprobe::probe_share)
-            let _hold = (!grouped).then(|| {
-                if let Some(ws) = crate::ffi::active_workstate() {
-                    ws.hold_download_for_fleet(true);
-                }
-                FleetHoldGuard
-            });
-            donor_check_postings(
-                &servers,
-                &postings,
-                &options,
-                true,
-                (postings.len() as i32).min(MAX_PARALLEL),
-                |key, h| {
-                    if let Ok(idx) = key.parse::<usize>() {
-                        let mut msg = b"Fleet probe of ".to_vec();
-                        msg.extend_from_slice(probe_names.get(&idx).map_or(&[][..], |n| n.as_slice()));
-                        msg.extend_from_slice(
-                            fleet_probe_log_tail(donor_now_ms() - check_start, h).as_bytes(),
+            if holds {
+                let (pre_added, adds_done) = (&pre_added, &adds_done);
+                let (members, category, dupe_key) = (&members, &category, &dupe_key);
+                s.spawn(move || {
+                    let _done = Done(adds_done);
+                    for (pos, cand) in candidates_ref.iter().enumerate() {
+                        if !cand.error.is_empty() || cand.same_as >= 0 || cand.existing_id != 0 {
+                            continue;
+                        }
+                        let member = &members[cand.index];
+                        let prio = priority.to_string().into_bytes();
+                        let params: Vec<(&[u8], &[u8])> = vec![
+                            (crate::fleethold::HELD_PARAM, b"yes"),
+                            (crate::fleethold::PROBING_PARAM, b"yes"),
+                            (crate::fleethold::MEMBER_PARAM, b"yes"),
+                            (crate::fleethold::HELD_PRIORITY_PARAM, &prio),
+                        ];
+                        let id = scanner_add_external_paused(
+                            ctx_addr as *mut c_void,
+                            host_cb,
+                            &fleet_ensure_nzb_ext(&member.name),
+                            category,
+                            crate::fleethold::HELD_PRIORITY,
+                            dupe_key,
+                            fleet_calc_member_add_score(running_id, lowest, top, pos as i32 + 1),
+                            &params,
+                            &member.data,
+                            true,
+                            true,
                         );
-                        fleet_log(std::ptr::null_mut(), host_cb, MK_INFO, &msg);
-                        checked_map
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .insert(idx, *h);
+                        pre_added[pos].store(if id == 0 { -1 } else { id }, Ordering::SeqCst);
                     }
-                },
-            );
+                });
+            }
+            // kinds and archive keys: the copies proven healthy first, the
+            // ones not known yet next, weak ones after them; a copy proven
+            // dead needs neither (its kind ranks nothing)
+            {
+                let (kinds_done, kind_slots, health_done) = (&kinds_done, &kind_slots, &health_done);
+                s.spawn(move || {
+                    let _done = Done(kinds_done);
+                    let total = summaries_ref.len();
+                    let taken = Mutex::new(vec![false; total]);
+                    let parallel = crate::light_pool::parallel_jobs_now(FLEET_KIND_PROBE_PARALLEL);
+                    std::thread::scope(|s2| {
+                        for _ in 0..parallel.min(total) {
+                            s2.spawn(|| loop {
+                                if now_unix_sec() >= overall_deadline || donor_stopping() || http_stopped() {
+                                    break;
+                                }
+                                let next = {
+                                    let health = health_ref.lock().unwrap_or_else(|e| e.into_inner());
+                                    let classes: Vec<u8> = (0..total)
+                                        .map(|k| {
+                                            let Some(&i) = usable_ref.get(k) else {
+                                                return 1;
+                                            };
+                                            match health.get(&candidates_ref[i].index) {
+                                                None => 1,
+                                                Some((h, cut)) => {
+                                                    let (alive, dead, _) = eval_fleet_member_health(
+                                                        true,
+                                                        cut_settled(*cut, h),
+                                                        h.present,
+                                                        h.missing,
+                                                        h.error,
+                                                        DONOR_MIN_KNOWN,
+                                                        min_alive,
+                                                    );
+                                                    // only a 0% copy skips its kind and key: a weak
+                                                    // donor (under DupeMinAlive, "dead" for leading)
+                                                    // still needs its lock and inner key (F3, F8)
+                                                    kind_probe_class(alive, kind_probe_skips(alive, dead))
+                                                }
+                                            }
+                                        })
+                                        .collect();
+                                    drop(health);
+                                    let mut taken = taken.lock().unwrap_or_else(|e| e.into_inner());
+                                    let pick = (0..total)
+                                        .filter(|&k| !taken[k] && classes[k] < KIND_CLASS_DEAD)
+                                        .min_by_key(|&k| (classes[k], k));
+                                    if let Some(k) = pick {
+                                        taken[k] = true;
+                                    }
+                                    pick
+                                };
+                                let Some(k) = next else {
+                                    // only 0% copies are left: the health check
+                                    // (its check after a pause) may still find one
+                                    // alive, so wait for it before giving up
+                                    let untaken = taken.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|t| !t);
+                                    if untaken && !health_done.load(Ordering::SeqCst) {
+                                        std::thread::sleep(std::time::Duration::from_millis(200));
+                                        continue;
+                                    }
+                                    break;
+                                };
+                                let ctx = ctx_addr as *mut c_void;
+                                let copy_deadline =
+                                    (now_unix_sec() + i64::from(GROUP_CHECK_SEC_PER_COPY)).min(overall_deadline);
+                                let info = summaries_ref[k];
+                                let probe = probe_one_copy(ctx, host_cb, info, copy_deadline);
+                                let key = if k < usable_ref.len() {
+                                    key_one_copy(ctx, host_cb, info, copy_deadline)
+                                } else {
+                                    None
+                                };
+                                *kind_slots[k].lock().unwrap_or_else(|e| e.into_inner()) = Some((probe, key));
+                            });
+                        }
+                    });
+                });
+            }
+            // the alive share, by STATs: each copy for at most its own minute
+            // (what was measured by then is kept, its line says it was cut),
+            // a few requests at once on its connections, and a few more STATs
+            // for a copy whose first ten were all missing
+            {
+                let (health_done, check_missed) = (&health_done, &check_missed);
+                let (servers, postings, probe_names) = (&servers, &postings, &probe_names);
+                s.spawn(move || {
+                    let _done = Done(health_done);
+                    if servers.is_empty() || postings.is_empty() {
+                        return;
+                    }
+                    let wait_ms = (deadline_ms - donor_now_ms() - FINISH_RESERVE_MS - 1000).max(0);
+                    let Some(_cg) = fleet_check_mutex().try_lock_for(wait_ms) else {
+                        check_missed.store(true, Ordering::SeqCst);
+                        return;
+                    };
+                    let check_start = donor_now_ms();
+                    let budget_ms = 1000i64.max(deadline_ms - check_start - FINISH_RESERVE_MS) as i32;
+                    let options = DonorOptions {
+                        sample: DonorSampleOptions {
+                            percent: cur.health_percent,
+                            minimum: cur.health_min,
+                            maximum: cur.health_max.min(FLEET_SAMPLE_MAX),
+                            body_percent: cur.body_percent,
+                            max_body: group_probe_body_checks(true, cur.body_checks),
+                            seed: 0,
+                        },
+                        probe: 10,
+                        budget_ms,
+                        deadline_ms: check_start + i64::from(budget_ms),
+                        lanes: fleet_probe_lanes(servers.iter().map(|s| s.cap()).min().unwrap_or(1), postings.len()),
+                        posting_budget_ms,
+                        dead_extra: FLEET_DEAD_EXTRA,
+                        // a paused server never stalls a copy's check (F6, F7)
+                        skip_paused: true,
+                    };
+                    // `again`: the check after a server's pause, which
+                    // replaces the first one only when it measured as much
+                    let emit = |again: bool, key: &str, h: &DonorHealthResult, ms: i64| {
+                        if let Ok(idx) = key.parse::<usize>() {
+                            // the fleet's own deadline cuts a check as well as
+                            // the copy's budget does
+                            let cut = probe_was_cut(h, ms, posting_budget_ms)
+                                || (h.answered() < h.checked && donor_now_ms() + 250 >= options.deadline_ms);
+                            let mut msg = b"Fleet probe of ".to_vec();
+                            msg.extend_from_slice(probe_names.get(&idx).map_or(&[][..], |n| n.as_slice()));
+                            if again {
+                                msg.extend_from_slice(b" (again, after its server's pause)");
+                            }
+                            msg.extend_from_slice(fleet_probe_log_tail(ms, h).as_bytes());
+                            if h.paused > 0 {
+                                msg.extend_from_slice(
+                                    format!(
+                                        "; {} sampled articles left unchecked by a paused server, {}",
+                                        h.paused,
+                                        if again { "kept as measured" } else { "checked again after the pause" }
+                                    )
+                                    .as_bytes(),
+                                );
+                            } else if cut {
+                                msg.extend_from_slice(
+                                    format!(
+                                        "; cut at its {} s budget, the share measured so far is kept",
+                                        GROUP_CHECK_SEC_PER_COPY
+                                    )
+                                    .as_bytes(),
+                                );
+                            }
+                            fleet_log(std::ptr::null_mut(), host_cb, MK_INFO, &msg);
+                            let mut health = health_ref.lock().unwrap_or_else(|e| e.into_inner());
+                            if !again || retry_replaces(health.get(&idx).map(|(f, _)| f), h) {
+                                health.insert(idx, (*h, cut));
+                            }
+                        }
+                    };
+                    crate::dupesearch_nzb::donor_check_postings_timed(
+                        servers,
+                        postings,
+                        &options,
+                        true,
+                        (postings.len() as i32).min(MAX_PARALLEL),
+                        None,
+                        |key, h, ms| emit(false, key, h, ms),
+                    );
+                    // A paused server (three failed exchanges in a row) left
+                    // its articles unreached at once (`skip_paused`) instead
+                    // of the check sleeping through the pause: a copy whose
+                    // sample it cut short (or left without a single answer)
+                    // is cut or unverified, never dead on the few answers it
+                    // got (F6), and is checked once more after the pause,
+                    // here in the background, while the copy proven healthy
+                    // downloads.
+                    let unmeasured: Vec<crate::dupesearch_nzb::DonorPosting> = {
+                        let health = health_ref.lock().unwrap_or_else(|e| e.into_inner());
+                        postings
+                            .iter()
+                            .filter(|p| {
+                                p.key
+                                    .parse::<usize>()
+                                    .map_or(false, |idx| health.get(&idx).map_or(true, |(h, _)| probe_retryable(h)))
+                            })
+                            .map(|p| crate::dupesearch_nzb::DonorPosting {
+                                key: p.key.clone(),
+                                ids: p.ids.clone(),
+                                groups: p.groups.clone(),
+                            })
+                            .collect()
+                    };
+                    if unmeasured.is_empty() {
+                        return;
+                    }
+                    // other fleets' checks are not kept waiting meanwhile
+                    drop(_cg);
+                    while servers.iter().any(|srv| srv.paused())
+                        && donor_now_ms() + 1000 < options.deadline_ms
+                        && !donor_stopping()
+                        && !http_stopped()
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                    if servers.iter().all(|srv| srv.paused())
+                        || donor_now_ms() + 1000 >= options.deadline_ms
+                        || donor_stopping()
+                        || http_stopped()
+                    {
+                        return;
+                    }
+                    let Some(_cg) = fleet_check_mutex()
+                        .try_lock_for((options.deadline_ms - donor_now_ms() - 1000).max(0))
+                    else {
+                        return;
+                    };
+                    crate::dupesearch_nzb::donor_check_postings_timed(
+                        servers,
+                        &unmeasured,
+                        &options,
+                        true,
+                        (unmeasured.len() as i32).min(MAX_PARALLEL),
+                        None,
+                        |key, h, ms| emit(true, key, h, ms),
+                    );
+                });
+            }
+            // this thread: says when the copies are in, and starts the primary
+            // as soon as one is proven healthy (B1c)
+            let mut adds_logged = !holds;
+            loop {
+                let all_done = adds_done.load(Ordering::SeqCst)
+                    && kinds_done.load(Ordering::SeqCst)
+                    && health_done.load(Ordering::SeqCst);
+                if !adds_logged && adds_done.load(Ordering::SeqCst) {
+                    adds_logged = true;
+                    let added_now = pre_added.iter().filter(|a| a.load(Ordering::SeqCst) > 0).count();
+                    let mut msg = b"Fleet ".to_vec();
+                    msg.extend_from_slice(&dupe_key);
+                    msg.extend_from_slice(
+                        format!(": {added_now} copy(ies) added held, probing them in the background").as_bytes(),
+                    );
+                    fleet_log(ctx_addr as *mut c_void, host_cb, MK_INFO, &msg);
+                    key_guard = None;
+                }
+                if let Some((idx, _, id)) = leader {
+                    if holds && fleet_leader_gone(ctx_addr as *mut c_void, host_cb, id) {
+                        // the early leader failed or was deleted: the next
+                        // healthy probed copy leads now, not after the probe
+                        failed_leads.insert(idx);
+                        leader = None;
+                        switch_closed = false;
+                    }
+                }
+                if holds && !switch_closed && !donor_stopping() && !http_stopped() {
+                    let health = health_slots.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    let mut views: Vec<LeadView> = Vec::new();
+                    let mut facts: BTreeMap<usize, (i32, crate::donorkind::Packing, DonorHealthResult, bool)> =
+                        BTreeMap::new();
+                    for (k, &i) in usable_ref.iter().enumerate() {
+                        let cand = &candidates_ref[i];
+                        let id = pre_added[i].load(Ordering::SeqCst);
+                        let (Some(&(h, cut)), Some(((_, packing, _), _))) = (
+                            health.get(&cand.index),
+                            kind_slots[k].lock().unwrap_or_else(|e| e.into_inner()).clone(),
+                        ) else {
+                            continue;
+                        };
+                        if id <= 0 || failed_leads.contains(&i) {
+                            continue;
+                        }
+                        let (alive, dead, _) = eval_fleet_member_health(
+                            true,
+                            cut_settled(cut, &h),
+                            h.present,
+                            h.missing,
+                            h.error,
+                            DONOR_MIN_KNOWN,
+                            min_alive,
+                        );
+                        let pw = summary_password_known(&cand.summary);
+                        let locked = fleet_candidate_locked(
+                            cand.encrypted || packing.headers_encrypted(),
+                            pw,
+                            cand.stored_password,
+                        );
+                        let head = cand
+                            .summary
+                            .heads
+                            .iter()
+                            .max_by_key(|h| h.bytes)
+                            .map(|h| h.name.as_slice())
+                            .unwrap_or(&[]);
+                        let ease = crate::donorkind::primary_ease(packing, head, pw);
+                        views.push(LeadView {
+                            idx: i,
+                            // a cut check counts only with at least ten answers
+                            healthy: !dead
+                                && !locked
+                                && cut_settled(cut, &h)
+                                && alive >= 0
+                                && alive.saturating_mul(10) >= crate::dupesearch_nzb::FLEET_HEALTHY_ALIVE_PERMILLE,
+                            ease,
+                            alive,
+                        });
+                        facts.insert(i, (id, packing, h, cut));
+                    }
+                    if let Some(pick) = pick_lead(&views, leader.map(|(i, e, _)| (i, e))) {
+                        let view = views.iter().find(|v| v.idx == pick).copied();
+                        if let (Some(view), Some(&(id, packing, h, cut))) = (view, facts.get(&pick)) {
+                            let alive_s = view.alive.to_string().into_bytes();
+                            let ease_s = view.ease.to_string().into_bytes();
+                            let sample_s = alive_sample_value(&h).into_bytes();
+                            let kind = crate::donorkind::DonorKind::of(false, packing);
+                            let mut params: Vec<(&[u8], &[u8])> = vec![
+                                (FLEET_PARAM, b"1"),
+                                (crate::donorkind::KIND_PARAM, kind.param()),
+                                (ALIVE_PARAM, &alive_s),
+                                (ALIVE_SAMPLE_PARAM, &sample_s),
+                                (crate::fleethold::EASE_PARAM, &ease_s),
+                            ];
+                            params.push((ALIVE_CUT_PARAM, if cut { b"yes" } else { b"no" }));
+                            let old_id = leader.map_or(0, |(_, _, id)| id);
+                            let released = fleet_lead_release(
+                                ctx_addr as *mut c_void,
+                                host_cb,
+                                &dupe_key,
+                                id,
+                                &params,
+                                old_id,
+                            );
+                            if released {
+                                leader = Some((pick, view.ease, id));
+                                last_leader = id;
+                            } else {
+                                // kept (downloaded too much), gone, or another
+                                // submission's copy downloads: the end of the
+                                // probe decides, as before
+                                switch_closed = true;
+                            }
+                        }
+                    }
+                }
+                if all_done {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        });
+        lead_id = last_leader;
+        for (i, a) in pre_added.iter().enumerate() {
+            match a.load(Ordering::SeqCst) {
+                0 => {}
+                -1 => candidates[i].error = b"RustyGet could not add the nzb-file".to_vec(),
+                id => candidates[i].pre_added = id,
+            }
         }
-        for (idx, h) in checked_map.into_inner().unwrap_or_else(|e| e.into_inner()) {
+        for (k, slot) in kind_slots.into_iter().enumerate() {
+            let got = slot.into_inner().unwrap_or_else(|e| e.into_inner());
+            let ((listed, packing, salv), key) = got.unwrap_or_else(|| {
+                (
+                    (crate::twin::Listed::default(), crate::donorkind::Packing::Unknown, None),
+                    None,
+                )
+            });
+            if let Some(&i) = usable.get(k) {
+                candidates[i].encrypted |= packing.headers_encrypted();
+                probed[i] = Some((listed, packing));
+                salvaged[i] = salv;
+                if key.is_some() {
+                    intake_keys[i] = key;
+                }
+            } else {
+                earlier_probed.push((listed, packing));
+            }
+        }
+        for (idx, (h, cut)) in health_slots.into_inner().unwrap_or_else(|e| e.into_inner()) {
             if idx < candidates.len() {
                 candidates[idx].health = h;
                 candidates[idx].checked = true;
+                candidates[idx].cut = cut;
             }
         }
-        complete = donor_now_ms() - check_start < i64::from(options.budget_ms);
+        if check_missed.load(Ordering::SeqCst) {
+            complete = false;
+        }
     }
 
     let min_alive_opt = read_host_opts(host_ctx, host_cb).min_alive;
+    // a grouped fleet judges each copy on its own check: one copy cut at its
+    // budget never leaves the copies after it unknown
+    let checks_complete = complete;
     for cand in &mut candidates {
         if cand.error.is_empty() && cand.same_as < 0 {
             let (alive, dead, m_comp) = eval_fleet_member_health(
                 cand.checked,
-                complete,
+                (if grouped { checks_complete } else { complete }) && cut_settled(cand.cut, &cand.health),
                 cand.health.present,
                 cand.health.missing,
                 cand.health.error,
@@ -7213,7 +8005,7 @@ pub unsafe fn fleet_append(
             );
             cand.alive = alive;
             cand.dead = dead;
-            complete &= m_comp;
+            complete &= m_comp && !cand.cut;
         }
     }
 
@@ -7528,6 +8320,15 @@ pub unsafe fn fleet_append(
             if let Some(av) = alive_str.as_deref() {
                 params.push((ALIVE_PARAM, av));
             }
+            // how many sampled articles that share rests on, and whether its
+            // check was cut at the copy's budget (a less sure share)
+            let sample_str = cand.checked.then(|| alive_sample_value(&cand.health).into_bytes());
+            if let (Some(sv), true) = (sample_str.as_deref(), alive_str.is_some()) {
+                params.push((ALIVE_SAMPLE_PARAM, sv));
+                // "no" replaces the early leader's "yes" once a later check
+                // (after a pause) measured the whole sample
+                params.push((ALIVE_CUT_PARAM, if cand.cut { b"yes" } else { b"no" }));
+            }
             if let Some(same) = cand.video {
                 params.push((VIDEO_PARAM, video_param_value(same)));
             }
@@ -7676,6 +8477,38 @@ pub unsafe fn fleet_append(
         disk_found
     });
 
+    // the primary released during the probe finished already: it is the one
+    // chosen. A leader that failed or was deleted is not: the reply then says
+    // why nothing downloads (ALL_DEAD, INCOMPLETE, ...)
+    // any copy of this fleet that succeeded during the probe counts (an early
+    // leader that failed may have handed over to another that finished)
+    let mut fleet_ids: Vec<i32> = Vec::new();
+    if lead_id != 0 {
+        fleet_ids.push(lead_id);
+    }
+    fleet_ids.extend(out_entries.iter().map(|e| e.nzb_id).filter(|&id| id > 0 && id != lead_id));
+    let succeeded_id = if chosen == 0 && reason.is_empty() && grouped {
+        with_guarded_queue(host_ctx, host_cb, |dq_ptr| {
+            fleet_ids.iter().copied().find(|&id| {
+                dq_find_nzb(host_ctx, host_cb, dq_ptr, id).is_some_and(|(p, in_hist)| {
+                    in_hist && {
+                        let s = inspect_nzb(host_ctx, host_cb, p, false);
+                        s.dupe_success && s.delete_status == DeleteStatus::None
+                    }
+                })
+            })
+        })
+    } else {
+        None
+    };
+    if let Some(done_id) = succeeded_id {
+        chosen = done_id;
+        for entry in &mut out_entries {
+            if entry.nzb_id == done_id {
+                entry.status = b"QUEUED".to_vec();
+            }
+        }
+    }
     if chosen == 0 && reason.is_empty() {
         let code = eval_fleet_outcome_reason(any_usable, any_alive, any_unknown, on_disk);
         reason = match code {
@@ -7761,6 +8594,153 @@ mod tests {
         servers[1].usable = false;
         assert_eq!(backbone_order(&servers)[&1], vec![1]);
     }
+    /// B1c: the primary starts as soon as a copy is proven healthy, the
+    /// easiest to borrow into of the copies probed so far; a copy probed
+    /// later replaces it only when strictly easier (and only before much is
+    /// downloaded); weak, locked or dead copies never lead early.
+    #[test]
+    fn the_first_healthy_copy_leads_while_the_others_are_probed() {
+        let v = |idx, healthy, ease, alive| LeadView { idx, healthy, ease, alive };
+        assert_eq!(pick_lead(&[], None), None);
+        assert_eq!(pick_lead(&[v(0, false, 0, 870)], None), None, "a weak copy waits for the probe");
+        assert_eq!(pick_lead(&[v(3, true, 3, 1000)], None), Some(3), "the only healthy copy so far leads");
+        // an easier copy proven healthy later takes over
+        assert_eq!(pick_lead(&[v(3, true, 3, 1000), v(5, true, 1, 1000)], Some((3, 3))), Some(5));
+        // an equal or harder one is only ranked
+        assert_eq!(pick_lead(&[v(3, true, 1, 1000), v(5, true, 1, 1000)], Some((3, 1))), None);
+        assert_eq!(pick_lead(&[v(3, true, 1, 990), v(5, true, 3, 1000)], Some((3, 1))), None);
+        // among several at once: easiest, then most alive, then the first
+        assert_eq!(pick_lead(&[v(1, true, 1, 980), v(2, true, 1, 1000), v(0, true, 2, 1000)], None), Some(2));
+        assert!(fleet_switch_allowed(0) && fleet_switch_allowed(FLEET_SWITCH_MAX_BYTES - 1));
+        assert!(!fleet_switch_allowed(FLEET_SWITCH_MAX_BYTES));
+        // review: a big single-file leader has finished no file after 600 MB,
+        // but its per-article counters count them: no switch
+        let mb = 1024 * 1024;
+        assert!(!fleet_switch_allowed(leader_downloaded_bytes(600 * mb, 0, 0)));
+        assert!(!fleet_switch_allowed(leader_downloaded_bytes(0, 600 * mb, 0)));
+        assert!(fleet_switch_allowed(leader_downloaded_bytes(40 * mb, 40 * mb, 0)));
+        assert_eq!(leader_downloaded_bytes(0, 0, 700 * mb), 700 * mb);
+        // review of 36e4f2cb: a small leader that finished downloading or is
+        // unpacking keeps the lead; an easier copy is only ranked
+        assert!(fleet_leader_switchable(40 * mb, false, 200 * mb));
+        assert!(!fleet_leader_switchable(40 * mb, true, 0), "in post-processing");
+        assert!(!fleet_leader_switchable(40 * mb, false, 0), "nothing left to download");
+        assert!(!fleet_leader_switchable(600 * mb, false, 200 * mb));
+        // review: an early leader parked on health or deleted during the
+        // probe gives the lead to the next healthy probed copy
+        assert!(leader_gone(false, DeleteStatus::None, true));
+        assert!(leader_gone(true, DeleteStatus::None, false));
+        assert!(leader_gone(false, DeleteStatus::Manual, false));
+        assert!(!leader_gone(false, DeleteStatus::None, false));
+        // review: params are never written onto a copy the user deleted
+        assert!(fleet_history_writable(DeleteStatus::Dupe, false) && fleet_history_writable(DeleteStatus::None, true));
+        assert!(!fleet_history_writable(DeleteStatus::None, false), "a failure is not written");
+        assert!(!fleet_history_writable(DeleteStatus::Manual, false) && !fleet_history_writable(DeleteStatus::Health, false));
+        let v = |idx, healthy, ease, alive| LeadView { idx, healthy, ease, alive };
+        // with the failed leader (0) left out, the next healthy copy leads
+        assert_eq!(pick_lead(&[v(2, true, 3, 1000)], None), Some(2));
+    }
+
+    /// F6/F7: only answers are evidence. A copy a paused server left with
+    /// errors or unreached articles measured nothing and is checked once
+    /// more after the pause; a copy with any present or missing answer, or
+    /// one with nothing to ask, is not.
+    #[test]
+    fn a_copy_a_pause_cut_short_is_checked_again_after_it() {
+        let h = |checked: i32, present: i32, missing: i32, error: i32| DonorHealthResult {
+            checked,
+            present,
+            missing,
+            error,
+            ..Default::default()
+        };
+        assert!(!probe_measured(&h(10, 0, 0, 3)));
+        assert!(probe_retryable(&h(10, 0, 0, 3)), "three errors, seven unreached");
+        assert!(probe_retryable(&h(10, 0, 0, 0)), "all unreached");
+        assert!(!probe_retryable(&h(10, 0, 10, 0)), "all missing: dead, measured");
+        assert!(!probe_retryable(&h(40, 1, 6, 3)), "measured, partly");
+        assert!(!probe_retryable(&h(0, 0, 0, 0)), "nothing to ask");
+        // six real 430s, then the only server paused: the sample is cut by
+        // the pause, so it settles nothing with fewer than ten answers and is
+        // checked again; never "dead (0/6 sampled)"
+        let paused = DonorHealthResult { paused: 34, ..h(40, 0, 6, 3) };
+        assert!(probe_retryable(&paused));
+        assert!(probe_was_cut(&paused, 2_000, 60_000), "cut by the pause, not the budget");
+        assert!(!cut_settled(probe_was_cut(&paused, 2_000, 60_000), &paused));
+        // the check after the pause replaces it only when it measured as much
+        assert!(retry_replaces(Some(&paused), &h(40, 1, 39, 0)));
+        assert!(!retry_replaces(Some(&paused), &h(40, 0, 2, 0)));
+        assert!(!retry_replaces(Some(&paused), &h(40, 0, 0, 5)));
+        assert!(retry_replaces(None, &h(40, 0, 10, 0)));
+    }
+
+    /// B1a: a copy's check is cut only when its budget ran out with sampled
+    /// articles unanswered; the kind probe reads healthy copies first and
+    /// never a dead one.
+    #[test]
+    fn a_copy_check_is_cut_only_at_its_budget() {
+        let h = |checked, present, missing| DonorHealthResult { checked, present, missing, ..Default::default() };
+        assert!(probe_was_cut(&h(200, 40, 60), 60_000, 60_000));
+        assert!(!probe_was_cut(&h(200, 40, 160), 60_000, 60_000), "every article answered");
+        assert!(!probe_was_cut(&h(200, 40, 60), 20_000, 60_000), "unreached early, not cut");
+        assert_eq!(alive_sample_value(&h(40, 0, 40)), "0/40");
+        assert_eq!(kind_probe_class(100, false), 0);
+        assert_eq!(kind_probe_class(-1, false), 1);
+        assert_eq!(kind_probe_class(17, true), KIND_CLASS_DEAD);
+        assert_eq!(kind_probe_class(87, false), 2);
+        // review of cf714fb5: a 27% donor under DupeMinAlive still gets its
+        // kind and key (a locked one must not be picked for failover)
+        assert!(!kind_probe_skips(27, true) && kind_probe_skips(0, true) && !kind_probe_skips(-1, false));
+        assert_eq!(kind_probe_class(27, kind_probe_skips(27, true)), 2);
+        assert!(FLEET_PROBE_LANES > 1 && FLEET_DEAD_EXTRA >= 20);
+        // a cut check of 24 missing is still dead; of 7 missing unknown
+        assert!(cut_settled(true, &h(31, 0, 24)) && !cut_settled(true, &h(31, 0, 7)));
+        assert!(cut_settled(false, &h(31, 0, 7)));
+        // the Dune drop: 60 connections, 14 copies: 2 lanes each; a 4-connection test server: 1
+        assert_eq!(fleet_probe_lanes(60, 14), 2);
+        assert_eq!(fleet_probe_lanes(60, 2), FLEET_PROBE_LANES);
+        assert_eq!(fleet_probe_lanes(4, 3), 1);
+    }
+
+    /// B2: the older backup pass leaves a fleet that stays in Downloads (a
+    /// `dupes:` key in DupeMode SCORE with the duplicate check on) to its
+    /// probe and fleethold, and says "queued" for a queued backup.
+    #[test]
+    fn the_backup_pass_leaves_held_fleets_alone() {
+        // review of cf714fb5: an open fleet (a copy queued) owns its picks;
+        // one that ended with every copy in history is searched again
+        assert!(fleet_pick_owned(true, true, false));
+        assert!(fleet_pick_owned(false, false, true), "the primary just deleted, its fleet still queued");
+        assert!(!fleet_pick_owned(true, false, false), "an all-dead fleet in history");
+        assert!(!fleet_pick_owned(false, true, false));
+        assert!(fleet_owns_pick(true, 0, DupeMode::Score, b"dupes:dune.part.two.2024", true));
+        assert!(!fleet_owns_pick(false, 0, DupeMode::Score, b"dupes:dune.part.two.2024", true));
+        assert!(!fleet_owns_pick(true, 0, DupeMode::All, b"dupes:dune.part.two.2024", true));
+        assert!(!fleet_owns_pick(true, 0, DupeMode::Score, b"imdb=tt15239678", true));
+        assert!(!fleet_owns_pick(true, 1, DupeMode::Score, b"dupes:x", true));
+        // review: DupeSearch writes dupes:<title> onto every download it
+        // searches; without a fleet's marks it keeps its retry and re-ranks
+        assert!(!fleet_owns_pick(true, 0, DupeMode::Score, b"dupes:some.show.s01e01", false));
+        // review 2: a plain hold is no fleet mark (the duplicate check holds
+        // ordinary DupeSearch backups too); DupeFleet or DupeProbing are
+        assert!(!fleet_own_marks(false, false));
+        assert!(fleet_own_marks(true, false) && fleet_own_marks(false, true));
+        // review 3: after a restart mid-probe a copy has only DupeHeld and
+        // DupeFleetMember (DupeProbing cleared, no DupeFleet yet): still a
+        // fleet's copy; a plain held DupeSearch backup is not
+        let from = |params: &'static [(&'static [u8], &'static [u8])]| {
+            fleet_param_marks(move |n| params.iter().find(|(k, _)| k.eq_ignore_ascii_case(n)).map(|(_, v)| v.to_vec()))
+        };
+        let member_only = from(&[(b"DupeHeld", b"yes"), (b"DupeFleetMember", b"yes")]);
+        let plain_held = from(&[(b"DupeHeld", b"yes")]);
+        assert!(from(&[(b"DupeProbing", b"yes")]) && from(&[(b"DupeFleet", b"3")]));
+        assert!(!from(&[(b"DupeProbing", b"no")]));
+        assert!(fleet_owns_pick(true, 0, DupeMode::Score, b"dupes:x.2024", member_only));
+        assert!(!fleet_owns_pick(true, 0, DupeMode::Score, b"dupes:x.2024", plain_held));
+        assert_eq!(member_place(false), "queued");
+        assert_eq!(member_place(true), "in history");
+    }
+
     #[test]
     fn grouped_fleets_sample_alive_by_stat_only() {
         assert!(is_group_key(b"dupes:x.2024.1080p.grp"));

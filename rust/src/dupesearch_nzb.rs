@@ -1020,6 +1020,10 @@ pub struct DonorHealthResult {
     pub error: i32,
     pub body_checked: i32,
     pub body_bad: i32,
+    /// Sampled articles left unsettled because a paused server was skipped
+    /// ([`DonorOptions::skip_paused`]): the sample was cut short by the
+    /// pause, not answered, so it settles nothing on its own.
+    pub paused: i32,
 }
 
 impl DonorHealthResult {
@@ -1040,6 +1044,7 @@ impl std::ops::AddAssign for DonorHealthResult {
         self.error += other.error;
         self.body_checked += other.body_checked;
         self.body_bad += other.body_bad;
+        self.paused += other.paused;
     }
 }
 
@@ -1083,6 +1088,25 @@ pub struct DonorOptions {
     pub probe: i32,
     pub budget_ms: i32,
     pub deadline_ms: i64,
+    /// Requests each server works on at once for one posting, each on a
+    /// connection of its own (1: one walker per server, as before). A server
+    /// that answers a STAT only every second or so (a proxy slow on missing
+    /// articles) is asked in parallel instead of one article at a time (B1).
+    pub lanes: i32,
+    /// The longest one posting is checked, in ms (0: no limit of its own):
+    /// a fleet's per-copy budget. What was measured until then is kept.
+    pub posting_budget_ms: i32,
+    /// STATs added to a probe that found every article missing, so that 0%
+    /// and ~2% alive can be told apart (0: none). Taken only within the
+    /// posting's budget.
+    pub dead_extra: i32,
+    /// A paused server (given up on after errors, see
+    /// [`DonorServer::paused`]) leaves its articles unreached at once
+    /// instead of the check waiting out its pause, even when no other
+    /// server can answer. A fleet probe sets it: a copy the only server
+    /// could not be asked about is unverified and probed again later (F6),
+    /// and its check never sleeps through a 30 s pause inside its budget.
+    pub skip_paused: bool,
 }
 
 impl Default for DonorOptions {
@@ -1092,6 +1116,10 @@ impl Default for DonorOptions {
             probe: 10,
             budget_ms: 120_000,
             deadline_ms: 0,
+            lanes: 1,
+            posting_budget_ms: 0,
+            dead_extra: 0,
+            skip_paused: false,
         }
     }
 }
@@ -1296,7 +1324,17 @@ impl DonorServer {
     }
 
     pub fn ask<F: Fn() -> bool>(&self, batch: &[DonorRequest], cancelled: F) -> Vec<DonorAnswer> {
+        self.ask_opts(batch, cancelled, false)
+    }
+
+    /// [`Self::ask`]; with `skip_paused` a pause found on entry (another
+    /// walker's third failure since the caller looked) leaves the batch
+    /// unreached at once instead of sleeping through it.
+    pub fn ask_opts<F: Fn() -> bool>(&self, batch: &[DonorRequest], cancelled: F, skip_paused: bool) -> Vec<DonorAnswer> {
         let over = || donor_stopping() || cancelled();
+        if skip_paused && self.paused() {
+            return vec![DonorAnswer::Unreached; batch.len()];
+        }
         while self.down_until_ms.load(std::sync::atomic::Ordering::SeqCst) - donor_now_ms() > 0
             && !over()
         {
@@ -1388,6 +1426,25 @@ pub fn donor_check_items_guarded(
     budget_ms: i32,
     keepalive: Option<std::sync::Arc<dyn Send + Sync>>,
 ) -> DonorHealthResult {
+    donor_check_items_lanes(servers, items, budget_ms, 1, false, keepalive)
+}
+
+/// [`donor_check_items_guarded`] with `lanes` walkers per server: each takes
+/// the next unsettled articles of a cursor the server's walkers share, on a
+/// connection of its own, so a server slow per request answers `lanes`
+/// requests at once. At the end of `budget_ms` what settled is counted and
+/// the rest is left unknown (neither present nor missing). With
+/// `skip_paused` a paused server's articles are unreached at once, never
+/// waited for ([`DonorOptions::skip_paused`]).
+pub fn donor_check_items_lanes(
+    servers: &[std::sync::Arc<DonorServer>],
+    items: &[DonorItem],
+    budget_ms: i32,
+    lanes: i32,
+    skip_paused: bool,
+    keepalive: Option<std::sync::Arc<dyn Send + Sync>>,
+) -> DonorHealthResult {
+    let lanes = lanes.clamp(1, 16) as usize;
     let mut health = DonorHealthResult {
         checked: items.len() as i32,
         ..Default::default()
@@ -1401,6 +1458,8 @@ pub fn donor_check_items_guarded(
         servers: Vec<std::sync::Arc<DonorServer>>,
         final_verdict: Vec<std::sync::atomic::AtomicI32>,
         stop: std::sync::atomic::AtomicBool,
+        /// articles a walker left unreached because its server was paused
+        pause_skipped: Vec<std::sync::atomic::AtomicBool>,
         mutex: std::sync::Mutex<(Vec<Vec<DonorAnswer>>, Vec<bool>, usize)>,
         cond: std::sync::Condvar,
         /// walkers still on their pass; when none are left, articles every
@@ -1423,15 +1482,24 @@ pub fn donor_check_items_guarded(
             .map(|_| std::sync::atomic::AtomicI32::new(0))
             .collect(),
         stop: std::sync::atomic::AtomicBool::new(false),
+        pause_skipped: (0..count)
+            .map(|_| std::sync::atomic::AtomicBool::new(false))
+            .collect(),
         mutex: std::sync::Mutex::new((
             vec![vec![DonorAnswer::None; servers.len()]; count],
             vec![false; count],
             count,
         )),
         cond: std::sync::Condvar::new(),
-        walking: std::sync::atomic::AtomicUsize::new(servers.len()),
+        walking: std::sync::atomic::AtomicUsize::new(servers.len() * lanes),
         _keepalive: keepalive,
     });
+    // one cursor per server, shared by its lanes
+    let cursors: std::sync::Arc<Vec<std::sync::atomic::AtomicUsize>> = std::sync::Arc::new(
+        (0..servers.len())
+            .map(|_| std::sync::atomic::AtomicUsize::new(0))
+            .collect(),
+    );
     // Rebind gates so their settled closure reads `state.final_verdict[i]`
     let mut gates_bound = Vec::with_capacity(count);
     for (i, item) in items.iter().enumerate() {
@@ -1446,10 +1514,11 @@ pub fn donor_check_items_guarded(
     }
     let gates_arc = std::sync::Arc::new(gates_bound);
 
-    for s in 0..servers.len() {
+    for s in (0..servers.len()).flat_map(|s| std::iter::repeat_n(s, lanes)) {
         DONOR_WALKERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let st = state.clone();
         let gt = gates_arc.clone();
+        let cursors = cursors.clone();
         std::thread::spawn(move || {
             struct WalkerGuard(std::sync::Arc<SharedCheckState>);
             impl Drop for WalkerGuard {
@@ -1464,17 +1533,20 @@ pub fn donor_check_items_guarded(
             }
             let _guard = WalkerGuard(st.clone());
             let server = &st.servers[s];
-            let mut cursor = 0usize;
-            while cursor < st.items.len() {
+            let cursor = &cursors[s];
+            while cursor.load(std::sync::atomic::Ordering::SeqCst) < st.items.len() {
                 if st.stop.load(std::sync::atomic::Ordering::SeqCst) || donor_stopping() {
                     return;
                 }
                 let mut todo = Vec::new();
-                while cursor < st.items.len() && (todo.len() as i32) < server.depth() {
-                    if st.final_verdict[cursor].load(std::sync::atomic::Ordering::SeqCst) == 0 {
-                        todo.push(cursor);
+                while (todo.len() as i32) < server.depth() {
+                    let at = cursor.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if at >= st.items.len() {
+                        break;
                     }
-                    cursor += 1;
+                    if st.final_verdict[at].load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                        todo.push(at);
+                    }
                 }
                 if todo.is_empty() {
                     continue;
@@ -1484,7 +1556,12 @@ pub fn donor_check_items_guarded(
                     .iter()
                     .enumerate()
                     .any(|(idx, srv)| idx != s && !srv.paused());
-                let answers = if server.paused() && others_can_answer {
+                let answers = if server.paused() && (others_can_answer || skip_paused) {
+                    if !others_can_answer {
+                        for &idx in &todo {
+                            st.pause_skipped[idx].store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
                     vec![DonorAnswer::Unreached; todo.len()]
                 } else {
                     let batch: Vec<DonorRequest> = todo
@@ -1496,9 +1573,21 @@ pub fn donor_check_items_guarded(
                         })
                         .collect();
                     let st_cancel = st.clone();
-                    server.ask(&batch, move || {
-                        st_cancel.stop.load(std::sync::atomic::Ordering::SeqCst)
-                    })
+                    let answers = server.ask_opts(
+                        &batch,
+                        move || st_cancel.stop.load(std::sync::atomic::Ordering::SeqCst),
+                        skip_paused,
+                    );
+                    if skip_paused
+                        && !others_can_answer
+                        && server.paused()
+                        && answers.iter().all(|a| *a == DonorAnswer::Unreached)
+                    {
+                        for &idx in &todo {
+                            st.pause_skipped[idx].store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
+                    answers
                 };
 
                 let mut guard = st.mutex.lock().unwrap_or_else(|e| e.into_inner());
@@ -1561,6 +1650,9 @@ pub fn donor_check_items_guarded(
             }
         }
         let v = state.final_verdict[i].load(std::sync::atomic::Ordering::SeqCst);
+        if v == 0 && state.pause_skipped[i].load(std::sync::atomic::Ordering::SeqCst) {
+            health.paused += 1;
+        }
         donor_health_accum_verdict_counts(
             v,
             1,
@@ -1606,19 +1698,62 @@ pub fn donor_check_posting_guarded(
     };
 
     let deadline = donor_now_ms() + (options.budget_ms as i64);
+    let lanes = options.lanes;
     let mut health =
-        donor_check_items_guarded(servers, &first, options.budget_ms, keepalive.clone());
+        donor_check_items_lanes(servers, &first, options.budget_ms, lanes, options.skip_paused, keepalive.clone());
+    let probed: std::collections::BTreeSet<&str> =
+        first.iter().map(|it| it.message_id.as_str()).collect();
+    let rest: Vec<DonorItem> = items
+        .iter()
+        .filter(|it| !probed.contains(it.message_id.as_str()))
+        .cloned()
+        .collect();
+    let rem_budget = || (deadline - donor_now_ms()).max(10) as i32;
     if full && !donor_dead_probe(&health) {
-        let probed: std::collections::BTreeSet<&str> =
-            first.iter().map(|it| it.message_id.as_str()).collect();
-        let rest: Vec<DonorItem> = items
-            .into_iter()
-            .filter(|it| !probed.contains(it.message_id.as_str()))
-            .collect();
-        let rem_budget = (deadline - donor_now_ms()).max(10) as i32;
-        health += donor_check_items_guarded(servers, &rest, rem_budget, keepalive);
+        health += donor_check_items_lanes(servers, &rest, rem_budget(), lanes, options.skip_paused, keepalive);
+    } else if full && options.dead_extra > 0 && deadline - donor_now_ms() > 1000 {
+        // every probed article missing: a few more tell 0% from ~2% alive
+        let extra = dead_extra_items(&rest, ids, groups, &probed, options);
+        if !extra.is_empty() {
+            health += donor_check_items_lanes(servers, &extra, rem_budget(), lanes, options.skip_paused, keepalive);
+        }
     }
     health
+}
+
+/// The articles a probe that found every article missing adds
+/// ([`DonorOptions::dead_extra`]): the next ones of the sample, else more
+/// picked from the posting, never one asked already.
+fn dead_extra_items(
+    rest: &[DonorItem],
+    ids: &[String],
+    groups: &std::sync::Arc<Vec<String>>,
+    probed: &std::collections::BTreeSet<&str>,
+    options: &DonorOptions,
+) -> Vec<DonorItem> {
+    let want = options.dead_extra.max(0) as usize;
+    let mut out: Vec<DonorItem> = rest.iter().take(want).cloned().collect();
+    if out.len() < want {
+        let mut more = options.sample;
+        more.percent = 0;
+        more.minimum = (options.probe.max(0) as usize + want) as i32;
+        more.maximum = more.minimum;
+        more.max_body = 0;
+        for it in donor_plan(ids, groups, &more) {
+            if out.len() >= want {
+                break;
+            }
+            if !probed.contains(it.message_id.as_str())
+                && !out.iter().any(|o| o.message_id == it.message_id)
+            {
+                out.push(it);
+            }
+        }
+    }
+    for it in &mut out {
+        it.body = false;
+    }
+    out
 }
 
 pub struct DonorPosting {
@@ -1651,6 +1786,25 @@ pub fn donor_check_postings_guarded<F>(
 ) where
     F: Fn(&str, &DonorHealthResult) + Send + Sync,
 {
+    donor_check_postings_timed(servers, postings, options, full, concurrency, keepalive, |k, h, _| {
+        emit(k, h)
+    });
+}
+
+/// [`donor_check_postings_guarded`] whose `emit` also gets the time the
+/// posting's own check took, in ms; each posting is checked for at most
+/// [`DonorOptions::posting_budget_ms`] (when set) from its own start.
+pub fn donor_check_postings_timed<F>(
+    servers: &[std::sync::Arc<DonorServer>],
+    postings: &[DonorPosting],
+    options: &DonorOptions,
+    full: bool,
+    concurrency: i32,
+    keepalive: Option<std::sync::Arc<dyn Send + Sync>>,
+    emit: F,
+) where
+    F: Fn(&str, &DonorHealthResult, i64) + Send + Sync,
+{
     let next = std::sync::atomic::AtomicUsize::new(0);
     let thread_count = postings.len().min(concurrency.max(1) as usize);
     let next_ref = &next;
@@ -1671,10 +1825,14 @@ pub fn donor_check_postings_guarded<F>(
                     }
                     own.budget_ms = own.budget_ms.min(left as i32);
                 }
+                if options.posting_budget_ms > 0 {
+                    own.budget_ms = own.budget_ms.min(options.posting_budget_ms);
+                }
                 let p = &postings[idx];
+                let start = donor_now_ms();
                 let h =
                     donor_check_posting_guarded(servers, &p.ids, &p.groups, &own, full, ka.clone());
-                emit_ref(&p.key, &h);
+                emit_ref(&p.key, &h, donor_now_ms() - start);
             });
         }
     });
@@ -4387,6 +4545,261 @@ mod tests {
         assert!(fleet_member_skip_reason(false, 7, false).is_some());
     }
 
+    /// B1: a cut check keeps what it measured once articles were found, and
+    /// stays unknown with none.
+    #[test]
+    fn a_cut_check_keeps_what_it_measured() {
+        // a cut check (some sampled articles never answered) keeps what was
+        // measured once articles were found, and stays unknown with none
+        let (alive, dead, _) = eval_fleet_member_health(true, false, 34, 166, 0, DONOR_MIN_KNOWN, 50);
+        assert_eq!((alive, dead), (17, true));
+        let (alive, dead, _) = eval_fleet_member_health(true, false, 0, 7, 0, DONOR_MIN_KNOWN, 50);
+        assert_eq!((alive, dead), (-1, false));
+    }
+
+    /// B1: a server that answers a STAT only after a while is asked several
+    /// requests at once (lanes, each on a connection of its own), a posting is
+    /// checked for at most its own budget and keeps what it measured, and a
+    /// probe whose first ten articles were all missing asks a few more before
+    /// the copy is called dead.
+    #[test]
+    fn slow_servers_are_asked_in_lanes_within_the_posting_budget() {
+        use std::sync::atomic::{AtomicI32, Ordering};
+        use std::sync::Arc;
+        struct Slow {
+            delay_ms: u64,
+            present: std::collections::BTreeSet<String>,
+            active: AtomicI32,
+            peak: AtomicI32,
+            asked: AtomicI32,
+        }
+        impl DonorServerExchange for Arc<Slow> {
+            fn exchange(&self, batch: &[DonorRequest]) -> Result<Vec<DonorAnswer>, DonorExchangeError> {
+                let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+                self.peak.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(self.delay_ms * batch.len() as u64));
+                self.asked.fetch_add(batch.len() as i32, Ordering::SeqCst);
+                self.active.fetch_sub(1, Ordering::SeqCst);
+                Ok(batch
+                    .iter()
+                    .map(|r| {
+                        if self.present.contains(&r.message_id) {
+                            DonorAnswer::Present
+                        } else {
+                            DonorAnswer::Missing
+                        }
+                    })
+                    .collect())
+            }
+        }
+        // the stop flag is process-wide: other donor tests stop and reset it
+        let _donor_guard = DONOR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        donor_stop_all();
+        donor_wait_all();
+        donor_reset();
+        let ids: Vec<String> = (0..400).map(|i| format!("lane{i}@x")).collect();
+        let groups = Arc::new(Vec::<String>::new());
+        let opts = |lanes: i32, posting_budget_ms: i32, dead_extra: i32| DonorOptions {
+            sample: DonorSampleOptions {
+                percent: 100,
+                minimum: 1,
+                maximum: 200,
+                body_percent: 0,
+                max_body: 0,
+                seed: 0,
+            },
+            probe: 10,
+            budget_ms: 60_000,
+            deadline_ms: 0,
+            lanes,
+            posting_budget_ms,
+            dead_extra,
+            skip_paused: false,
+        };
+        // every article present, 20 ms a request: four lanes at once
+        let all = Arc::new(Slow {
+            delay_ms: 20,
+            present: ids.iter().cloned().collect(),
+            active: AtomicI32::new(0),
+            peak: AtomicI32::new(0),
+            asked: AtomicI32::new(0),
+        });
+        let server = Arc::new(DonorServer::new(8, all.clone()));
+        let posting = DonorPosting { key: "a".into(), ids: ids.clone(), groups: groups.clone() };
+        let got = std::sync::Mutex::new(Vec::new());
+        donor_check_postings_timed(&[server], std::slice::from_ref(&posting), &opts(4, 0, 0), true, 1, None, |_, h, ms| {
+            got.lock().unwrap().push((*h, ms))
+        });
+        let (h, _) = got.lock().unwrap()[0];
+        assert_eq!(h.present, 200);
+        assert!(all.peak.load(Ordering::SeqCst) >= 3, "lanes ask at once: {}", all.peak.load(Ordering::SeqCst));
+        // half missing and 25 ms a request: cut at its 600 ms budget,
+        // what was measured kept
+        let some = Arc::new(Slow {
+            delay_ms: 25,
+            present: ids.iter().step_by(2).cloned().collect(),
+            active: AtomicI32::new(0),
+            peak: AtomicI32::new(0),
+            asked: AtomicI32::new(0),
+        });
+        let server = Arc::new(DonorServer::new(8, some.clone()));
+        let got = std::sync::Mutex::new(Vec::new());
+        let start = std::time::Instant::now();
+        donor_check_postings_timed(&[server], std::slice::from_ref(&posting), &opts(1, 600, 0), true, 1, None, |_, h, ms| {
+            got.lock().unwrap().push((*h, ms))
+        });
+        assert!(start.elapsed() < std::time::Duration::from_millis(1500), "{:?}", start.elapsed());
+        let (h, ms) = got.lock().unwrap()[0];
+        assert!(ms < 1000, "{ms}");
+        assert!(h.answered() < h.checked && h.answered() >= 10, "{h:?}");
+        // every article missing but one in forty: ten probed missing, then
+        // more are asked, so the copy is not dead from ten
+        let rare = Arc::new(Slow {
+            delay_ms: 1,
+            present: ids.iter().skip(5).step_by(40).cloned().collect(),
+            active: AtomicI32::new(0),
+            peak: AtomicI32::new(0),
+            asked: AtomicI32::new(0),
+        });
+        let server = Arc::new(DonorServer::new(8, rare.clone()));
+        let none_present = DonorPosting { key: "r".into(), ids: ids.clone(), groups: groups.clone() };
+        let got = std::sync::Mutex::new(Vec::new());
+        donor_check_postings_timed(&[server.clone()], std::slice::from_ref(&none_present), &opts(2, 0, 30), true, 1, None, |_, h, _| {
+            got.lock().unwrap().push(*h)
+        });
+        let h = got.lock().unwrap()[0];
+        assert!(h.present + h.missing > 10, "more than ten asked: {h:?}");
+        assert!(h.present + h.missing <= 40, "at most ten and the extra: {h:?}");
+        // without the extra the probe stops at ten (as before)
+        let got = std::sync::Mutex::new(Vec::new());
+        let dead_only = Arc::new(Slow {
+            delay_ms: 1,
+            present: Default::default(),
+            active: AtomicI32::new(0),
+            peak: AtomicI32::new(0),
+            asked: AtomicI32::new(0),
+        });
+        let server = Arc::new(DonorServer::new(8, dead_only));
+        donor_check_postings_timed(&[server], std::slice::from_ref(&none_present), &opts(1, 0, 0), true, 1, None, |_, h, _| {
+            got.lock().unwrap().push(*h)
+        });
+        let h = got.lock().unwrap()[0];
+        assert_eq!((h.present, h.missing), (0, 10));
+    }
+
+    /// F7 (coordinator audit of fleet-e2e-6790): after three failed
+    /// exchanges a server is paused for 30 s, and a check whose only server
+    /// was paused slept through the pause inside the copy's budget. A fleet
+    /// probe (`skip_paused`) leaves the paused server's articles unreached at
+    /// once: the copy is unverified (alive -1, never dead) and its check ends
+    /// in well under a second; an ordinary check still waits (its budget).
+    #[test]
+    fn a_paused_server_never_stalls_a_fleet_probe() {
+        use std::sync::atomic::{AtomicI32, Ordering};
+        use std::sync::Arc;
+        struct Broken {
+            exchanges: AtomicI32,
+        }
+        impl DonorServerExchange for Arc<Broken> {
+            fn exchange(&self, _batch: &[DonorRequest]) -> Result<Vec<DonorAnswer>, DonorExchangeError> {
+                self.exchanges.fetch_add(1, Ordering::SeqCst);
+                Err(DonorExchangeError::default())
+            }
+        }
+        let _donor_guard = DONOR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        donor_stop_all();
+        donor_wait_all();
+        donor_reset();
+        let ids: Vec<String> = (0..200).map(|i| format!("pause{i}@x")).collect();
+        let groups = Arc::new(Vec::<String>::new());
+        let posting = DonorPosting { key: "p".into(), ids: ids.clone(), groups: groups.clone() };
+        let opts = |skip_paused: bool| DonorOptions {
+            sample: DonorSampleOptions {
+                percent: 100,
+                minimum: 1,
+                maximum: 200,
+                body_percent: 0,
+                max_body: 0,
+                seed: 0,
+            },
+            probe: 10,
+            budget_ms: 60_000,
+            deadline_ms: 0,
+            lanes: 4,
+            posting_budget_ms: 3_000,
+            dead_extra: 30,
+            skip_paused,
+        };
+        let broken = Arc::new(Broken { exchanges: AtomicI32::new(0) });
+        let server = Arc::new(DonorServer::new(8, broken.clone()));
+        server.set_retry_after_ms(30_000);
+        let got = std::sync::Mutex::new(Vec::new());
+        let start = std::time::Instant::now();
+        donor_check_postings_timed(&[server.clone()], std::slice::from_ref(&posting), &opts(true), true, 1, None, |_, h, ms| {
+            got.lock().unwrap().push((*h, ms))
+        });
+        assert!(start.elapsed() < std::time::Duration::from_millis(1000), "{:?}", start.elapsed());
+        assert!(server.paused());
+        let (h, _) = got.lock().unwrap()[0];
+        assert_eq!((h.present, h.missing), (0, 0), "{h:?}");
+        // the fleet's judgement: errors and unreached articles are no evidence
+        let fleet = |h: &DonorHealthResult| eval_fleet_member_health(true, true, h.present, h.missing, h.error, 5, 80);
+        assert_eq!(fleet(&h), (-1, false, false), "unverified, never dead: {h:?}");
+        assert!(!donor_dead_probe(&h));
+        assert!(h.paused > 0 && h.paused <= h.checked, "the pause cut the sample: {h:?}");
+        // the paused server is not asked again while paused
+        let before = broken.exchanges.load(Ordering::SeqCst);
+        let got = std::sync::Mutex::new(Vec::new());
+        let start = std::time::Instant::now();
+        donor_check_postings_timed(&[server.clone()], std::slice::from_ref(&posting), &opts(true), true, 1, None, |_, h, _| {
+            got.lock().unwrap().push(*h)
+        });
+        assert!(start.elapsed() < std::time::Duration::from_millis(500), "{:?}", start.elapsed());
+        assert_eq!(broken.exchanges.load(Ordering::SeqCst), before);
+        let h = got.lock().unwrap()[0];
+        assert_eq!((h.present, h.missing, h.error), (0, 0, 0), "{h:?}");
+        assert_eq!(h.paused, h.checked, "every article left by the pause: {h:?}");
+        assert_eq!(fleet(&h), (-1, false, false));
+        // review of 36e4f2cb: a few real 430s, then the only server pauses:
+        // the rest of the sample (and the extra STATs) is left by the pause,
+        // counted in `paused`, so the copy is not judged on the few answers
+        struct Then {
+            exchanges: AtomicI32,
+        }
+        impl DonorServerExchange for Arc<Then> {
+            fn exchange(&self, batch: &[DonorRequest]) -> Result<Vec<DonorAnswer>, DonorExchangeError> {
+                if self.exchanges.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Ok(vec![DonorAnswer::Missing; batch.len()])
+                } else {
+                    Err(DonorExchangeError::default())
+                }
+            }
+        }
+        let then = Arc::new(Then { exchanges: AtomicI32::new(0) });
+        let server = Arc::new(DonorServer::new(8, then));
+        server.set_retry_after_ms(30_000);
+        let one_lane = DonorOptions { lanes: 1, ..opts(true) };
+        let got = std::sync::Mutex::new(Vec::new());
+        let start = std::time::Instant::now();
+        donor_check_postings_timed(&[server.clone()], std::slice::from_ref(&posting), &one_lane, true, 1, None, |_, h, _| {
+            got.lock().unwrap().push(*h)
+        });
+        assert!(start.elapsed() < std::time::Duration::from_millis(1000), "{:?}", start.elapsed());
+        let h = got.lock().unwrap()[0];
+        assert!(h.missing > 0 && h.present == 0, "{h:?}");
+        assert!(h.paused > 0, "the pause cut the sample: {h:?}");
+        assert!(server.paused());
+        // without skip_paused the check waits for the pause, cut only by the
+        // copy's 3 s budget (an ordinary DupeSearch check keeps that)
+        let start = std::time::Instant::now();
+        donor_check_postings_timed(&[server.clone()], std::slice::from_ref(&posting), &opts(false), true, 1, None, |_, _, _| {});
+        let waited = start.elapsed();
+        assert!(waited >= std::time::Duration::from_millis(2_500) && waited < std::time::Duration::from_millis(6_000), "{waited:?}");
+        donor_stop_all();
+        donor_wait_all();
+        donor_reset();
+    }
+
     /// F6: timeouts are never evidence: a copy whose checks only timed out is
     /// unknown (unverified, -1) and not complete, never dead or 0% alive; the
     /// errors don't water down the share of the articles that did answer.
@@ -5689,6 +6102,7 @@ mod tests {
             probe: 10,
             budget_ms: 10_000,
             deadline_ms: 0,
+            ..Default::default()
         };
 
         donor_reset();
@@ -5732,6 +6146,7 @@ mod tests {
             error,
             body_checked: 0,
             body_bad: 0,
+            paused: 0,
         };
         assert_eq!(mk_h(300, 0, 1, 299).alive(), 0.0);
         assert_eq!(mk_h(300, 150, 0, 150).alive(), 0.5);

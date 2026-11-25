@@ -1048,6 +1048,89 @@ fn keep_priority(files: &[Vec<u8>], priority: c_int) {
     }
 }
 
+/// Longest line [`fleet_summary_lines`] writes: a log line is cut at 1023
+/// bytes, which lost the outcome of the later copies of a big fleet.
+pub const FLEET_SUMMARY_LINE_MAX: usize = 900;
+
+/// The log lines summing up a fleet sent from NzbDir (B4): a first line with
+/// what downloads and how many copies ended how, then the copies with their
+/// outcome over as many lines as it takes, none over
+/// [`FLEET_SUMMARY_LINE_MAX`] (a name longer than that alone is cut).
+pub fn fleet_summary_lines(
+    key: &[u8],
+    reason: &[u8],
+    chosen: c_int,
+    added: &[(Vec<u8>, c_int, Vec<u8>)],
+) -> Vec<Vec<u8>> {
+    let mut head = b"Fleet ".to_vec();
+    head.extend_from_slice(key);
+    head.extend_from_slice(b" from NzbDir: ");
+    let mut said = Vec::new();
+    if chosen > 0 {
+        said.push(format!("downloading #{chosen}").into_bytes());
+    }
+    if !reason.is_empty() {
+        said.push(reason.to_vec());
+    }
+    if said.is_empty() {
+        said.push(b"nothing queued".to_vec());
+    }
+    head.extend_from_slice(&said.join(&b", "[..]));
+    let mut counts: Vec<(Vec<u8>, usize)> = Vec::new();
+    for (_, _, status) in added {
+        match counts.iter_mut().find(|(s, _)| s == status) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((status.clone(), 1)),
+        }
+    }
+    head.extend_from_slice(format!("; {} cop(ies)", added.len()).as_bytes());
+    for (i, (status, n)) in counts.iter().enumerate() {
+        head.extend_from_slice(if i == 0 { b": " } else { b", " });
+        head.extend_from_slice(format!("{n} ").as_bytes());
+        head.extend_from_slice(status);
+    }
+    truncate_utf8(&mut head, FLEET_SUMMARY_LINE_MAX);
+    let mut lines = vec![head];
+    let mut prefix = b"Fleet ".to_vec();
+    prefix.extend_from_slice(key);
+    prefix.extend_from_slice(b" from NzbDir, copies: ");
+    let mut line = prefix.clone();
+    for (name, id, status) in added {
+        let mut item = crate::releasename::log_name(name);
+        item.push(b' ');
+        item.extend_from_slice(status);
+        if *id > 0 {
+            item.extend_from_slice(format!(" #{id}").as_bytes());
+        }
+        let sep = if line.len() > prefix.len() { 2 } else { 0 };
+        if line.len() > prefix.len() && line.len() + sep + item.len() > FLEET_SUMMARY_LINE_MAX {
+            lines.push(std::mem::replace(&mut line, prefix.clone()));
+        }
+        if line.len() > prefix.len() {
+            line.extend_from_slice(b"; ");
+        }
+        line.extend_from_slice(&item);
+        truncate_utf8(&mut line, FLEET_SUMMARY_LINE_MAX);
+    }
+    if line.len() > prefix.len() {
+        lines.push(line);
+    }
+    lines
+}
+
+/// `v` cut to at most `max` bytes, never inside a UTF-8 sequence (names are
+/// bytes and may not be UTF-8: only continuation bytes are backed over).
+fn truncate_utf8(v: &mut Vec<u8>, max: usize) {
+    if v.len() <= max {
+        return;
+    }
+    let mut end = max;
+    while end > 0 && (v[end] & 0xC0) == 0x80 {
+        end -= 1;
+    }
+    v.truncate(end);
+}
+
 /// Whether a fleet call from NzbDir did nothing with its copies, so they go
 /// back for the next scan: nothing was added and the reply says the key was
 /// busy, the program stops, or no member came through.
@@ -1128,23 +1211,9 @@ fn spawn_nzbdir_fleet(
                     }
                     keep_priority(&copies.iter().map(|c| c.3.clone()).collect::<Vec<_>>(), priority);
                 }
-                let mut msg = b"Fleet ".to_vec();
-                msg.extend_from_slice(&key);
-                msg.extend_from_slice(b" from NzbDir: ");
-                msg.extend_from_slice(&reply.reason);
-                if reply.chosen > 0 {
-                    msg.extend_from_slice(format!(", downloading #{}", reply.chosen).as_bytes());
+                for msg in fleet_summary_lines(&key, &reply.reason, reply.chosen, &reply.added) {
+                    emit_log(&env, LOG_INFO, &msg);
                 }
-                for (name, id, status) in &reply.added {
-                    msg.extend_from_slice(b"; ");
-                    msg.extend_from_slice(&crate::releasename::log_name(name));
-                    msg.extend_from_slice(b" ");
-                    msg.extend_from_slice(status);
-                    if *id > 0 {
-                        msg.extend_from_slice(format!(" #{id}").as_bytes());
-                    }
-                }
-                emit_log(&env, LOG_INFO, &msg);
             }
             #[cfg(not(unix))]
             {
@@ -2455,6 +2524,40 @@ pub(crate) unsafe fn add_cli_nzb_file_active(
 
 #[cfg(test)]
 mod tests {
+    /// B4: the summary of a fleet from NzbDir names what downloads first
+    /// (never an empty reason) and lists every copy over lines short enough
+    /// for the log, instead of one line cut at 1023 bytes.
+    #[test]
+    fn a_fleet_summary_is_split_never_cut() {
+        let key = b"dupes:dune.part.two.2024.uhd.bluray.2160p.truehd.atmos.7.1.dv.hevc.remux.framestor";
+        let added: Vec<(Vec<u8>, c_int, Vec<u8>)> = (0..17)
+            .map(|i| {
+                (
+                    format!("Dune.Part.Two.2024.UHD.BluRay.2160p.TrueHD.Atmos.7.1.DV.HEVC.REMUX-FraMeSToR_{i}.nzb").into_bytes(),
+                    if i < 14 { 460 + i } else { 0 },
+                    if i == 0 { b"QUEUED".to_vec() } else if i < 14 { b"BACKUP".to_vec() } else { b"SAME_POSTING".to_vec() },
+                )
+            })
+            .collect();
+        let lines = super::fleet_summary_lines(key, b"", 460, &added);
+        let first = String::from_utf8_lossy(&lines[0]).to_string();
+        assert!(first.contains("from NzbDir: downloading #460; 17 cop(ies): 1 QUEUED, 13 BACKUP, 3 SAME_POSTING"), "{first}");
+        assert!(!first.contains(": ,"), "{first}");
+        assert!(lines.len() > 2);
+        assert!(lines.iter().all(|l| l.len() <= super::FLEET_SUMMARY_LINE_MAX));
+        let all = lines.iter().map(|l| String::from_utf8_lossy(l).to_string()).collect::<Vec<_>>().join("\n");
+        for i in 0..17 {
+            assert!(all.contains(&format!("FraMeSToR_{i}.nzb ")), "copy {i} listed");
+        }
+        assert!(all.contains("FraMeSToR_16.nzb SAME_POSTING"));
+        // a name longer than a line is cut, never inside a UTF-8 character
+        let long = ("é".repeat(600) + ".nzb").into_bytes();
+        let cut = super::fleet_summary_lines(key, b"", 9, &[(long, 9, b"BACKUP".to_vec())]);
+        assert!(cut.iter().all(|l| std::str::from_utf8(l).is_ok() && l.len() <= super::FLEET_SUMMARY_LINE_MAX));
+        let none = super::fleet_summary_lines(key, b"KEY_BUSY", 0, &[]);
+        assert_eq!(none.len(), 1);
+        assert!(String::from_utf8_lossy(&none[0]).contains("from NzbDir: KEY_BUSY; 0 cop(ies)"));
+    }
     #[test]
     fn a_scan_folder_that_cannot_be_read_is_warned_about_once_until_it_works() {
         let a = b"Could not scan /nonexistent/rg/nzb for archives: No such file or directory";

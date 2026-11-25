@@ -1843,6 +1843,12 @@ mod native {
                     continue;
                 }
                 let partial = cf.status == CF_PARTIAL;
+                // a file deleted from the queue with the download (parked on
+                // health) has no article list left: nothing to sample, and no
+                // "Error reading diskstate" for it (B4)
+                if !crate::diskstate_format::active_file_info_exists(cf.id) {
+                    continue;
+                }
                 let (fi_ptr, state_loaded) = self.disk_load_file_for_inspect(cf.id, false, partial);
                 if fi_ptr.is_none() {
                     continue;

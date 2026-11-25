@@ -10821,6 +10821,19 @@ impl CrossPackRepairSession {
         let _permit = context
             .try_permit()
             .map_err(|blocked| format!("the volume is not writable now ({blocked:?})"))?;
+        // Leftovers of an earlier write of this volume (a crash) go first.
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            let mut suffix = std::ffi::OsString::from("-");
+            suffix.push(leaf);
+            suffix.push(".tmp");
+            let suffix = suffix.to_string_lossy().into_owned();
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with(".rustyget-dead-") && name.ends_with(&suffix) {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
         let mut temp_name = std::ffi::OsString::from(format!(
             ".rustyget-dead-{}-{}-",
             std::process::id(),

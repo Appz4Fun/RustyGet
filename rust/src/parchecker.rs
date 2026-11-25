@@ -895,7 +895,9 @@ impl ActiveStreamingSession {
         let hint = first_article_hash16k(&bytes);
         let bound = live_hash16k(hint.as_bytes())
             .filter(|hash| !self.shared_hash16k.contains(hash))
-            .and_then(|_| live_source_id(self, Some(queue_id), identity.1, hint.as_bytes()).ok())
+            .and_then(|_| {
+                resolve_live_source_id(self, Some(queue_id), identity.1, hint.as_bytes()).ok()
+            })
             .filter(|id| {
                 let length = self.file_lengths[id];
                 size <= length && (bytes.len() >= 16 * 1024 || length == size)
@@ -906,6 +908,11 @@ impl ActiveStreamingSession {
             self.release_unbound(queue_id);
             return Err(unknown());
         };
+        // Accepted: later articles of this queue file resolve to it.
+        self.queue_bindings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(queue_id, id);
         if let Some(path) = written {
             self.note_written(id, path);
         }
@@ -928,9 +935,7 @@ impl ActiveStreamingSession {
                 queue.bytes -= data.len() as u64;
                 continue;
             }
-            if queue.captured.len() < LIVE_MARK_LIMIT {
-                queue.captured.insert((id, offset));
-            }
+            // No capture mark: its cache write may have happened while it waited.
             queue.pending.push_back(DeferredArticle {
                 file_id: id,
                 offset,
@@ -2015,8 +2020,17 @@ pub(crate) fn streaming_session_queue_completed_file(
     bytes: u64,
     capture: impl FnOnce() -> Result<LiveCompletedFile, RepairError>,
 ) -> Result<(), RepairError> {
-    let charge = reserve_control(nzb_id, bytes, effective_live_pool_bytes())?;
+    let charge = reserve_control(nzb_id, bytes, effective_live_pool_bytes());
     let file = capture()?;
+    // The file is complete: articles still waiting for it to be bound never will be, on
+    // every exit below.
+    if let (Some(entry), Some(queue_id)) = (
+        active_streaming_session(nzb_id),
+        file.queued_id.and_then(|id| i32::try_from(id).ok()),
+    ) {
+        entry.release_unbound(queue_id);
+    }
+    let charge = charge?;
     let actual = file.name.capacity()
         + file.hash16k.capacity()
         + file.base_dir.capacity()
@@ -2030,15 +2044,7 @@ pub(crate) fn streaming_session_queue_completed_file(
         ));
     }
     let writers = download_writes(nzb_id, &file.base_dir).map_err(|_| RepairError::Cancelled)?;
-    let entry = active_streaming_session(nzb_id);
-    // The file is complete: articles still waiting for it to be bound never will be.
-    if let (Some(entry), Some(queue_id)) = (
-        entry.as_ref(),
-        file.queued_id.and_then(|id| i32::try_from(id).ok()),
-    ) {
-        entry.release_unbound(queue_id);
-    }
-    let generation = entry.map(|entry| entry.generation);
+    let generation = active_streaming_session(nzb_id).map(|entry| entry.generation);
     COMPLETED_LIVE_FILES
         .lock()
         .unwrap_or_else(|e| e.into_inner())

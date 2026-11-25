@@ -11041,19 +11041,66 @@ def _livepar_run(daemon, t, tag, seed, missing, recovery):
 
 
 def scenario_liveparnocache(daemon, t):
-    """Live PAR with no article cache (ArticleCache=0): RAM never holds an article, so
-    every one is a cache miss. Live repair must not give up: each article is handed to
-    par-rs without its bytes, and par-rs reads its slice from the DirectWrite file
-    (set_target_path) once the slice is complete; the recovery volume is fetched for the
-    two damaged blocks, and the live repair rebuilds them as the download ends. No batch
-    par-repair runs."""
-    h, intact, io = _livepar_run(daemon, t, 'lnc', 12480, {0: {5}, 1: {5}}, 3)
+    """Live PAR with no article cache (ArticleCache=0): the article cache never holds an
+    article, so every one is a cache miss. The writer keeps each article's decoded bytes
+    for live PAR as it writes them to the DirectWrite file (within ParBuffer), and the
+    capture takes them there: par-rs reads nothing back from disk (source_bytes_read
+    0 MB; before, it read every slice back from the file). The recovery volume is fetched
+    for the two damaged blocks, and the live repair rebuilds them as the download ends.
+    No batch par-repair runs."""
+    h, intact, io, end_s = _livepar_run_timed(daemon, t, 'lnc', 12480, {0: {5}, 1: {5}}, 3)
     live = _grep_log(t, 'as the download ended')
     batch = _grep_log(t, 'PAR repair timings for')
     ok = (h['Status'].startswith('SUCCESS') and intact and live >= 1 and batch == 0
-          and io.get('misses', 0) > 0 and io.get('read_by_parrs', 0) > 0 and io.get('source_mb', 0) > 0)
-    return ('liveparnocache', ok, 'status=%s intact=%s live_repairs=%d batch_repairs=%d io=%s'
-            % (h['Status'], intact, live, batch, io))
+          and io.get('misses', 0) > 0 and io.get('source_mb', 1) == 0.0)
+    return ('liveparnocache', ok, 'status=%s intact=%s live_repairs=%d batch_repairs=%d end_to_history_s=%s io=%s'
+            % (h['Status'], intact, live, batch, end_s, io))
+
+
+def scenario_liveparobfuscated(daemon, t):
+    """Obfuscated data file names (not renamed while downloading: DirectRename=no), two
+    damaged blocks. The live repair at download end takes the damaged files under their
+    obfuscated names (the live binding names their par2 files), and post-processing's
+    par-rename keeps their certified CRCs: no batch par-repair reads the download again.
+    Before, the obfuscated targets were "unresolvable" and a batch repair ran."""
+    h, intact, io, end_s = _livepar_run_timed(daemon, t, 'lob', 12520, {0: {5}, 3: {12}}, 3,
+                                              obfuscate=True)
+    live = _grep_log(t, 'as the download ended')
+    batch = _grep_log(t, 'PAR repair timings for')
+    ok = h['Status'].startswith('SUCCESS') and intact and live >= 1 and batch == 0
+    return ('liveparobfuscated', ok, 'status=%s intact=%s live_repairs=%d batch_repairs=%d end_to_history_s=%s io=%s'
+            % (h['Status'], intact, live, batch, end_s, io))
+
+
+def _livepar_run_timed(daemon, t, tag, seed, missing, recovery, obfuscate=False):
+    """_livepar_run, timed from the end of the download (the job leaves the download
+    queue for post-processing) to its history entry. With ``obfuscate`` the data files are
+    posted under random names (the par2 files keep theirs). Returns (history, intact,
+    live I/O, seconds from download end to history or None)."""
+    import zlib
+    members, payloads = _livepar_release(t, tag, seed, missing, recovery)
+    if obfuscate:
+        members = [(p, n if n.endswith('.par2') else 'q%07x' % (zlib.crc32(n.encode()) & 0xfffffff),
+                    size, seg, lost) for (p, n, size, seg, lost) in members]
+    api = daemon.wait_ready()
+    daemon.append(api, 'Live', build_multi_nzb(members), False, tag + '-key', 100)
+    deadline = time.time() + 300
+    end = None
+    h = None
+    while time.time() < deadline:
+        h = next((x for x in api.history() if x.get('NZBName') == 'Live'), None)
+        if h:
+            break
+        g = next((g for g in api.listgroups() if g['NZBName'] == 'Live'), None)
+        if end is None and (g is None or str(g.get('Status', '')).startswith('PP_')):
+            end = time.time()
+        time.sleep(0.1)
+    if h is None:
+        raise RuntimeError('timeout waiting for Live in history')
+    done = time.time()
+    intact = all(_verify_output(t, data, name, dirs=(('main', 'dst'), ('main', 'inter')))
+                 for name, data in payloads.items())
+    return h, intact, _livepar_io(t), (round(done - end, 2) if end else None)
 
 
 def scenario_liveparplanned(daemon, t):
@@ -13200,6 +13247,7 @@ SCENARIOS = {
     'twinparrepair': scenario_twinparrepair,
     'pardamagerepairable': scenario_pardamagerepairable,
     'liveparnocache': scenario_liveparnocache,
+    'liveparobfuscated': scenario_liveparobfuscated,
     'liveparplanned': scenario_liveparplanned,
     'livepargrow': scenario_livepargrow,
     'parinplace': scenario_parinplace,
@@ -13593,6 +13641,8 @@ SCENARIO_OPTIONS = {
     'twinparrepair': ['HealthCheck=none', 'DupeArticleFallback=no', 'ParCheck=force', 'Unpack=no'],
     'pardamagerepairable': ['ParCheck=auto', 'HealthCheck=dupe', 'DupeArticleFallback=no'],
     'liveparnocache': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=0', 'DirectWrite=yes'],
+    'liveparobfuscated': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes',
+                          'ParRename=yes', 'DirectRename=no'],
     'liveparplanned': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
     'livepargrow': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
     'parinplace': ['ParCheck=auto', 'LiveParRepair=no'],

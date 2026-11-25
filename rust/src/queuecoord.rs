@@ -398,7 +398,7 @@ fn backup_continues_extraction(
     nzb.direct_unpack_status == DirectUnpackStatus::Running
         && alt_covers_lost_articles(
             true,
-            opts.dupe_article_fallback == crate::queuesubsys_host::DAF_LIVE && opts.direct_unpack,
+            live_borrowing(opts),
             crate::donorkind::DonorKind::from_param(
                 host.nzb_get_param(nzb.ptr, crate::donorkind::KIND_PARAM).as_deref(),
             ),
@@ -1363,6 +1363,16 @@ fn backup_still_unclassified(
 #[cfg(unix)]
 fn dupe_lending_possible(opts: &crate::queuesubsys_host::GlobalOptsSnap) -> bool {
     !opts.raw_article
+}
+
+/// Whether the live dead-volume borrow can feed a running extraction (the `live_borrowing`
+/// argument of [`alt_covers_lost_articles`]): `DupeArticleFallback=live` with `DirectUnpack`,
+/// and a duplicate can lend at all.
+#[cfg(unix)]
+fn live_borrowing(opts: &crate::queuesubsys_host::GlobalOptsSnap) -> bool {
+    opts.dupe_article_fallback == crate::queuesubsys_host::DAF_LIVE
+        && opts.direct_unpack
+        && dupe_lending_possible(opts)
 }
 #[cfg(unix)]
 const DUPE_PROBE_SAMPLE_COUNT: i32 = 10;
@@ -4888,8 +4898,7 @@ impl NzbgetRsQueueCoordinator {
             let lendable =
                 alt_covers_lost_articles(
                     false,
-                    opts.dupe_article_fallback == crate::queuesubsys_host::DAF_LIVE
-                        && opts.direct_unpack,
+                    live_borrowing(opts),
                     crate::donorkind::DonorKind::from_param(
                         host.nzb_get_param(nzb.ptr, crate::donorkind::KIND_PARAM)
                             .as_deref(),
@@ -5144,7 +5153,7 @@ impl NzbgetRsQueueCoordinator {
         );
         if alt_covers_lost_articles(
             dead_rate,
-            opts.dupe_article_fallback == crate::queuesubsys_host::DAF_LIVE && opts.direct_unpack,
+            live_borrowing(opts),
             own_kind,
             backup_kind,
             eval.projected,

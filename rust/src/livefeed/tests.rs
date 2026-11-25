@@ -442,3 +442,44 @@ fn split_pieces_that_are_rar_volumes_are_not_joined() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_run_that_died_leaves_a_temp_file_the_next_run_replaces() {
+    let dir = scratch("stale-temp");
+    let movie = payload(300_000, 5);
+    let pieces: Vec<(String, Vec<u8>)> = movie
+        .chunks(100_000)
+        .enumerate()
+        .map(|(i, c)| (format!("m.mkv.{:03}", i + 1), c.to_vec()))
+        .collect();
+    for (n, d) in &pieces {
+        std::fs::write(dir.join("dl").join(n), d).unwrap();
+    }
+    // What a killed run left in the unpack folder.
+    std::fs::create_dir_all(dir.join("out")).unwrap();
+    std::fs::write(dir.join("out/.m.mkv.rustyget-live"), b"stale").unwrap();
+    let set = live_set(
+        b"m.mkv.001",
+        &pieces
+            .iter()
+            .map(|(n, _)| n.as_bytes().to_vec())
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let mut feed = DiskFeed {
+        finished: Arc::new(AtomicBool::new(true)),
+        damaged: Vec::new(),
+    };
+    let (outcome, _) = run(&dir, &set, &mut feed);
+    assert!(
+        matches!(outcome, Outcome::Done { files: 1, .. }),
+        "{outcome:?}"
+    );
+    let left: Vec<_> = std::fs::read_dir(dir.join("out"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(left, vec![std::ffi::OsString::from("m.mkv")]);
+    assert_eq!(std::fs::read(dir.join("out/m.mkv")).unwrap(), movie);
+    let _ = std::fs::remove_dir_all(&dir);
+}

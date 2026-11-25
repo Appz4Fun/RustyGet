@@ -852,7 +852,7 @@ fn feed_members(
         } else if let Err(e) = std::fs::create_dir_all(&dest) {
             return fail(&members, &empties, format!("cannot create {}: {e}", dest.display()));
         }
-        let (tmp, file) = match crate::progressive_unpack::create_unique_sibling(&target) {
+        let (tmp, file) = match live_temp(&target) {
             Ok(created) => created,
             Err(e) => return fail(&members, &empties, format!("cannot write {}: {e}", target.display())),
         };
@@ -1039,7 +1039,7 @@ fn join_live(
     if let Err(e) = std::fs::create_dir_all(&dest) {
         return Outcome::Failed(format!("cannot create {}: {e}", dest.display()));
     }
-    let (tmp, out) = match crate::progressive_unpack::create_unique_sibling(&target) {
+    let (tmp, out) = match live_temp(&target) {
         Ok(created) => created,
         Err(e) => return Outcome::Failed(format!("cannot write {}: {e}", target.display())),
     };
@@ -1154,6 +1154,29 @@ fn join_live(
         dirs: 0,
         bytes: size,
     }
+}
+
+/// The file a live output is written to before it is complete: a hidden sibling of `target`
+/// with a name of its own, so a run that ended without cleaning up (a crash, a kill) leaves a
+/// file the next run replaces instead of one that is moved to the destination with the output.
+fn live_temp(target: &Path) -> std::io::Result<(PathBuf, File)> {
+    let name = target
+        .file_name()
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let mut tmp_name = std::ffi::OsString::from(".");
+    tmp_name.push(name);
+    tmp_name.push(".rustyget-live");
+    let tmp = target.with_file_name(tmp_name);
+    // Never through a link: a stale file (or anything else under the name) is removed first.
+    if std::fs::symlink_metadata(&tmp).is_ok() {
+        std::fs::remove_file(&tmp)?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&tmp)?;
+    Ok((tmp, file))
 }
 
 /// Copies `len` bytes from the start of `src` to `dst` at `at`. On Linux the kernel copies

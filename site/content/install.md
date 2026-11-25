@@ -6,7 +6,7 @@ lede = "RustyGet runs on Linux and macOS, and builds from source with Just and R
 +++
 
 > [!IMPORTANT] No release packages yet
-> RustyGet has no installers, Docker images or NAS packages yet. Until it publishes its own packages, build it from source.
+> RustyGet has no installers, Docker images, or NAS packages yet. Until it publishes its own packages, build it from source.
 
 ## Requirements
 
@@ -159,5 +159,4 @@ RustyGet reads an existing `nzbget.conf`, queue and history as they are, so you 
 
 RustyGet keeps its own extra data, such as stream-repair progress and recovery counters, in a trailer of the queue files.
 
-
-Options that your configuration file doesn't list take RustyGet's built-in values. The duplicate-fleet settings are off in those, so your setup behaves as before until you turn them on, one at a time, as described in [Duplicate fleets](duplicate-fleets.md).
+Options that your configuration file doesn't list take RustyGet's built-in values, and those turn duplicate fleets on: `DupeArticleFallback=live`, `DupeStreamDecompress=yes`, `DupeBorrowFirst=yes`, `DupeWatch=yes`, and `HealthCheck=dupe`. To keep the old behavior, set those options in the file; [Duplicate fleets](duplicate-fleets.md) explains each one.

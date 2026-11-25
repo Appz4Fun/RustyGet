@@ -87,4 +87,4 @@ Much of RustyGet is written with AI coding tools. That's welcome, on three condi
 
 ## License
 
-RustyGet is free software under the GNU General Public License, version 2 or later. Keep existing copyright notices when you change a file.
+RustyGet is free software under version 2 or later of the GNU General Public License. Keep existing copyright notices when you change a file.

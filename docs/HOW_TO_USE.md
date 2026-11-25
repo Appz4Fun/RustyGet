@@ -137,7 +137,7 @@ rustyget -o reloadqueue=no -o dupecheck=no -o parcheck=yes -s
 ```  
 or:
 ```
-rustyget -o createlog=no -C
+rustyget -o outputmode=log -C
 ```
 
 ### Running rustyget as systemd service (Linux only)

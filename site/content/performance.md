@@ -17,7 +17,7 @@ Connections
 : Each connection is a thread. For servers at level 0 (`ServerN.Level=0`), use the fewest connections that still fill your link. More connections make a small device less responsive. Give fill servers (level 1 and higher) the same count as your main servers when you can.
 
 Article checksums
-: `CrcCheck` verifies every article. With a reliable server you can turn it off to save CPU, but quick par verification then becomes less reliable and sometimes falls back to a full scan. RustyGet combines the per-article checksums into file checksums with a fast SIMD path, so the check costs little.
+: RustyGet always verifies every article against its yEnc checksum, using a fast SIMD path, so the check costs little. The old `CrcCheck` option is obsolete and ignored.
 
 Par check and repair
 : Keep `ParCheck=auto` so only damaged downloads get repaired, and keep `ParQuick=yes` for fast verification. Set `ParThreads` to your core count (`0` picks it for you) and raise `ParBuffer` if you have memory to spare. `ParTimeLimit` stops repairs that would run for hours; you can copy a badly damaged download to a faster computer and repair it there.

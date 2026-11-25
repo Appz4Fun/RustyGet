@@ -35,7 +35,7 @@ RustyGet is a Usenet downloader written in Rust. It treats every copy of a relea
 | Byte-identical copies | **Twins** proven by par2 checksums (MD5, 16 KB hash, and length of every file); the same video in other packaging is an **alt** |
 | Not enough par2 blocks | Repairs with the fewest recovery volumes of a twin that cover the damage |
 | Holes after the download | Stream repair patches verified bytes from other copies, even across RAR, ZIP, 7-Zip, raw splits, and encrypted RAR |
-| PAR2 repair | Runs live while the download arrives and finishes as the last article lands |
+| PAR2 repair | With `LiveParRepair=yes`, runs while the download arrives and finishes as the last article lands |
 | A download that can't complete | `HealthCheck=dupe` fails over within seconds, and a probe parks dead copies before they download |
 | Clients with many copies | One `appendfleet` call: RustyGet checks every copy and downloads the most complete one |
 | Unpacking | Built in, with no external programs |
@@ -69,7 +69,7 @@ For more detail, see [Duplicate fleets](https://rustyget.xbmc4lyfe.com/duplicate
 RustyGet has no external helper programs. Archives, parity, yEnc, compression and XML are handled in-process by Rust libraries:
 
 - **[zipfast](https://github.com/xbmc4lyfe/zipfast) and zipview:** RAR (1.5 through 5.0, multi-volume, encrypted data and headers), 7-Zip (including split `.7z.001`), ZIP, TAR, Gzip, Bzip2, XZ and Zstandard, extracted while the download arrives, with no `unrar` or `7z` executables. Nested archives, obfuscated archive names and file permissions are handled in the unpack pipeline.
-- **[par-rs](https://github.com/xbmc4lyfe/par-rs):** PAR2 verification, repair while downloading, Reed-Solomon repair and rename of obfuscated files.
+- **[par-rs](https://github.com/xbmc4lyfe/par-rs)** handles par2 verification, repair while downloading, Reed-Solomon repair and the renaming of obfuscated files.
 - **SIMD yEnc, `crc32fast`, `flate2` (`zlib-rs`) and `quick-xml`.**
 
 RustyGet targets macOS (Apple Silicon) and x86_64 Linux. Every build runs on an Intel Coffee Lake desktop and an Apple M4; newer CPU instructions are used where a benchmark proves them faster.
@@ -81,10 +81,11 @@ RustyGet runs on Linux and macOS. It has no release packages yet, so build it fr
 ```bash
 git clone https://github.com/Appz4Fun/RustyGet.git rustyget
 cd rustyget
+[ -e ~/.rustyget ] || install -m 600 rustyget.conf ~/.rustyget
 just run ~/.rustyget
 ```
 
-`just run <config>` builds the release binary and starts it with that configuration file. If the file doesn't exist, RustyGet creates it with a random password, prints the password once, and opens a setup guide in the web interface at `http://<host>:6789`. See [Install and build](https://rustyget.xbmc4lyfe.com/install.html) for the libraries each platform needs, and [Quick start](https://rustyget.xbmc4lyfe.com/quick-start.html) for the first settings.
+`just run <config>` builds the release binary and starts it with that configuration file, which the line before copies from the template on the first run. Then open `http://127.0.0.1:6789` on the same computer: the template listens on `127.0.0.1`, and the default login is `rustyget` with the password `tegbzn6789`. Change the password first, and set `ControlIP` to reach RustyGet from other devices. Started with no configuration file at all, `rustyget -D` creates one with a random password and prints it once. See [Install and build](https://rustyget.xbmc4lyfe.com/install.html) for the libraries each platform needs, and [Quick start](https://rustyget.xbmc4lyfe.com/quick-start.html) for the first settings.
 
 ## Works with your tools
 

@@ -45,7 +45,7 @@ Each layer handles what the one before it couldn't. Turn them on in this order.
 | Look after backups | `DupeWatch=yes` | Without searching: switches a DupeMode FORCE download to SCORE, drops a dead download below its backups, swaps a failing one for a whole backup (copies at least 97.5% alive first, TWINs first among them), and returns the best backup when a download fails with nothing of its key queued. On by default. |
 | Fleet submission | `appendfleet` | Lets a client send every copy at once and have RustyGet pick the best. |
 
-Left out of the configuration file, every fleet setting is off, so an existing configuration changes nothing until you opt in. RustyGet's configuration template, which a new installation starts from, sets `DupeArticleFallback=live`, `DupeStreamDecompress=yes`, and `HealthCheck=dupe`.
+Left out of the configuration file, the fleet settings take RustyGet's built-in values, which turn fleet borrowing and early failover on: `DupeArticleFallback=live`, `DupeStreamDecompress=yes`, `DupeBorrowFirst=yes`, `DupeWatch=yes`, and `HealthCheck=dupe`. To keep an existing configuration's old behavior, set those options in the file. RustyGet's configuration template, which a new installation starts from, sets the same values.
 
 ## Article fallback
 

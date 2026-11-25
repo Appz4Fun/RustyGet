@@ -20,7 +20,7 @@ See [Duplicate fleets](duplicate-fleets.md) for how it works.
 ## Why Rust
 
 - **Memory safety.** Duplicate fleets juggle many postings, threads, and partial files at once. Rust rules out use-after-free crashes and overlapping buffer copies.
-- **Speed where it counts.** par2 repair runs live while the download arrives, and archives unpack as their bytes land, with SIMD paths where a benchmark proves them faster.
+- **Speed where it counts.** par2 repair can run while the download arrives (`LiveParRepair`), and archives unpack as their bytes land, with SIMD paths where a benchmark proves them faster.
 - **One toolchain, no helpers.** Archives, parity, yEnc, compression and XML are handled in-process by Rust libraries, with no external `unrar`, `7z` or `par2` programs.
 - **Tested behavior.** Every change is checked by unit tests and a functional harness with more than 100 end-to-end scenarios.
 

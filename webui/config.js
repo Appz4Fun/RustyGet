@@ -6930,23 +6930,11 @@ var UpdateDialog = (new function($)
 		loadPackageInfo();
 	}
 
-	function error(e)
-	{
-		$('#UpdateDialog_CheckProgress').hide();
-		$('#UpdateDialog_CheckFailed').show();
-	}
-
 	function parseJsonP(jsonp)
 	{
 		var p = jsonp.indexOf('{');
 		var obj = JSON.parse(jsonp.substr(p, 10000));
 		return obj;
-	}
-
-	function loadedUpstreamInfo(data)
-	{
-		VersionInfo = parseJsonP(data);
-		loadPackageInfo();
 	}
 
 	function loadPackageInfo()

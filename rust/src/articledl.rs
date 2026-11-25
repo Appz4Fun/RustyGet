@@ -658,6 +658,14 @@ pub(crate) fn shutdown_daemon_article_cache() {
     DAEMON_CACHE_RUNNING.store(false, Ordering::SeqCst);
 }
 
+/// Whether a cache flush of a file hands its written bytes to live PAR: only while a session
+/// runs, and never for a par2 file. A par2 file is no source of the live set, and resolving
+/// it against the live namespace invalidates the namespace, which stops live PAR for the job
+/// ("writer identity differs from its captured row").
+fn live_flush_reports(par_file: bool, has_session: bool) -> bool {
+    has_session && !par_file
+}
+
 fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) -> bool {
     let Some(qh) = crate::ffi::queue_host() else {
         return false;
@@ -709,8 +717,11 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
                     // Identity for live PAR's flush report, decided once here: copied only
                     // when a session runs now (one starting mid-flush catches up from the
                     // completion replay).
-                    let live = crate::parchecker::streaming_session_has_session(nzb.id)
-                        .then(|| (nzb.id, f.id, f.filename.clone(), f.hash16k.clone()));
+                    let live = live_flush_reports(
+                        f.par_file,
+                        crate::parchecker::streaming_session_has_session(nzb.id),
+                    )
+                    .then(|| (nzb.id, f.id, f.filename.clone(), f.hash16k.clone()));
                     return Some((fp, info_name, write_context, live));
                 }
             }
@@ -4091,6 +4102,13 @@ impl NzbgetRsArticleDownloader {
 mod tests {
     use super::*;
     use std::os::unix::ffi::OsStrExt;
+
+    #[test]
+    fn a_par2_file_flush_is_never_handed_to_live_par() {
+        assert!(super::live_flush_reports(false, true));
+        assert!(!super::live_flush_reports(true, true), "a par2 file would stop live PAR");
+        assert!(!super::live_flush_reports(false, false));
+    }
 
     #[test]
     fn exhausted_live_par_budget_does_not_block_an_ordinary_article_write() {

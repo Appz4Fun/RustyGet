@@ -29,7 +29,38 @@ struct CertifiedTargets {
     generation: SessionGeneration,
     targets: Vec<WriterTarget>,
     crcs: Vec<(i32, u32)>,
+    /// Each target's file as published, so a CRC still holds for it after a rename
+    /// (post-processing's par-rename gives an obfuscated target its par2 name).
+    stamps: Vec<(i32, FileStamp)>,
     _reservation: Arc<ControlLease>,
+}
+
+/// A file as it was when its CRC was certified: the same inode, length and modification
+/// time mean the same bytes, under whatever name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FileStamp {
+    dev: u64,
+    ino: u64,
+    len: u64,
+    mtime_ns: i128,
+}
+
+impl FileStamp {
+    #[cfg(unix)]
+    pub(crate) fn of(path: &std::path::Path) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::symlink_metadata(path).ok()?;
+        meta.is_file().then(|| Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            len: meta.len(),
+            mtime_ns: i128::from(meta.mtime()) * 1_000_000_000 + i128::from(meta.mtime_nsec()),
+        })
+    }
+    #[cfg(not(unix))]
+    pub(crate) fn of(_path: &std::path::Path) -> Option<Self> {
+        None
+    }
 }
 struct WriteState {
     physical_root: Option<Arc<super::source_identity::SourceRoot>>,
@@ -306,9 +337,16 @@ impl WriteCoordinator {
             if set.generation != generation {
                 return None;
             }
+            // Under its certified path, or renamed since: the very file as published.
+            let renamed = || {
+                set.stamps
+                    .iter()
+                    .find(|(file_id, _)| *file_id == id)
+                    .is_some_and(|(_, stamp)| FileStamp::of(path) == Some(*stamp))
+            };
             set.targets
                 .iter()
-                .any(|target| target.file_id == id && target.path == path)
+                .any(|target| target.file_id == id && (target.path == path || renamed()))
                 .then(|| {
                     set.crcs
                         .iter()
@@ -599,6 +637,16 @@ impl RepairWriteLease {
         verified: &[(i32, u32)],
         publish: impl FnOnce() -> T,
     ) -> Result<T, WriteBlocked> {
+        // Stamped with no lock held; the targets are named and the repair has written
+        // them. On a filesystem with coarse modification times (1-2 s) a same-length
+        // rewrite within that time keeps the stamp: only a coordinated write (which cancels
+        // the generation and with it every certificate) is ruled out there.
+        let stamps: Vec<(i32, FileStamp)> = self
+            .targets
+            .iter()
+            .filter(|target| verified.iter().any(|(id, _)| *id == target.file_id))
+            .filter_map(|target| Some((target.file_id, FileStamp::of(&target.path)?)))
+            .collect();
         let mut state = self
             .coordinator
             .state
@@ -629,6 +677,7 @@ impl RepairWriteLease {
             generation: self.generation,
             targets: std::mem::take(&mut self.targets),
             crcs: verified.to_vec(),
+            stamps,
             _reservation: self.reservation.take().unwrap(),
         });
         let result = publish();

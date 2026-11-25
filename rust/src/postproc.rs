@@ -2984,6 +2984,7 @@ fn case_blind<'a>(
 
 /// The stand-in for dead volume `full_path` of download `nzb_id` handed over before its borrow
 /// finished (see [`direct_unpack_offer_virtual`]), if any.
+#[cfg(test)]
 pub(crate) fn direct_unpack_offered(
     nzb_id: i32,
     full_path: &[u8],
@@ -3288,12 +3289,15 @@ fn live_repair_may_start(nzb: &crate::queuesubsys_host::NzbSnap) -> bool {
         || (!nzb.post_working && nzb.post_stage == PostStage::Queued)
 }
 
-/// Post-processing waits (boundedly) while live work for `nzb_id` is still
-/// pending: completed files not yet folded into the live session, or a live
-/// repair helper that is running.
+/// Post-processing waits while live work for `nzb_id` is still pending: completed files
+/// not yet folded into the live session, or a live repair helper that is running. It waits
+/// as long as the session makes progress (`streaming_session_progress_token`), so a
+/// completion drain that is still reading is never cut off for a batch repair that would
+/// read the whole download again; only 10 s without any progress hands the job over.
 #[cfg(unix)]
 pub(crate) fn live_repair_should_defer_post(nzb_id: i32) -> bool {
-    static SINCE: std::sync::LazyLock<Mutex<std::collections::HashMap<i32, std::time::Instant>>> =
+    type Since = std::collections::HashMap<i32, (std::time::Instant, Option<u64>)>;
+    static SINCE: std::sync::LazyLock<Mutex<Since>> =
         std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
     const LIMIT: Duration = Duration::from_secs(10);
     // A running download-end repair is waited for while it progresses: never cut off
@@ -3324,8 +3328,14 @@ pub(crate) fn live_repair_should_defer_post(nzb_id: i32) -> bool {
         since.remove(&nzb_id);
         return false;
     }
-    let first = *since.entry(nzb_id).or_insert_with(std::time::Instant::now);
-    if first.elapsed() < LIMIT {
+    let progress = crate::parchecker::streaming_session_progress_token(nzb_id);
+    let now = std::time::Instant::now();
+    let clock = since.entry(nzb_id).or_insert((now, progress));
+    if progress.is_some() && clock.1 != progress {
+        // Still working: the stall clock starts again.
+        *clock = (now, progress);
+    }
+    if live_defer_within(clock.0, now, LIMIT) {
         return true;
     }
     // Past the cap ordinary repair takes over, but never alongside a live
@@ -3335,6 +3345,12 @@ pub(crate) fn live_repair_should_defer_post(nzb_id: i32) -> bool {
         return true;
     }
     false
+}
+
+/// Within `limit` of the last progress at `since`: post-processing still waits.
+#[cfg(unix)]
+fn live_defer_within(since: std::time::Instant, now: std::time::Instant, limit: Duration) -> bool {
+    now.saturating_duration_since(since) < limit
 }
 
 #[cfg(unix)]
@@ -3640,8 +3656,9 @@ fn keep_live_helper(
 /// The live repair at the end of a download without held direct-unpack volumes: once every
 /// slice arrived or failed and the recovery on hand covers the damage, rebuild the damaged
 /// files from the live syndromes (no batch verify or repair read) and certify their CRCs,
-/// so post-processing's par-check finds them repaired and no batch repair runs. Files still
-/// under another name (obfuscated, not renamed yet) leave the job to par-check. The caller
+/// so post-processing's par-check finds them repaired and no batch repair runs. A file still
+/// under another name (obfuscated, not renamed yet) is repaired where it is: its live binding
+/// names its par2 file, and the certified CRC follows it through par-rename. The caller
 /// holds the queue lock; the repair runs on its own thread.
 #[cfg(unix)]
 fn live_par_repair_at_download_end(
@@ -3677,14 +3694,30 @@ fn live_par_repair_at_download_end(
     }
     let mut targets = Vec::with_capacity(names.len());
     for name in &names {
+        // Under its par2 name, or still under another (obfuscated) one: the live binding
+        // of the queue file names its par2 file, and it is repaired where it is.
         let found = (0..host.nzb_completed_files_len(nzb.ptr))
             .map(|index| host.nzb_completed_file_at(nzb.ptr, index))
-            .find(|file| !file.par_file && file.filename == *name);
+            .filter(|file| !file.par_file)
+            .find(|file| file.filename == *name)
+            .or_else(|| {
+                (0..host.nzb_completed_files_len(nzb.ptr))
+                    .map(|index| host.nzb_completed_file_at(nzb.ptr, index))
+                    .filter(|file| !file.par_file)
+                    .find(|file| {
+                        crate::parchecker::streaming_session_par_name_of(
+                            nzb_id,
+                            (Some(file.id), &file.filename, &file.hash16k),
+                        )
+                        .is_some_and(|par_name| par_name == *name)
+                    })
+            });
         let Some(file) = found else {
             unresolvable();
             return;
         };
-        let path = crate::fsops::path(&nzb.dest_dir).join(crate::fsops::path(name));
+        let path =
+            crate::fsops::path(&nzb.dest_dir).join(crate::fsops::path(&file.filename));
         if !path.is_file() {
             unresolvable();
             return;
@@ -4032,18 +4065,99 @@ pub(crate) fn live_par_time_discard(nzb_id: i32) {
     let _ = crate::parchecker::streaming_session_take_par_secs(nzb_id);
 }
 
+/// Borrowed dead volumes of downloads whose direct unpack ended without success, by full
+/// path: post-processing's stream repair resumes them ([`direct_unpack_borrowed`]) and
+/// writes them as real volumes, instead of fetching their bytes from the duplicate again.
+/// Their scratch files go when the download leaves post-processing
+/// ([`direct_unpack_forget_holds`]).
+static KEPT_BORROWS: std::sync::LazyLock<
+    Mutex<std::collections::HashMap<i32, std::collections::HashMap<Vec<u8>, crate::deadvolume::VirtualVolume>>>,
+> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+fn kept_borrows() -> std::sync::MutexGuard<
+    'static,
+    std::collections::HashMap<i32, std::collections::HashMap<Vec<u8>, crate::deadvolume::VirtualVolume>>,
+> {
+    KEPT_BORROWS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Forgets download `nzb_id`'s holds and deletes the scratch files of its borrowed dead
+/// volumes: the download is done with them (it left post-processing, was deleted, or
+/// direct unpack extracted them).
 pub(crate) fn direct_unpack_forget_holds(nzb_id: i32) {
     note_dead_volume_borrow(nzb_id, false);
     forget_dead_volume_verdicts(nzb_id);
     let gone = direct_unpack_holds().remove(&nzb_id);
-    // Borrowed data of rebuilt dead volumes is only read by direct unpack.
+    let kept = kept_borrows().remove(&nzb_id);
     for v in gone
         .iter()
         .flat_map(|st| st.virtuals.values().chain(st.offered.values()))
+        .chain(kept.iter().flat_map(|k| k.values()))
     {
         if crate::deadvolume::is_scratch(&v.data) {
             let _ = std::fs::remove_file(&v.data);
         }
+    }
+}
+
+/// Forgets download `nzb_id`'s holds while post-processing still needs its borrowed dead
+/// volumes: direct unpack ended without extracting them (or never paused for them), so the
+/// stages below repair and unpack the download. The borrowed bytes are kept for them, so no
+/// dead volume is ever fetched twice.
+pub(crate) fn direct_unpack_forget_holds_keep_borrows(nzb_id: i32) {
+    note_dead_volume_borrow(nzb_id, false);
+    forget_dead_volume_verdicts(nzb_id);
+    let Some(gone) = direct_unpack_holds().remove(&nzb_id) else {
+        return;
+    };
+    let DirectUnpackHoldState {
+        virtuals, offered, ..
+    } = gone;
+    if virtuals.is_empty() && offered.is_empty() {
+        return;
+    }
+    let mut kept = kept_borrows();
+    let entry = kept.entry(nzb_id).or_default();
+    // A finished stand-in replaces one handed over with holes.
+    for (path, volume) in offered.into_iter().chain(virtuals) {
+        if let Some(old) = entry.insert(path, volume) {
+            if crate::deadvolume::is_scratch(&old.data)
+                && !entry.values().any(|v| v.data == old.data)
+            {
+                let _ = std::fs::remove_file(&old.data);
+            }
+        }
+    }
+}
+
+/// The borrowed stand-in for dead volume `full_path` of download `nzb_id`, finished or
+/// handed over with holes, whether direct unpack still holds it or post-processing kept it.
+pub(crate) fn direct_unpack_borrowed(
+    nzb_id: i32,
+    full_path: &[u8],
+) -> Option<crate::deadvolume::VirtualVolume> {
+    direct_unpack_virtual(nzb_id, full_path).or_else(|| {
+        kept_borrows()
+            .get(&nzb_id)
+            .and_then(|kept| case_blind(kept, full_path).cloned())
+    })
+}
+
+/// Drops the kept borrow of dead volume `full_path` of download `nzb_id` once it was
+/// written as a real volume (its scratch file is gone).
+pub(crate) fn direct_unpack_forget_borrowed(nzb_id: i32, full_path: &[u8]) {
+    let mut kept = kept_borrows();
+    if let Some(entry) = kept.get_mut(&nzb_id) {
+        entry.retain(|k, _| !k.eq_ignore_ascii_case(full_path));
+        if entry.is_empty() {
+            kept.remove(&nzb_id);
+        }
+    }
+    drop(kept);
+    let mut holds = direct_unpack_holds();
+    if let Some(st) = holds.get_mut(&nzb_id) {
+        st.virtuals.retain(|k, _| !k.eq_ignore_ascii_case(full_path));
+        st.offered.retain(|k, _| !k.eq_ignore_ascii_case(full_path));
     }
 }
 
@@ -5014,6 +5128,7 @@ impl NzbgetRsDirectUnpack {
             self.cleanup(host, &mut local);
         }
 
+        let mut extracted = false;
         let valid_owner = host.with_locked_queue(|dq_ptr| {
             let Some(nzb) = self.find_nzb(host, dq_ptr).filter(|n| n.owned) else {
                 return false;
@@ -5055,6 +5170,7 @@ impl NzbgetRsDirectUnpack {
 
             self.add_extra_time(host, nzb_ptr, true);
 
+            extracted = status == DirectUnpackStatus::Success;
             Self::finish_nzb(host, nzb_ptr, status);
             true
         });
@@ -5067,7 +5183,15 @@ impl NzbgetRsDirectUnpack {
             return;
         }
 
-        direct_unpack_forget_holds(self.nzb_id);
+        if extracted || cancelled {
+            // Direct unpack read the borrowed dead volumes, or the download is going away:
+            // nothing else needs them.
+            direct_unpack_forget_holds(self.nzb_id);
+        } else {
+            // Post-processing repairs and unpacks the download: its borrowed dead volumes
+            // are written as real volumes then, never fetched again.
+            direct_unpack_forget_holds_keep_borrows(self.nzb_id);
+        }
         Self::global_log(
             MK_DEBUG,
             format!("Exiting DirectUnpack-loop for {}", self.nzb_id).as_bytes(),

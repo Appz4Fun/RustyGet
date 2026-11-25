@@ -602,6 +602,110 @@ fn closed_startup_ticket_cannot_install_a_session_after_cleanup() {
     streaming_session_forget(id);
 }
 
+/// A damaged file still under an obfuscated name (not renamed yet) is admitted to the live
+/// repair at download end by its queue file's binding, repaired where it is, and its CRC
+/// stays certified after post-processing's par-rename gives it its par2 name: no batch
+/// repair. Before, the target was refused ("not in this PAR set") and the job went to a
+/// batch repair that read the whole download again.
+#[test]
+fn live_repair_takes_an_obfuscated_target_and_certifies_it_through_par_rename() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900145;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.vol00+1.PAR2"), &fx.0, 500 << 20)
+        .unwrap();
+    let first = set.main.as_ref().unwrap().recoverable_file_ids[0];
+    let ss = set.main.as_ref().unwrap().slice_size;
+    let desc = &set.file_descs[&first];
+    let named = fx.0.join(desc.local_name());
+    let original = std::fs::read(&named).unwrap();
+    for fid in &set.main.as_ref().unwrap().recoverable_file_ids {
+        let file = &set.file_descs[fid];
+        let start = if *fid == first { ss.min(file.file_length) } else { 0 };
+        streaming_session_reconcile_file(
+            id,
+            *fid,
+            &fx.0.join(file.local_name()),
+            &[ByteRange::new(start as i64, (file.file_length - start) as i64)],
+        )
+        .unwrap()
+        .unwrap();
+    }
+    // The download wrote it under an obfuscated name, with its first slice damaged.
+    let obfuscated = fx.0.join("a8f3k2q9z");
+    std::fs::rename(&named, &obfuscated).unwrap();
+    use std::io::{Seek, SeekFrom, Write};
+    let mut disk = std::fs::OpenOptions::new().write(true).open(&obfuscated).unwrap();
+    disk.seek(SeekFrom::Start(0)).unwrap();
+    disk.write_all(&vec![0; (ss as usize).min(original.len())]).unwrap();
+    drop(disk);
+    assert!(streaming_session_status(id).unwrap().early_cutover_possible);
+    // Its queue file (id 40) is matched to the par2 file by its 16k hash.
+    let hash: String = desc.hash_16k.iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(
+        streaming_session_par_name_of(id, (Some(40), b"a8f3k2q9z", hash.as_bytes())).as_deref(),
+        Some(desc.name.as_slice())
+    );
+    let request = streaming_session_prepare_repair(
+        id,
+        vec![crate::parlive::WriterTarget { file_id: 40, path: obfuscated.clone() }],
+        reserve_control(id, 4096, 500 << 20).unwrap(),
+    )
+    .expect("an obfuscated target is admitted by its binding");
+    let lease = request.acquire().unwrap();
+    let (report, released) = lease.repair_and_publish(|verified| verified.len(), || ()).unwrap();
+    assert!(!report.repaired_slices.is_empty());
+    assert_eq!(released, 1);
+    assert_eq!(std::fs::read(&obfuscated).unwrap(), original);
+    assert!(!named.exists(), "nothing is written under the par2 name");
+    assert_eq!(
+        streaming_session_verified_target_crc(id, &fx.0, 40, b"a8f3k2q9z"),
+        Some(crc32fast::hash(&original))
+    );
+    // Par-rename: the same file under its par2 name keeps its certified CRC.
+    std::fs::rename(&obfuscated, &named).unwrap();
+    assert_eq!(
+        streaming_session_verified_target_crc(id, &fx.0, 40, &desc.name),
+        Some(crc32fast::hash(&original))
+    );
+    // Another file under that name is not certified.
+    std::fs::remove_file(&named).unwrap();
+    std::fs::write(&named, &original).unwrap();
+    assert!(streaming_session_verified_target_crc(id, &fx.0, 40, &desc.name).is_none());
+    streaming_session_cancel(id);
+    streaming_session_forget(id);
+    crate::parlive::forget_download_writes(id);
+}
+
+/// A target whose name is one par2 file's while its queue file is bound to another is
+/// refused: nothing is repaired under the wrong identity.
+#[test]
+fn live_repair_refuses_a_target_whose_name_and_binding_disagree() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900146;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.vol00+1.PAR2"), &fx.0, 500 << 20)
+        .unwrap();
+    let ids = &set.main.as_ref().unwrap().recoverable_file_ids;
+    if ids.len() < 2 {
+        streaming_session_forget(id);
+        return;
+    }
+    let (a, b) = (&set.file_descs[&ids[0]], &set.file_descs[&ids[1]]);
+    let hash_b: String = b.hash_16k.iter().map(|x| format!("{x:02x}")).collect();
+    // Queue file 41 holds b's bytes but sits under a's name.
+    assert!(streaming_session_par_name_of(id, (Some(41), b"zz-unknown", hash_b.as_bytes())).is_some());
+    let result = streaming_session_prepare_repair(
+        id,
+        vec![crate::parlive::WriterTarget { file_id: 41, path: fx.0.join(a.local_name()) }],
+        reserve_control(id, 4096, 500 << 20).unwrap(),
+    );
+    let error = result.err().expect("refused").to_string();
+    assert!(error.contains("name and queue binding disagree"), "{error}");
+    streaming_session_forget(id);
+    crate::parlive::forget_download_writes(id);
+}
+
 #[test]
 fn live_target_lease_repairs_real_bytes_and_seals_the_same_queue_file() {
     let fx = Fixture::new();
@@ -1794,14 +1898,251 @@ fn live_article_ram_refused_waits_for_the_cache_flush() {
     streaming_session_drain_articles(id).unwrap().unwrap();
     assert_eq!(streaming_session_status(id).unwrap().verified, 0);
     assert!(entry.awaiting_commits() > 0);
-    // The cache writes them out: par-rs reads them from their file.
+    // The cache writes them out, and hands over the bytes it wrote: par-rs verifies them
+    // from RAM and never reads them back from their file.
     for (name, _, bytes) in &files {
-        streaming_session_articles_committed(id, (None, name, &[]), &[(0, bytes.len() as u64)]);
+        let items: Vec<(u64, &[u8])> = bytes
+            .chunks(1000)
+            .enumerate()
+            .map(|(i, chunk)| ((i * 1000) as u64, chunk))
+            .collect();
+        streaming_session_articles_written(id, (None, name, &[]), true, &items);
     }
     streaming_session_drain_articles(id).unwrap().unwrap();
     let status = streaming_session_status(id).unwrap();
     assert_eq!(status.verified, status.total);
     assert_eq!(entry.awaiting_commits(), 0);
+    let io = streaming_session_io_stats(id).unwrap();
+    assert_eq!(io.source_bytes_read, 0, "no flushed byte is read back from the file");
+    assert_eq!(entry.articles.lock().unwrap().bytes, 0, "every copy is returned");
+    drop(entry);
+    streaming_session_forget(id);
+}
+
+/// Past the snapshot byte limit (ParBuffer) the write keeps no copy: an article in its
+/// file is handed over without bytes, as before, and memory stays within the cap.
+#[test]
+fn live_written_handoff_stays_within_the_byte_limit() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900186;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 * 1024 * 1024)
+        .unwrap();
+    let files = written_copies(&fx, &set);
+    let entry = active_streaming_session(id).unwrap();
+    entry.article_byte_limit.store(0, Ordering::Release);
+    for (name, path, bytes) in &files {
+        let file_id = entry.session.file_id_by_name(name).unwrap();
+        entry.note_written(file_id, path);
+        assert!(entry.await_commit(file_id, 0, bytes.len() as u64, crc32fast::hash(bytes)));
+        streaming_session_articles_written(id, (None, name, &[]), true, &[(0, bytes)]);
+        assert_eq!(entry.articles.lock().unwrap().bytes, 0, "no copy past the cap");
+    }
+    streaming_session_drain_articles(id).unwrap().unwrap();
+    let status = streaming_session_status(id).unwrap();
+    assert_eq!(status.verified, status.total);
+    assert!(streaming_session_io_stats(id).unwrap().source_bytes_read > 0);
+    drop(entry);
+    streaming_session_forget(id);
+}
+
+/// An article written before live PAR captured it (a cache flush that ran first) misses
+/// the cache, but its capture takes the bytes kept at the write: nothing is read back.
+#[test]
+fn live_capture_after_its_write_takes_the_kept_bytes() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900187;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 * 1024 * 1024)
+        .unwrap();
+    let files = written_copies(&fx, &set);
+    for (name, _, bytes) in &files {
+        let items: Vec<(u64, &[u8])> = bytes
+            .chunks(1000)
+            .enumerate()
+            .map(|(i, chunk)| ((i * 1000) as u64, chunk))
+            .collect();
+        streaming_session_articles_written(id, (None, name, &[]), true, &items);
+    }
+    for (name, path, bytes) in &files {
+        defer_uncached(id, name, path, bytes, (0, bytes.len()), 1000);
+    }
+    streaming_session_drain_articles(id).unwrap().unwrap();
+    let status = streaming_session_status(id).unwrap();
+    assert_eq!(status.verified, status.total);
+    assert_eq!(streaming_session_io_stats(id).unwrap().source_bytes_read, 0);
+    let entry = active_streaming_session(id).unwrap();
+    assert!(entry.metrics.stashed_articles.load(Ordering::Relaxed) > 0);
+    assert_eq!(entry.articles.lock().unwrap().bytes, 0);
+    drop(entry);
+    streaming_session_forget(id);
+}
+
+/// An article written straight to disk (no cache buffer) is kept by the writer's tee
+/// within the ParBuffer cap; its capture misses the cache and takes those bytes. A tee
+/// that is dropped (a failed download) returns its charge.
+#[test]
+fn live_tee_of_an_uncached_article_feeds_its_capture() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900188;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 * 1024 * 1024)
+        .unwrap();
+    let files = written_copies(&fx, &set);
+    let dropped = streaming_session_reserve_tee(id, 1000).unwrap();
+    drop(dropped);
+    let entry = active_streaming_session(id).unwrap();
+    assert_eq!(entry.articles.lock().unwrap().bytes, 0);
+    drop(entry);
+    for (name, _, bytes) in &files {
+        for (i, chunk) in bytes.chunks(1000).enumerate() {
+            let mut tee = streaming_session_reserve_tee(id, chunk.len() as u64).unwrap();
+            tee.push(&chunk[..chunk.len() / 2]);
+            tee.push(&chunk[chunk.len() / 2..]);
+            tee.stash((None, name, &[]), (i * 1000) as u64);
+        }
+    }
+    for (name, path, bytes) in &files {
+        defer_uncached(id, name, path, bytes, (0, bytes.len()), 1000);
+    }
+    streaming_session_drain_articles(id).unwrap().unwrap();
+    let status = streaming_session_status(id).unwrap();
+    assert_eq!(status.verified, status.total);
+    assert_eq!(streaming_session_io_stats(id).unwrap().source_bytes_read, 0);
+    let entry = active_streaming_session(id).unwrap();
+    assert_eq!(entry.articles.lock().unwrap().bytes, 0);
+    // A full byte limit is covered by a loan of free ParBuffer, as for a snapshot.
+    entry.article_byte_limit.store(0, Ordering::Release);
+    let tee = streaming_session_reserve_tee(id, 1000).expect("a loan covers the shortfall");
+    assert!(entry.lent_memory.load(Ordering::Relaxed) >= 1000);
+    assert!(entry.article_byte_limit.load(Ordering::Relaxed) >= 1000);
+    drop(tee);
+    assert_eq!(entry.articles.lock().unwrap().bytes, 0);
+    drop(entry);
+    streaming_session_forget(id);
+}
+
+/// Obfuscated names and no 16k hash known (DirectRename off): before, live PAR matched
+/// no article and every file was read back whole at its completion, and the job went to a
+/// batch repair. Now the first article binds its file by its 16k hash from RAM, and the
+/// articles that arrived before it wait with their bytes: nothing is read back.
+#[test]
+fn live_binds_an_obfuscated_file_by_its_first_article() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900189;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 * 1024 * 1024)
+        .unwrap();
+    let files = written_copies(&fx, &set);
+    for (n, (_, path, bytes)) in files.iter().enumerate() {
+        let name = format!("q{n:07x}");
+        let queue_id = 70 + n as i32;
+        let article = 20_000;
+        let mut offsets: Vec<usize> = (0..bytes.len()).step_by(article).collect();
+        offsets.reverse(); // the first article arrives last
+        for offset in offsets {
+            let end = (offset + article).min(bytes.len());
+            let chunk = bytes[offset..end].to_vec();
+            let crc = crc32fast::hash(&chunk);
+            streaming_session_defer_committed_article(
+                id,
+                (Some(queue_id), name.as_bytes(), &[]),
+                offset as u64,
+                chunk.len() as u64,
+                crc,
+                Some(path),
+                || Some(chunk),
+            )
+            .unwrap()
+            .unwrap();
+        }
+    }
+    streaming_session_drain_articles(id).unwrap().unwrap();
+    let status = streaming_session_status(id).unwrap();
+    assert_eq!(status.verified, status.total);
+    assert_eq!(streaming_session_io_stats(id).unwrap().source_bytes_read, 0);
+    let entry = active_streaming_session(id).unwrap();
+    assert_eq!(
+        entry.metrics.bound_by_first_article.load(Ordering::Relaxed),
+        files.len() as u64
+    );
+    assert!(entry.articles.lock().unwrap().unbound.is_empty());
+    // The completed file under its obfuscated name resolves to its par2 file.
+    assert!(streaming_session_par_name_of(id, (Some(70), b"q0000000", &[])).is_some());
+    drop(entry);
+    streaming_session_forget(id);
+}
+
+/// The first article of a file not bound yet fails, or the file completes without one:
+/// what waited for it is dropped and its charge returned, and nothing waits any more.
+#[test]
+fn live_unbound_articles_are_released_when_the_first_article_cannot_bind() {
+    let fx = Fixture::new();
+    let id = -1900191;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 * 1024 * 1024)
+        .unwrap();
+    let data: Vec<u8> = (0..40_000u32).map(|i| (i * 13) as u8).collect();
+    let entry = active_streaming_session(id).unwrap();
+    for queue_id in [101, 102, 103] {
+        streaming_session_defer_committed_article(
+            id, (Some(queue_id), b"q-obf", &[]), 20_000, 20_000, crc32fast::hash(&data[20_000..]),
+            None, || Some(data[20_000..].to_vec()),
+        )
+        .unwrap()
+        .unwrap();
+    }
+    assert_eq!(entry.articles.lock().unwrap().bytes, 60_000);
+    // 101: its first article failed on every server.
+    assert!(streaming_session_defer_failure_for_queue(id, (Some(101), b"q-obf", &[]), 0, 20_000)
+        .unwrap()
+        .is_err());
+    // 102: its first article left the cache before its capture.
+    assert!(streaming_session_defer_committed_article(
+        id, (Some(102), b"q-obf", &[]), 0, 20_000, 0, None, || None,
+    )
+    .unwrap()
+    .is_err());
+    assert_eq!(entry.articles.lock().unwrap().bytes, 20_000);
+    // 103: the file completes without its first article captured.
+    entry.release_unbound(103);
+    assert_eq!(entry.articles.lock().unwrap().bytes, 0);
+    assert!(entry.articles.lock().unwrap().unbound.is_empty());
+    // None of them waits any more.
+    assert!(streaming_session_defer_committed_article(
+        id, (Some(101), b"q-obf", &[]), 20_000, 20_000, 0, None, || Some(data[20_000..].to_vec()),
+    )
+    .unwrap()
+    .is_err());
+    assert_eq!(entry.articles.lock().unwrap().bytes, 0);
+    drop(entry);
+    streaming_session_forget(id);
+}
+
+/// A queue file whose first article matches no par2 file is not part of the set: what
+/// waited for it is dropped and its charge returned.
+#[test]
+fn live_unbound_articles_of_a_file_outside_the_set_are_dropped() {
+    let fx = Fixture::new();
+    let id = -1900190;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 * 1024 * 1024)
+        .unwrap();
+    let other: Vec<u8> = (0..40_000u32).map(|i| (i * 7) as u8).collect();
+    let crc = crc32fast::hash(&other[20_000..]);
+    streaming_session_defer_committed_article(
+        id, (Some(99), b"sample.nfo", &[]), 20_000, 20_000, crc, None, || Some(other[20_000..].to_vec()),
+    )
+    .unwrap()
+    .unwrap();
+    let entry = active_streaming_session(id).unwrap();
+    assert_eq!(entry.articles.lock().unwrap().bytes, 20_000);
+    assert!(streaming_session_defer_committed_article(
+        id, (Some(99), b"sample.nfo", &[]), 0, 20_000, crc32fast::hash(&other[..20_000]), None,
+        || Some(other[..20_000].to_vec()),
+    )
+    .unwrap()
+    .is_err());
+    assert_eq!(entry.articles.lock().unwrap().bytes, 0);
+    assert!(entry.articles.lock().unwrap().not_in_set.contains(&99));
     drop(entry);
     streaming_session_forget(id);
 }

@@ -1573,6 +1573,20 @@ impl NzbgetRsStreamRepairCtrl {
         })
     }
 
+    /// A direct unpack thread still runs for the post-processed download (paused for its
+    /// repair): it reads rebuilt dead volumes itself.
+    fn direct_unpack_running(&self, q: JobQueue<'_>) -> bool {
+        let host = q.host;
+        host.with_locked_queue(|_| {
+            let nzb = if q.post_ptr().is_some() {
+                host.post_snap(q.post_ptr()).nzb_ptr
+            } else {
+                NzbRef::NONE
+            };
+            !nzb.is_none() && host.nzb_snap(nzb, false).has_unpack_thread
+        })
+    }
+
     fn exec_cross_pack_repair(
         &self,
         q: JobQueue<'_>,
@@ -1622,9 +1636,13 @@ impl NzbgetRsStreamRepairCtrl {
         // Only direct unpack reads a rebuilt dead volume: without it nothing is borrowed.
         let nzb_id = nzb_id.filter(|_| direct_unpack_on());
         let dead_nzb_id = nzb_id;
+        // After direct unpack ended without them, finished dead volumes are written as real
+        // volumes for the ordinary unpack.
+        let materialize = nzb_id.is_some() && !self.live_mode && !self.direct_unpack_running(q);
         let dead_context = crate::streamrepair::DeadVolumeContext {
             pending_data_files,
             nzb_id,
+            materialize,
         };
         let Some(mut session) = CrossPackRepairSession::new_with_dead(
             dest_dir,

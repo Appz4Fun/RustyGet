@@ -6647,12 +6647,19 @@ def _live_archive(daemon, t, label, name, tag, volumes, files):
     again = _grep_log(t, 'Executing 7-Zip') + _grep_log(t, 'Joining splitted file')
     used = _grep_log(t, 'Using directly unpacked files')
     left = _left_volumes(t, [v[0] for v in volumes])
+    stray = _stray_temp_files(t)
     ok = (extracted and live >= 1 and du_ok == 1 and declined == 0 and again == 0 and used == 1 and
-          not left and h['Status'].startswith('SUCCESS') and h['UnpackStatus'] == 'SUCCESS')
+          not left and not stray and h['Status'].startswith('SUCCESS') and h['UnpackStatus'] == 'SUCCESS')
     return (label, ok, 'status=%s unpack=%s extracted_ok=%s live=%d du_ok=%d declined=%d extracted_again=%d '
-            'used_direct=%d volumes_left=%s %s' % (
-                h['Status'], h['UnpackStatus'], extracted, live, du_ok, declined, again, used, left,
+            'used_direct=%d volumes_left=%s stray_temp=%s %s' % (
+                h['Status'], h['UnpackStatus'], extracted, live, du_ok, declined, again, used, left, stray,
                 _live_timing(clock, name)))
+
+
+def _stray_temp_files(t):
+    """Temp files of an unpack left in the download's folders."""
+    return sorted(rel for rel in t.find_files('main', 'dst') + t.find_files('main', 'inter')
+                  if '.rustyget-' in rel)
 
 
 def scenario_live7zsplit(daemon, t):
@@ -6725,7 +6732,7 @@ def scenario_livesplitjoin(daemon, t):
                   r'the download ended', log)
     placed = (int(m.group(2)), int(m.group(3))) if m else None
     joined_after = _grep_log(t, 'Joining splitted file')
-    left = _left_volumes(t, [v[0] for v in volumes])
+    left = _left_volumes(t, [v[0] for v in volumes]) + _stray_temp_files(t)
     ok = (extracted and placed is not None and placed[0] == len(movie) and joined_after == 0 and not left and
           h['Status'].startswith('SUCCESS') and h['UnpackStatus'] == 'SUCCESS')
     return ('livesplitjoin', ok, 'status=%s unpack=%s extracted_ok=%s placed_live=%s post_download_join_bytes=%d '

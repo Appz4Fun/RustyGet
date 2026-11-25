@@ -903,7 +903,10 @@ mod tests {
             );
             assert_eq!(files.len(), 1);
             assert_eq!(files[0].packed_size, packed as i64);
-            assert_eq!(files[0].size, packed as i64);
+            // A 32-bit unpacked size of 0xFFFFFFFF means "unknown" (zipfast reads it as UnRAR
+            // does), reported as 0 like a RAR5 member of unknown size.
+            let size = if large { packed as i64 } else { 0 };
+            assert_eq!(files[0].size, size);
             assert_eq!(files[0].data_offset, data_at as i64);
             assert_eq!(files[0].time, 0x5a6b_2c21);
         }

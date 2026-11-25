@@ -1807,6 +1807,7 @@ fn copy_artifact(
     } else {
         std::fs::create_dir_all(dest).map_err(io)?;
     }
+    clean_stale_parts_once(target.parent().unwrap_or_else(|| Path::new(".")));
     let (tmp, mut out) = create_unique_sibling(target).map_err(io)?;
     let fail = |out: std::fs::File, f: Failure| {
         drop(out);
@@ -1838,8 +1839,10 @@ fn copy_artifact(
         return fail(out, io(e));
     }
     apply_meta(&out, meta);
+    // Renamed while still open: its write lock keeps a stale-part cleaner off it.
+    let renamed = std::fs::rename(&tmp, target);
     drop(out);
-    if let Err(e) = std::fs::rename(&tmp, target) {
+    if let Err(e) = renamed {
         let _ = std::fs::remove_file(&tmp);
         return Err(io(e));
     }
@@ -1869,6 +1872,122 @@ fn free_name(target: &Path, taken: &dyn Fn(&Path) -> bool) -> PathBuf {
     target.to_path_buf()
 }
 
+/// Runs [`remove_stale_parts`] on `dir` once per process: files left by an earlier process
+/// are there before this one starts, so a folder needs no second scan.
+fn clean_stale_parts_once(dir: &Path) {
+    use std::collections::HashSet;
+    static CLEANED: Mutex<Option<HashSet<PathBuf>>> = Mutex::new(None);
+    {
+        let mut cleaned = CLEANED.lock().unwrap_or_else(|e| e.into_inner());
+        let set = cleaned.get_or_insert_with(HashSet::new);
+        if set.len() >= 4096 {
+            set.clear();
+        }
+        if !set.insert(dir.to_path_buf()) {
+            return;
+        }
+    }
+    remove_stale_parts(dir);
+}
+
+/// Removes the `.rustyget-<pid>-<n>.part` files (see [`create_unique_sibling`]) that a daemon
+/// process no longer running left in `dir`, such as one that crashed mid-copy. Only regular
+/// files, never this process's own or a running process's, and never one whose write lock
+/// is held: a writer keeps its part file locked, which also covers a daemon on another host
+/// or in another PID namespace sharing the folder, where its pid means nothing here.
+/// Returns how many it removed.
+fn remove_stale_parts(dir: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let own = std::process::id();
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(stale_part_pid) else {
+            continue;
+        };
+        if pid == own || process_running(pid) {
+            continue;
+        }
+        let path = entry.path();
+        if !std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file()) {
+            continue;
+        }
+        // Held while unlinking, so a writer cannot take the file over meanwhile.
+        let Some(_lock) = try_lock_unused(&path) else {
+            continue;
+        };
+        if std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// Opens `path` (never following a link) and takes its write lock, unless another open file
+/// holds it. `None` when it is in use or cannot be opened.
+fn try_lock_unused(path: &Path) -> Option<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::io::AsRawFd;
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+            .ok()?;
+        let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
+        locked.then_some(file)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// Takes `file`'s write lock for as long as it is open (see [`remove_stale_parts`]).
+fn lock_part(file: &std::fs::File) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    }
+    #[cfg(not(unix))]
+    let _ = file;
+}
+
+/// The pid in a `.rustyget-<pid>-<n>.part` name.
+fn stale_part_pid(name: &str) -> Option<u32> {
+    let (pid, n) = name
+        .strip_prefix(".rustyget-")?
+        .strip_suffix(".part")?
+        .split_once('-')?;
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if !digits(pid) || !digits(n) {
+        return None;
+    }
+    pid.parse().ok().filter(|&p| p > 0)
+}
+
+/// Whether a process `pid` exists (one that can't be signalled still counts).
+fn process_running(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        let Ok(pid) = libc::pid_t::try_from(pid) else {
+            return true;
+        };
+        let signalled = unsafe { libc::kill(pid, 0) } == 0;
+        signalled || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
 /// Creates a new, uniquely named file next to `target` without touching any existing path.
 fn create_unique_sibling(target: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
     use std::sync::atomic::AtomicU64;
@@ -1882,7 +2001,10 @@ fn create_unique_sibling(target: &Path) -> std::io::Result<(PathBuf, std::fs::Fi
             .create_new(true)
             .open(&tmp)
         {
-            Ok(f) => return Ok((tmp, f)),
+            Ok(f) => {
+                lock_part(&f);
+                return Ok((tmp, f));
+            }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e),
         }

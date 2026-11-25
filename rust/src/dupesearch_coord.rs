@@ -1020,13 +1020,23 @@ pub fn probe_measured(h: &DonorHealthResult) -> bool {
 /// pause: it measured nothing, and that was for want of answers (errors or
 /// unreached articles), not for want of articles to ask.
 pub fn probe_retryable(h: &DonorHealthResult) -> bool {
-    !probe_measured(h) && h.checked > 0 && (h.error > 0 || h.answered() < h.checked)
+    h.paused > 0 || (!probe_measured(h) && h.checked > 0 && (h.error > 0 || h.answered() < h.checked))
+}
+
+/// Whether the check after a pause (`again`) replaces the first one
+/// (`first`): it measured something, and at least as much.
+pub fn retry_replaces(first: Option<&DonorHealthResult>, again: &DonorHealthResult) -> bool {
+    probe_measured(again) && first.map_or(true, |f| again.present + again.missing >= f.present + f.missing)
 }
 
 /// Whether a copy's STAT check ran out of its own budget before every
 /// sampled article answered (`elapsed_ms` of `budget_ms`).
+///
+/// A sample a paused server left unsettled ([`DonorHealthResult::paused`])
+/// is cut as well, however early: it needs ten answers to settle
+/// ([`cut_settled`]), and it is checked again after the pause.
 pub fn probe_was_cut(h: &DonorHealthResult, elapsed_ms: i64, budget_ms: i32) -> bool {
-    h.answered() < h.checked && elapsed_ms + 250 >= i64::from(budget_ms)
+    h.paused > 0 || (h.answered() < h.checked && elapsed_ms + 250 >= i64::from(budget_ms))
 }
 
 /// Whether a copy's STAT check settled enough to judge it, cut or not: a
@@ -4874,7 +4884,7 @@ impl NzbgetRsDupeSearch {
                     state.placed.insert(verified.len() + m_idx, item);
                     let mut mmsg = log_tag().to_vec();
                     push_c_slice(&mut mmsg, &job.name);
-                    mmsg.extend_from_slice(b": duplicate ");
+                    mmsg.extend_from_slice(b": backup ");
                     push_c_slice(&mut mmsg, &member_title);
                     mmsg.extend_from_slice(
                         format!(
@@ -7670,7 +7680,7 @@ pub unsafe fn fleet_append(
                         skip_paused: true,
                     };
                     // `again`: the check after a server's pause, which
-                    // replaces only a share the first check could not measure
+                    // replaces the first one only when it measured as much
                     let emit = |again: bool, key: &str, h: &DonorHealthResult, ms: i64| {
                         if let Ok(idx) = key.parse::<usize>() {
                             let cut = probe_was_cut(h, ms, posting_budget_ms);
@@ -7680,7 +7690,16 @@ pub unsafe fn fleet_append(
                                 msg.extend_from_slice(b" (again, after its server's pause)");
                             }
                             msg.extend_from_slice(fleet_probe_log_tail(ms, h).as_bytes());
-                            if cut {
+                            if h.paused > 0 {
+                                msg.extend_from_slice(
+                                    format!(
+                                        "; {} sampled articles left unchecked by a paused server, {}",
+                                        h.paused,
+                                        if again { "kept as measured" } else { "checked again after the pause" }
+                                    )
+                                    .as_bytes(),
+                                );
+                            } else if cut {
                                 msg.extend_from_slice(
                                     format!(
                                         "; cut at its {} s budget, the share measured so far is kept",
@@ -7690,11 +7709,9 @@ pub unsafe fn fleet_append(
                                 );
                             }
                             fleet_log(std::ptr::null_mut(), host_cb, MK_INFO, &msg);
-                            if !again || probe_measured(h) {
-                                health_ref
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner())
-                                    .insert(idx, (*h, cut));
+                            let mut health = health_ref.lock().unwrap_or_else(|e| e.into_inner());
+                            if !again || retry_replaces(health.get(&idx).map(|(f, _)| f), h) {
+                                health.insert(idx, (*h, cut));
                             }
                         }
                     };
@@ -7709,10 +7726,12 @@ pub unsafe fn fleet_append(
                     );
                     // A paused server (three failed exchanges in a row) left
                     // its articles unreached at once (`skip_paused`) instead
-                    // of the check sleeping through the pause: a copy it left
-                    // without a single answer is unverified (F6), and is
-                    // checked once more after the pause, here in the
-                    // background, while the copy proven healthy downloads.
+                    // of the check sleeping through the pause: a copy whose
+                    // sample it cut short (or left without a single answer)
+                    // is cut or unverified, never dead on the few answers it
+                    // got (F6), and is checked once more after the pause,
+                    // here in the background, while the copy proven healthy
+                    // downloads.
                     let unmeasured: Vec<crate::dupesearch_nzb::DonorPosting> = {
                         let health = health_ref.lock().unwrap_or_else(|e| e.into_inner());
                         postings
@@ -8575,7 +8594,7 @@ mod tests {
     /// more after the pause; a copy with any present or missing answer, or
     /// one with nothing to ask, is not.
     #[test]
-    fn a_copy_without_answers_is_checked_again_after_a_pause() {
+    fn a_copy_a_pause_cut_short_is_checked_again_after_it() {
         let h = |checked: i32, present: i32, missing: i32, error: i32| DonorHealthResult {
             checked,
             present,
@@ -8589,6 +8608,18 @@ mod tests {
         assert!(!probe_retryable(&h(10, 0, 10, 0)), "all missing: dead, measured");
         assert!(!probe_retryable(&h(40, 1, 6, 3)), "measured, partly");
         assert!(!probe_retryable(&h(0, 0, 0, 0)), "nothing to ask");
+        // six real 430s, then the only server paused: the sample is cut by
+        // the pause, so it settles nothing with fewer than ten answers and is
+        // checked again; never "dead (0/6 sampled)"
+        let paused = DonorHealthResult { paused: 34, ..h(40, 0, 6, 3) };
+        assert!(probe_retryable(&paused));
+        assert!(probe_was_cut(&paused, 2_000, 60_000), "cut by the pause, not the budget");
+        assert!(!cut_settled(probe_was_cut(&paused, 2_000, 60_000), &paused));
+        // the check after the pause replaces it only when it measured as much
+        assert!(retry_replaces(Some(&paused), &h(40, 1, 39, 0)));
+        assert!(!retry_replaces(Some(&paused), &h(40, 0, 2, 0)));
+        assert!(!retry_replaces(Some(&paused), &h(40, 0, 0, 5)));
+        assert!(retry_replaces(None, &h(40, 0, 10, 0)));
     }
 
     #[test]

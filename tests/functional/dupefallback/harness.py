@@ -12823,7 +12823,7 @@ def scenario_fleetfailoverkeepsalive(daemon, t):
     weak_after = after.get(rel + '_2', {})
     log = t.read_file('nzbget.log').decode(errors='replace')
     backup_pass = log.count('checking the backups of ' + rel)
-    in_history_wording = len(re.findall(r'duplicate ' + re.escape(rel) + r'\S* in history', log))
+    in_history_wording = len(re.findall(r'(?:duplicate|backup) ' + re.escape(rel) + r'\S* in history', log))
     ok = (weak_alive is not None and 0 < int(weak_alive) < 50 and order.get(rel + '_2') == 2 and
           order.get(rel + '_3') == 3 and weak_after.get('DupeAlive') == weak_alive and
           new_order.get(rel + '_2') == '1' and new_order.get(rel + '_3') == '2' and

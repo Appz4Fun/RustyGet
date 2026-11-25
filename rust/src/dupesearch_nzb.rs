@@ -1020,6 +1020,10 @@ pub struct DonorHealthResult {
     pub error: i32,
     pub body_checked: i32,
     pub body_bad: i32,
+    /// Sampled articles left unsettled because a paused server was skipped
+    /// ([`DonorOptions::skip_paused`]): the sample was cut short by the
+    /// pause, not answered, so it settles nothing on its own.
+    pub paused: i32,
 }
 
 impl DonorHealthResult {
@@ -1040,6 +1044,7 @@ impl std::ops::AddAssign for DonorHealthResult {
         self.error += other.error;
         self.body_checked += other.body_checked;
         self.body_bad += other.body_bad;
+        self.paused += other.paused;
     }
 }
 
@@ -1443,6 +1448,8 @@ pub fn donor_check_items_lanes(
         servers: Vec<std::sync::Arc<DonorServer>>,
         final_verdict: Vec<std::sync::atomic::AtomicI32>,
         stop: std::sync::atomic::AtomicBool,
+        /// articles a walker left unreached because its server was paused
+        pause_skipped: Vec<std::sync::atomic::AtomicBool>,
         mutex: std::sync::Mutex<(Vec<Vec<DonorAnswer>>, Vec<bool>, usize)>,
         cond: std::sync::Condvar,
         /// walkers still on their pass; when none are left, articles every
@@ -1465,6 +1472,9 @@ pub fn donor_check_items_lanes(
             .map(|_| std::sync::atomic::AtomicI32::new(0))
             .collect(),
         stop: std::sync::atomic::AtomicBool::new(false),
+        pause_skipped: (0..count)
+            .map(|_| std::sync::atomic::AtomicBool::new(false))
+            .collect(),
         mutex: std::sync::Mutex::new((
             vec![vec![DonorAnswer::None; servers.len()]; count],
             vec![false; count],
@@ -1537,6 +1547,11 @@ pub fn donor_check_items_lanes(
                     .enumerate()
                     .any(|(idx, srv)| idx != s && !srv.paused());
                 let answers = if server.paused() && (others_can_answer || skip_paused) {
+                    if !others_can_answer {
+                        for &idx in &todo {
+                            st.pause_skipped[idx].store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
                     vec![DonorAnswer::Unreached; todo.len()]
                 } else {
                     let batch: Vec<DonorRequest> = todo
@@ -1613,6 +1628,9 @@ pub fn donor_check_items_lanes(
             }
         }
         let v = state.final_verdict[i].load(std::sync::atomic::Ordering::SeqCst);
+        if v == 0 && state.pause_skipped[i].load(std::sync::atomic::Ordering::SeqCst) {
+            health.paused += 1;
+        }
         donor_health_accum_verdict_counts(
             v,
             1,
@@ -4706,6 +4724,7 @@ mod tests {
         let fleet = |h: &DonorHealthResult| eval_fleet_member_health(true, true, h.present, h.missing, h.error, 5, 80);
         assert_eq!(fleet(&h), (-1, false, false), "unverified, never dead: {h:?}");
         assert!(!donor_dead_probe(&h));
+        assert!(h.paused > 0 && h.paused <= h.checked, "the pause cut the sample: {h:?}");
         // the paused server is not asked again while paused
         let before = broken.exchanges.load(Ordering::SeqCst);
         let got = std::sync::Mutex::new(Vec::new());
@@ -4717,6 +4736,7 @@ mod tests {
         assert_eq!(broken.exchanges.load(Ordering::SeqCst), before);
         let h = got.lock().unwrap()[0];
         assert_eq!((h.present, h.missing, h.error), (0, 0, 0), "{h:?}");
+        assert_eq!(h.paused, h.checked, "every article left by the pause: {h:?}");
         assert_eq!(fleet(&h), (-1, false, false));
         // without skip_paused the check waits for the pause, cut only by the
         // copy's 3 s budget (an ordinary DupeSearch check keeps that)

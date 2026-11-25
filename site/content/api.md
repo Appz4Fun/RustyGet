@@ -125,7 +125,7 @@ RustyGet also stores its findings as NZB parameters, which the API returns in `P
 | `DupeKind` | `twin`, `twin:N/M`, or `alt`. |
 | `DupeSampled`, `DupeSampledOf` | A twin or alt verdict from sampled articles, for postings without par2, and the primary it refers to. |
 | `DupeAlive` | Percent of the posting found alive. `0` means dead, and failover skips it. Missing means not measured (unverified). |
-| `DupeAliveSample` | `found/asked`: the sampled articles `DupeAlive` rests on, such as `0/40`. |
+| `DupeAliveSample` | `found/answered`: the sampled articles `DupeAlive` rests on, such as `0/40`; articles that timed out or that no server was asked about are not counted. |
 | `DupeAliveCut` | `yes` when the copy's check ran out of its time budget (60 s per copy) before every sampled article answered: `DupeAlive` is the share measured so far. |
 | `DupeHealth` | The measured health of a backup. |
 | `DupeProjected`, `DupeParked` | The projected health in percent of a download judged from a sample (dead or doomed), and the share of its tried articles that arrived when it was kept as a donor. |

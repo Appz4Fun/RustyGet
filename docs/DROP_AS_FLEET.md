@@ -455,9 +455,12 @@ branch `fleet-e2e-fixes` fixes them:
   server was paused slept through the pause inside the copy's budget. The
   fleet probe sets `DonorOptions::skip_paused`: the paused server's articles
   are unreached at once, so a copy no server answered is unverified (never
-  dead), and the background health check asks such a copy once more after
-  the pause, within the fleet's deadline, while the primary downloads; the
-  second check replaces only a share the first could not measure.
+  dead). A sample the pause cut short counts as cut (`DonorHealthResult::paused`,
+  `DupeAliveCut`): it needs ten real answers to settle, so a copy is never
+  called dead on the few 430s it got before the pause. The background health
+  check asks such a copy once more after the pause, within the fleet's
+  deadline, while the primary downloads; the second check replaces the first
+  only when it measured at least as many articles.
 - **Ten STATs could not tell 0% from 2%.** A copy whose first ten sampled
   articles are all missing gets 30 more within its budget
   (`DonorOptions::dead_extra`) before it is called dead, and carries
@@ -540,7 +543,7 @@ Review fixes (76a80014 review):
 | B4: the NzbDir summary is split, never cut, and names what downloads. | Rust `scanner::tests::a_fleet_summary_is_split_never_cut` |
 | B5: a copy being probed is never "next". | Rust `fleethold::tests::next_is_the_copy_failover_takes`; functional `fleetslowprobe` |
 | F11: a RAR set whose first article is gone is keyed from its last volume. | Rust `dupeintake::tests::a_rar_set_gets_its_key_from_the_last_volume` |
-| A paused server never stalls a copy's check; a copy it left unanswered is unverified and checked again after the pause. | Rust `dupesearch_nzb::tests::a_paused_server_never_stalls_a_fleet_probe`, `dupesearch_coord::tests::a_copy_without_answers_is_checked_again_after_a_pause` |
+| A paused server never stalls a copy's check; a sample it cut short is never dead on its few answers and is checked again after the pause. | Rust `dupesearch_nzb::tests::a_paused_server_never_stalls_a_fleet_probe`, `dupesearch_coord::tests::a_copy_a_pause_cut_short_is_checked_again_after_it` |
 | More samples before "dead". | functional `fleetslowprobe` (`DupeAliveSample` 0/N with N > 10); Playwright `fleet-downloads.js` ("dead (0/40 sampled)") |
 
 Run the web UI test with `node tests/webui/dupe-group.js` (plain Node, no

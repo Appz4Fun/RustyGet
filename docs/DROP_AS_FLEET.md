@@ -450,6 +450,14 @@ branch `fleet-e2e-fixes` fixes them:
   articles. C11 lacks its last volume's head too, so it stays unkeyed (never
   a guess). zipfast `map::set_identity` (c825529) is not pinned yet:
   `OPEN ITEM (zipfast)`.
+- **A paused server never stalls a probe (F6, F7).** After three failed
+  exchanges in a row a server is paused for 30 s, and a check whose only
+  server was paused slept through the pause inside the copy's budget. The
+  fleet probe sets `DonorOptions::skip_paused`: the paused server's articles
+  are unreached at once, so a copy no server answered is unverified (never
+  dead), and the background health check asks such a copy once more after
+  the pause, within the fleet's deadline, while the primary downloads; the
+  second check replaces only a share the first could not measure.
 - **Ten STATs could not tell 0% from 2%.** A copy whose first ten sampled
   articles are all missing gets 30 more within its budget
   (`DonorOptions::dead_extra`) before it is called dead, and carries
@@ -532,6 +540,7 @@ Review fixes (76a80014 review):
 | B4: the NzbDir summary is split, never cut, and names what downloads. | Rust `scanner::tests::a_fleet_summary_is_split_never_cut` |
 | B5: a copy being probed is never "next". | Rust `fleethold::tests::next_is_the_copy_failover_takes`; functional `fleetslowprobe` |
 | F11: a RAR set whose first article is gone is keyed from its last volume. | Rust `dupeintake::tests::a_rar_set_gets_its_key_from_the_last_volume` |
+| A paused server never stalls a copy's check; a copy it left unanswered is unverified and checked again after the pause. | Rust `dupesearch_nzb::tests::a_paused_server_never_stalls_a_fleet_probe`, `dupesearch_coord::tests::a_copy_without_answers_is_checked_again_after_a_pause` |
 | More samples before "dead". | functional `fleetslowprobe` (`DupeAliveSample` 0/N with N > 10); Playwright `fleet-downloads.js` ("dead (0/40 sampled)") |
 
 Run the web UI test with `node tests/webui/dupe-group.js` (plain Node, no

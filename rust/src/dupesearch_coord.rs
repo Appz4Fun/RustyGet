@@ -1009,6 +1009,20 @@ fn alive_sample_value(h: &DonorHealthResult) -> String {
     format!("{}/{}", h.present.max(0), (h.present + h.missing).max(0))
 }
 
+/// Whether a copy's STAT check measured anything: a server answered at
+/// least one article present or missing. Errors and unreached articles
+/// (a paused or timed-out server) are no evidence (F6).
+pub fn probe_measured(h: &DonorHealthResult) -> bool {
+    h.present + h.missing > 0
+}
+
+/// Whether a copy's STAT check is worth one more try after a server's
+/// pause: it measured nothing, and that was for want of answers (errors or
+/// unreached articles), not for want of articles to ask.
+pub fn probe_retryable(h: &DonorHealthResult) -> bool {
+    !probe_measured(h) && h.checked > 0 && (h.error > 0 || h.answered() < h.checked)
+}
+
 /// Whether a copy's STAT check ran out of its own budget before every
 /// sampled article answered (`elapsed_ms` of `budget_ms`).
 pub fn probe_was_cut(h: &DonorHealthResult, elapsed_ms: i64, budget_ms: i32) -> bool {
@@ -7652,6 +7666,37 @@ pub unsafe fn fleet_append(
                         lanes: fleet_probe_lanes(servers.iter().map(|s| s.cap()).min().unwrap_or(1), postings.len()),
                         posting_budget_ms,
                         dead_extra: FLEET_DEAD_EXTRA,
+                        // a paused server never stalls a copy's check (F6, F7)
+                        skip_paused: true,
+                    };
+                    // `again`: the check after a server's pause, which
+                    // replaces only a share the first check could not measure
+                    let emit = |again: bool, key: &str, h: &DonorHealthResult, ms: i64| {
+                        if let Ok(idx) = key.parse::<usize>() {
+                            let cut = probe_was_cut(h, ms, posting_budget_ms);
+                            let mut msg = b"Fleet probe of ".to_vec();
+                            msg.extend_from_slice(probe_names.get(&idx).map_or(&[][..], |n| n.as_slice()));
+                            if again {
+                                msg.extend_from_slice(b" (again, after its server's pause)");
+                            }
+                            msg.extend_from_slice(fleet_probe_log_tail(ms, h).as_bytes());
+                            if cut {
+                                msg.extend_from_slice(
+                                    format!(
+                                        "; cut at its {} s budget, the share measured so far is kept",
+                                        GROUP_CHECK_SEC_PER_COPY
+                                    )
+                                    .as_bytes(),
+                                );
+                            }
+                            fleet_log(std::ptr::null_mut(), host_cb, MK_INFO, &msg);
+                            if !again || probe_measured(h) {
+                                health_ref
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .insert(idx, (*h, cut));
+                            }
+                        }
                     };
                     crate::dupesearch_nzb::donor_check_postings_timed(
                         servers,
@@ -7660,28 +7705,55 @@ pub unsafe fn fleet_append(
                         true,
                         (postings.len() as i32).min(MAX_PARALLEL),
                         None,
-                        |key, h, ms| {
-                            if let Ok(idx) = key.parse::<usize>() {
-                                let cut = probe_was_cut(h, ms, posting_budget_ms);
-                                let mut msg = b"Fleet probe of ".to_vec();
-                                msg.extend_from_slice(probe_names.get(&idx).map_or(&[][..], |n| n.as_slice()));
-                                msg.extend_from_slice(fleet_probe_log_tail(ms, h).as_bytes());
-                                if cut {
-                                    msg.extend_from_slice(
-                                        format!(
-                                            "; cut at its {} s budget, the share measured so far is kept",
-                                            GROUP_CHECK_SEC_PER_COPY
-                                        )
-                                        .as_bytes(),
-                                    );
-                                }
-                                fleet_log(std::ptr::null_mut(), host_cb, MK_INFO, &msg);
-                                health_ref
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner())
-                                    .insert(idx, (*h, cut));
-                            }
-                        },
+                        |key, h, ms| emit(false, key, h, ms),
+                    );
+                    // A paused server (three failed exchanges in a row) left
+                    // its articles unreached at once (`skip_paused`) instead
+                    // of the check sleeping through the pause: a copy it left
+                    // without a single answer is unverified (F6), and is
+                    // checked once more after the pause, here in the
+                    // background, while the copy proven healthy downloads.
+                    let unmeasured: Vec<crate::dupesearch_nzb::DonorPosting> = {
+                        let health = health_ref.lock().unwrap_or_else(|e| e.into_inner());
+                        postings
+                            .iter()
+                            .filter(|p| {
+                                p.key
+                                    .parse::<usize>()
+                                    .map_or(false, |idx| health.get(&idx).map_or(true, |(h, _)| probe_retryable(h)))
+                            })
+                            .map(|p| crate::dupesearch_nzb::DonorPosting {
+                                key: p.key.clone(),
+                                ids: p.ids.clone(),
+                                groups: p.groups.clone(),
+                            })
+                            .collect()
+                    };
+                    if unmeasured.is_empty() {
+                        return;
+                    }
+                    while servers.iter().all(|srv| srv.paused())
+                        && donor_now_ms() + 1000 < options.deadline_ms
+                        && !donor_stopping()
+                        && !http_stopped()
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                    if servers.iter().all(|srv| srv.paused())
+                        || donor_now_ms() + 1000 >= options.deadline_ms
+                        || donor_stopping()
+                        || http_stopped()
+                    {
+                        return;
+                    }
+                    crate::dupesearch_nzb::donor_check_postings_timed(
+                        servers,
+                        &unmeasured,
+                        &options,
+                        true,
+                        (unmeasured.len() as i32).min(MAX_PARALLEL),
+                        None,
+                        |key, h, ms| emit(true, key, h, ms),
                     );
                 });
             }
@@ -8498,6 +8570,27 @@ mod tests {
     /// B1a: a copy's check is cut only when its budget ran out with sampled
     /// articles unanswered; the kind probe reads healthy copies first and
     /// never a dead one.
+    /// F6/F7: only answers are evidence. A copy a paused server left with
+    /// errors or unreached articles measured nothing and is checked once
+    /// more after the pause; a copy with any present or missing answer, or
+    /// one with nothing to ask, is not.
+    #[test]
+    fn a_copy_without_answers_is_checked_again_after_a_pause() {
+        let h = |checked: i32, present: i32, missing: i32, error: i32| DonorHealthResult {
+            checked,
+            present,
+            missing,
+            error,
+            ..Default::default()
+        };
+        assert!(!probe_measured(&h(10, 0, 0, 3)));
+        assert!(probe_retryable(&h(10, 0, 0, 3)), "three errors, seven unreached");
+        assert!(probe_retryable(&h(10, 0, 0, 0)), "all unreached");
+        assert!(!probe_retryable(&h(10, 0, 10, 0)), "all missing: dead, measured");
+        assert!(!probe_retryable(&h(40, 1, 6, 3)), "measured, partly");
+        assert!(!probe_retryable(&h(0, 0, 0, 0)), "nothing to ask");
+    }
+
     #[test]
     fn a_copy_check_is_cut_only_at_its_budget() {
         let h = |checked, present, missing| DonorHealthResult { checked, present, missing, ..Default::default() };

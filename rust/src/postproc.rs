@@ -2853,6 +2853,44 @@ pub(crate) fn dead_volume_donor_mismatched(nzb_id: i32, donor: &[u8]) -> bool {
             .is_some_and(|r| matches!(r, Err(n) if *n >= DEAD_VOLUME_DONOR_MISMATCH_RUNS))
 }
 
+/// (download, donor NZBID) pairs whose video a live repair run checked against the download's
+/// own bytes and found the same, with no check of that run finding it different (see
+/// [`dead_volume_donor_confirmed`]).
+fn dead_volume_donor_confirmations(
+) -> std::sync::MutexGuard<'static, std::collections::HashMap<(i32, i32), i64>> {
+    static SET: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<(i32, i32), i64>>> =
+        std::sync::OnceLock::new();
+    SET.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Records that donor `donor_id`'s video matched download `nzb_id`'s video of `payload_size`
+/// bytes (see [`dead_volume_donor_confirmed`]).
+pub(crate) fn note_dead_volume_donor_confirmed(nzb_id: i32, donor_id: i32, payload_size: i64) {
+    if donor_id > 0 {
+        dead_volume_donor_confirmations().insert((nzb_id, donor_id), payload_size);
+    }
+}
+
+/// Forgets that donor `donor_id`'s video matched download `nzb_id`'s: a later check compared it
+/// in full and found it different.
+pub(crate) fn forget_dead_volume_donor_confirmed(nzb_id: i32, donor_id: i32) {
+    dead_volume_donor_confirmations().remove(&(nzb_id, donor_id));
+}
+
+/// True when the video of donor `donor_id` matched the one of download `nzb_id` in an earlier
+/// live repair run, by a check that compared in full, and no check of that run found it
+/// different. A later dead volume then has none of the download's own bytes around it to
+/// compare (the primary died for good), and the donor lends it still (failover-continue).
+/// Keyed by NZBID, which no later copy reuses.
+/// Returns the payload size the match was for.
+pub(crate) fn dead_volume_donor_confirmed(nzb_id: i32, donor_id: i32) -> Option<i64> {
+    (donor_id > 0)
+        .then(|| dead_volume_donor_confirmations().get(&(nzb_id, donor_id)).copied())
+        .flatten()
+}
+
 /// True when some donor's video matched the one of download `nzb_id` while dead volumes waited
 /// for it: that donor lends them.
 pub(crate) fn dead_volume_any_donor_confirmed(nzb_id: i32) -> bool {
@@ -2885,7 +2923,9 @@ fn dead_volume_rebuilt(nzb_id: i32) -> bool {
 /// them: it left the queue, or came back to it from history to start over.
 pub(crate) fn forget_dead_volume_verdicts(nzb_id: i32) {
     dead_volume_donor_identities().retain(|(id, _), _| *id != nzb_id);
+    dead_volume_donor_confirmations().retain(|(id, _), _| *id != nzb_id);
     crate::queuecoord::forget_kept_for_borrowing(nzb_id);
+    crate::streamrepair_coord::expire_batched();
 }
 
 /// Forgets what was put back into the volumes of download `nzb_id` (dead volumes read
@@ -6550,6 +6590,24 @@ mod dead_volume_case_tests {
             note_dead_volume_donor_identity(id, donor, false);
         }
         assert!(!dead_volume_donor_mismatched(id, donor));
+    }
+
+    #[test]
+    fn a_donor_confirmed_for_a_download_stays_confirmed_until_it_leaves() {
+        let (id, donor) = (-4_242_529, 7_711);
+        assert_eq!(dead_volume_donor_confirmed(id, donor), None);
+        note_dead_volume_donor_confirmed(id, donor, 15_000_000);
+        assert_eq!(dead_volume_donor_confirmed(id, donor), Some(15_000_000));
+        assert_eq!(dead_volume_donor_confirmed(id, donor + 1), None);
+        assert_eq!(dead_volume_donor_confirmed(id + 1, donor), None);
+        note_dead_volume_donor_confirmed(id, 0, 1);
+        assert_eq!(dead_volume_donor_confirmed(id, 0), None);
+        // A later check that differs takes it back.
+        forget_dead_volume_donor_confirmed(id, donor);
+        assert_eq!(dead_volume_donor_confirmed(id, donor), None);
+        note_dead_volume_donor_confirmed(id, donor, 15_000_000);
+        forget_dead_volume_verdicts(id);
+        assert_eq!(dead_volume_donor_confirmed(id, donor), None);
     }
 
     #[test]

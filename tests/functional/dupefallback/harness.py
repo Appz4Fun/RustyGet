@@ -4125,6 +4125,288 @@ def scenario_deadvolumeencrypted(daemon, t):
             % (hp['Status'], hb['Status'], failed_over, cancelled, kept, du_ok, integ))
 
 
+
+# ---- failover-continue: the backup carries on the primary's extraction ----
+
+def _failcont_requests(t):
+    """Every BODY/ARTICLE request nserv received, as message-ids in order."""
+    return re.findall(r'Received: (?:BODY|ARTICLE) <([^>]*)>',
+                      t.read_file('nserv.log').decode(errors='replace'))
+
+
+def _failcont_before(ids, prefix, cut, seg):
+    """Data articles under ``prefix`` that lie wholly before ``cut`` (the
+    primary's frontier, its own offsets), less one article of slack: for a
+    twin, whose articles sit at the primary's offsets, none may be fetched."""
+    n = 0
+    for mid in set(ids):
+        if not mid.startswith(prefix) or '.par2?' in mid:
+            continue
+        m = re.search(r'/([^/?]+)\?\d+=(\d+):(\d+)$', mid)
+        if m and m.group(1) in _failcont_before.offsets:
+            start = _failcont_before.offsets[m.group(1)] + int(m.group(2))
+            if start + int(m.group(3)) <= cut - seg:
+                n += 1
+    return n
+
+
+_failcont_before.offsets = {}
+
+
+def _failcont_bytes(ids, prefix):
+    """(bytes served, articles served, data articles requested more than once,
+    par2 articles requested more than once) for the message-ids under
+    ``prefix``: an id ``path?i=off:size`` carries its size; one marked ``!2``
+    is missing on the server and serves nothing. TwinCheck reads each copy's
+    par2 index on its own, also the one the download already holds: counted
+    apart (it reads no volume data)."""
+    served, count, seen, again, par_again = 0, 0, set(), 0, 0
+    for mid in ids:
+        if not mid.startswith(prefix):
+            continue
+        if mid in seen:
+            if '.par2?' in mid:
+                par_again += 1
+            else:
+                again += 1
+            continue
+        seen.add(mid)
+        # a copy's par2 index is read by TwinCheck, apart from the data: not counted
+        if mid.endswith('!2') or '.par2?' in mid:
+            continue
+        m = re.search(r'\?\d+=\d+:(\d+)$', mid)
+        if m:
+            served += int(m.group(1))
+            count += 1
+    return served, count, again, par_again
+
+
+def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKind'):
+    """The ultimate goal (extract while downloading, 2026-11-25): a stored rar
+    set of movie.mkv extracts while it downloads, and the primary dies at
+    ``die`` (a fraction of its data: every article from there on is gone). Its
+    backup waits in history, labelled the way a fleet labels it:
+
+    - ``twin``: the same posting again (same volumes, articles and par2), its
+      articles swapped in one for one;
+    - ``alt``: the same movie in another stored rar set (RAR 1.5-4, other
+      volume and article sizes), lent by the bytes of the video inside;
+    - ``aes``: the same movie in a RAR5 store set with encrypted headers, the
+      password in the backup's nzb;
+    - ``compressed``: the same movie compressed (rar -m3): it cannot lend live,
+      so the primary fails over to it as before, with the reason logged;
+    - ``other``: another video of the same size in another stored rar set,
+      labelled ``container`` (another container, the video inside not
+      verified): it never lends a byte (no earlier confirmation stands in for
+      a check of it), and the release completes from it with its own video.
+
+    The backup continues the primary's extraction where it stopped: nothing
+    of the primary is fetched again, the backup serves only what lies past the
+    frontier (plus its headers and an article straddling the cut), direct
+    unpack is never cancelled or restarted, and the movie is byte-identical.
+
+    With ``fleet`` the two copies are one fleet (a ``dupes:`` key, F16): the
+    backup waits held in the queue, not in history. ``twin_label='DupeKind'``
+    labels a twin the way TwinCheck does, with no fleet kind."""
+    if not generators.HAVE_RAR:
+        return (name, None, 'SKIP: rar not installed')
+    tag = 'fc' + backup[0]
+    password = 'fleet-pw 9' if backup == 'aes' else None
+    seg = 50_000
+    movie = _payload(15_000_000, 25110)
+    # RAR5, as current releases are: a dead last volume of a RAR 1.5-4 set cannot be rebuilt
+    # (its header stores the whole file's checksum; deadvolume::synthesize_frame)
+    with tempfile.TemporaryDirectory(prefix='fc-') as workdir:
+        vols = generators.rar5_store_volumes_hp('movie.mkv', movie, 1_000_000, None, workdir)
+    total = sum(len(v) for v in vols)
+    cut = int(total * die)
+    names = ['Show.part%02d.rar' % (i + 1) for i in range(len(vols))]
+    members, base = [], 0
+    for i, (vname, data) in enumerate(zip(names, vols)):
+        rel = '%sA/%s' % (tag, vname)
+        t.write_file(os.path.join('data', rel), data)
+        parts = (len(data) + seg - 1) // seg
+        dead = {p for p in range(1, parts + 1) if base + (p - 1) * seg + seg > cut}
+        members.append((rel, vname, len(data), seg, dead))
+        base += len(data)
+    par = generators.par2_index(list(zip(names, vols)))
+    t.write_file(os.path.join('data', '%sA/Show.par2' % tag), par)
+    members.append(('%sA/Show.par2' % tag, 'Show.par2', len(par), seg, set()))
+    labels = []
+    if backup == 'twin':
+        # a repost: the same files under the same names
+        donor_vols = list(zip(names, vols))
+        donor_seg = seg
+        labels = [(twin_label, 'twin')]
+    elif backup in ('alt', 'other'):
+        donor_movie = movie if backup == 'alt' else _payload(len(movie), 25111)
+        alt = generators.rar3_store_volumes_valid('movie.mkv', donor_movie, 1_400_000)
+        donor_vols = [('Other.part%02d.rar' % (i + 1), d) for i, d in enumerate(alt)]
+        donor_seg = 100_000
+        labels = ([('DupeCopyKind', 'borrowable'), ('DupeVideo', 'same')] if backup == 'alt'
+                  else [('DupeKind', 'container')])
+    else:
+        with tempfile.TemporaryDirectory(prefix='fc-') as workdir:
+            if backup == 'aes':
+                enc = generators.rar5_store_volumes_hp('movie.mkv', movie, 5_000_000, password, workdir)
+            else:
+                with open(os.path.join(workdir, 'movie.mkv'), 'wb') as f:
+                    f.write(movie)
+                import subprocess as _sp
+                _sp.run([generators.RAR_PATH, 'a', '-idq', '-m3', '-ma5', '-v5000000b', 'out.rar',
+                         'movie.mkv'], cwd=workdir, check=True, capture_output=True)
+                outs = sorted((n for n in os.listdir(workdir) if n.startswith('out')),
+                              key=lambda n: int(''.join(c for c in n if c.isdigit()) or 0))
+                enc = [open(os.path.join(workdir, n), 'rb').read() for n in outs]
+        donor_vols = [('Other.part%d.rar' % (i + 1), d) for i, d in enumerate(enc)]
+        donor_seg = 100_000
+        labels = ([('DupeCopyKind', 'borrowable-encrypted'), ('DupeLocked', 'yes'), ('DupeVideo', 'same')]
+                  if backup == 'aes' else [('DupeCopyKind', 'unborrowable')])
+    donor_members = []
+    for vname, data in donor_vols:
+        rel = '%sB/%s' % (tag, vname)
+        t.write_file(os.path.join('data', rel), data)
+        donor_members.append((rel, vname, len(data), donor_seg, set()))
+    if backup == 'twin':
+        t.write_file(os.path.join('data', '%sB/Show.par2' % tag), par)
+        donor_members.append(('%sB/Show.par2' % tag, 'Show.par2', len(par), seg, set()))
+    donor_total = sum(len(d) for _, d in donor_vols)
+    off = 0
+    _failcont_before.offsets = {}
+    for vname, data in donor_vols:
+        _failcont_before.offsets[vname] = off
+        off += len(data)
+    api = daemon.wait_ready()
+    key = 'dupes:show.failcont.' + tag if fleet else tag + '-key'
+    daemon.append(api, 'Primary', build_multi_nzb(members), True, key, 100)
+    _ds_append(api, 'Backup', build_multi_nzb(donor_members, password=password), key, 90,
+               paused=False, params=[{'Name': k, 'Value': v} for k, v in labels])
+    if fleet:
+        if _params(_wait_held(api, 'Backup')).get('DupeHeld') != 'yes':
+            return (name, False, 'the backup was not held by its fleet')
+    else:
+        daemon.wait_history(api, 'Backup', timeout=60)
+    started = time.time()
+    api.editqueue('GroupResume', 0, '', [g['NZBID'] for g in api.listgroups() if g['NZBName'] == 'Primary'])
+    hp = daemon.wait_history(api, 'Primary', timeout=300)
+    hb = daemon.wait_history(api, 'Backup', timeout=300)
+    deadline = time.time() + 240
+    while (not hp['Status'].startswith('SUCCESS') and not hb['Status'].startswith(('SUCCESS', 'FAILURE'))
+           and time.time() < deadline):
+        time.sleep(0.5)
+        hb = daemon.wait_history(api, 'Backup', timeout=300)
+    elapsed = time.time() - started
+    ids = _failcont_requests(t)
+    a_bytes, a_count, a_again, a_par_again = _failcont_bytes(ids, tag + 'A/')
+    b_bytes, b_count, b_again, b_par_again = _failcont_bytes(ids, tag + 'B/')
+    failed_over = _grep_log(t, 'Failing over Primary')
+    cancelled = _grep_log(t, 'Cancelling direct unpack')
+    backup_unpacks = _grep_log(t, 'Directly unpacking Backup') + _grep_log(t, 'Unpacking Backup')
+    du_ok = _grep_log(t, 'Direct unpack for Primary successful')
+    used_direct = _grep_log(t, 'Using directly unpacked files')
+    integ = _verify_output(t, movie, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
+    winner = 'Primary' if hp['Status'].startswith('SUCCESS') else (
+        'Backup' if hb['Status'].startswith('SUCCESS') else 'none')
+    # the backup may serve what lies past the cut, the article holding each of its
+    # volume's headers (its payload map is built from them; encrypted headers
+    # also need each volume's last article), and two of its articles at the
+    # cut (the one straddling it; the one holding the bytes the first check of
+    # its video compares with the primary's, which under AES also gives the
+    # IV block)
+    header_articles = len(donor_vols) * (2 if backup == 'aes' else 1)
+    if backup == 'twin':
+        # one for one: only the articles past the frontier, one straddling it
+        header_articles = 0
+    b_budget = int(donor_total * (1 - die)) + (header_articles + 2) * donor_seg
+    b_before = _failcont_before(ids, tag + 'B/', cut, seg) if backup == 'twin' else 0
+    if backup == 'compressed':
+        ok = (integ and winner == 'Backup' and failed_over == 1 and
+              _grep_log(t, 'cannot continue the extraction of Primary') >= 1)
+    elif backup == 'other':
+        # the backup's own (other) video, whole: nothing of it was lent into the primary's
+        integ = _verify_output(t, donor_movie, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
+        # (the check cannot tell it apart before the primary's end here: the download is
+        # held until then, as `donorkind::unknown_kind_is_labelled_alt` says, and its
+        # post-processing falls back to the backup)
+        lent = (_grep_log(t, 'from duplicate Backup') + _grep_log(t, 'from a duplicate; direct unpack reads it')
+                + _grep_log(t, 'Wrote dead volume'))
+        ok = integ and winner == 'Backup' and du_ok == 0 and lent == 0
+    else:
+        # the extraction that ran before the cut is the one that finished: direct unpack of
+        # the primary succeeded and post-processing took its files, extracting nothing again
+        ok = (integ and winner == 'Primary' and failed_over == 0 and cancelled == 0 and backup_unpacks == 0
+              and du_ok == 1 and used_direct == 1 and a_again == 0 and b_again == 0 and b_bytes <= b_budget
+              and b_before == 0)
+    return (name, ok,
+            'winner=%s primary=%s backup=%s secs=%.1f primary_served=%d/%d B (%d articles, %d again, '
+            'par2 %d again) backup_served=%d B of %d (budget %d, %d articles, %d again, par2 %d again) '
+            'twin_before_frontier=%d failover_logs=%d du_cancelled=%d du_ok=%d used_direct=%d '
+            'backup_unpacks=%d extracted_ok=%s'
+            % (winner, hp['Status'], hb['Status'], elapsed, a_bytes, total, a_count, a_again, a_par_again,
+               b_bytes, donor_total, b_budget, b_count, b_again, b_par_again, b_before, failed_over, cancelled,
+               du_ok, used_direct, backup_unpacks, integ))
+
+
+def scenario_failcont_twin25(daemon, t):
+    return _failcont(daemon, t, 'failcont_twin25', 'twin', 0.25)
+
+
+def scenario_failcont_twin50(daemon, t):
+    return _failcont(daemon, t, 'failcont_twin50', 'twin', 0.50)
+
+
+def scenario_failcont_twin90(daemon, t):
+    return _failcont(daemon, t, 'failcont_twin90', 'twin', 0.90)
+
+
+def scenario_failcont_alt25(daemon, t):
+    return _failcont(daemon, t, 'failcont_alt25', 'alt', 0.25)
+
+
+def scenario_failcont_alt50(daemon, t):
+    return _failcont(daemon, t, 'failcont_alt50', 'alt', 0.50)
+
+
+def scenario_failcont_alt90(daemon, t):
+    return _failcont(daemon, t, 'failcont_alt90', 'alt', 0.90)
+
+
+def scenario_failcont_aes25(daemon, t):
+    return _failcont(daemon, t, 'failcont_aes25', 'aes', 0.25)
+
+
+def scenario_failcont_aes50(daemon, t):
+    return _failcont(daemon, t, 'failcont_aes50', 'aes', 0.50)
+
+
+def scenario_failcont_aes90(daemon, t):
+    return _failcont(daemon, t, 'failcont_aes90', 'aes', 0.90)
+
+
+def scenario_failcont_fleettwin(daemon, t):
+    return _failcont(daemon, t, 'failcont_fleettwin', 'twin', 0.50, fleet=True)
+
+
+def scenario_failcont_fleetalt(daemon, t):
+    return _failcont(daemon, t, 'failcont_fleetalt', 'alt', 0.50, fleet=True)
+
+
+def scenario_failcont_fleetaes(daemon, t):
+    return _failcont(daemon, t, 'failcont_fleetaes', 'aes', 0.50, fleet=True)
+
+
+def scenario_failcont_compressed(daemon, t):
+    return _failcont(daemon, t, 'failcont_compressed', 'compressed', 0.50)
+
+
+def scenario_failcont_twinlabel(daemon, t):
+    return _failcont(daemon, t, 'failcont_twinlabel', 'twin', 0.50, twin_label='DupeKind')
+
+
+def scenario_failcont_othervideo(daemon, t):
+    return _failcont(daemon, t, 'failcont_othervideo', 'other', 0.50)
+
+
 def _headlost_volume(daemon, t, name, rar5, par=False):
     """A plain stored rar set without par2 loses the first articles of one
     middle volume (its headers and the start of its data) and a few in its
@@ -14046,6 +14328,21 @@ SCENARIOS = {
     'skipholetwin': scenario_skipholetwin,
     'deadvolumenestednopar': scenario_deadvolumenestednopar,
     'deadvolumeencrypted': scenario_deadvolumeencrypted,
+    'failcont_twin25': scenario_failcont_twin25,
+    'failcont_twin50': scenario_failcont_twin50,
+    'failcont_twin90': scenario_failcont_twin90,
+    'failcont_alt25': scenario_failcont_alt25,
+    'failcont_alt50': scenario_failcont_alt50,
+    'failcont_alt90': scenario_failcont_alt90,
+    'failcont_aes25': scenario_failcont_aes25,
+    'failcont_aes50': scenario_failcont_aes50,
+    'failcont_aes90': scenario_failcont_aes90,
+    'failcont_compressed': scenario_failcont_compressed,
+    'failcont_othervideo': scenario_failcont_othervideo,
+    'failcont_twinlabel': scenario_failcont_twinlabel,
+    'failcont_fleettwin': scenario_failcont_fleettwin,
+    'failcont_fleetalt': scenario_failcont_fleetalt,
+    'failcont_fleetaes': scenario_failcont_fleetaes,
     'headlostvolume': scenario_headlostvolume,
     'headlostvolume5': scenario_headlostvolume5,
     'headlostvolumepar': scenario_headlostvolumepar,
@@ -14470,6 +14767,21 @@ SCENARIO_OPTIONS = {
     'skipholetwin': PROD_OPTIONS + ['DownloadRate=1500'],
     'deadvolumenestednopar': PROD_OPTIONS + ['DownloadRate=4000'],
     'deadvolumeencrypted': PROD_OPTIONS + ['DownloadRate=4000'],
+    'failcont_twin25': PROD_OPTIONS + ['DownloadRate=4000'],
+    'failcont_twin50': PROD_OPTIONS + ['DownloadRate=4000'],
+    'failcont_twin90': PROD_OPTIONS + ['DownloadRate=4000'],
+    'failcont_alt25': PROD_OPTIONS + ['DownloadRate=4000'],
+    'failcont_alt50': PROD_OPTIONS + ['DownloadRate=4000'],
+    'failcont_alt90': PROD_OPTIONS + ['DownloadRate=4000'],
+    'failcont_aes25': PROD_OPTIONS + ['DownloadRate=4000'],
+    'failcont_aes50': PROD_OPTIONS + ['DownloadRate=4000'],
+    'failcont_aes90': PROD_OPTIONS + ['DownloadRate=4000'],
+    'failcont_compressed': PROD_OPTIONS + ['DownloadRate=4000'],
+    'failcont_othervideo': PROD_OPTIONS + ['DownloadRate=4000'],
+    'failcont_twinlabel': PROD_OPTIONS + ['DownloadRate=4000'],
+    'failcont_fleettwin': PROD_OPTIONS + ['DownloadRate=4000'],
+    'failcont_fleetalt': PROD_OPTIONS + ['DownloadRate=4000'],
+    'failcont_fleetaes': PROD_OPTIONS + ['DownloadRate=4000'],
     'headlostvolume': PROD_OPTIONS + ['DownloadRate=4000'],
     'headlostvolume5': PROD_OPTIONS + ['DownloadRate=4000'],
     'headlostvolumepar': PROD_OPTIONS + ['DownloadRate=4000'],
@@ -14525,7 +14837,8 @@ def _promote_fallback(options, mode):
 # finished job is rightly not redone
 FALLBACK_MODE_BOUND = {'livegate', 'streamrestartcredit', 'wholefilerestart', 'wholefilestale'}
 # scenarios that read nserv's request log (nserv.log)
-CAPTURE_REQUESTS = {'repost', 'wholefileproofcost', 'dropnzbdir', 'fleetstaysqueued', 'fleetprimaryfirst'}
+CAPTURE_REQUESTS = {'repost', 'wholefileproofcost', 'dropnzbdir', 'fleetstaysqueued', 'fleetprimaryfirst'} | {
+    'failcont_twin25', 'failcont_twin50', 'failcont_twin90', 'failcont_alt25', 'failcont_alt50', 'failcont_alt90', 'failcont_aes25', 'failcont_aes50', 'failcont_aes90', 'failcont_compressed', 'failcont_othervideo', 'failcont_twinlabel', 'failcont_fleettwin', 'failcont_fleetalt', 'failcont_fleetaes'}
 # extra nserv arguments per scenario (-w: response latency in ms)
 SCENARIO_NSERV_ARGS = {'fleetslowprobe': ['-x', '2000'], 'fleetprobespeed': ['-w', '300'], 'fleetprobebusy': ['-w', '300'], 'fleetprobehealthfail': ['-w', '800'], 'finaldeletemidway': ['-w', '300'], 'finaldeleterestart': ['-w', '300'], 'restartmidway': ['-w', '300'], 'xpacklatency': ['-w', '1000'], 'deadpickprobe': ['-w', '500'], 'deadpickafterreload': ['-w', '500'],
                        'deadpickpartial': ['-w', '100'], 'deadpickstray': ['-w', '500'], 'forcefailover': ['-w', '500'], 'copybackup': ['-w', '500'], 'copyoffailed': ['-w', '500'], 'deaddownloadstray2': ['-w', '300'], 'deaddownloadrestart': ['-w', '300'], 'deadbackupsonly': ['-w', '500'], 'backuporder': ['-w', '500'], 'deaddownloadlate': ['-w', '300'], 'deadpickservers': ['-w', '200'],

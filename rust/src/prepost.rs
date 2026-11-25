@@ -2060,7 +2060,7 @@ impl NzbgetRsPrePostProcessor {
                             .as_deref(),
                         host.nzb_get_param(backup.ptr, crate::donorkind::KIND_PARAM)
                             .as_deref(),
-                        crate::queuecoord::backup_labelled_alt(host, backup.ptr),
+                        crate::queuecoord::backup_may_lend_while_extracting(host, backup.ptr),
                     ))
             })
         {

@@ -84,6 +84,10 @@ pub trait VolumeFeed: Send + 'static {
     fn set_became_final(&self) -> bool {
         false
     }
+    /// True once the download has ended (volumes may still be held for their repair).
+    fn download_finished(&self) -> bool {
+        false
+    }
     /// True when some volume of the download was rebuilt around data borrowed from a duplicate
     /// (see [`crate::deadvolume`]): it has no file, so the set on disk is not the whole set.
     fn has_borrowed(&self) -> bool {
@@ -107,8 +111,9 @@ pub trait VolumeFeed: Send + 'static {
     }
 }
 
-/// Volume bytes at the start and end that hold archive headers. A hole there cannot be read
-/// past, so such a volume waits for its repair instead.
+/// Volume bytes at the start and end that may hold archive headers, for a volume whose headers
+/// cannot be read (encrypted headers, see [`place_holes`]): a hole there cannot be read past, so
+/// such a volume waits for its repair instead. Every other volume is placed by its own headers.
 const HEADER_GUARD_HEAD: i64 = 64 * 1024;
 const HEADER_GUARD_TAIL: i64 = 4 * 1024;
 
@@ -161,6 +166,172 @@ pub fn skippable_holes_behind_head(
         }
     }
     merged
+}
+
+/// Where the lost ranges of a downloaded RAR volume fall, read from the volume's own header
+/// chain (zipfast's single-volume member map): the exact data area of every member piece in
+/// it, instead of a fixed guard at the volume's edges.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HolePlacement {
+    /// Every hole lies inside a member's data (sorted, merged): extraction reads past them.
+    Data(Vec<(u64, u64)>),
+    /// Every hole lies inside member data or behind the last member's data, which ends at
+    /// `data_end`: the headers there (quick-open data and the end of archive header) can be
+    /// rebuilt (RAR 5.0, see `deadvolume::restore_tail_guarded`), then the rest is read past.
+    Tail { data_end: u64 },
+    /// A hole covers a header in front of member data: extraction waits for the repair.
+    Header,
+    /// The headers cannot be read (encrypted without a password, not a RAR volume, unreadable).
+    Unknown,
+}
+
+/// Sorts `holes` (`offset`, `len`) and joins overlapping or touching ones, dropping empty ones.
+pub fn merge_holes(holes: &[(u64, u64)]) -> Vec<(u64, u64)> {
+    let mut out: Vec<(u64, u64)> = holes.iter().copied().filter(|&(_, l)| l > 0).collect();
+    out.sort_unstable();
+    let mut merged: Vec<(u64, u64)> = Vec::with_capacity(out.len());
+    for (s, l) in out {
+        match merged.last_mut() {
+            Some((ms, ml)) if *ms + *ml >= s => *ml = (*ml).max(s + l - *ms),
+            _ => merged.push((s, l)),
+        }
+    }
+    merged
+}
+
+/// Reads the header chain of the volume at `path` with `holes` (`offset`, `len`) unreadable,
+/// stopping at byte `limit` when given. Only header bytes are read.
+fn map_holed_volume(
+    path: &Path,
+    holes: &[(u64, u64)],
+    limit: Option<u64>,
+) -> Option<Result<zipfast::map::VolumeMap, zipfast::map::MapError>> {
+    let mut source = HoledVolume::open(path, holes.to_vec()).ok()?;
+    if let Some(limit) = limit.filter(|&l| l < source.info.extent) {
+        source.info.extent = limit;
+        source.info.length = zipfast::progressive::SourceLength::Final(limit);
+    }
+    let name = path.file_name()?.to_os_string();
+    let mut builder =
+        zipfast::map::VolumeMapBuilder::new(Box::new(source), zipfast::map::MapOptions::new(name));
+    match builder.poll_map(&mut Context::from_waker(Waker::noop())) {
+        Poll::Ready(result) => Some(result),
+        // A file on disk never answers NotYet.
+        Poll::Pending => None,
+    }
+}
+
+/// Places the lost ranges `holes` (`offset`, `len`) of the complete RAR volume at `path`
+/// against its headers. A hole fully inside a member piece's data is skippable; a hole behind
+/// the last piece's data lies in the volume's tail; anything else covers a header.
+pub fn place_holes(path: &Path, holes: &[(u64, u64)]) -> HolePlacement {
+    use zipfast::map::{MapError, VolumeEnd};
+    let holes = merge_holes(holes);
+    if holes.is_empty() {
+        return HolePlacement::Data(Vec::new());
+    }
+    let Ok(file_len) = std::fs::metadata(path).map(|m| m.len()) else {
+        return HolePlacement::Unknown;
+    };
+    // A file that does not start like a RAR volume (a self-extractor, another format) is not
+    // read here; one whose start is lost is placed below (its headers are lost).
+    if holes[0].0 >= 8 {
+        let mut sig = [0u8; 8];
+        let read = std::fs::File::open(path).and_then(|f| {
+            use std::io::Read;
+            f.take(8).read_exact(&mut sig)
+        });
+        if read.is_err() || &sig[..6] != b"Rar!\x1a\x07" {
+            return HolePlacement::Unknown;
+        }
+    }
+    let spans_of = |map: &zipfast::map::VolumeMap| -> Vec<(u64, u64)> {
+        map.members
+            .iter()
+            .map(|m| (m.packed.start, m.packed.end.min(file_len)))
+            .filter(|&(s, e)| s < e)
+            .collect()
+    };
+    let inside =
+        |spans: &[(u64, u64)], (s, l): (u64, u64)| spans.iter().any(|&(a, b)| a <= s && s + l <= b);
+    // Whole volume first: when its headers are all readable, every hole is in data or in the
+    // tail (quick-open data, padding). A hole in a header read on the way stops the walk.
+    let (map, cut) = match map_holed_volume(path, &holes, None) {
+        None => return HolePlacement::Unknown,
+        Some(Ok(map)) => match map.end {
+            VolumeEnd::Complete => (map, None),
+            // A RAR 1.5-2.x volume may end without an end of archive header: the walk ran to the
+            // end of the file right behind the last member's data.
+            VolumeEnd::Truncated { offset } if offset >= file_len => (map, None),
+            VolumeEnd::Locked { .. } => return HolePlacement::Unknown,
+            _ => return HolePlacement::Header,
+        },
+        Some(Err(MapError::HeaderHole { offset, .. })) => {
+            // Read again up to the hole that hit a header: the members in front of it.
+            let cut = holes
+                .iter()
+                .find(|&&(s, l)| s <= offset && offset < s + l)
+                .map_or(offset, |&(s, _)| s);
+            match map_holed_volume(path, &holes, Some(cut)) {
+                Some(Ok(map)) if matches!(map.end, VolumeEnd::Truncated { .. }) => {
+                    let VolumeEnd::Truncated { offset: at } = map.end else {
+                        unreachable!()
+                    };
+                    // Only headers behind the last piece's data (the tail: quick-open data,
+                    // end of archive) can be rebuilt; the walk lists every file header in
+                    // front of where it stopped, so none lies between.
+                    let last_end = map.members.last().map(|m| m.packed.end);
+                    if last_end.is_none_or(|end| end > at) {
+                        return HolePlacement::Header;
+                    }
+                    (map, Some(at))
+                }
+                Some(Ok(_)) | Some(Err(_)) => return HolePlacement::Header,
+                None => return HolePlacement::Unknown,
+            }
+        }
+        Some(Err(MapError::WrongPassword | MapError::PasswordRequired)) => {
+            return HolePlacement::Unknown
+        }
+        Some(Err(MapError::NotArchive)) => return HolePlacement::Unknown,
+        Some(Err(_)) => return HolePlacement::Header,
+    };
+    let spans = spans_of(&map);
+    if cut.is_none() && holes.iter().all(|&h| inside(&spans, h)) {
+        return HolePlacement::Data(holes);
+    }
+    let Some(data_end) = map.members.iter().map(|m| m.packed.end).max() else {
+        return HolePlacement::Header;
+    };
+    if data_end >= file_len {
+        return HolePlacement::Header;
+    }
+    // Every hole is data, behind the last data (the tail), or runs from data into the tail.
+    let placed = holes.iter().all(|&(s, l)| {
+        s >= data_end
+            || inside(&spans, (s, l))
+            || (s + l > data_end && inside(&spans, (s, data_end - s)))
+    });
+    if placed {
+        HolePlacement::Tail { data_end }
+    } else {
+        HolePlacement::Header
+    }
+}
+
+/// The holes of a volume extraction can read past now: `Data` placements as they are, the
+/// fixed edge guard for a volume whose headers cannot be read, nothing (wait for the repair)
+/// otherwise.
+pub fn skippable_placed(
+    placement: &HolePlacement,
+    holes: &[crate::dupefallback::NzbgetRsByteRange],
+    file_size: i64,
+) -> Vec<(u64, u64)> {
+    match placement {
+        HolePlacement::Data(h) => h.clone(),
+        HolePlacement::Unknown => skippable_holes(holes, file_size),
+        HolePlacement::Tail { .. } | HolePlacement::Header => Vec::new(),
+    }
 }
 
 /// A set whose volumes are all on disk: present volumes are complete, absent ones missing.
@@ -1699,7 +1870,7 @@ fn free_name(target: &Path, taken: &dyn Fn(&Path) -> bool) -> PathBuf {
 }
 
 /// Creates a new, uniquely named file next to `target` without touching any existing path.
-fn create_unique_sibling(target: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
+pub(crate) fn create_unique_sibling(target: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
     use std::sync::atomic::AtomicU64;
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let parent = target.parent().unwrap_or_else(|| Path::new("."));

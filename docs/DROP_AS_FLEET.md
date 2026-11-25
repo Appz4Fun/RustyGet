@@ -487,6 +487,16 @@ Review fixes (76a80014 review):
   why nothing downloads; the probe's findings are written onto a copy in
   history only when its primary's success filed it or it succeeded itself
   (`fleet_history_writable`), and no copy in history keeps a hold or probe mark.
+- The kind probe skips only a copy proven 0% alive: a weak donor under
+  DupeMinAlive still gets its kind, lock and inner key
+  (`kind_probe_skips`), so a locked one is never failed over to; its
+  workers wait for the health check while only 0% copies are left, since
+  the check after a pause can still find one alive.
+- `DupeAliveCut=no` replaces an early leader's `yes` once a full check
+  measured its sample. A fleet copy in history that the user deleted or
+  that failed is not reported as added. A fleet owns its picks for the
+  backup pass only while it is open (`fleet_pick_owned`): a fleet that
+  ended with every copy in history is searched by DupeSearch again.
 - An early primary that finished downloading or is in post-processing is
   never held again for an easier copy (`fleet_leader_switchable`); the
   easier copy is only ranked.

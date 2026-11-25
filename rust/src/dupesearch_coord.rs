@@ -926,18 +926,30 @@ fn pick_fleet_marked(host_ctx: *mut c_void, host_cb: DupeHostFn, dq_ptr: usize, 
         return pick.has_dupe_fleet;
     };
     let marked = |s: &NzbSnap| fleet_param_marks(|n| qh.nzb_get_param(s.ptr, n));
-    if marked(pick) {
-        return true;
-    }
     let (q_len, _) = dq_counts(host_ctx, host_cb, dq_ptr);
-    (0..q_len).any(|i| {
+    let mut pick_queued = false;
+    let other_marked = (0..q_len).any(|i| {
         let p = dq_queue_at(host_ctx, host_cb, dq_ptr, i);
-        if p.is_none() || p == pick.ptr {
+        if p.is_none() {
+            return false;
+        }
+        if p == pick.ptr {
+            pick_queued = true;
             return false;
         }
         let s = inspect_nzb(host_ctx, host_cb, p, false);
         s.kind == 0 && s.dupe_key.eq_ignore_ascii_case(&pick.dupe_key) && marked(&s)
-    })
+    });
+    // the fleet owns the pick only while it is open (a copy of it queued):
+    // a fleet that ended with every copy in history (all dead) is searched
+    // again, as before DupeFleetMember was durable
+    fleet_pick_owned(marked(pick), pick_queued, other_marked)
+}
+
+/// [`pick_fleet_marked`]'s rule: the pick's own fleet marks count while it is
+/// queued; a queued, marked copy of its key counts always (the fleet is open).
+pub fn fleet_pick_owned(pick_marked: bool, pick_queued: bool, other_queued_marked: bool) -> bool {
+    (pick_marked && pick_queued) || other_queued_marked
 }
 
 /// Whether a copy carries a fleet's own marks: its rank (`DupeFleet`) or its
@@ -1067,6 +1079,13 @@ pub fn kind_probe_class(alive: i32, dead: bool) -> u8 {
     } else {
         2
     }
+}
+
+/// Whether the kind probe skips a copy: only one proven 0% alive. A weak
+/// donor under DupeMinAlive (`dead` for leading) is still read, so its lock
+/// (encrypted headers) and inner key are known before failover can take it.
+pub fn kind_probe_skips(alive: i32, dead: bool) -> bool {
+    dead && alive == 0
 }
 
 /// [`kind_probe_class`] of a copy proven dead.
@@ -6426,7 +6445,8 @@ fn fleet_apply_member(
             // it keeps what the probe found. A copy the user deleted, or one
             // filed as a failure, is left as it is.
             let snap = inspect_nzb(host_ctx, host_cb, ptr_, false);
-            if fleet_history_writable(snap.delete_status, snap.dupe_success) {
+            let writable = fleet_history_writable(snap.delete_status, snap.dupe_success);
+            if writable {
                 for (k, v) in params {
                     qh.nzb_set_param(ptr_, k, Some(v));
                 }
@@ -6450,7 +6470,9 @@ fn fleet_apply_member(
             crate::fleethold::leave_fleet_host(&qh, ptr_);
             qh.dq_history_changed(dq_ptr);
             qh.dq_save(dq_ptr);
-            return nzb_id;
+            // a copy the user deleted or one that failed is no backup of the
+            // fleet: the reply reports it as before (not added)
+            return if writable { nzb_id } else { 0 };
         }
         for (k, v) in params {
             qh.nzb_set_param(ptr_, k, Some(v));
@@ -7585,7 +7607,7 @@ pub unsafe fn fleet_append(
             // ones not known yet next, weak ones after them; a copy proven
             // dead needs neither (its kind ranks nothing)
             {
-                let (kinds_done, kind_slots) = (&kinds_done, &kind_slots);
+                let (kinds_done, kind_slots, health_done) = (&kinds_done, &kind_slots, &health_done);
                 s.spawn(move || {
                     let _done = Done(kinds_done);
                     let total = summaries_ref.len();
@@ -7616,7 +7638,10 @@ pub unsafe fn fleet_append(
                                                         DONOR_MIN_KNOWN,
                                                         min_alive,
                                                     );
-                                                    kind_probe_class(alive, dead)
+                                                    // only a 0% copy skips its kind and key: a weak
+                                                    // donor (under DupeMinAlive, "dead" for leading)
+                                                    // still needs its lock and inner key (F3, F8)
+                                                    kind_probe_class(alive, kind_probe_skips(alive, dead))
                                                 }
                                             }
                                         })
@@ -7632,6 +7657,14 @@ pub unsafe fn fleet_append(
                                     pick
                                 };
                                 let Some(k) = next else {
+                                    // only 0% copies are left: the health check
+                                    // (its check after a pause) may still find one
+                                    // alive, so wait for it before giving up
+                                    let untaken = taken.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|t| !t);
+                                    if untaken && !health_done.load(Ordering::SeqCst) {
+                                        std::thread::sleep(std::time::Duration::from_millis(200));
+                                        continue;
+                                    }
                                     break;
                                 };
                                 let ctx = ctx_addr as *mut c_void;
@@ -7888,9 +7921,7 @@ pub unsafe fn fleet_append(
                                 (ALIVE_SAMPLE_PARAM, &sample_s),
                                 (crate::fleethold::EASE_PARAM, &ease_s),
                             ];
-                            if cut {
-                                params.push((ALIVE_CUT_PARAM, b"yes"));
-                            }
+                            params.push((ALIVE_CUT_PARAM, if cut { b"yes" } else { b"no" }));
                             let old_id = leader.map_or(0, |(_, _, id)| id);
                             let released = fleet_lead_release(
                                 ctx_addr as *mut c_void,
@@ -8294,9 +8325,9 @@ pub unsafe fn fleet_append(
             let sample_str = cand.checked.then(|| alive_sample_value(&cand.health).into_bytes());
             if let (Some(sv), true) = (sample_str.as_deref(), alive_str.is_some()) {
                 params.push((ALIVE_SAMPLE_PARAM, sv));
-                if cand.cut {
-                    params.push((ALIVE_CUT_PARAM, b"yes"));
-                }
+                // "no" replaces the early leader's "yes" once a later check
+                // (after a pause) measured the whole sample
+                params.push((ALIVE_CUT_PARAM, if cand.cut { b"yes" } else { b"no" }));
             }
             if let Some(same) = cand.video {
                 params.push((VIDEO_PARAM, video_param_value(same)));
@@ -8657,6 +8688,10 @@ mod tests {
         assert_eq!(kind_probe_class(-1, false), 1);
         assert_eq!(kind_probe_class(17, true), KIND_CLASS_DEAD);
         assert_eq!(kind_probe_class(87, false), 2);
+        // review of cf714fb5: a 27% donor under DupeMinAlive still gets its
+        // kind and key (a locked one must not be picked for failover)
+        assert!(!kind_probe_skips(27, true) && kind_probe_skips(0, true) && !kind_probe_skips(-1, false));
+        assert_eq!(kind_probe_class(27, kind_probe_skips(27, true)), 2);
         assert!(FLEET_PROBE_LANES > 1 && FLEET_DEAD_EXTRA >= 20);
         // a cut check of 24 missing is still dead; of 7 missing unknown
         assert!(cut_settled(true, &h(31, 0, 24)) && !cut_settled(true, &h(31, 0, 7)));
@@ -8672,6 +8707,12 @@ mod tests {
     /// probe and fleethold, and says "queued" for a queued backup.
     #[test]
     fn the_backup_pass_leaves_held_fleets_alone() {
+        // review of cf714fb5: an open fleet (a copy queued) owns its picks;
+        // one that ended with every copy in history is searched again
+        assert!(fleet_pick_owned(true, true, false));
+        assert!(fleet_pick_owned(false, false, true), "the primary just deleted, its fleet still queued");
+        assert!(!fleet_pick_owned(true, false, false), "an all-dead fleet in history");
+        assert!(!fleet_pick_owned(false, true, false));
         assert!(fleet_owns_pick(true, 0, DupeMode::Score, b"dupes:dune.part.two.2024", true));
         assert!(!fleet_owns_pick(false, 0, DupeMode::Score, b"dupes:dune.part.two.2024", true));
         assert!(!fleet_owns_pick(true, 0, DupeMode::All, b"dupes:dune.part.two.2024", true));

@@ -5100,17 +5100,21 @@ mod tests {
         .unwrap();
         let piece2 = f0[12288..16384].to_vec();
         let crc2 = crc32fast::hash(&piece2);
-        assert!(matches!(
-            streaming_session_defer_article(nzb_id, (b"part01.rar", &[]), 12288, 4096, crc2, || {
-                Some(piece2)
-            })
-            .unwrap(),
-            Err(RepairError::StreamingMemoryLimit {
-                context: "live article snapshots",
-                ..
-            })
-        ));
+        // An overrun no loan covers waits for the cache write, which hands its bytes over
+        // (not refused, and never read back from a file).
+        streaming_session_defer_article(nzb_id, (b"part01.rar", &[]), 12288, 4096, crc2, || {
+            Some(piece2.clone())
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(entry.awaiting_commits(), 1);
         drop(filler);
+        entry.article_byte_limit.store(1 << 20, Ordering::Release);
+        assert_eq!(
+            streaming_session_articles_written(nzb_id, (None, b"part01.rar", &[]), false, &[(12288, &piece2)]),
+            1
+        );
+        assert_eq!(entry.awaiting_commits(), 0);
         streaming_session_forget(nzb_id);
         drop(entry);
         let _ = std::fs::remove_dir_all(&dir);

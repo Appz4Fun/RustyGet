@@ -1846,10 +1846,22 @@ pub(crate) fn streaming_session_reserve_tee(nzb_id: i32, size: u64) -> Option<Li
         return None;
     }
     let mut queue = entry.articles.lock().unwrap_or_else(|e| e.into_inner());
-    let next = queue.bytes.checked_add(size)?;
-    if next > entry.article_byte_limit.load(Ordering::Acquire)
-        || queue.stash.len() >= LIVE_STASH_LIMIT
-    {
+    let mut next = queue.bytes.checked_add(size)?;
+    let mut limit = entry.article_byte_limit.load(Ordering::Acquire);
+    if next > limit && queue.stash.len() < LIVE_STASH_LIMIT {
+        // As for a snapshot: a loan of free ParBuffer (at most half of the pool) covers the
+        // shortfall rather than letting par-rs read the article back later.
+        drop(queue);
+        entry.lend_memory(&RepairError::StreamingMemoryLimit {
+            context: "live article snapshots",
+            required_bytes: next,
+            limit_bytes: limit,
+        });
+        queue = entry.articles.lock().unwrap_or_else(|e| e.into_inner());
+        next = queue.bytes.checked_add(size)?;
+        limit = entry.article_byte_limit.load(Ordering::Acquire);
+    }
+    if next > limit || queue.stash.len() >= LIVE_STASH_LIMIT {
         return None;
     }
     queue.bytes = next;

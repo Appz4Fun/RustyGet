@@ -2011,9 +2011,13 @@ fn live_tee_of_an_uncached_article_feeds_its_capture() {
     assert_eq!(streaming_session_io_stats(id).unwrap().source_bytes_read, 0);
     let entry = active_streaming_session(id).unwrap();
     assert_eq!(entry.articles.lock().unwrap().bytes, 0);
-    // No room: no tee.
+    // A full byte limit is covered by a loan of free ParBuffer, as for a snapshot.
     entry.article_byte_limit.store(0, Ordering::Release);
-    assert!(streaming_session_reserve_tee(id, 1000).is_none());
+    let tee = streaming_session_reserve_tee(id, 1000).expect("a loan covers the shortfall");
+    assert!(entry.lent_memory.load(Ordering::Relaxed) >= 1000);
+    assert!(entry.article_byte_limit.load(Ordering::Relaxed) >= 1000);
+    drop(tee);
+    assert_eq!(entry.articles.lock().unwrap().bytes, 0);
     drop(entry);
     streaming_session_forget(id);
 }

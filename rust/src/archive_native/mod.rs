@@ -740,6 +740,12 @@ where
         parallel_min: None,
         select: Some(select),
         windows_safe_names: false,
+        special_entries: Default::default(),
+        fallback_mtime: None,
+        compressed_tar: Default::default(),
+        version_naming: Default::default(),
+        preexisting_links: Default::default(),
+        refused_link_placeholder: false,
     };
     let limits = sz_limits();
 
@@ -844,7 +850,7 @@ where
             let msg = match (&err, SevenZipError::of(&err)) {
                 (zipfast::Error::Encrypted, _)
                 | (_, Some(SevenZipError::PasswordRequired))
-                | (_, Some(SevenZipError::WrongPassword)) => SZ_WRONG_PASSWORD.to_string(),
+                | (_, Some(SevenZipError::WrongPassword { .. })) => SZ_WRONG_PASSWORD.to_string(),
                 (_, Some(SevenZipError::Canceled)) => return Err("7-Zip: Aborted".to_string()),
                 (_, Some(SevenZipError::Map(zipfast::map::MapError::NotArchive)))
                 | (zipfast::Error::NotAnArchive, _) => {

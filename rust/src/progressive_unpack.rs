@@ -1092,6 +1092,17 @@ where
         // zipfast publishes by rename only when it may replace; skip mode would need hard
         // links, which some destinations (exFAT, SMB) do not support.
         && req.overwrite == Overwrite::Always
+        // A dead volume rebuilt from a duplicate is no file of the set: the declaration would
+        // cover only the files before it, and the publication then trips over the rest.
+        && !rar_set_members_with(req.first_volume, &mut |path: &Path| {
+            match feed.lock().unwrap_or_else(|e| e.into_inner()).volume(path) {
+                VolumeView::Virtual(v) => Some(v),
+                _ => None,
+            }
+        })
+        .1
+        .iter()
+        .any(Option::is_some)
         && upgrade_protection(
             req.first_volume,
             &protection,
@@ -1118,6 +1129,12 @@ where
                 &dir,
                 req,
                 &member,
+                &mut |path: &Path| {
+                    match feed.lock().unwrap_or_else(|e| e.into_inner()).volume(path) {
+                        VolumeView::Virtual(v) if v.holes.is_empty() => Some(v),
+                        _ => None,
+                    }
+                },
                 is_cancelled,
                 log_cb,
             )
@@ -1345,27 +1362,34 @@ fn apply_meta(file: &std::fs::File, meta: MemberMeta) {
 }
 
 /// Reads the missing inner bytes of `artifact` out of the (now repaired) volume set in `dir`
-/// and patches them in.
+/// and patches them in. `virtual_of` gives a dead volume rebuilt from a duplicate in place of
+/// its missing file (a primary that died part way: every volume after the one it died in is
+/// one), so the set is read to its end.
+#[allow(clippy::too_many_arguments)]
 fn patch_from_repaired_volumes(
     session: &mut ProgressiveSession,
     artifact: &mut Artifact,
     dir: &Path,
     req: &Request<'_>,
     member: &Member,
+    virtual_of: &mut dyn FnMut(&Path) -> Option<crate::deadvolume::VirtualVolume>,
     is_cancelled: &mut dyn FnMut() -> bool,
     log_cb: &mut dyn FnMut(i32, &str),
 ) -> Result<(), Failure> {
     let name = member.name.as_slice();
     use crate::streamrepair::{ContentMapper, DiskSourceSet, MemberFormat};
 
-    let members = rar_set_members(req.first_volume);
+    let (members, virtuals) = rar_set_members_with(req.first_volume, virtual_of);
     if members.is_empty() {
         return Err(Failure::Damaged(
             "no volumes to read the repair from".into(),
         ));
     }
     let dir_bytes = path_bytes(dir);
-    let sources = DiskSourceSet::new(&dir_bytes, &members);
+    let sources = PatchSources {
+        disk: DiskSourceSet::new(&dir_bytes, &members),
+        virtuals,
+    };
     let set = crate::streamrepair::MemberSet {
         format: MemberFormat::Rar,
         members: (0..members.len() as i32).collect(),
@@ -1511,6 +1535,118 @@ fn create_unique_dir(parent: &Path) -> std::io::Result<PathBuf> {
 }
 
 /// Volume files of the set starting at `first`, in order, that exist on disk.
+/// The volumes of the RAR set from `first`, like [`rar_set_members`], going on past a missing
+/// file `virtual_of` has a rebuilt dead volume for (each such member comes with its source).
+fn rar_set_members_with(
+    first: &Path,
+    virtual_of: &mut dyn FnMut(&Path) -> Option<crate::deadvolume::VirtualVolume>,
+) -> (Vec<crate::streamrepair::SetMember>, Vec<Option<PatchVirtual>>) {
+    let mut out = Vec::new();
+    let mut virtuals = Vec::new();
+    let mut p = first.to_path_buf();
+    loop {
+        let name = p
+            .file_name()
+            .map(|n| path_bytes(Path::new(n)))
+            .unwrap_or_default();
+        if let Ok(meta) = std::fs::metadata(&p) {
+            out.push(crate::streamrepair::SetMember::new(name, meta.len() as i64));
+            virtuals.push(None);
+        } else if let Some(source) = virtual_of(&p).and_then(|v| PatchVirtual::open(&v).ok()) {
+            out.push(crate::streamrepair::SetMember::new(name, source.len() as i64));
+            virtuals.push(Some(source));
+        } else {
+            break;
+        }
+        match zipfast::volume::next_volume(&p) {
+            Some(n) if n != p => p = n,
+            _ => break,
+        }
+    }
+    (out, virtuals)
+}
+
+/// A finished dead volume read back by offset (headers, borrowed part, tail).
+struct PatchVirtual {
+    head: Vec<u8>,
+    data: Mutex<std::fs::File>,
+    data_len: u64,
+    tail: Vec<u8>,
+}
+
+impl PatchVirtual {
+    fn open(v: &crate::deadvolume::VirtualVolume) -> std::io::Result<Self> {
+        let data = std::fs::File::open(&v.data)?;
+        if data.metadata()?.len() < v.data_len {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "borrowed data is shorter than its part",
+            ));
+        }
+        Ok(Self { head: v.head.clone(), data: Mutex::new(data), data_len: v.data_len, tail: v.tail.clone() })
+    }
+
+    fn len(&self) -> u64 {
+        self.head.len() as u64 + self.data_len + self.tail.len() as u64
+    }
+}
+
+impl crate::streamrepair::ContentSource for PatchVirtual {
+    fn size(&self) -> i64 {
+        self.len() as i64
+    }
+
+    fn read(&self, offset: i64, buf: &mut [u8]) -> crate::streamrepair::ReadResult {
+        use crate::streamrepair::ReadError;
+        use std::io::{Read, Seek, SeekFrom};
+        let start = u64::try_from(offset).map_err(|_| ReadError::OutOfRange)?;
+        if start.checked_add(buf.len() as u64).is_none_or(|end| end > self.len()) {
+            return Err(ReadError::OutOfRange);
+        }
+        let head = self.head.len() as u64;
+        let data_end = head + self.data_len;
+        let mut filled = 0usize;
+        while filled < buf.len() {
+            let at = start + filled as u64;
+            let rest = &mut buf[filled..];
+            let n = if at < head {
+                let n = rest.len().min((head - at) as usize);
+                rest[..n].copy_from_slice(&self.head[at as usize..at as usize + n]);
+                n
+            } else if at < data_end {
+                let n = rest.len().min((data_end - at) as usize);
+                let mut f = self.data.lock().unwrap_or_else(|e| e.into_inner());
+                f.seek(SeekFrom::Start(at - head)).map_err(|_| ReadError::Unavailable)?;
+                f.read_exact(&mut rest[..n]).map_err(|_| ReadError::Unavailable)?;
+                n
+            } else {
+                let from = (at - data_end) as usize;
+                let n = rest.len().min(self.tail.len() - from);
+                rest[..n].copy_from_slice(&self.tail[from..from + n]);
+                n
+            };
+            filled += n;
+        }
+        Ok(())
+    }
+}
+
+/// The repaired set as the patch reads it: files on disk, and rebuilt dead volumes in place of
+/// missing ones.
+struct PatchSources<'a> {
+    disk: crate::streamrepair::DiskSourceSet<'a>,
+    virtuals: Vec<Option<PatchVirtual>>,
+}
+
+impl crate::streamrepair::ContentSourceSet for PatchSources<'_> {
+    fn get_source(&self, member_index: i32) -> Option<&dyn crate::streamrepair::ContentSource> {
+        match usize::try_from(member_index).ok().and_then(|i| self.virtuals.get(i)) {
+            Some(Some(v)) => Some(v),
+            _ => self.disk.get_source(member_index),
+        }
+    }
+}
+
 fn rar_set_members(first: &Path) -> Vec<crate::streamrepair::SetMember> {
     let mut out = Vec::new();
     let mut p = first.to_path_buf();

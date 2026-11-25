@@ -2984,6 +2984,7 @@ fn case_blind<'a>(
 
 /// The stand-in for dead volume `full_path` of download `nzb_id` handed over before its borrow
 /// finished (see [`direct_unpack_offer_virtual`]), if any.
+#[cfg(test)]
 pub(crate) fn direct_unpack_offered(
     nzb_id: i32,
     full_path: &[u8],

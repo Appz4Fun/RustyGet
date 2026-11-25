@@ -1212,6 +1212,188 @@ pub fn restore_head_guarded(path: &[u8], holes: &[(u64, u64)], index: usize) -> 
     Some((head, data_end))
 }
 
+/// Largest header area read to rebuild a volume's tail: the volume's start up to its last file
+/// header, with member data left as zeros (only headers are read). A volume whose last file
+/// header lies further in (a large member in front of a small one) is left to its repair.
+const TAIL_HEAD_MAX: u64 = 64 << 20;
+
+/// Writes back the lost tail of RAR 5.0 volume `path`: the quick-open data and end of archive
+/// header behind its last file's data, which ends at `data_end`, rebuilt byte for byte by
+/// zipfast (`rar5::rebuild_volume_tail`) from the volume's own headers and length. Only bytes
+/// inside `holes` (`offset`, `len`) are written, and only when zipfast is certain of them and
+/// they agree with every tail byte that arrived. Returns the holes left (those in member data).
+/// The write is announced to live PAR as a range replacement, as for a rebuilt head.
+pub fn restore_tail_guarded(path: &[u8], holes: &[(u64, u64)], data_end: u64) -> Option<Vec<(u64, u64)>> {
+    let os = crate::fsops::path(path);
+    let file = std::path::Path::new(&os);
+    let context = crate::parlive::donor_write_context(file.parent()?, file).ok()?;
+    let live = context.watched_by_live_par();
+    let (left, written) = context
+        .perform_io(|| {
+            restore_tail(file, holes, data_end).ok_or_else(|| std::io::ErrorKind::NotFound.into())
+        })
+        .ok()?;
+    if let Some((start, len)) = written {
+        if !(live && context.range_replaced(start, len)) {
+            context.invalidate_identity();
+        }
+    }
+    Some(left)
+}
+
+/// [`restore_tail_guarded`] without the live PAR bookkeeping: the holes left, and the range
+/// rewritten (`offset`, `len`) when anything was.
+fn restore_tail(
+    file: &std::path::Path,
+    holes: &[(u64, u64)],
+    data_end: u64,
+) -> Option<(Vec<(u64, u64)>, Option<(u64, u64)>)> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    use zipfast::map::{MapOptions, VolumeEnd};
+    let holes = crate::progressive_unpack::merge_holes(holes);
+    let mut f = std::fs::OpenOptions::new().read(true).write(true).open(file).ok()?;
+    let len = f.metadata().ok()?.len();
+    if data_end >= len {
+        return None;
+    }
+    // The headers in front of the tail, read without the tail: every member piece up to the
+    // last one, whose data ends at `data_end`.
+    let name = file.file_name()?.to_os_string();
+    let truncated = TruncatedVolume::open(&f, data_end)?;
+    let map = {
+        let mut builder =
+            zipfast::map::VolumeMapBuilder::new(Box::new(truncated), MapOptions::new(name));
+        match builder.poll_map(&mut std::task::Context::from_waker(std::task::Waker::noop())) {
+            std::task::Poll::Ready(Ok(map)) => map,
+            _ => return None,
+        }
+    };
+    if map.format != zipfast::map::MapFormat::Rar5
+        || !matches!(map.end, VolumeEnd::Truncated { offset } if offset == data_end)
+    {
+        return None;
+    }
+    let last = map.members.last()?;
+    if last.packed.end != data_end {
+        return None;
+    }
+    // Header bytes only; holes in them would have stopped the walk above. Member data stays
+    // zero: the rebuild reads only headers.
+    let head_len = last.header.end;
+    if head_len > TAIL_HEAD_MAX {
+        return None;
+    }
+    let mut head = vec![0u8; usize::try_from(head_len).ok()?];
+    let first_header = map.members.first()?.header.start;
+    let mut regions: Vec<std::ops::Range<u64>> = vec![0..first_header];
+    regions.extend(map.members.iter().map(|m| m.header.clone()));
+    for r in regions {
+        let (s, e) = (usize::try_from(r.start).ok()?, usize::try_from(r.end).ok()?);
+        if e > head.len() || s > e {
+            return None;
+        }
+        f.seek(SeekFrom::Start(r.start)).ok()?;
+        f.read_exact(&mut head[s..e]).ok()?;
+    }
+    let more = last.split_after.then_some(true);
+    let tail = zipfast::rar5::rebuild_volume_tail(&head, len, more).ok()?;
+    let tail_len = (tail.bytes.len() as u64).checked_add(tail.padding)?;
+    if !tail.exact || tail.offset != data_end || data_end.checked_add(tail_len)? != len {
+        return None;
+    }
+    // The tail as rar wrote it: the rebuilt headers, then zeros.
+    let mut rebuilt = tail.bytes;
+    rebuilt.resize(usize::try_from(tail_len).ok()?, 0);
+    let mut on_disk = vec![0u8; rebuilt.len()];
+    f.seek(SeekFrom::Start(data_end)).ok()?;
+    f.read_exact(&mut on_disk).ok()?;
+    let lost = |at: u64| holes.iter().any(|&(s, l)| s <= at && at < s + l);
+    // Every byte of the tail that arrived must be the rebuilt one.
+    if (0..rebuilt.len()).any(|i| !lost(data_end + i as u64) && on_disk[i] != rebuilt[i]) {
+        return None;
+    }
+    let mut written: Option<(u64, u64)> = None;
+    if on_disk != rebuilt {
+        for &(s, l) in &holes {
+            let (from, to) = (s.max(data_end), (s + l).min(len));
+            if from >= to {
+                continue;
+            }
+            let i = (from - data_end) as usize..(to - data_end) as usize;
+            f.seek(SeekFrom::Start(from)).ok()?;
+            f.write_all(&rebuilt[i]).ok()?;
+            written = Some(match written {
+                Some((ws, wl)) => (ws.min(from), (ws + wl).max(to) - ws.min(from)),
+                None => (from, to - from),
+            });
+        }
+        f.flush().ok()?;
+    }
+    // The holes left are those in member data, cut at the data's end.
+    let left = holes
+        .iter()
+        .filter(|&&(s, _)| s < data_end)
+        .map(|&(s, l)| (s, l.min(data_end - s)))
+        .collect();
+    Some((left, written))
+}
+
+/// A volume file read only up to `limit`: the walk of its headers stops there.
+struct TruncatedVolume {
+    file: std::fs::File,
+    info: zipfast::progressive::SourceInfo,
+}
+
+impl TruncatedVolume {
+    fn open(file: &std::fs::File, limit: u64) -> Option<Self> {
+        let file = file.try_clone().ok()?;
+        Some(Self {
+            file,
+            info: zipfast::progressive::SourceInfo {
+                id: zipfast::progressive::SourceId(0),
+                generation: 0,
+                extent: limit,
+                length: zipfast::progressive::SourceLength::Final(limit),
+            },
+        })
+    }
+}
+
+impl zipfast::progressive::RangeSource for TruncatedVolume {
+    fn info(&self) -> zipfast::progressive::SourceInfo {
+        self.info
+    }
+    fn backing_files(&self) -> &[std::fs::File] {
+        &[]
+    }
+    fn read_at(
+        &mut self,
+        offset: u64,
+        buf: &mut [u8],
+        _cx: &mut std::task::Context<'_>,
+    ) -> zipfast::progressive::ProgressiveResult<zipfast::progressive::RangeRead> {
+        use zipfast::progressive::{FailureKind, ProgressiveFailure, RangeRead};
+        let n = buf.len().min(self.info.extent.saturating_sub(offset) as usize);
+        let mut done = 0;
+        while done < n {
+            #[cfg(unix)]
+            let got = std::os::unix::fs::FileExt::read_at(&self.file, &mut buf[done..n], offset + done as u64);
+            #[cfg(not(unix))]
+            let got = std::os::windows::fs::FileExt::seek_read(&self.file, &mut buf[done..n], offset + done as u64);
+            match got {
+                Ok(0) => break,
+                Ok(k) => done += k,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return Err(ProgressiveFailure::new(FailureKind::Truncated)),
+            }
+        }
+        if done == 0 {
+            return Err(ProgressiveFailure::new(FailureKind::Truncated));
+        }
+        Ok(RangeRead::Filled { count: done })
+    }
+}
+
 fn restore_head_and_data(path: &[u8], holes: &[(u64, u64)], index: usize) -> Option<(u64, u64)> {
     use std::io::{Read, Seek, SeekFrom, Write};
     let &(first_start, first_end) = holes.first()?;
@@ -1752,6 +1934,80 @@ mod tests {
         assert_eq!(restore_head_from_tail(p, &[(0, 4000)], 2), Some(head_len));
         // A wrong volume number disagrees with bytes that arrived behind a short hole.
         assert_eq!(restore_head_from_tail(p, &[(0, 10)], 1), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn holes_are_placed_against_the_volumes_own_member_pieces() {
+        use crate::progressive_unpack::{place_holes, HolePlacement};
+        let b = testdata("deadvolume/out.part3.rar");
+        let (_, files) = parse(&b);
+        let data_start = files[0].data_offset as u64;
+        let data_end = data_start + files[0].packed_size as u64;
+        let len = b.len() as u64;
+        assert!(data_end < len, "the volume has a tail behind its data");
+        let dir = std::env::temp_dir().join(format!("rg_placeholes_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("out.part3.rar");
+        std::fs::write(&path, &b).unwrap();
+        // A hole a few bytes into the member's data, well inside the old 64 KiB guard: read past.
+        let near_head = (data_start + 5, 1000);
+        assert_eq!(place_holes(&path, &[near_head]), HolePlacement::Data(vec![near_head]));
+        // One ending right at the data's end, inside the old 4 KiB tail guard: read past too.
+        let near_tail = (data_end - 300, 300);
+        assert_eq!(
+            place_holes(&path, &[near_head, near_tail]),
+            HolePlacement::Data(vec![near_head, near_tail])
+        );
+        // A hole in the headers in front of the data waits for the repair.
+        assert_eq!(place_holes(&path, &[(data_start - 10, 20)]), HolePlacement::Header);
+        // One behind the data, or running from the data into the tail, is the tail's.
+        assert_eq!(place_holes(&path, &[(len - 20, 20)]), HolePlacement::Tail { data_end });
+        assert_eq!(
+            place_holes(&path, &[(data_end - 100, len - data_end + 100)]),
+            HolePlacement::Tail { data_end }
+        );
+        // Without holes, nothing to place; a file that is no RAR volume says nothing.
+        assert_eq!(place_holes(&path, &[]), HolePlacement::Data(Vec::new()));
+        let other = dir.join("notes.txt");
+        std::fs::write(&other, vec![b'x'; 5000]).unwrap();
+        assert_eq!(place_holes(&other, &[(100, 10)]), HolePlacement::Unknown);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_lost_tail_is_rebuilt_byte_for_byte_from_the_volumes_own_headers() {
+        let b = testdata("deadvolume/out.part3.rar");
+        let (_, files) = parse(&b);
+        let data_end = (files[0].data_offset + files[0].packed_size) as u64;
+        let len = b.len() as u64;
+        let dir = std::env::temp_dir().join(format!("rg_tailback_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("out.part3.rar");
+        // The whole tail and 100 bytes of data in front of it lost (zeros on disk).
+        let hole = (data_end - 100, len - data_end + 100);
+        let mut lost = b.clone();
+        lost[hole.0 as usize..].fill(0);
+        std::fs::write(&path, &lost).unwrap();
+        let (left, written) = restore_tail(&path, &[hole], data_end).unwrap();
+        assert_eq!(left, vec![(data_end - 100, 100)], "the data part stays lost");
+        assert_eq!(written, Some((data_end, len - data_end)));
+        let now = std::fs::read(&path).unwrap();
+        assert_eq!(now[data_end as usize..], b[data_end as usize..]);
+        assert!(now[(data_end - 100) as usize..data_end as usize].iter().all(|&c| c == 0));
+        // Again: nothing left to write.
+        assert_eq!(restore_tail(&path, &[hole], data_end).unwrap().1, None);
+        // Bytes of the tail that arrived and disagree with the rebuild: nothing is written.
+        let mut odd = b.clone();
+        let end = odd.len();
+        odd[end - 5..].fill(0);
+        odd[end - 30] ^= 0x55;
+        std::fs::write(&path, &odd).unwrap();
+        assert!(restore_tail(&path, &[(len - 5, 5)], data_end).is_none());
+        assert_eq!(std::fs::read(&path).unwrap(), odd);
+        // A data end that is not the last piece's: refused.
+        std::fs::write(&path, &lost).unwrap();
+        assert!(restore_tail(&path, &[hole], data_end - 1).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

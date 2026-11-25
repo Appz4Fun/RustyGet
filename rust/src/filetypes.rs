@@ -241,7 +241,8 @@ pub fn is_rar_file(name: &[u8]) -> bool {
 /// of it arrived and its name tells nothing (an obfuscated posted name): such a dead file may
 /// be any volume of the set, which waits for its repair instead of being taken as missing.
 pub fn may_hold_for_direct_unpack(name: &[u8], success_articles: i32) -> bool {
-    if is_rar_file(name) {
+    // A volume of a 7z, ZIP or split-file set direct unpack extracts live (`livefeed`).
+    if is_rar_file(name) || crate::livefeed::is_live_volume(name) {
         return true;
     }
     let ext = file_extension(basename(name));
@@ -448,6 +449,9 @@ mod tests {
     fn obfuscated_dead_files_are_held_but_release_extras_are_not() {
         use super::may_hold_for_direct_unpack as hold;
         assert!(hold(b"movie.part03.rar", 12));
+        assert!(hold(b"movie.7z.002", 12));
+        assert!(hold(b"movie.mkv.003", 12));
+        assert!(hold(b"movie.z02", 12));
         assert!(hold(b"a8f3k2b9", 0));
         assert!(hold(b"a8f3k2b9.7x2", 0));
         assert!(!hold(b"a8f3k2b9", 1), "articles arrived: its type is known later");

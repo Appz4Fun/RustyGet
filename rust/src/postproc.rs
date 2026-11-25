@@ -1511,6 +1511,8 @@ struct UnpackRunState {
     prev_pass_list_tried: bool,
     last_unpack_status: UnpackStatus,
     direct_unpack_status: DirectUnpackStatus,
+    /// Volumes of a 7z, ZIP or split-file set direct unpack extracted live are in the folder.
+    has_live_extracted: bool,
     par_status: NzbParStatus,
     par_rename_status: i32,
     use_temp_unpack_dir: bool,
@@ -1888,12 +1890,14 @@ impl NzbgetRsUnpackController {
             st.has_seven_zip_files = chk.has_seven_zip_files;
             st.has_seven_zip_multi_files = chk.has_seven_zip_multi_files;
             st.has_splitted_files = chk.has_splitted_files;
+            st.has_live_extracted = chk.has_live_extracted;
         }
 
         let has_files = st.has_rar_files
             || st.has_seven_zip_files
             || st.has_seven_zip_multi_files
-            || st.has_splitted_files;
+            || st.has_splitted_files
+            || st.has_live_extracted;
 
         if st.unpack_tried
             && !st.par_repaired
@@ -1942,6 +1946,36 @@ impl NzbgetRsUnpackController {
                     std::sync::Arc::new(std::sync::Mutex::new(guard))
                 });
             st.unpack_guard = Some(guard);
+
+            if st.has_live_extracted {
+                if st.unpack_dir_created {
+                    // What direct unpack extracted live is gone: extract those sets again.
+                    self.print_message(
+                        q,
+                        &mut st,
+                        MK_WARNING,
+                        b"Could not find files unpacked by direct unpack, unpacking them again",
+                    );
+                    st.extracted_archives.retain(|a| !crate::livefeed::is_live_first(a));
+                    let dl_refs: Vec<&[u8]> =
+                        st.downloaded_files.iter().map(Vec::as_slice).collect();
+                    let ex_refs: Vec<&[u8]> =
+                        st.extracted_archives.iter().map(Vec::as_slice).collect();
+                    let chk = crate::unpack::check_archive_files(
+                        &st.dest_dir,
+                        st.use_temp_unpack_dir,
+                        &dl_refs,
+                        &ex_refs,
+                        &st.unpack_ignore_ext,
+                    );
+                    st.has_seven_zip_files |= chk.has_seven_zip_files;
+                    st.has_seven_zip_multi_files |= chk.has_seven_zip_multi_files;
+                    st.has_splitted_files |= chk.has_splitted_files;
+                    st.has_live_extracted = false;
+                } else if !st.has_rar_files {
+                    self.print_message(q, &mut st, MK_INFO, b"Using directly unpacked files");
+                }
+            }
 
             if st.has_rar_files {
                 if st.has_not_unpacked_rar_files || st.unpack_dir_created {
@@ -2162,6 +2196,8 @@ impl NzbgetRsUnpackController {
         let unpack_dir = st.unpack_dir.clone();
         let dl_snapshot = st.downloaded_files.clone();
         let dl_refs: Vec<&[u8]> = dl_snapshot.iter().map(Vec::as_slice).collect();
+        let ex_snapshot = st.extracted_archives.clone();
+        let ex_refs: Vec<&[u8]> = ex_snapshot.iter().map(Vec::as_slice).collect();
         let use_temp = st.use_temp_unpack_dir;
         let cleanup_disk = st.unpack_cleanup_disk;
         let pw_str = std::str::from_utf8(password).unwrap_or("");
@@ -2190,6 +2226,7 @@ impl NzbgetRsUnpackController {
             use_temp,
             cleanup_disk,
             &dl_refs,
+            &ex_refs,
             &mut || st_cell.borrow_mut().all_ok_received = false,
             &mut || st_cell.borrow().all_ok_received,
             &mut |kind, msg| {
@@ -2239,12 +2276,15 @@ impl NzbgetRsUnpackController {
         let mut joined = std::mem::take(&mut st.joined_files);
         let guard = st.unpack_guard.clone();
         let _scope = guard.as_ref().map(crate::unpacklimits::Scope::enter);
+        let ex_snapshot = st.extracted_archives.clone();
+        let ex_refs: Vec<&[u8]> = ex_snapshot.iter().map(Vec::as_slice).collect();
 
         let ok = crate::unpack::join_splitted_files(
             &dest_dir,
             &unpack_dir,
             par_success,
             write_buf,
+            &ex_refs,
             &mut joined,
             &mut |kind, msg| {
                 let msg_kind = match kind {
@@ -2296,6 +2336,8 @@ impl NzbgetRsUnpackController {
         let jn_snapshot = st.joined_files.clone();
         let dl_refs: Vec<&[u8]> = dl_snapshot.iter().map(Vec::as_slice).collect();
         let jn_refs: Vec<&[u8]> = jn_snapshot.iter().map(Vec::as_slice).collect();
+        let ex_snapshot = st.extracted_archives.clone();
+        let ex_refs: Vec<&[u8]> = ex_snapshot.iter().map(Vec::as_slice).collect();
         let unpack_ok = st.unpack_ok;
         let use_temp = st.use_temp_unpack_dir;
         let fin_created = st.final_dir_created;
@@ -2317,6 +2359,7 @@ impl NzbgetRsUnpackController {
             umask,
             &dl_refs,
             &jn_refs,
+            &ex_refs,
             &mut |kind, msg| {
                 let msg_kind = match kind {
                     0 => MK_INFO,
@@ -2515,6 +2558,10 @@ impl crate::progressive_unpack::VolumeFeed for DirectUnpackFeed {
         direct_unpack_holds()
             .get(&self.nzb_id)
             .is_some_and(|st| !st.virtuals.is_empty() || !st.offered.is_empty())
+    }
+
+    fn download_finished(&self) -> bool {
+        direct_unpack_download_finished(self.nzb_id)
     }
 
     fn set_became_final(&self) -> bool {
@@ -4863,6 +4910,175 @@ impl NzbgetRsDirectUnpack {
         );
     }
 
+    /// Extracts a 7z, ZIP or split-file set while it downloads (see `livefeed`). The set's
+    /// last volume, which holds its directory, is moved up the download queue first. A set
+    /// that cannot be extracted live is left to post-processing, which extracts it as before.
+    fn execute_live(
+        &self,
+        host: &QueueSubsysHost,
+        archive_name: &[u8],
+        local: &mut DirectUnpackRunLocal,
+    ) {
+        use crate::livefeed::{Outcome, SetKind};
+        local.all_ok_received = false;
+        let names = host.with_locked_queue(|dq_ptr| {
+            let Some(nzb) = self.find_nzb(host, dq_ptr) else {
+                return Vec::new();
+            };
+            let mut names: Vec<Vec<u8>> = Vec::new();
+            let mut queued = Vec::new();
+            for i in 0..host.nzb_file_len(nzb.ptr) {
+                let f = host.file_snap(host.nzb_file_at(nzb.ptr, i));
+                if !f.deleted {
+                    names.push(cstr::until_nul(&f.filename).to_vec());
+                    queued.push(f);
+                }
+            }
+            for i in 0..host.nzb_completed_files_len(nzb.ptr) {
+                let f = host.nzb_completed_file_at(nzb.ptr, i);
+                names.push(cstr::until_nul(&f.filename).to_vec());
+            }
+            if let Some(set) = crate::livefeed::live_set(archive_name, &names) {
+                if set.kind != SetKind::Split {
+                    for f in queued.iter().filter(|f| !f.extra_priority) {
+                        if cstr::until_nul(&f.filename).eq_ignore_ascii_case(set.last()) {
+                            host.file_set_int(
+                                f.ptr,
+                                crate::queuesubsys_host::FILE_INT_EXTRA_PRIORITY,
+                                1,
+                            );
+                        }
+                    }
+                }
+            }
+            names
+        });
+        let Some(set) = crate::livefeed::live_set(archive_name, &names) else {
+            // Not a set this download carries whole: post-processing looks at it.
+            local.unpack_ok = true;
+            return;
+        };
+
+        let _unpack_guard = UNPACK_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        if self.is_stopped(host) {
+            return;
+        }
+        self.set_waiting(false);
+        self.exec_thread_key
+            .store(current_thread_key(), Ordering::Release);
+        self.set_unpacking(true);
+
+        let dir = crate::fsops::path(&local.dest_dir).to_path_buf();
+        let password = String::from_utf8_lossy(&local.password).into_owned();
+        let mut feed = DirectUnpackFeed {
+            nzb_id: self.nzb_id,
+            expected_volumes: set.volumes.len() as u64,
+        };
+        let req = crate::livefeed::Request {
+            dir: &dir,
+            set: &set,
+            password: &password,
+        };
+        let cell = std::cell::RefCell::new(&mut *local);
+        let outcome = crate::livefeed::extract(
+            &req,
+            &mut feed,
+            &mut || {
+                let mut guard_local = cell.borrow_mut();
+                let local = &mut **guard_local;
+                if !self.processed.load(Ordering::Acquire) {
+                    let m = [b"Directly unpacking ", local.name.as_slice()].concat();
+                    self.add_message(host, MK_INFO, &m, local);
+                    self.cleanup(host, local);
+                    self.create_unpack_dir(host, local);
+                    self.processed.store(true, Ordering::Release);
+                }
+                if local.unpack_dir.is_empty() {
+                    return None;
+                }
+                let unpack_dir = local.unpack_dir.clone();
+                let guard = local
+                    .unpack_guard
+                    .get_or_insert_with(|| {
+                        let _ = crate::unpacklimits::take_handed_over(crate::fsops::path(
+                            &unpack_dir,
+                        ));
+                        crate::unpacklimits::Guard::shared(
+                            crate::fsops::path(&unpack_dir),
+                            &[
+                                crate::fsops::path(&local.dest_dir),
+                                crate::fsops::path(&local.final_dir),
+                            ],
+                        )
+                    })
+                    .clone();
+                Some((crate::fsops::path(&unpack_dir).to_path_buf(), Some(guard)))
+            },
+            &mut |kind, msg| {
+                let msg_kind = match kind {
+                    0 | 4 => MK_INFO,
+                    1 => MK_ERROR,
+                    2 => MK_WARNING,
+                    _ => MK_DETAIL,
+                };
+                self.add_message(host, msg_kind, msg.as_bytes(), &mut cell.borrow_mut());
+            },
+            &mut || {
+                self.apply_releases(host);
+                self.is_stopped_or_terminated(host)
+            },
+            &|waiting| self.set_waiting(waiting),
+        );
+        drop(cell);
+
+        match outcome {
+            Outcome::Done { files, bytes, .. } => {
+                Self::global_log(
+                    MK_DETAIL,
+                    format!(
+                        "Direct unpack extracted {} live: {files} file(s), {bytes} bytes",
+                        String::from_utf8_lossy(archive_name)
+                    )
+                    .as_bytes(),
+                );
+                self.add_message(host, MK_INFO, b"Unrar: All OK", local);
+                local.unpack_ok = local.all_ok_received
+                    && !self.terminated.load(Ordering::Acquire)
+                    && !self.is_stopped(host);
+            }
+            Outcome::Declined(why) => {
+                let msg = trunc_1023(
+                    [
+                        b"Direct unpack leaves ".as_slice(),
+                        archive_name,
+                        b" to post-processing: ",
+                        why.as_bytes(),
+                    ]
+                    .concat(),
+                );
+                host.with_locked_queue(|dq_ptr| {
+                    let nzb_ptr = self.find_nzb(host, dq_ptr).map_or(NzbRef::NONE, |n| n.ptr);
+                    if nzb_ptr.is_some() {
+                        Self::nzb_message(host, nzb_ptr, MK_INFO, &cstr::nul_terminated(&msg));
+                    }
+                });
+                local.unpack_ok =
+                    !self.terminated.load(Ordering::Acquire) && !self.is_stopped(host);
+            }
+            Outcome::Failed(why) => {
+                Self::global_log(
+                    MK_DEBUG,
+                    format!("Direct unpack stopped: {why}").as_bytes(),
+                );
+                local.unpack_ok = false;
+            }
+        }
+
+        self.set_unpacking(false);
+        self.exec_thread_key.store(0, Ordering::Release);
+        self.set_waiting(false);
+    }
+
     fn execute_unrar(
         &self,
         host: &QueueSubsysHost,
@@ -5066,7 +5282,10 @@ impl NzbgetRsDirectUnpack {
                 }
                 started.push(archive.clone());
                 self.set_waiting(false);
-                if !self.processed.load(Ordering::Acquire) {
+                // A 7z, ZIP or split-file set prepares its unpack folder only once it is known
+                // to be extracted live.
+                let live = crate::livefeed::is_live_first(&archive);
+                if !live && !self.processed.load(Ordering::Acquire) {
                     let m = [b"Directly unpacking ", local.name.as_slice()].concat();
                     self.add_message(host, MK_INFO, &m, &mut local);
                     self.cleanup(host, &mut local);
@@ -5075,7 +5294,11 @@ impl NzbgetRsDirectUnpack {
                 }
 
                 let committed = local.extracted_archives.len();
-                self.execute_unrar(host, &archive, &mut local);
+                if live {
+                    self.execute_live(host, &archive, &mut local);
+                } else {
+                    self.execute_unrar(host, &archive, &mut local);
+                }
                 if !local.unpack_ok {
                     local.extracted_archives.truncate(committed);
                     break;

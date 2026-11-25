@@ -6540,6 +6540,251 @@ def scenario_parfailuredirectunpackfailed(daemon, t):
     return (label, ok and du_failed == 1, '%s du_failed=%d' % (detail, du_failed))
 
 
+class _LogClock:
+    """Times the first appearance of each of ``needles`` in the daemon log, polled
+    every 50 ms from a thread started before the download is queued."""
+
+    def __init__(self, t, needles):
+        self.t = t
+        self.needles = list(needles)
+        self.seen = {}
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _run(self):
+        while not self.stop.is_set():
+            try:
+                text = self.t.read_file('nzbget.log').decode(errors='replace')
+            except Exception:
+                text = ''
+            now = time.time()
+            for needle in self.needles:
+                if needle not in self.seen and needle in text:
+                    self.seen[needle] = now
+            if len(self.seen) == len(self.needles):
+                return
+            time.sleep(0.05)
+
+    def close(self):
+        time.sleep(0.2)
+        self.stop.set()
+        self.thread.join(5)
+
+    def span(self, start, end):
+        if start in self.seen and end in self.seen:
+            return '%.2f' % (self.seen[end] - self.seen[start])
+        return 'n/a'
+
+
+def _live_clock(t, name):
+    """The download's end and the moments its files were extracted."""
+    return _LogClock(t, ['Collection %s completely downloaded' % name,
+                         'Direct unpack for %s successful' % name,
+                         'Unpack for %s successful' % name])
+
+
+def _live_timing(clock, name):
+    """Seconds from the download's end (its last article) to the extracted files in
+    place: direct unpack's end, and post-processing's unpack done."""
+    done = 'Collection %s completely downloaded' % name
+    return 'after_download_s=%s du_after_download_s=%s' % (
+        clock.span(done, 'Unpack for %s successful' % name),
+        clock.span(done, 'Direct unpack for %s successful' % name))
+
+
+def _live_release(daemon, t, name, tag, volumes, seg, extra=()):
+    """Queues ``volumes`` = [(name, bytes)] (plus ``extra`` members) as one download,
+    timing it with a log clock; returns (history, clock)."""
+    members = []
+    for vname, data in volumes:
+        rel = '%s/%s' % (tag, vname)
+        t.write_file(os.path.join('data', rel), data)
+        members.append((rel, vname, len(data), seg, set()))
+    members += list(extra)
+    api = daemon.wait_ready()
+    clock = _live_clock(t, name)
+    daemon.append(api, name, build_multi_nzb(members), False, tag + '-key', 100)
+    h = daemon.wait_history(api, name, timeout=300)
+    clock.close()
+    return h, clock
+
+
+def _left_volumes(t, names):
+    """Volumes still on disk after post-processing (UnpackCleanupDisk deletes them)."""
+    left = set(os.path.basename(rel) for rel in t.find_files('main'))
+    return sorted(n for n in names if n in left)
+
+
+def _live_archive(daemon, t, label, name, tag, volumes, files):
+    """A 7z or ZIP set extracted while it downloads: direct unpack maps it once its
+    first and last volume are on disk (the last is moved up the queue), writes each
+    member straight into its output as the volumes arrive and is done when the
+    download ends; post-processing extracts nothing again and deletes the volumes."""
+    h, clock = _live_release(daemon, t, name, tag, volumes, 500_000)
+    first = volumes[0][0]
+    extracted = all(_verify_output(t, data, '.' + fname.rsplit('.', 1)[1]) for fname, data in files)
+    live = _grep_log(t, 'Unrar: Extracting from %s' % first)
+    du_ok = _grep_log(t, 'Direct unpack for %s successful' % name)
+    declined = _grep_log(t, 'Direct unpack leaves')
+    again = _grep_log(t, 'Executing 7-Zip') + _grep_log(t, 'Joining splitted file')
+    used = _grep_log(t, 'Using directly unpacked files')
+    left = _left_volumes(t, [v[0] for v in volumes])
+    ok = (extracted and live >= 1 and du_ok == 1 and declined == 0 and again == 0 and used == 1 and
+          not left and h['Status'].startswith('SUCCESS') and h['UnpackStatus'] == 'SUCCESS')
+    return (label, ok, 'status=%s unpack=%s extracted_ok=%s live=%d du_ok=%d declined=%d extracted_again=%d '
+            'used_direct=%d volumes_left=%s %s' % (
+                h['Status'], h['UnpackStatus'], extracted, live, du_ok, declined, again, used, left,
+                _live_timing(clock, name)))
+
+
+def scenario_live7zsplit(daemon, t):
+    """A store-mode 7z cut into byte pieces (movie.7z.001 ...) holding a movie and its
+    nfo is extracted while it downloads; nothing is extracted after the download."""
+    movie = _payload(48_000_000, 7101)
+    nfo = _payload(4_000, 7102)
+    arch = generators.seven_zip_copy_checked([('movie.mkv', movie), ('movie.nfo', nfo)])
+    pieces = generators.split_bytes(arch, [6_000_000] * (len(arch) // 6_000_000))
+    volumes = [('Movie.7z.%03d' % (i + 1), p) for i, p in enumerate(pieces)]
+    return _live_archive(daemon, t, 'live7zsplit', 'RelL7z', 'l7zA', volumes,
+                         [('movie.mkv', movie), ('movie.nfo', nfo)])
+
+
+def scenario_livezipsplit(daemon, t):
+    """A stored ZIP cut into byte pieces (movie.zip.001 ...) is extracted while it
+    downloads; it used to be joined into a .zip after the download."""
+    movie = _payload(30_000_000, 7201)
+    nfo = _payload(3_000, 7202)
+    arch = generators.zip_store([('movie.mkv', movie), ('movie.nfo', nfo)])
+    pieces = generators.split_bytes(arch, [5_000_000] * (len(arch) // 5_000_000))
+    volumes = [('Movie.zip.%03d' % (i + 1), p) for i, p in enumerate(pieces)]
+    return _live_archive(daemon, t, 'livezipsplit', 'RelLZs', 'lzsA', volumes,
+                         [('movie.mkv', movie), ('movie.nfo', nfo)])
+
+
+def scenario_livezipz01(daemon, t):
+    """An Info-ZIP split set (movie.z01 ... movie.zip, the central directory in the
+    .zip) is extracted while it downloads."""
+    movie = _payload(30_000_000, 7301)
+    nfo = _payload(2_000, 7302)
+    disks = generators.zip_store_infozip_split([('movie.nfo', nfo), ('movie.mkv', movie)], 5_000_000)
+    volumes = [('Movie.z%02d' % (i + 1), d) for i, d in enumerate(disks[:-1])]
+    volumes.append(('Movie.zip', disks[-1]))
+    return _live_archive(daemon, t, 'livezipz01', 'RelLZ1', 'lz1A', volumes,
+                         [('movie.mkv', movie), ('movie.nfo', nfo)])
+
+
+def scenario_livesplitjoin(daemon, t):
+    """A split movie (movie.mkv.001 ...) is joined while it downloads: each piece is
+    placed at its offset in movie.mkv as it completes. Post-processing joins nothing
+    (no byte is read or written by a join after the download) and deletes the pieces."""
+    movie = _payload(40_000_000, 7401)
+    pieces = generators.split_bytes(movie, [6_000_000] * (len(movie) // 6_000_000))
+    volumes = [('movie.mkv.%03d' % (i + 1), p) for i, p in enumerate(pieces)]
+    h, clock = _live_release(daemon, t, 'RelLSJ', 'lsjA', volumes, 500_000)
+    extracted = _verify_output(t, movie, '.mkv')
+    log = t.read_file('nzbget.log').decode(errors='replace')
+    m = re.search(r'Joined movie\.mkv from (\d+) pieces as they arrived \((\d+) bytes\); (\d+) bytes placed after '
+                  r'the download ended', log)
+    placed = (int(m.group(2)), int(m.group(3))) if m else None
+    joined_after = _grep_log(t, 'Joining splitted file')
+    left = _left_volumes(t, [v[0] for v in volumes])
+    ok = (extracted and placed is not None and placed[0] == len(movie) and joined_after == 0 and not left and
+          h['Status'].startswith('SUCCESS') and h['UnpackStatus'] == 'SUCCESS')
+    return ('livesplitjoin', ok, 'status=%s unpack=%s extracted_ok=%s placed_live=%s post_download_join_bytes=%d '
+            'join_runs=%d pieces_left=%s %s' % (
+                h['Status'], h['UnpackStatus'], extracted, placed, 0 if joined_after == 0 else len(movie),
+                joined_after, left, _live_timing(clock, 'RelLSJ')))
+
+
+def _edge_hole_par(t, work, names, seg):
+    """par2 recovery for ``names`` in ``work`` (12 blocks): [(rel, name, size, seg, set())]."""
+    subprocess.run(['par2', 'create', '-q', '-q', '-s65536', '-c12', '-n1', '-a', 'Rel', 'Rel.par2'] + names,
+                   cwd=work, check=True, capture_output=True)
+    members = []
+    tag = os.path.basename(work)
+    for n in sorted(os.listdir(work)):
+        if n.endswith('.par2'):
+            members.append(('%s/%s' % (tag, n), n, os.path.getsize(os.path.join(work, n)), seg, set()))
+    return members
+
+
+def scenario_liveedgehole(daemon, t):
+    """A stored rar set (no duplicate; par2 recovery only) loses an article 20 KB into
+    its second volume, inside member data but within the 64 KiB that used to count as
+    header, and one ending 61 bytes before its third volume's data ends, within the
+    old 4 KiB tail guard. The volumes' own headers place both holes in member data:
+    direct unpack reads past them while the download goes on instead of pausing at
+    the second volume, and the holes are patched once par2 repairs the volumes."""
+    seg = 20_000
+    movie = _payload(12_000_000, 9981)
+    vols = generators.rar3_store_volumes_valid('movie.mkv', movie, 1_400_000)
+    tag = 'LEH'
+    work = t.path('data', tag)
+    os.makedirs(work, exist_ok=True)
+    names = ['Rel.part%02d.rar' % (i + 1) for i in range(len(vols))]
+    damage = {1: {2}, 2: {70}}          # parts are 1-based: bytes 20,000-39,999 and 1,380,000-1,399,999
+    members = []
+    for i, (n, d) in enumerate(zip(names, vols)):
+        t.write_file(os.path.join('data', tag, n), d)
+        members.append(('%s/%s' % (tag, n), n, len(d), seg, damage.get(i, set())))
+    members += _edge_hole_par(t, work, names, seg)
+    api = daemon.wait_ready()
+    clock = _live_clock(t, 'RelLEH')
+    daemon.append(api, 'RelLEH', build_multi_nzb(members), False, 'leh-key', 100)
+    h = daemon.wait_history(api, 'RelLEH', timeout=300)
+    clock.close()
+    ok = _verify_output(t, movie, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
+    skipped = _grep_log(t, 'extracted past damage in movie.mkv')
+    patched = _grep_log(t, 'repaired movie.mkv from the repaired volumes')
+    paused = _grep_log(t, 'Pausing direct unpack at')
+    good = ok and h['Status'].startswith('SUCCESS') and skipped >= 1 and patched >= 1 and paused == 0
+    return ('liveedgehole', good, 'status=%s par=%s unpack=%s extracted_ok=%s skipped=%d patched=%d paused=%d %s' % (
+        h['Status'], h['ParStatus'], h['UnpackStatus'], ok, skipped, patched, paused, _live_timing(clock, 'RelLEH')))
+
+
+def scenario_liveedgehole5(daemon, t):
+    """A RAR5 store set made by rar (no duplicate; par2 recovery only) loses the last
+    article of its third volume: the end of the movie's data there and the whole
+    tail behind it (quick-open record, end of archive header). The tail is rebuilt
+    byte for byte from the volume's own headers and length as the volume finishes,
+    direct unpack reads past the lost data instead of stopping at the volume until
+    the repair, and par2 repairs the data afterwards."""
+    if not generators.HAVE_RAR:
+        return ('liveedgehole5', None, 'SKIP: rar not installed')
+    seg = 20_000
+    movie = _payload(12_000_000, 9982)
+    with tempfile.TemporaryDirectory(prefix='leh5-') as workdir:
+        vols = generators.rar5_store_volumes_hp('movie.mkv', movie, 1_000_000, None, workdir)
+    tag = 'LE5'
+    work = t.path('data', tag)
+    os.makedirs(work, exist_ok=True)
+    names = ['Rel.part%02d.rar' % (i + 1) for i in range(len(vols))]
+    last_part = (len(vols[2]) + seg - 1) // seg
+    damage = {2: {last_part}}
+    members = []
+    for i, (n, d) in enumerate(zip(names, vols)):
+        t.write_file(os.path.join('data', tag, n), d)
+        members.append(('%s/%s' % (tag, n), n, len(d), seg, damage.get(i, set())))
+    members += _edge_hole_par(t, work, names, seg)
+    api = daemon.wait_ready()
+    clock = _live_clock(t, 'RelLE5')
+    daemon.append(api, 'RelLE5', build_multi_nzb(members), False, 'le5-key', 100)
+    h = daemon.wait_history(api, 'RelLE5', timeout=300)
+    clock.close()
+    ok = _verify_output(t, movie, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
+    rebuilt = _grep_log(t, 'Rebuilt the end of Rel.part03.rar')
+    skipped = _grep_log(t, 'extracted past damage in movie.mkv')
+    patched = _grep_log(t, 'repaired movie.mkv from the repaired volumes')
+    paused = _grep_log(t, 'Pausing direct unpack at')
+    good = (ok and h['Status'].startswith('SUCCESS') and rebuilt == 1 and skipped >= 1 and patched >= 1 and
+            paused == 0)
+    return ('liveedgehole5', good, 'status=%s par=%s unpack=%s extracted_ok=%s tail_rebuilt=%d skipped=%d patched=%d '
+            'paused=%d %s' % (h['Status'], h['ParStatus'], h['UnpackStatus'], ok, rebuilt, skipped, patched, paused,
+                              _live_timing(clock, 'RelLE5')))
+
+
+
 def scenario_jointwosets(daemon, t):
     """Two sets of split files in one download (a.mkv.001-003, b.srt.001-002): both
     are joined. The fragment check counted the other set's pieces too, and the join
@@ -13324,6 +13569,12 @@ SCENARIOS = {
     'parfailurenodirectunpack': scenario_parfailurenodirectunpack,
     'parfailuredirectunpackfailed': scenario_parfailuredirectunpackfailed,
     'jointwosets': scenario_jointwosets,
+    'live7zsplit': scenario_live7zsplit,
+    'livezipsplit': scenario_livezipsplit,
+    'livezipz01': scenario_livezipz01,
+    'livesplitjoin': scenario_livesplitjoin,
+    'liveedgehole': scenario_liveedgehole,
+    'liveedgehole5': scenario_liveedgehole5,
     'staleprogress': scenario_staleprogress,
     'authrejected': scenario_authrejected,
     'appendlongname': scenario_appendlongname,
@@ -13768,6 +14019,12 @@ SCENARIO_OPTIONS = {
     'joingroupnogroups': ['Server1.JoinGroup=yes', 'ArticleRetries=0', 'DirectWrite=no'],
     'stallquit': ['ArticleTimeout=5', 'ArticleRetries=2', 'ArticleInterval=0', 'DirectWrite=no', 'Server1.Connections=1'],
     'directunpacksimple': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1'],
+    'live7zsplit': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1', 'UnpackCleanupDisk=yes', 'DownloadRate=8000'],
+    'livezipsplit': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1', 'UnpackCleanupDisk=yes', 'DownloadRate=8000'],
+    'livezipz01': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1', 'UnpackCleanupDisk=yes', 'DownloadRate=8000'],
+    'livesplitjoin': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1', 'UnpackCleanupDisk=yes', 'DownloadRate=8000'],
+    'liveedgehole': PROD_OPTIONS + ['DownloadRate=3000'],
+    'liveedgehole5': PROD_OPTIONS + ['DownloadRate=3000'],
     'directunpacktwoarchives': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1'],
     'directunpackparfailure': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1'],
     'parfailurenodirectunpack': ['Unpack=yes', 'DirectUnpack=no', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1'],

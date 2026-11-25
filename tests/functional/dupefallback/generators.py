@@ -274,6 +274,38 @@ def zip_store(files):
     return bytes(out)
 
 
+def zip_store_infozip_split(files, volume_size):
+    """An Info-ZIP split set of a stored zip holding ``files`` = [(name, bytes), ...],
+    as ``zip -s`` writes one: disk 0 starts with the spanning signature, the
+    member data is cut every ``volume_size`` bytes (mid-member), and the
+    central directory, with each entry's disk and offset in that disk, sits in
+    the last volume (the ``.zip``). Returns the volumes' bytes in disk order
+    (``.z01``, ``.z02``, ..., then the ``.zip``)."""
+    import zlib
+    stream = bytearray(b'PK\x07\x08')
+    entries = []
+    for name, data in files:
+        encoded = name.encode()
+        crc = zlib.crc32(data) & 0xffffffff
+        entries.append((encoded, crc, len(data), len(stream)))
+        stream += struct.pack('<IHHHHHIIIHH', 0x04034b50, 20, 0, 0, 0, 0,
+                              crc, len(data), len(data), len(encoded), 0)
+        stream += encoded + data
+    disks = [bytes(stream[i:i + volume_size]) for i in range(0, len(stream), volume_size)]
+    last = len(disks) - 1
+    central = bytearray()
+    for encoded, crc, size, at in entries:
+        central += struct.pack('<IHHHHHHIIIHHHHHII', 0x02014b50, 20, 20, 0, 0, 0, 0,
+                               crc, size, size, len(encoded), 0, 0, at // volume_size, 0, 0,
+                               at % volume_size)
+        central += encoded
+    cd_at = len(disks[last])
+    tail = bytes(central) + struct.pack('<IHHHHIIH', 0x06054b50, last, last, len(files),
+                                        len(files), len(central), cd_at, 0)
+    disks[last] = disks[last] + tail
+    return disks
+
+
 def _7z_number(value):
     out = bytearray()
     first = 0
@@ -315,6 +347,41 @@ def seven_zip_copy(files):
     out += struct.pack('<I', 0)
     out += struct.pack('<QQ', data_size, len(header))
     out += struct.pack('<I', 0)
+    for _, data in files:
+        out += data
+    out += header
+    return bytes(out)
+
+
+def seven_zip_copy_checked(files):
+    """``seven_zip_copy`` with every checksum 7-Zip writes: the start header's,
+    the header's and each file's CRC, so a reader that checks them (zipfast)
+    extracts it."""
+    import zlib
+    header = bytearray()
+    header += b'\x01\x04\x06' + _7z_number(0) + _7z_number(len(files))
+    header += b'\x09'
+    for _, data in files:
+        header += _7z_number(len(data))
+    header += b'\x00\x07\x0b' + _7z_number(len(files)) + b'\x00'
+    for _ in files:
+        header += _7z_number(1) + b'\x01\x00'      # one coder, id size 1, Copy
+    header += b'\x0c'
+    for _, data in files:
+        header += _7z_number(len(data))
+    header += b'\x0a\x01'                          # every folder's CRC
+    for _, data in files:
+        header += struct.pack('<I', zlib.crc32(data) & 0xffffffff)
+    header += b'\x00\x00\x05' + _7z_number(len(files))
+    names = bytearray(b'\x00')
+    for name, _ in files:
+        names += name.encode('utf-16-le') + b'\x00\x00'
+    header += b'\x11' + _7z_number(len(names)) + names
+    header += b'\x00\x00'
+    data_size = sum(len(data) for _, data in files)
+    start = struct.pack('<QQI', data_size, len(header), zlib.crc32(bytes(header)) & 0xffffffff)
+    out = bytearray(b'7z\xbc\xaf\x27\x1c\x00\x04')
+    out += struct.pack('<I', zlib.crc32(start) & 0xffffffff) + start
     for _, data in files:
         out += data
     out += header

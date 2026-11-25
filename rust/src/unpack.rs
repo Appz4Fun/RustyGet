@@ -1757,6 +1757,8 @@ pub struct UnpackArchiveCheckResult {
     pub has_seven_zip_files: bool,
     pub has_seven_zip_multi_files: bool,
     pub has_splitted_files: bool,
+    /// Volumes of a 7z, ZIP or split-file set direct unpack extracted live (`livefeed`).
+    pub has_live_extracted: bool,
 }
 
 /// `UnpackController::CheckArchiveFiles`:
@@ -1778,6 +1780,11 @@ pub fn check_archive_files(
         if crate::fsops::directory_exists(&full, &crate::fsops::posix_stat)
             || !is_downloaded_file(&filename, use_temp_unpack_dir, downloaded_files)
         {
+            continue;
+        }
+        // Extracted live by direct unpack: nothing to unpack again.
+        if crate::livefeed::in_extracted_set(&filename, extracted_archives) {
+            res.has_live_extracted = true;
             continue;
         }
         let archive_kind = classify_archive_file(&filename);
@@ -1818,6 +1825,7 @@ pub fn discover_unpack_archives(
     multi_volumes: bool,
     use_temp_unpack_dir: bool,
     downloaded_files: &[&[u8]],
+    extracted: &[&[u8]],
 ) -> Vec<Vec<u8>> {
     let mut archives = Vec::new();
     let sep = crate::paths::PATH_SEPARATOR;
@@ -1826,6 +1834,7 @@ pub fn discover_unpack_archives(
         let full = [dest_dir, &[sep], &filename].concat();
         if crate::fsops::directory_exists(&full, &crate::fsops::posix_stat)
             || !is_downloaded_file(&filename, use_temp_unpack_dir, downloaded_files)
+            || crate::livefeed::in_extracted_set(&filename, extracted)
         {
             continue;
         }
@@ -1862,6 +1871,7 @@ pub fn extract_discovered_archives(
     use_temp_unpack_dir: bool,
     cleanup_disk: bool,
     downloaded_files: &[&[u8]],
+    extracted: &[&[u8]],
     reset_all_ok: &mut dyn FnMut(),
     has_all_ok: &mut dyn FnMut() -> bool,
     log_cb: &mut dyn FnMut(i32, &str),
@@ -1873,6 +1883,7 @@ pub fn extract_discovered_archives(
         multi_volumes,
         use_temp_unpack_dir,
         downloaded_files,
+        extracted,
     );
     if archives.is_empty() {
         return false;
@@ -2153,6 +2164,7 @@ pub fn join_splitted_files(
     unpack_dir: &[u8],
     par_success: bool,
     write_buffer_kb: i32,
+    extracted: &[&[u8]],
     joined_files: &mut Vec<Vec<u8>>,
     log_cb: &mut dyn FnMut(i32, &[u8]),
     progress_cb: &mut dyn FnMut(Option<&[u8]>, i32),
@@ -2160,6 +2172,11 @@ pub fn join_splitted_files(
     let sep = crate::paths::PATH_SEPARATOR;
     for filename in crate::fsops::list_dir_entries(dest_dir) {
         let full = [dest_dir, &[sep], &filename].concat();
+        // Joined live by direct unpack as its pieces arrived: its pieces are only cleaned up.
+        if crate::livefeed::in_extracted_set(&filename, extracted) {
+            joined_files.push(filename);
+            continue;
+        }
         if !crate::fsops::directory_exists(&full, &crate::fsops::posix_stat)
             && is_split_first_piece(&filename)
             && !file_has_rar_signature(crate::fsops::path(&full))
@@ -2199,6 +2216,7 @@ pub fn unpack_controller_cleanup(
     umask: u32,
     downloaded_files: &[&[u8]],
     joined_files: &[&[u8]],
+    live_extracted: &[&[u8]],
     log_cb: &mut dyn FnMut(i32, &[u8]),
 ) -> (bool, bool) {
     let mut ok = true;
@@ -2284,7 +2302,7 @@ pub fn unpack_controller_cleanup(
                 is_downloaded_file(&filename, use_temp_unpack_dir, downloaded_files);
             let in_joined = joined_files.contains(&filename.as_slice());
 
-            let cleanup_kind = classify_cleanup_archive_file(
+            let mut cleanup_kind = classify_cleanup_archive_file(
                 is_dir,
                 inter_dir,
                 in_extracted,
@@ -2293,6 +2311,13 @@ pub fn unpack_controller_cleanup(
                 in_joined,
                 &filename,
             );
+            // A volume of a set direct unpack extracted live.
+            if !is_dir
+                && is_downloaded
+                && crate::livefeed::in_extracted_set(&filename, live_extracted)
+            {
+                cleanup_kind = 1;
+            }
             if cleanup_kind == 1
                 || (cleanup_kind == 2 && file_has_rar_signature(crate::fsops::path(&full)))
             {
@@ -2324,6 +2349,10 @@ pub fn unpack_controller_cleanup(
 /// `DirectUnpack::IsMainArchive`:
 /// Checks that `filename` has a RAR extension (`FileTypes::IsRarExt`) and is not a non-first `.partN.rar` volume.
 pub fn direct_unpack_is_main_archive(filename: &[u8]) -> bool {
+    // The first volume of a 7z, ZIP or split-file set, extracted live (`livefeed`).
+    if crate::livefeed::is_live_first(filename) {
+        return true;
+    }
     let Some(ext) = crate::fsdelete::file_extension(filename) else {
         return false;
     };
@@ -4040,21 +4069,30 @@ mod tests {
         assert!(chk.has_seven_zip_multi_files);
         assert!(chk.has_splitted_files);
 
-        // 3. DirectUnpack::FindArchiveFiles finds only main RAR archives
-        let direct_main = direct_unpack_find_archive_files(dest_bytes);
-        assert_eq!(direct_main, vec![b"archive.part01.rar".to_vec()]);
+        // 3. DirectUnpack::FindArchiveFiles finds main RAR archives and the first volumes of
+        //    the sets it extracts live (`livefeed`)
+        let mut direct_main = direct_unpack_find_archive_files(dest_bytes);
+        direct_main.sort();
+        assert_eq!(
+            direct_main,
+            vec![
+                b"archive.part01.rar".to_vec(),
+                b"movie.mkv.001".to_vec(),
+                b"multi.7z.001".to_vec()
+            ]
+        );
 
         // 4. discover_unpack_archives for Unrar, 7z single, and 7z multi
         assert_eq!(
-            discover_unpack_archives(dest_bytes, false, false, true, &[]),
+            discover_unpack_archives(dest_bytes, false, false, true, &[], &[]),
             vec![b"archive.part01.rar".to_vec()]
         );
         assert_eq!(
-            discover_unpack_archives(dest_bytes, true, false, true, &[]),
+            discover_unpack_archives(dest_bytes, true, false, true, &[], &[]),
             vec![b"bundle.7z".to_vec()]
         );
         assert_eq!(
-            discover_unpack_archives(dest_bytes, true, true, true, &[]),
+            discover_unpack_archives(dest_bytes, true, true, true, &[], &[]),
             vec![b"multi.7z.001".to_vec()]
         );
 
@@ -4067,6 +4105,7 @@ mod tests {
             unpack_bytes,
             false,
             64,
+            &[],
             &mut joined_files,
             &mut |kind, msg| join_logs.push((kind, msg.to_vec())),
             &mut |_label, prog| {
@@ -4138,6 +4177,7 @@ mod tests {
             0o022,
             &[],
             &joined_refs,
+            &[],
             &mut |kind, msg| cleanup_logs.push((kind, msg.to_vec())),
         );
         assert!(cleanup_ok);

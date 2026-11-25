@@ -204,11 +204,13 @@ struct ActiveStreamingSession {
 /// DirectWrite output (`<dest>/<id>.out.tmp`) or the completed file under its current
 /// (possibly obfuscated) name, given to par-rs with `set_target_path`.
 ///
-/// A cache miss means the article reached its file, so it is handed over at once. An
-/// article refused while still in the cache (RAM staging full, or the snapshot queue full)
-/// waits here until the article cache writes it out
-/// (`streaming_session_articles_committed`); one never flushed before its file completes
-/// is covered by the completion replay.
+/// The None path is the last resort. An article refused while still in the cache (RAM
+/// staging full, or the snapshot queue full) waits here until the article cache writes it
+/// out, and that write hands it over with its bytes (`streaming_session_articles_written`);
+/// an article written before its capture (a flush that ran first, or no cache buffer) is
+/// taken from bytes kept at the write. Only past the snapshot byte limit is an article in
+/// its file handed over without bytes; one never written before its file completes is
+/// covered by the completion replay.
 #[derive(Default)]
 struct CommittedSources {
     /// The file each queue file's bytes are written into, and whether par-rs knows it.
@@ -259,6 +261,14 @@ impl LiveArticleLease {
     fn fold(&self) -> Result<ArticleOutcome, RepairError> {
         let article = self.article.as_ref().unwrap();
         match &article.bytes {
+            // In the file as well: par-rs takes the bytes, and may read a slice's gaps there.
+            Some(data) if article.committed => self.entry.session.on_article_finished(
+                &article.file_id,
+                article.offset,
+                article.size,
+                article.crc32,
+                Some(data),
+            ),
             Some(data) => self.entry.session.on_article_finished_memory_only(
                 &article.file_id,
                 article.offset,
@@ -299,10 +309,23 @@ impl Drop for LiveArticleLease {
 #[derive(Default)]
 struct DeferredArticles {
     pending: VecDeque<DeferredArticle>,
-    // Includes the item currently being folded, until its owned bytes drop.
+    // Includes the item currently being folded, until its owned bytes drop, and the
+    // stashed bytes below.
     bytes: u64,
     active_upper_bound: u64,
+    /// Articles captured from RAM whose cache write is still to come: the write needs to
+    /// hand nothing over for them.
+    captured: HashSet<(FileId, u64)>,
+    /// Bytes of articles written to disk before live PAR captured them (a cache flush that
+    /// ran first, or an article written straight to disk with the cache full or off). The
+    /// capture takes them here instead of par-rs reading them back from the file. Charged
+    /// to the snapshot byte limit like queued snapshots; dropped with the file's completion.
+    stash: HashMap<(FileId, u64), Vec<u8>>,
 }
+
+/// At most this many captured-article marks and stashed articles per session.
+const LIVE_MARK_LIMIT: usize = 65536;
+const LIVE_STASH_LIMIT: usize = 4096;
 
 static STREAMING_SESSIONS: LazyLock<Mutex<HashMap<i32, Arc<ActiveStreamingSession>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -659,14 +682,11 @@ impl ActiveStreamingSession {
             .contains_key(id)
     }
 
-    /// An article RAM cannot take while it is still in the cache: hand it over without its
-    /// bytes once the cache writes it out. False when no written file is known for `id`
+    /// An article RAM cannot take while it is still in the cache: the cache write hands it
+    /// over with the bytes it writes ([`Self::articles_written`]). False when too many wait
     /// (the completion replay covers it then).
     fn await_commit(&self, id: FileId, offset: u64, size: u64, crc32: u32) -> bool {
         let mut sources = self.committed.lock().unwrap_or_else(|e| e.into_inner());
-        if !sources.paths.contains_key(&id) {
-            return false;
-        }
         let awaiting = sources.awaiting.entry(id).or_default();
         if awaiting.len() >= 4096 {
             return false;
@@ -679,32 +699,100 @@ impl ActiveStreamingSession {
         true
     }
 
-    /// Articles of `id` at `ranges` are in its file now: queue the waiting ones among them
-    /// for par-rs to read there.
-    fn committed_ranges(&self, id: FileId, ranges: &[(u64, u64)]) -> usize {
-        let ready: Vec<(u64, u64, u32)> = {
+    /// The article cache wrote `items` (offset, bytes) of file `id`, into its DirectWrite file
+    /// when `in_file`. Every article live PAR still waits for is handed over with the bytes
+    /// written, so par-rs never reads them back: one that waited for the write (RAM could not
+    /// take it) is queued with them, one not captured yet is stashed for its capture. A copy
+    /// is taken only within the snapshot byte limit (ParBuffer); past it, an article in its
+    /// file is handed over without bytes (par-rs reads it there), any other is left to the
+    /// completion replay. Copies only, no I/O: the cache thread calls it after its write.
+    /// This is the one place a cache write meets live PAR.
+    fn articles_written(&self, id: FileId, in_file: bool, items: &[(u64, &[u8])]) -> usize {
+        let in_file = in_file && self.has_written_file(&id);
+        let mut ready: Vec<(u64, u64, u32)> = Vec::new();
+        {
             let mut sources = self.committed.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(awaiting) = sources.awaiting.get_mut(&id) else {
-                return 0;
-            };
-            let (ready, waiting): (Vec<_>, Vec<_>) = awaiting.drain(..).partition(|&(o, n, _)| {
-                ranges.iter().any(|&(offset, size)| offset <= o && o + n <= offset + size)
-            });
-            *awaiting = waiting;
-            ready
-        };
-        let mut queue = self.articles.lock().unwrap_or_else(|e| e.into_inner());
-        for &(offset, size, crc32) in &ready {
-            queue.pending.push_back(DeferredArticle {
-                file_id: id,
-                offset,
-                crc32,
-                size,
-                bytes: None,
-                committed: true,
-            });
+            if let Some(awaiting) = sources.awaiting.get_mut(&id) {
+                awaiting.retain(|&(o, n, crc)| {
+                    let written = items
+                        .iter()
+                        .any(|&(offset, bytes)| offset == o && bytes.len() as u64 == n);
+                    if written {
+                        ready.push((o, n, crc));
+                    }
+                    !written
+                });
+            }
         }
-        ready.len()
+        let mut queue = self.articles.lock().unwrap_or_else(|e| e.into_inner());
+        let limit = self.article_byte_limit.load(Ordering::Acquire);
+        let mut handed = 0;
+        for &(offset, bytes) in items {
+            let size = bytes.len() as u64;
+            if size == 0 || queue.captured.remove(&(id, offset)) {
+                continue;
+            }
+            let room = queue.bytes.checked_add(size).is_some_and(|n| n <= limit);
+            if let Some(&(_, _, crc32)) = ready.iter().find(|&&(o, _, _)| o == offset) {
+                if queue.pending.len() >= 4096 || (!room && !in_file) {
+                    continue; // the completion replay covers it
+                }
+                let copy = room.then(|| bytes.to_vec());
+                if copy.is_some() {
+                    queue.bytes += size;
+                    self.metrics.captured_bytes.fetch_add(size, Ordering::Relaxed);
+                    self.metrics.written_handoffs.fetch_add(1, Ordering::Relaxed);
+                }
+                queue.pending.push_back(DeferredArticle {
+                    file_id: id,
+                    offset,
+                    crc32,
+                    size,
+                    bytes: copy,
+                    committed: in_file,
+                });
+                handed += 1;
+            } else if room && queue.stash.len() < LIVE_STASH_LIMIT {
+                if let Some(old) = queue.stash.insert((id, offset), bytes.to_vec()) {
+                    queue.bytes -= old.len() as u64;
+                }
+                queue.bytes += size;
+            }
+        }
+        handed
+    }
+
+    /// Takes the stashed bytes of the article of `id` at `offset` of `size` bytes, if any.
+    fn take_stashed(
+        queue: &mut DeferredArticles,
+        id: FileId,
+        offset: u64,
+        size: u64,
+    ) -> Option<Vec<u8>> {
+        let bytes = queue.stash.remove(&(id, offset))?;
+        if bytes.len() as u64 == size {
+            return Some(bytes); // stays charged: it moves into the queue
+        }
+        queue.bytes -= bytes.len() as u64;
+        None
+    }
+
+    /// Stashes `bytes` of the article of `id` at `offset`, already charged to the queue.
+    fn stash_charged(&self, id: FileId, offset: u64, bytes: Vec<u8>, charged: u64) {
+        let mut queue = self.articles.lock().unwrap_or_else(|e| e.into_inner());
+        queue.bytes -= charged;
+        let size = bytes.len() as u64;
+        if size == 0
+            || queue.captured.contains(&(id, offset))
+            || queue.stash.len() >= LIVE_STASH_LIMIT
+            || queue.bytes.checked_add(size).is_none()
+        {
+            return;
+        }
+        if let Some(old) = queue.stash.insert((id, offset), bytes) {
+            queue.bytes -= old.len() as u64;
+        }
+        queue.bytes += size;
     }
 
     /// File `id` completed: its completion replay covers what waits, and par-rs reads it at
@@ -713,6 +801,18 @@ impl ActiveStreamingSession {
         let mut sources = self.committed.lock().unwrap_or_else(|e| e.into_inner());
         sources.awaiting.remove(&id);
         sources.paths.insert(id, (path.to_path_buf(), false));
+        drop(sources);
+        let mut queue = self.articles.lock().unwrap_or_else(|e| e.into_inner());
+        queue.captured.retain(|(file, _)| *file != id);
+        let mut freed = 0;
+        queue.stash.retain(|(file, _), bytes| {
+            let keep = *file != id;
+            if !keep {
+                freed += bytes.len() as u64;
+            }
+            keep
+        });
+        queue.bytes -= freed;
     }
 
     /// Articles still waiting for the cache, for the log.
@@ -1209,6 +1309,30 @@ pub(crate) fn streaming_session_defer_committed_article(
             entry.note_written(id, path);
         }
         let mut queue = entry.articles.lock().unwrap_or_else(|e| e.into_inner());
+        // Written before this capture: its bytes were kept aside then, already charged.
+        if queue.pending.len() < 4096 {
+            if let Some(bytes) = ActiveStreamingSession::take_stashed(&mut queue, id, offset, size) {
+                queue.pending.push_back(DeferredArticle {
+                    file_id: id,
+                    offset,
+                    crc32,
+                    size,
+                    bytes: Some(bytes),
+                    committed: entry.has_written_file(&id),
+                });
+                // Not in the article cache: still a cache miss, but nothing is read back.
+                entry.metrics.cache_misses.fetch_add(1, Ordering::Relaxed);
+                entry
+                    .metrics
+                    .stashed_articles
+                    .fetch_add(1, Ordering::Relaxed);
+                entry
+                    .metrics
+                    .captured_bytes
+                    .fetch_add(size, Ordering::Relaxed);
+                return Ok(());
+            }
+        }
         let next = queue.bytes.checked_add(size);
         let mut limit = entry.article_byte_limit.load(Ordering::Acquire);
         // Many files arriving at once fill the first byte limit; a loan of free
@@ -1267,6 +1391,13 @@ pub(crate) fn streaming_session_defer_committed_article(
         }
         ensure_current_generation(nzb_id, &entry)?;
         queue.bytes = next.unwrap();
+        // Bytes kept aside for it (a write that ran first) are not needed any more; else
+        // its coming cache write has nothing to hand over.
+        if let Some(old) = queue.stash.remove(&(id, offset)) {
+            queue.bytes -= old.len() as u64;
+        } else if queue.captured.len() < LIVE_MARK_LIMIT {
+            queue.captured.insert((id, offset));
+        }
         queue.pending.push_back(DeferredArticle {
             file_id: id,
             offset,
@@ -1449,24 +1580,108 @@ pub(crate) fn streaming_session_note_file_path(
     }
 }
 
-/// Articles of a queue file reached its file: the article cache wrote them out. Those that
-/// waited for it (RAM could not take them) are handed to par-rs, which reads them there.
-/// Metadata only; the cache thread calls it after its write.
-pub(crate) fn streaming_session_articles_committed(
+/// The article cache wrote `items` (offset, bytes) of a queue file, into its DirectWrite
+/// file when `in_file` (else into article temporaries). Live PAR takes what it still needs
+/// of them from these bytes, never from the file (see `articles_written`). No I/O; the
+/// cache thread calls it after its write. Returns how many waiting articles were queued.
+pub(crate) fn streaming_session_articles_written(
     nzb_id: i32,
     identity: (Option<i32>, &[u8], &[u8]),
-    ranges: &[(u64, u64)],
-) {
+    in_file: bool,
+    items: &[(u64, &[u8])],
+) -> usize {
     let Some(entry) = active_streaming_session(nzb_id) else {
-        return;
+        return 0;
     };
-    if entry.session.is_cancelled() || ranges.is_empty() {
-        return;
+    if entry.session.is_cancelled() || items.is_empty() {
+        return 0;
     }
     let Ok(id) = live_source_id(&entry, identity.0, identity.1, identity.2) else {
-        return;
+        return 0;
     };
-    entry.committed_ranges(id, ranges);
+    entry.articles_written(id, in_file, items)
+}
+
+/// Room for an article of `size` bytes written straight to disk (no cache buffer): its
+/// decoded bytes are kept aside for live PAR's capture, charged to the session's snapshot
+/// byte limit (ParBuffer, a cap) while held. `None` without a session or room.
+pub(crate) fn streaming_session_reserve_tee(nzb_id: i32, size: u64) -> Option<LiveTee> {
+    let entry = active_streaming_session(nzb_id)?;
+    if entry.session.is_cancelled() || size == 0 {
+        return None;
+    }
+    let mut queue = entry.articles.lock().unwrap_or_else(|e| e.into_inner());
+    let next = queue.bytes.checked_add(size)?;
+    if next > entry.article_byte_limit.load(Ordering::Acquire)
+        || queue.stash.len() >= LIVE_STASH_LIMIT
+    {
+        return None;
+    }
+    queue.bytes = next;
+    drop(queue);
+    Some(LiveTee {
+        entry: Some(entry),
+        nzb_id,
+        charged: size,
+        bytes: Vec::with_capacity(usize::try_from(size).ok()?),
+        void: false,
+    })
+}
+
+/// The decoded bytes of one article written straight to disk, kept for live PAR's capture
+/// so par-rs need not read them back (see [`streaming_session_reserve_tee`]). Its charge
+/// returns when it drops, or moves to the kept bytes with [`LiveTee::stash`].
+pub(crate) struct LiveTee {
+    entry: Option<Arc<ActiveStreamingSession>>,
+    nzb_id: i32,
+    charged: u64,
+    bytes: Vec<u8>,
+    void: bool,
+}
+
+impl LiveTee {
+    /// Appends decoded bytes. More than reserved voids the tee (nothing is kept).
+    pub(crate) fn push(&mut self, data: &[u8]) {
+        if self.void {
+            return;
+        }
+        if self.bytes.len() as u64 + data.len() as u64 > self.charged {
+            self.void = true;
+            self.bytes = Vec::new();
+            return;
+        }
+        self.bytes.extend_from_slice(data);
+    }
+
+    /// The article is written whole at `offset` of queue file `identity`: keep its bytes for
+    /// the capture, when the session that reserved them is still the job's.
+    pub(crate) fn stash(mut self, identity: (Option<i32>, &[u8], &[u8]), offset: u64) {
+        let Some(entry) = self.entry.take() else {
+            return;
+        };
+        let bytes = std::mem::take(&mut self.bytes);
+        let current = !self.void
+            && !entry.session.is_cancelled()
+            && active_streaming_session(self.nzb_id)
+                .is_some_and(|now| now.generation == entry.generation);
+        let id = current
+            .then(|| live_source_id(&entry, identity.0, identity.1, identity.2).ok())
+            .flatten();
+        match id {
+            Some(id) => entry.stash_charged(id, offset, bytes, self.charged),
+            None => {
+                entry.articles.lock().unwrap_or_else(|e| e.into_inner()).bytes -= self.charged;
+            }
+        }
+    }
+}
+
+impl Drop for LiveTee {
+    fn drop(&mut self) {
+        if let Some(entry) = self.entry.take() {
+            entry.articles.lock().unwrap_or_else(|e| e.into_inner()).bytes -= self.charged;
+        }
+    }
 }
 
 /// Jobs with queued work, copied under the registry lock without doing repair work.
@@ -2864,11 +3079,50 @@ pub(crate) fn streaming_session_download_end_targets(nzb_id: i32) -> Option<Vec<
     (!names.is_empty()).then_some(names)
 }
 
+/// The par2 name of queue file `identity` of job `nzb_id`: the file's live binding, which
+/// also holds for a file still under another (obfuscated) name. `None` without a session or
+/// when the file is not matched to a par2 file. Metadata only; callers may hold the queue lock.
+pub(crate) fn streaming_session_par_name_of(
+    nzb_id: i32,
+    identity: (Option<i32>, &[u8], &[u8]),
+) -> Option<Vec<u8>> {
+    let entry = active_streaming_session(nzb_id)?;
+    let id = live_source_id(&entry, identity.0, identity.1, identity.2).ok()?;
+    let name = entry.target_names.get(&id)?;
+    Some(par_rs::filenames::os_str_bytes(name.as_os_str()).to_vec())
+}
+
 /// Live progress of the repair call running on job `nzb_id`'s session (par-rs #104): its
 /// step, the step's done and total units, and the session's work counter, which rises while
 /// a repair makes progress. `None` without a session.
 pub(crate) fn streaming_session_repair_progress(nzb_id: i32) -> Option<LiveRepairProgress> {
     Some(active_streaming_session(nzb_id)?.session.repair_progress())
+}
+
+/// A counter that rises whenever job `nzb_id`'s live session makes progress: slices
+/// folded, source or recovery bytes read, articles captured, repair work, admission steps.
+/// Post-processing waits for live work while it rises and hands over to batch repair only
+/// when it stalls. `None` without a session.
+pub(crate) fn streaming_session_progress_token(nzb_id: i32) -> Option<u64> {
+    let entry = active_streaming_session(nzb_id)?;
+    let io = entry.session.io_stats();
+    let (folds, _) = entry.session.fold_stats();
+    Some(
+        [
+            folds,
+            io.source_bytes_read,
+            io.backfill_bytes_read,
+            io.recovery_bytes_read,
+            io.target_verification_bytes_read,
+            entry.catchup_source_bytes.load(Ordering::Relaxed),
+            entry.session.repair_progress().work,
+            entry.admission_progress.load(Ordering::Relaxed),
+            entry.metrics.captured_articles.load(Ordering::Relaxed),
+            entry.metrics.committed_articles.load(Ordering::Relaxed),
+        ]
+        .iter()
+        .fold(0u64, |total, n| total.wrapping_add(*n)),
+    )
 }
 
 /// Job `nzb_id`'s live repair admission counter (see `admission_progress`).
@@ -3186,20 +3440,47 @@ pub(crate) fn streaming_session_prepare_repair(
             "target metadata exceeds reservation",
         ));
     }
-    let mut ids = Vec::with_capacity(targets.len());
+    let mut ids: Vec<(i32, FileId)> = Vec::with_capacity(targets.len());
     for target in targets {
         let name = target
             .path
             .file_name()
             .ok_or_else(|| live_error("live target admission", "target has no filename"))?;
-        let id = entry
+        let leaf = par_rs::filenames::os_str_bytes(name);
+        // The par2 file under its own name in the repair destination.
+        let by_name = entry
             .session
-            .file_id_by_name(&par_rs::filenames::os_str_bytes(name))
-            .ok_or_else(|| live_error("live target admission", "target is not in this PAR set"))?;
-        if entry.base_dir.join(&entry.target_names[&id]) != target.path {
+            .file_id_by_name(&leaf)
+            .filter(|id| entry.base_dir.join(&entry.target_names[id]) == target.path);
+        // The queue file's live binding: a file still under another (obfuscated) name is
+        // repaired where it is, never written to under a par2 name it does not have yet.
+        let bound = live_source_id(&entry, Some(target.file_id), &leaf, &[]).ok();
+        let id = match (by_name, bound) {
+            (Some(named), Some(bound)) if named != bound => {
+                return Err(live_error(
+                    "live target admission",
+                    "target name and queue binding disagree",
+                ));
+            }
+            (Some(id), _) => id,
+            (None, Some(id)) if target.path.parent() == Some(entry.base_dir.as_path()) => id,
+            (None, Some(_)) => {
+                return Err(live_error(
+                    "live target admission",
+                    "target path differs from repair destination",
+                ));
+            }
+            (None, None) => {
+                return Err(live_error(
+                    "live target admission",
+                    "target is not in this PAR set",
+                ));
+            }
+        };
+        if ids.iter().any(|(_, known)| *known == id) {
             return Err(live_error(
                 "live target admission",
-                "target path differs from repair destination",
+                "two targets name one PAR file",
             ));
         }
         ids.push((target.file_id, id));

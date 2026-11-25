@@ -3288,12 +3288,15 @@ fn live_repair_may_start(nzb: &crate::queuesubsys_host::NzbSnap) -> bool {
         || (!nzb.post_working && nzb.post_stage == PostStage::Queued)
 }
 
-/// Post-processing waits (boundedly) while live work for `nzb_id` is still
-/// pending: completed files not yet folded into the live session, or a live
-/// repair helper that is running.
+/// Post-processing waits while live work for `nzb_id` is still pending: completed files
+/// not yet folded into the live session, or a live repair helper that is running. It waits
+/// as long as the session makes progress (`streaming_session_progress_token`), so a
+/// completion drain that is still reading is never cut off for a batch repair that would
+/// read the whole download again; only 10 s without any progress hands the job over.
 #[cfg(unix)]
 pub(crate) fn live_repair_should_defer_post(nzb_id: i32) -> bool {
-    static SINCE: std::sync::LazyLock<Mutex<std::collections::HashMap<i32, std::time::Instant>>> =
+    type Since = std::collections::HashMap<i32, (std::time::Instant, Option<u64>)>;
+    static SINCE: std::sync::LazyLock<Mutex<Since>> =
         std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
     const LIMIT: Duration = Duration::from_secs(10);
     // A running download-end repair is waited for while it progresses: never cut off
@@ -3324,8 +3327,14 @@ pub(crate) fn live_repair_should_defer_post(nzb_id: i32) -> bool {
         since.remove(&nzb_id);
         return false;
     }
-    let first = *since.entry(nzb_id).or_insert_with(std::time::Instant::now);
-    if first.elapsed() < LIMIT {
+    let progress = crate::parchecker::streaming_session_progress_token(nzb_id);
+    let now = std::time::Instant::now();
+    let clock = since.entry(nzb_id).or_insert((now, progress));
+    if progress.is_some() && clock.1 != progress {
+        // Still working: the stall clock starts again.
+        *clock = (now, progress);
+    }
+    if live_defer_within(clock.0, now, LIMIT) {
         return true;
     }
     // Past the cap ordinary repair takes over, but never alongside a live
@@ -3335,6 +3344,12 @@ pub(crate) fn live_repair_should_defer_post(nzb_id: i32) -> bool {
         return true;
     }
     false
+}
+
+/// Within `limit` of the last progress at `since`: post-processing still waits.
+#[cfg(unix)]
+fn live_defer_within(since: std::time::Instant, now: std::time::Instant, limit: Duration) -> bool {
+    now.saturating_duration_since(since) < limit
 }
 
 #[cfg(unix)]
@@ -3640,8 +3655,9 @@ fn keep_live_helper(
 /// The live repair at the end of a download without held direct-unpack volumes: once every
 /// slice arrived or failed and the recovery on hand covers the damage, rebuild the damaged
 /// files from the live syndromes (no batch verify or repair read) and certify their CRCs,
-/// so post-processing's par-check finds them repaired and no batch repair runs. Files still
-/// under another name (obfuscated, not renamed yet) leave the job to par-check. The caller
+/// so post-processing's par-check finds them repaired and no batch repair runs. A file still
+/// under another name (obfuscated, not renamed yet) is repaired where it is: its live binding
+/// names its par2 file, and the certified CRC follows it through par-rename. The caller
 /// holds the queue lock; the repair runs on its own thread.
 #[cfg(unix)]
 fn live_par_repair_at_download_end(
@@ -3677,14 +3693,30 @@ fn live_par_repair_at_download_end(
     }
     let mut targets = Vec::with_capacity(names.len());
     for name in &names {
+        // Under its par2 name, or still under another (obfuscated) one: the live binding
+        // of the queue file names its par2 file, and it is repaired where it is.
         let found = (0..host.nzb_completed_files_len(nzb.ptr))
             .map(|index| host.nzb_completed_file_at(nzb.ptr, index))
-            .find(|file| !file.par_file && file.filename == *name);
+            .filter(|file| !file.par_file)
+            .find(|file| file.filename == *name)
+            .or_else(|| {
+                (0..host.nzb_completed_files_len(nzb.ptr))
+                    .map(|index| host.nzb_completed_file_at(nzb.ptr, index))
+                    .filter(|file| !file.par_file)
+                    .find(|file| {
+                        crate::parchecker::streaming_session_par_name_of(
+                            nzb_id,
+                            (Some(file.id), &file.filename, &file.hash16k),
+                        )
+                        .is_some_and(|par_name| par_name == *name)
+                    })
+            });
         let Some(file) = found else {
             unresolvable();
             return;
         };
-        let path = crate::fsops::path(&nzb.dest_dir).join(crate::fsops::path(name));
+        let path =
+            crate::fsops::path(&nzb.dest_dir).join(crate::fsops::path(&file.filename));
         if !path.is_file() {
             unresolvable();
             return;

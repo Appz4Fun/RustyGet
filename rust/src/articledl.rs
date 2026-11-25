@@ -778,11 +778,12 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
         },
     );
 
-    // Live PAR: articles that waited for their bytes to reach the file can be read there
-    // now. Only those written in place (DirectWrite), up to the first failed write.
+    // Live PAR: hand over the bytes just written, so par-rs never reads them back from the
+    // file: articles that waited for this write, and ones written before their capture.
+    // Only those written, up to the first failed write.
     if let Some((nzb_id, file_id, name, hash16k)) = live
         .as_ref()
-        .filter(|_| direct_write && !skip_disk_write && flushed_articles > 0)
+        .filter(|_| !skip_disk_write && flushed_articles > 0)
     {
         let written = usize::try_from(flushed_articles).unwrap_or(0).min(items.len());
         let all: i64 = items[..written]
@@ -790,19 +791,16 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
             .map(|item| i64::from(item.segment_size))
             .sum();
         let good = if all == flushed_size { written } else { written - 1 };
-        let ranges: Vec<(u64, u64)> = items[..good]
+        let written_items: Vec<(u64, &[u8])> = items[..good]
             .iter()
-            .filter_map(|item| {
-                Some((
-                    u64::try_from(item.segment_offset).ok()?,
-                    u64::try_from(item.segment_size).ok()?,
-                ))
-            })
+            .filter(|item| item.segment_content.len() as i64 == i64::from(item.segment_size))
+            .filter_map(|item| Some((u64::try_from(item.segment_offset).ok()?, item.segment_content)))
             .collect();
-        crate::parchecker::streaming_session_articles_committed(
+        crate::parchecker::streaming_session_articles_written(
             *nzb_id,
             (Some(*file_id), name, hash16k),
-            &ranges,
+            direct_write,
+            &written_items,
         );
     }
     let skip_after = qh.file_cache_flush_finish(file_ptr, flushed_articles)
@@ -1400,6 +1398,9 @@ struct RsArticleWriter {
     post_final_path: Vec<u8>,
     post_orig_filename: Vec<u8>,
     post_nzb_dest_dir: Vec<u8>,
+    /// Decoded bytes of an article written straight to disk, kept for live PAR's capture
+    /// (charged to its ParBuffer cap) so par-rs never reads them back from the file.
+    live_tee: Option<crate::parchecker::LiveTee>,
 }
 
 // Safety: `cached_ptr` points to an `ArticleCache`-owned `malloc` buffer exclusively owned
@@ -1443,6 +1444,7 @@ impl Default for RsArticleWriter {
             post_final_path: Vec::new(),
             post_orig_filename: Vec::new(),
             post_nzb_dest_dir: Vec::new(),
+            live_tee: None,
         }
     }
 }
@@ -1582,6 +1584,7 @@ impl RsArticleWriter {
             });
         self.out_file = None;
         self.drop_cached();
+        self.live_tee = None;
         self.write_context = write_context;
         if self.write_context.is_none() {
             return false;
@@ -1740,6 +1743,19 @@ impl RsArticleWriter {
             if skip_disk_write {
                 return true;
             }
+            // No cache buffer: keep a copy for live PAR within its ParBuffer cap, so the
+            // article's capture need not have par-rs read it back from disk.
+            if !raw_article
+                && self.format == Format::Yenc
+                && !is_dupe_fallback
+                && !fsnap.par_file
+                && memory_monitor_tier() != PRESSURE_CRITICAL
+            {
+                self.live_tee = crate::parchecker::streaming_session_reserve_tee(
+                    nzb.id,
+                    u64::try_from(self.article_size).unwrap_or(0),
+                );
+            }
             let direct_write = (direct_write_opt || force_direct_write)
                 && self.format == Format::Yenc
                 && !is_dupe_fallback;
@@ -1831,7 +1847,15 @@ impl RsArticleWriter {
         let Some(ref mut f) = self.out_file else {
             return false;
         };
-        f.write_bytes(buf) > 0
+        let ok = f.write_bytes(buf) > 0;
+        if let Some(tee) = self.live_tee.as_mut() {
+            if ok && !raw_article {
+                tee.push(buf);
+            } else {
+                self.live_tee = None;
+            }
+        }
+        ok
     }
 
     fn finish(&mut self, host: &DlHost<'_>, success: bool) {
@@ -1876,9 +1900,16 @@ impl RsArticleWriter {
             |msg| host.log_nzb(nzb_ptr, MK_ERROR, msg),
         );
 
+        let live_tee = self.live_tee.take();
         if !success || raw_article {
             self.drop_cached();
             return;
+        }
+        if let Some(tee) = live_tee.filter(|_| !has_cached && !skip_disk_write) {
+            // Written whole (the file is closed above): the capture takes these bytes.
+            if let Ok(offset) = u64::try_from(self.article_offset) {
+                tee.stash((Some(fsnap.id), &fsnap.filename, &fsnap.hash16k), offset);
+            }
         }
 
         if has_cached {

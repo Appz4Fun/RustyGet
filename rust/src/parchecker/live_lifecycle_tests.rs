@@ -1794,14 +1794,122 @@ fn live_article_ram_refused_waits_for_the_cache_flush() {
     streaming_session_drain_articles(id).unwrap().unwrap();
     assert_eq!(streaming_session_status(id).unwrap().verified, 0);
     assert!(entry.awaiting_commits() > 0);
-    // The cache writes them out: par-rs reads them from their file.
+    // The cache writes them out, and hands over the bytes it wrote: par-rs verifies them
+    // from RAM and never reads them back from their file.
     for (name, _, bytes) in &files {
-        streaming_session_articles_committed(id, (None, name, &[]), &[(0, bytes.len() as u64)]);
+        let items: Vec<(u64, &[u8])> = bytes
+            .chunks(1000)
+            .enumerate()
+            .map(|(i, chunk)| ((i * 1000) as u64, chunk))
+            .collect();
+        streaming_session_articles_written(id, (None, name, &[]), true, &items);
     }
     streaming_session_drain_articles(id).unwrap().unwrap();
     let status = streaming_session_status(id).unwrap();
     assert_eq!(status.verified, status.total);
     assert_eq!(entry.awaiting_commits(), 0);
+    let io = streaming_session_io_stats(id).unwrap();
+    assert_eq!(io.source_bytes_read, 0, "no flushed byte is read back from the file");
+    assert_eq!(entry.articles.lock().unwrap().bytes, 0, "every copy is returned");
+    drop(entry);
+    streaming_session_forget(id);
+}
+
+/// Past the snapshot byte limit (ParBuffer) the write keeps no copy: an article in its
+/// file is handed over without bytes, as before, and memory stays within the cap.
+#[test]
+fn live_written_handoff_stays_within_the_byte_limit() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900186;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 * 1024 * 1024)
+        .unwrap();
+    let files = written_copies(&fx, &set);
+    let entry = active_streaming_session(id).unwrap();
+    entry.article_byte_limit.store(0, Ordering::Release);
+    for (name, path, bytes) in &files {
+        let file_id = entry.session.file_id_by_name(name).unwrap();
+        entry.note_written(file_id, path);
+        assert!(entry.await_commit(file_id, 0, bytes.len() as u64, crc32fast::hash(bytes)));
+        streaming_session_articles_written(id, (None, name, &[]), true, &[(0, bytes)]);
+        assert_eq!(entry.articles.lock().unwrap().bytes, 0, "no copy past the cap");
+    }
+    streaming_session_drain_articles(id).unwrap().unwrap();
+    let status = streaming_session_status(id).unwrap();
+    assert_eq!(status.verified, status.total);
+    assert!(streaming_session_io_stats(id).unwrap().source_bytes_read > 0);
+    drop(entry);
+    streaming_session_forget(id);
+}
+
+/// An article written before live PAR captured it (a cache flush that ran first) misses
+/// the cache, but its capture takes the bytes kept at the write: nothing is read back.
+#[test]
+fn live_capture_after_its_write_takes_the_kept_bytes() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900187;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 * 1024 * 1024)
+        .unwrap();
+    let files = written_copies(&fx, &set);
+    for (name, _, bytes) in &files {
+        let items: Vec<(u64, &[u8])> = bytes
+            .chunks(1000)
+            .enumerate()
+            .map(|(i, chunk)| ((i * 1000) as u64, chunk))
+            .collect();
+        streaming_session_articles_written(id, (None, name, &[]), true, &items);
+    }
+    for (name, path, bytes) in &files {
+        defer_uncached(id, name, path, bytes, (0, bytes.len()), 1000);
+    }
+    streaming_session_drain_articles(id).unwrap().unwrap();
+    let status = streaming_session_status(id).unwrap();
+    assert_eq!(status.verified, status.total);
+    assert_eq!(streaming_session_io_stats(id).unwrap().source_bytes_read, 0);
+    let entry = active_streaming_session(id).unwrap();
+    assert!(entry.metrics.stashed_articles.load(Ordering::Relaxed) > 0);
+    assert_eq!(entry.articles.lock().unwrap().bytes, 0);
+    drop(entry);
+    streaming_session_forget(id);
+}
+
+/// An article written straight to disk (no cache buffer) is kept by the writer's tee
+/// within the ParBuffer cap; its capture misses the cache and takes those bytes. A tee
+/// that is dropped (a failed download) returns its charge.
+#[test]
+fn live_tee_of_an_uncached_article_feeds_its_capture() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900188;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 * 1024 * 1024)
+        .unwrap();
+    let files = written_copies(&fx, &set);
+    let dropped = streaming_session_reserve_tee(id, 1000).unwrap();
+    drop(dropped);
+    let entry = active_streaming_session(id).unwrap();
+    assert_eq!(entry.articles.lock().unwrap().bytes, 0);
+    drop(entry);
+    for (name, _, bytes) in &files {
+        for (i, chunk) in bytes.chunks(1000).enumerate() {
+            let mut tee = streaming_session_reserve_tee(id, chunk.len() as u64).unwrap();
+            tee.push(&chunk[..chunk.len() / 2]);
+            tee.push(&chunk[chunk.len() / 2..]);
+            tee.stash((None, name, &[]), (i * 1000) as u64);
+        }
+    }
+    for (name, path, bytes) in &files {
+        defer_uncached(id, name, path, bytes, (0, bytes.len()), 1000);
+    }
+    streaming_session_drain_articles(id).unwrap().unwrap();
+    let status = streaming_session_status(id).unwrap();
+    assert_eq!(status.verified, status.total);
+    assert_eq!(streaming_session_io_stats(id).unwrap().source_bytes_read, 0);
+    let entry = active_streaming_session(id).unwrap();
+    assert_eq!(entry.articles.lock().unwrap().bytes, 0);
+    // No room: no tee.
+    entry.article_byte_limit.store(0, Ordering::Release);
+    assert!(streaming_session_reserve_tee(id, 1000).is_none());
     drop(entry);
     streaming_session_forget(id);
 }

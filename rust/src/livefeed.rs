@@ -249,6 +249,8 @@ struct Volumes<'f> {
     /// Open handles; `clean` once complete without holes (not asked of the feed again).
     files: Vec<Option<File>>,
     clean: Vec<bool>,
+    /// Opened while it still had lost ranges: a repair may have replaced the file since.
+    damaged: Vec<bool>,
     /// The length each volume must have (the map was built with it).
     expect: Vec<Option<u64>>,
     /// A volume whose length differs from the one the map was built with.
@@ -267,6 +269,7 @@ impl<'f> Volumes<'f> {
             feed,
             files: (0..n).map(|_| None).collect(),
             clean: vec![false; n],
+            damaged: vec![false; n],
             expect: vec![None; n],
             wrong: None,
         }
@@ -288,11 +291,14 @@ impl<'f> Volumes<'f> {
             VolumeView::Missing => return View::Missing,
             VolumeView::NotYet | VolumeView::Virtual(_) => return View::NotYet,
         };
-        if self.files[i].is_none() {
+        // A repaired volume is read from the file now on disk: the repair may have written a
+        // new file in its place.
+        if self.files[i].is_none() || (self.damaged[i] && holes.is_empty()) {
             match File::open(&self.paths[i]) {
                 Ok(f) => self.files[i] = Some(f),
                 Err(_) => return View::NotYet,
             }
+            self.damaged[i] = !holes.is_empty();
         }
         let len = self.files[i]
             .as_ref()

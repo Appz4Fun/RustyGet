@@ -1,6 +1,6 @@
 # Rust nativeness scorecard
 
-RustyGet started as a line-by-line port of nzbget's C++. It now builds as pure
+RustyGet started as a line-by-line port of the original C++ code. It now builds as pure
 Rust, but much of it still *reads* like C++: integer status codes, `extern "C"`
 shims between Rust modules, getters and setters, out-parameters, panics. The
 scorecard turns that impression into numbers so idiomatic-Rust work can be

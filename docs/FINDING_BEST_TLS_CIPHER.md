@@ -1,23 +1,23 @@
 ## About ciphers
 
-When an encrypted communication with news server (option **ServerX.Encryption**) is active NZBGet and the news server use TLS/SSL protocol to exchange data in a secure way.
+When an encrypted communication with news server (option **ServerX.Encryption**) is active RustyGet and the news server use TLS/SSL protocol to exchange data in a secure way.
 
 TLS/SSL specification defines many possible ciphers which can be used to encrypt data. The ciphers differ in algorithms and key lengths.
 
-When a TLS/SSL connection is created the so called **TLS Handshake** process is performed. During TLS Handshake the client (NZBGet) and the server (news server) choose the cipher for communication. By default, the most secure cipher is selected. This cipher, however, may not give the best performance on your particular computer.
+When a TLS/SSL connection is created the so called **TLS Handshake** process is performed. During TLS Handshake the client (RustyGet) and the server (news server) choose the cipher for communication. By default, the most secure cipher is selected. This cipher, however, may not give the best performance on your particular computer.
 
-To maximize your download speed, you can configure NZBGet to use the fastest and most secure encryption cipher available on your system.
+To maximize your download speed, you can configure RustyGet to use the fastest and most secure encryption cipher available on your system.
 
 A cipher suite is a collection of algorithms that secure a network connection. For performance, we're most interested in the bulk encryption algorithm (Enc), as it handles the continuous encryption of downloaded data.
 
-NZBGet provides an option **ServerX.Cipher** to manually set a cipher.
+RustyGet provides an option **ServerX.Cipher** to manually set a cipher.
 
-## Optimizing NZBGet Speed by Choosing the Best Cipher
+## Optimizing RustyGet Speed by Choosing the Best Cipher
 
 ### Automatic WebUI test
 
 Open **Settings → News Servers → Optimize TLS ciphers** and save any pending
-server edits first. NZBGet measures authenticated decryption on the computer
+server edits first. RustyGet measures authenticated decryption on the computer
 running the daemon, then checks each encrypted server's eligible cipher suites.
 It saves the fastest measured supported cipher independently for each fully
 tested server, including disabled backup servers. Plaintext servers are skipped.
@@ -43,24 +43,24 @@ button stays disabled there.
 
 Closing the dialog keeps the test running and tracks its result. Settings saves
 wait until that result is reconciled. Updated WebUI clients also include their
-saved server identity/cipher baseline with each save; NZBGet checks it under the
+saved server identity/cipher baseline with each save; RustyGet checks it under the
 configuration write lock and rejects stale saves from another browser while
 retaining its unsaved edits. Legacy RPC callers that omit this baseline retain
 their previous save behavior.
 Only cipher options are saved, and concurrent configuration edits prevent the
-save. Reload NZBGet after a successful save to activate the choices.
+save. Reload RustyGet after a successful save to activate the choices.
 
 These local crypto measurements estimate cipher performance; they do not measure
 provider download speed. The manual procedure below remains available.
 
 ### Default Behavior (Empty Cipher Option)
-If you leave the Cipher option empty, NZBGet will use the default cipher list provided by your system's OpenSSL library. On a modern, up-to-date system, this default list is generally secure and reasonably performant.
+If you leave the Cipher option empty, RustyGet will use the default cipher list provided by your system's OpenSSL library. On a modern, up-to-date system, this default list is generally secure and reasonably performant.
 
 However, for maximum performance, it's better to explicitly set the cipher list yourself. This gives you full control and guarantees that you are using the fastest cipher your hardware can support, rather than relying on a generic default.
 
 ### Installing the OpenSSL Tools
 
-NZBGet uses the [OpenSSL](https://openssl-library.org/) library for its TLS/SSL connections, which means we can use OpenSSL's built-in tools to test encryption speed.
+RustyGet uses the [OpenSSL](https://openssl-library.org/) library for its TLS/SSL connections, which means we can use OpenSSL's built-in tools to test encryption speed.
 
   - On Linux, you can typically install it via your package manager e.g., for Debian/Ubuntu
   ```text
@@ -116,7 +116,7 @@ SRP-RSA-AES-256-CBC-SHA        SSLv3   Kx=SRP      Au=RSA   Enc=AES(256)        
 SRP-AES-256-CBC-SHA            SSLv3   Kx=SRP      Au=SRP   Enc=AES(256)               Mac=SHA1
 ```
 
-First column is the cipher suite name. This name must be used in NZBGet in option **ServerX.Cipher**.
+First column is the cipher suite name. This name must be used in RustyGet in option **ServerX.Cipher**.
 
 The second column indicates the SSL/TLS version where the cipher suite can be used. 
 

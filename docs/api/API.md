@@ -1,14 +1,14 @@
 ## Status of this document
 
-The document describes methods available in NZBGet `version 13.0 and later`. The document is updated after a new stable version is out. Current testing version may have methods or fields not described here; these methods or fields may change before getting stable.
+The document describes the methods RustyGet answers. Development versions may have methods or fields not described here; these may change before a release.
 
 ## Protocols
 
-NZBGet supports `XML-RPC`, `JSON-RPC` and `JSON-P-RPC`. RPC-protocols allow to control the program from other applications. Many programming languages have libraries, which make the usage of `XML-RPC`, `JSON-RPC` and `JSON-P-RPC` very simple. The implementations of all three protocols in NZBGet are equal: all methods are identical, except that `JSON-P-RPC` is off unless option `JsonP` turns it on, and then runs only the methods that read (see below). You may choose the protocol, which is better supported by your programming language.
+RustyGet supports `XML-RPC`, `JSON-RPC` and `JSON-P-RPC`. RPC-protocols allow to control the program from other applications. Many programming languages have libraries, which make the usage of `XML-RPC`, `JSON-RPC` and `JSON-P-RPC` very simple. The implementations of all three protocols in RustyGet are equal: all methods are identical, except that `JSON-P-RPC` is off unless option `JsonP` turns it on, and then runs only the methods that read (see below). You may choose the protocol, which is better supported by your programming language.
 
 ## Authentication
 
-NZBGet has three pairs of username/password:
+RustyGet has three pairs of username/password:
 
 - options `ControlUsername` and `ControlPassword` - Full access, usually used when connecting to web-interface;
 - options `RestrictedUsername` and `RestrictedPassword` - `v15.0` Restricted user can control the program with few restrictions. He has access to web-interface and can see most program settings. He can not change program settings and can not view security related options. In terms of RPC-API the user:
@@ -29,7 +29,7 @@ If HTTP basic authentication is somewhat problematic the username/password can a
 
 - `http://localhost:6789/username:password/xmlrpc`
 
-`Security warning`: HTTP authentication is not secure. Although the password is encoded using Base64 it is not encrypted. For secure communication use HTTPS (needs to be explicitly enabled in NZBGet settings by user).
+`Security warning`: HTTP authentication is not secure. Although the password is encoded using Base64 it is not encrypted. For secure communication use HTTPS (needs to be explicitly enabled in RustyGet settings by user).
 
 ## Features and limitations
 
@@ -470,7 +470,7 @@ Positive number representing `NZBID` of the queue item. `0` and negative numbers
 from xmlrpc.client import ServerProxy
 from base64 import standard_b64encode
 
-server = ServerProxy("http://nzbget:tegbzn6789@localhost:6789/xmlrpc")
+server = ServerProxy("http://rustyget:tegbzn6789@localhost:6789/xmlrpc")
 filename = "/tmp/test.nzb"
 with open(filename, "rb") as f:
     nzb_content = f.read()
@@ -640,7 +640,7 @@ This method returns structure with following fields:
 - **ServerPaused** `(bool)` - ~~`v12.0`~~ Deprecated, use DownloadPaused instead.
 - **PostPaused** `(bool)` - `true` if post-processor queue is currently in paused-state.
 - **ScanPaused** `(bool)` - `true` if the scanning of incoming nzb-directory is currently in paused-state.
-- **ServerTime** `(int)` - Current time on computer running NZBGet. Time is in C/Unix format (number of seconds since 00:00:00 UTC, January 1, 1970).
+- **ServerTime** `(int)` - Current time on computer running RustyGet. Time is in C/Unix format (number of seconds since 00:00:00 UTC, January 1, 1970).
 - **ResumeTime** `(int)` - Time to resume if set with method `scheduleresume`. Time is in C/Unix format.
 - **FeedActive** `(bool)` - `true` if any RSS feed is being fetched right now.
 - **FreeDiskSpaceLo** `(int)` - Free disk space on `DestDir`, in bytes. This field contains the low 32-bits of 64-bit value
@@ -689,7 +689,7 @@ This method returns an array of structures with following fields:
 - **Tools** `(struct[])`
   - **Name** `(string)` - Tool name, e.g. `unrar`.
   - **Version** `(string)` - Tool version, e.g. `7.00`.
-  - **Path** `(string)` - Tool path, e.g. `C:\ProgramData\NZBGet\unrar`.
+  - **Path** `(string)` - Tool path, e.g. `/usr/local/bin/unrar`.
 - **Libraries** `(struct[])` - Libraries
   - **Name** `(string)` - Library name, e.g. `OpenSSL`.
   - **Version** `(string)` - Library version, e.g. `3.3.1`.

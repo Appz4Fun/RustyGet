@@ -8,13 +8,13 @@ Addressed to the Antigravity "NZB Release Duplication Analysis" session developi
 `par-rs` is a single, general-purpose Rust crate (edition 2024, `rust-version = "1.99"`, lib name `par_rs`,
 `rlib` + `staticlib`) that covers everything a Usenet downloader or indexer needs from PAR2:
 
-* **Downloader side (RustyGet / nzbget replacement):** verify, repair, rename, twin detection,
+* **Downloader side (RustyGet / rustyget replacement):** verify, repair, rename, twin detection,
   `.vol` block-count heuristics, repair-while-downloading with early cutover, quick zero-read
   verification from article CRCs, backup policies matching `libpar2`.
 * **Indexer side (Atlas):** zero-copy inspection of PAR1 / PAR2 / PAR3 buffers, `Inventory`
   summaries, creator fingerprinting, obfuscated-file resolution, CRC-32 algebra.
 
-It replaces `par2cmdline-turbo` / `libpar2` and the PAR2 helper code nzbget carries
+It replaces `par2cmdline-turbo` / `libpar2` and the PAR2 helper code rustyget carries
 (`twin`, `parrenamer`, `dupefallback`, `pardamage`, `parparser`, `parchecker`, `repair`).
 It is not specific to either consumer: no RustyGet or Atlas types appear in it.
 
@@ -48,9 +48,9 @@ par-rs verify/repair with `par2` and vice versa), `cargo clippy --all-targets --
 | `verify` | `SetVerifier`: in-memory slice verification, rolling-CRC discovery of shifted slices, `RepairAssessment` |
 | `repair` | `repair_slices`, `repair_selected_slices` (surgical rows only), exponent-0 XOR fast path, `repair_on_disk(DiskRepairPlan)` |
 | `stream` | `SyndromeBank` + `StreamingSliceAssembler`: out-of-order yEnc byte ranges → verified slices → syndromes; `can_solve_now()` / `solve_now()` / `solve_selected_slices()` before the download finishes |
-| `repairer` | `Par2Repairer`: the full nzbget `ParChecker` flow on disk (load set → quick verify from article CRCs → parallel slice verification → sliding scans → extra/misnamed/split files → in-place repair with cloned backup → re-verify) |
+| `repairer` | `Par2Repairer`: the full rustyget `ParChecker` flow on disk (load set → quick verify from article CRCs → parallel slice verification → sliding scans → extra/misnamed/split files → in-place repair with cloned backup → re-verify) |
 | `streaming` | `StreamingParSession` (Send + Sync): live slice tracker, `.vol` unpause scheduler (`select_more_pars`), in-flight syndrome folding, Mode A donor splicing, Mode B early target repair for DirectUnpack |
-| `renamer` | `ParRenamer`: nzbget's par-renamer (par2-by-content, 16k-hash renames, split fragments, `.bad` marking, dry run) |
+| `renamer` | `ParRenamer`: rustyget's par-renamer (par2-by-content, 16k-hash renames, split fragments, `.bad` marking, dry run) |
 | `twin`, `filenames`, `damage` | set fingerprints and twin classification; `.volNNN+MM.par2` parsing, `calc_*_volume_blocks`, `select_more_pars`, `pick_twin_volume`; hole math and article-CRC quick verification (`quick_verify`, `verify_partial_file`) |
 | `create` | `build_set` (index + volumes in memory, UniFileN for non-ASCII names) and `create` (on disk, all-core hashing, 170 GB/s encode) |
 | `ffi` | C ABI (`nzbpar_*`) — not needed from Rust |
@@ -87,7 +87,7 @@ Use the Rust API directly; the C FFI exists only for non-Rust hosts.
 
 Two options, pick by how much of the writer path you want to hand over:
 
-**A. `StreamingParSession` (recommended; mirrors nzbget's ArticleWriter / DirectRenamer / DirectUnpack hooks)**
+**A. `StreamingParSession` (recommended; mirrors rustyget's ArticleWriter / DirectRenamer / DirectUnpack hooks)**
 
 ```rust
 let session = StreamingParSession::new(&packet_set, base_dir, SessionOptions { preallocated_syndrome_slots: 32, fold_threads: 2, ..Default::default() })?;
@@ -139,7 +139,7 @@ for aborts. `RepairOptions` knobs: `num_threads`, `mem_limit_bytes`, `backup`, `
 2. Whether you keep file ids (`[u8; 16]`) or want name-keyed entry points (easy to add).
 3. Whether DirectUnpack needs `VolumeStatus::CompleteAndVerified` per file (exists) or a byte-range
    "readable up to offset X" notion (not yet).
-4. Any nzbget behaviour you rely on that I should match bit-for-bit (backup naming, `.bad`
+4. Any rustyget behaviour you rely on that I should match bit-for-bit (backup naming, `.bad`
    marking, par-rename ordering, exit statuses).
 
 ## 4. Plans

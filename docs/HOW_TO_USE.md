@@ -1,15 +1,15 @@
 ## Configuration
 
-NZBGet needs a configuration file. 
+RustyGet needs a configuration file. 
 
 An example configuration file is provided in "rustyget.conf", which
-is installed into "`<prefix>`/share/nzbget" (where `<prefix>` depends on
+is installed into "`<prefix>`/share/rustyget" (where `<prefix>` depends on
 system configuration and configure options - typically "/usr/local",
 "/usr" or "/opt"). The installer adjusts the file according to your
 system paths. If you have performed the installation step 
 "make install-conf" this file is already copied to "`<prefix>`/etc" and
-NZBGet finds it automatically. If you install the program manually
-from a binary archive you have to copy the file from "`<prefix>`/share/nzbget"
+RustyGet finds it automatically. If you install the program manually
+from a binary archive you have to copy the file from "`<prefix>`/share/rustyget"
 to one of the locations listed below.
 
 Open the file in a text editor and modify it accodring to your needs.
@@ -33,7 +33,7 @@ On POSIX systems:
 ~/usr/etc/rustyget.conf
 ```
 
-If none of these exists, an NZBGet configuration file is read instead, from
+If none of these exists, an existing `nzbget.conf` is read instead, from
 `<EXE-DIR>/nzbget.conf`, `~/.nzbget` and the same folders as above with the
 name `nzbget.conf`. The log then says so and names the new path to rename
 it to (for example `~/.nzbget` to `~/.rustyget`).
@@ -47,58 +47,54 @@ options via command-line.
 
 ## Usage
 
-NZBGet can be used in either standalone mode which downloads a single file 
+RustyGet can be used in either standalone mode which downloads a single file 
 or as a server which is able to queue up numerous download requests.
 
 ### Standalone mode:
 --------------------
 ```
-nzbget <nzb-file>
+rustyget <nzb-file>
 ```
 ### Server mode:
 ----------------
 
-First start the nzbget-server:
+First start the RustyGet server:
 
   - in console mode:
 ```
-nzbget -s
+rustyget -s
 ```
-  - or in daemon mode (POSIX only):
+  - or in daemon mode:
 ```
- nzbget -D
+ rustyget -D
 ```	
-  - or as a service (Windowx only, firstly install the service with command "nzbget -install"):
-```
-  net start NZBGet
-``` 
 To stop server use:
 ```
-nzbget -Q  
+rustyget -Q  
 ```
 
-When NZBGet is started in console server mode it displays a message that
+When RustyGet is started in console server mode it displays a message that
 it is ready to receive download requests. In daemon mode it doesn't print any
 messages to console since it runs in background.
 
 When the server is running it is possible to queue up downloads. This can be
-done either in terminal with "nzbget -A <nzb-file>" or by uploading
+done either in terminal with "rustyget -A <nzb-file>" or by uploading
 a nzb-file into server's monitor-directory (<MAINDIR>/nzb by default).
 
 To check the status of server start client and connect it to server:
 ```
-nzbget -C
+rustyget -C
 ```
 The client have three different (display) outputmodes, which you can select
 in configuration file (on client computer) or in command line. Try them:
 ```
-nzbget -o outputmode=log -C
-nzbget -o outputmode=color -C
-nzbget -o outputmode=curses -C
+rustyget -o outputmode=log -C
+rustyget -o outputmode=color -C
+rustyget -o outputmode=curses -C
 ```
 To list files in server's queue:
 ```
-nzbget -L
+rustyget -L
 ```
 It prints something like:
 ```
@@ -117,85 +113,85 @@ The numbers in square braces are ID's of files or groups in queue.
 They can be used in edit-command. For example to move file with
 ID 2 to the top of queue:
 ```
-nzbget -E T 2
+rustyget -E T 2
 ```  
 or to pause files with IDs from 10 to 20:
 ```
-nzbget -E P 10-20
+rustyget -E P 10-20
 ```
 or to delete files from queue:
 ```
-nzbget -E D 3 10-15 20-21 16
+rustyget -E D 3 10-15 20-21 16
 ```
 
 The edit-command has also a group-mode which affects all files from the
 same nzb-file. You need to pass an ID of the group. For example to delete
 the whole group 1:
 ```
-nzbget -E G D 1
+rustyget -E G D 1
 ```
 The switch "o" is useful to override options in configuration files. 
 For example:
 ```
-nzbget -o reloadqueue=no -o dupecheck=no -o parcheck=yes -s
+rustyget -o reloadqueue=no -o dupecheck=no -o parcheck=yes -s
 ```  
 or:
 ```
-nzbget -o createlog=no -C
+rustyget -o createlog=no -C
 ```
 
-### Running nzbget as systemd service (Linux only)
+### Running rustyget as systemd service (Linux only)
 
-It is possible to run nzbget as a systemd service under modern Linux distributions.
-To do that, create `nzbget.service` file in `/etc/systemd/system/`. Example service files (replace `/path/to/nzbget` with real path, and `nzbget_user`/`nzbget_group` with real user/group):
+It is possible to run rustyget as a systemd service under modern Linux distributions.
+To do that, create `rustyget.service` file in `/etc/systemd/system/`. Example service files (replace `/path/to/rustyget` with real path, and `rustyget_user`/`rustyget_group` with real user/group):
 
-- nzbget runs as a daemon and logs to own log file:
+- rustyget runs as a daemon and logs to own log file:
 ```
 [Unit]
-Description=NZBGet Service
+Description=RustyGet Service
 After=network.target
 
 [Service]
 Type=forking
-ExecStart=/path/to/nzbget -D
-ExecStop=/path/to/nzbget -Q
-User=nzbget_user
-Group=nzbget_group
+ExecStart=/path/to/rustyget -D
+ExecStop=/path/to/rustyget -Q
+User=rustyget_user
+Group=rustyget_group
 Restart=on-failure
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-- nzbget runs as a server with logging to stdout, logs are forwarded to journald
+- rustyget runs as a server with logging to stdout, logs are forwarded to journald
 ```
 [Unit]
-Description=NZBGet Service
+Description=RustyGet Service
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/path/to/nzbget -s -o OutputMode=log
-ExecStop=/path/to/nzbget -Q
-User=nzbget_user
-Group=nzbget_group
+ExecStart=/path/to/rustyget -s -o OutputMode=log
+ExecStop=/path/to/rustyget -Q
+User=rustyget_user
+Group=rustyget_group
 Restart=on-failure
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-Then run (start nzbget and enable autostart):
+Then run (start rustyget and enable autostart):
 ```
 sudo systemctl daemon-reload
-sudo systemctl enable nzbget
-sudo systemctl start nzbget
+sudo systemctl enable rustyget
+sudo systemctl start rustyget
 ```
 
 ### Running client & server on seperate machines:
 -------------------------------------------------
 
-Since nzbget communicates via TCP/IP it's possible to have a server running on
+Since rustyget communicates via TCP/IP it's possible to have a server running on
 one computer and adding downloads via a client on another computer.
 
 Do this by setting the "ControlIP" option in the rustyget.conf file to point to the
@@ -205,19 +201,19 @@ same computer)
 ### Security warning
 --------------------
 
-NZBGet communicates via unsecured socket connections. This makes it vulnerable.
+RustyGet communicates via unsecured socket connections. This makes it vulnerable.
 Although server checks the password passed by client, this password is still 
 transmitted in unsecured way. For this reason it is highly recommended 
-to configure your Firewall to not expose the port used by NZBGet to WAN. 
+to configure your Firewall to not expose the port used by RustyGet to WAN. 
 
 If you need to control server from WAN it is better to connect to server's
 terminal via SSH and then run
-nzbget-client-commands in this terminal.
+RustyGet client commands in this terminal.
 
 ### Web-interface
 -----------------
 
-NZBGet has a built-in web-server providing the access to the program
+RustyGet has a built-in web-server providing the access to the program
 functions via web-interface.
 
 To activate web-interface set the option "WebDir" to the path with
@@ -226,14 +222,14 @@ described above the option is set automatically. If you install using
 binary files you should check if the option is set correctly.
 
 To access web-interface from your web-browser use the server address
-and port defined in NZBGet configuration file in options "ControlIP" and
+and port defined in RustyGet configuration file in options "ControlIP" and
 "ControlPort". For example:
 ```
 http://localhost:6789/
 ```
 
 For login credentials type username and the password defined by
-options "ControlUsername" (default `"nzbget"`) and "ControlPassword"
+options "ControlUsername" (default `"rustyget"`) and "ControlPassword"
 (default `"tegbzn6789"`).
 
 In a case your browser forget credentials, to prevent typing them each

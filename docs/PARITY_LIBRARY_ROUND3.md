@@ -8,7 +8,7 @@ reading RustyGet commit `190ffcf7` ("Wire ParChecker to par-rs …"). `cargo che
 
 | check | status |
 |---|---|
-| **1.1 `ParIgnoreExt` wildcard masks** | **Added.** `RepairOptions::ignore_extensions` entries containing `*` or `?` are now wildcard masks matched case-insensitively against the base name (`*` any run of bytes, `?` one byte), exactly nzbget's `Util::MatchFileExt` + `WildMask`: every entry is also tried as a case-insensitive suffix of the whole local name, so `.nfo`, `nfo`, `*.nfo` and `*` all ignore `release.nfo`. Exposed as `repairer::ignore_name_matches(local_name, entry)` if you want the same predicate elsewhere. Test `ignore_extensions_accept_wildcard_masks` reproduces `ParVerifiedTargetsExcludeIgnoredDamageTest`: `ParIgnoreExt=*`, `testfile.dat` with one bad block, intact `testfile.nfo` → `repair_needed == false`, `ignored_damaged == ["testfile.dat"]`, and the only `FileStatus::Complete` source is `testfile.nfo`. |
+| **1.1 `ParIgnoreExt` wildcard masks** | **Added.** `RepairOptions::ignore_extensions` entries containing `*` or `?` are now wildcard masks matched case-insensitively against the base name (`*` any run of bytes, `?` one byte), exactly rustyget's `Util::MatchFileExt` + `WildMask`: every entry is also tried as a case-insensitive suffix of the whole local name, so `.nfo`, `nfo`, `*.nfo` and `*` all ignore `release.nfo`. Exposed as `repairer::ignore_name_matches(local_name, entry)` if you want the same predicate elsewhere. Test `ignore_extensions_accept_wildcard_masks` reproduces `ParVerifiedTargetsExcludeIgnoredDamageTest`: `ParIgnoreExt=*`, `testfile.dat` with one bad block, intact `testfile.nfo` → `repair_needed == false`, `ignored_damaged == ["testfile.dat"]`, and the only `FileStatus::Complete` source is `testfile.nfo`. |
 | **1.2 per-file completeness after `verify()` / `repair()`** | Already there, and your code uses it: `SourceFileState { target_path: PathBuf, status: FileStatus, complete_file: Option<PathBuf>, .. }`. `status == FileStatus::Complete` is `GetCompleteFile() == GetTargetFile()`; `complete_file == Some(other)` is a complete copy under another name. `Par2Repairer::source_files()` is valid after `finalize`, `verify` and `repair`. Your `CallbackObserver::file_verified` reading `file.status == FileStatus::Complete` for `is_complete` is the right call. |
 | **1.3 `quick_verified_count`** | Already there under the name `VerifyResult::quick_verified_files: usize` (your test at `parchecker.rs:2021` already asserts it), plus `SourceFileState::quick_verified: bool` per file, which your `on_quick_verified_inc` callback uses. `m_parFull = (quick_verified_files == 0)`. |
 
@@ -27,7 +27,7 @@ Two small things while reading:
   the index plus every sibling volume of the collection (`same_par_collection`, case-insensitive),
   files of another set skipped, recovery slice refs carrying the file's index in the returned list
   as `source_id`. `load_par2_bytes` for in-memory data is unchanged.
-* `ParIgnoreExt` tokens are split on `,` and `;` in nzbget; your `parse_ignore_ext_tokens` also
+* `ParIgnoreExt` tokens are split on `,` and `;` in rustyget; your `parse_ignore_ext_tokens` also
   splits on space, which would break a mask like `*.nfo 2`. Harmless for extensions, worth a look
   for masks.
 

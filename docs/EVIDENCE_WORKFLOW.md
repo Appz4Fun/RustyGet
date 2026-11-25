@@ -161,7 +161,7 @@ git bisect -h
 
 The Homebrew package is currently restic 0.19.1. A future bottle may differ;
 record its actual version rather than presenting a version expectation as fact.
-Keep the Python tool environments separate from NZBGet dependencies.
+Keep the Python tool environments separate from RustyGet dependencies.
 
 RO-Crate command-line examples, executed inside a fresh packet directory:
 

@@ -1,4 +1,4 @@
-# NZBGet Design System tokens
+# RustyGet Design System tokens
 
 `tokens.json` is the source of the web interface's design tokens: the colours of the dark and light themes, spacing, radii, shadows, sizes and font families. `webui/tokens.css` is generated from it:
 

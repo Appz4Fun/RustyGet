@@ -1,11 +1,11 @@
 <!-- vale Google.Headings = NO -->
-# NZBGet Observe
+# RustyGet Observe
 <!-- vale Google.Headings = YES -->
 
-An opt-in Rust watcher for investigating missing progress in NZBGet. It connects
+An opt-in Rust watcher for investigating missing progress in RustyGet. It connects
 job progress with Linux resource observations and preserves a small evidence
 window when an active job stops advancing. It never changes the queue, starts
-downloads, runs profilers, or restarts NZBGet.
+downloads, runs profilers, or restarts RustyGet.
 
 ## Build and run
 
@@ -18,7 +18,7 @@ command below runs within that admitted worker environment:
 
 ```bash
 CARGO_BUILD_JOBS=1 cargo build --release --locked --manifest-path tools/nzbget-observe/Cargo.toml
-export NZBGET_OBSERVE_USER='your-nzbget-user'
+export NZBGET_OBSERVE_USER='your-rustyget-user'
 read -rs NZBGET_OBSERVE_PASSWORD
 export NZBGET_OBSERVE_PASSWORD
 tools/nzbget-observe/target/release/nzbget-observe \
@@ -26,8 +26,8 @@ tools/nzbget-observe/target/release/nzbget-observe \
   --interval 15 --stall-seconds 300 --samples 240
 ```
 
-Use an existing NZBGet credential that can call `status` and `listgroups`.
-NZBGet's built-in `RestrictedUsername`/`RestrictedPassword` account is **not
+Use an existing RustyGet credential that can call `status` and `listgroups`.
+RustyGet's built-in `RestrictedUsername`/`RestrictedPassword` account is **not
 read-only**: it denies `saveconfig`, but still permits mutating commands such as
 `pause`, `shutdown`, and `editqueue`. The watcher itself sends only the two
 observation methods. To enforce read-only access for its credential, use a
@@ -180,10 +180,10 @@ C++ across small, typical, and large inputs. Verify correctness and report uncer
 
 ## Shareable description
 
-NZBGet Observe is an opt-in Rust watcher that notices when an active job stops
+RustyGet Observe is an opt-in Rust watcher that notices when an active job stops
 showing progress and saves a bounded, sanitized evidence window. It respects
 pauses and stage changes, keeps Linux resource measurements separate from job
-progress, and suggests where to investigate next. The goal is to turn “NZBGet is
+progress, and suggests where to investigate next. The goal is to turn “RustyGet is
 slow” into a specific, testable question about provider waiting, decoding,
 storage, PAR work, or unpacking. It makes no automatic changes and does not claim
 that a stalled progress counter proves a hang.

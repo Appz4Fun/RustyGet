@@ -5,7 +5,7 @@ Status: proposed specification for human review; implementation has not started.
 ## Intent and acceptance
 
 Add an **Optimize TLS ciphers** button to Settings > News Servers. On the
-computer running NZBGet, measure local cipher throughput, discover which
+computer running RustyGet, measure local cipher throughput, discover which
 candidates each configured encrypted news server accepts, and automatically
 save the fastest measured supported cipher separately for each server. A server
 that accepts the overall winner gets that winner; another gets its own fastest
@@ -43,7 +43,7 @@ end-to-end download speed or guarantee a unique fastest cipher under all loads.
 
 Enumerate candidates from the linked OpenSSL implementation under its existing
 security policy. Eligible suites use TLS 1.2 or TLS 1.3, authenticated encryption
-with at least 128-bit security, and certificate authentication usable by NZBGet.
+with at least 128-bit security, and certificate authentication usable by RustyGet.
 TLS 1.2 additionally requires ephemeral key exchange. Exclude anonymous,
 NULL, export, legacy CBC/RC4/3DES, PSK and SRP suites; NNTP credentials are not
 TLS PSK credentials. Report exclusions and unavailable algorithms explicitly.
@@ -198,7 +198,7 @@ functionality, not a replacement of an existing C++ implementation; there is no
 prior C++ or Rust optimizer baseline to qualify. Existing migration and backend
 release holds remain unchanged. Do not manufacture comparative speed claims.
 
-Prepare an isolated loopback local NZBGet instance with its own configuration,
+Prepare an isolated loopback local RustyGet instance with its own configuration,
 queue/state directories and candidate WebUI/backend. Synthetic providers prove
 the feature; they do not prove the user's providers support a particular suite.
 Give the user its URL, start/stop instructions, screenshots, evidence summary,

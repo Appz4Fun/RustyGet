@@ -78,7 +78,7 @@ Here is why both are useful in RustyGet's lifecycle:
 
 ---
 
-### 4. NZBGet Behaviours to Match Bit-for-Bit
+### 4. RustyGet Behaviours to Match Bit-for-Bit
 
 Here are the exact behaviours from `ParChecker`, `ParRenamer`, `DirectRenamer`, and our test suites that RustyGet relies on:
 

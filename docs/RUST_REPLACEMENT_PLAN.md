@@ -2,7 +2,7 @@
 
 ## Goal
 
-Identify NZBGet daemon routines that can be completely replaced by Rust, remove their C++ implementations after parity is proven, and accept a replacement only when the matched complete-caller benchmark demonstrates at least a 2.0x speedup over both current and fairly optimized C++ on every required fixture. A 3.0x result is a stronger target, not a reason to accept a regression on another fixture.
+Identify RustyGet daemon routines that can be completely replaced by Rust, remove their C++ implementations after parity is proven, and accept a replacement only when the matched complete-caller benchmark demonstrates at least a 2.0x speedup over both current and fairly optimized C++ on every required fixture. A 3.0x result is a stronger target, not a reason to accept a regression on another fixture.
 
 ## Scope and decision
 

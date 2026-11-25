@@ -234,7 +234,7 @@ with the repository's actual pinned Rust compiler or installed LLVM tools;
 those producer versions remain unobserved until admitted native work.
 
 These tests establish parser/output behavior only. They contain synthetic source,
-counts and identities, and are not measured NZBGet production coverage.
+counts and identities, and are not measured RustyGet production coverage.
 
 ## Official references
 

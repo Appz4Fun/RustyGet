@@ -1,32 +1,30 @@
 ## About NServ
 
-NServ is a simple NNTP server developed for [functional testing](FUNCTIONAL_TESTING.md) of NZBGet.
+NServ is a simple NNTP server developed for [functional testing](FUNCTIONAL_TESTING.md) of RustyGet.
 
-Technically NServ is integrated into NZBGet as a sub-module. NServ is compiled during building process of NZBGet and can therefore be used on any platform supported by NZBGet. It’s rather a small module without extra dependencies and you shouldn’t worry about increased nzbget binary size.
+Technically NServ is integrated into RustyGet as a sub-module. NServ is compiled during building process of RustyGet and can therefore be used on any platform supported by RustyGet. It’s rather a small module without extra dependencies and you shouldn’t worry about increased rustyget binary size.
 
-Although NServ is primary used for functional testing it can also be used standalone for other purposes such as debugging NZBGet or for speed tests of NZBGet or even other download clients. NServ is fast although not very much optimized.
-
-**Note:** NServ is available in NZBGet starting from v18.
+Although NServ is primary used for functional testing it can also be used standalone for other purposes such as debugging RustyGet or for speed tests of RustyGet or even other download clients. NServ is fast although not very much optimized.
 
 ## Usage
 
-To start NServ pass parameter `--nserv` to nzbget binary:
+To start NServ pass parameter `--nserv` to rustyget binary:
 
 ```bash
-  /path/to/nzbget --nserv
+  /path/to/rustyget --nserv
 ```
 
-When nzbget is started with this parameter it executes the nserv-module; none of other nzbget code is executed in this case (nzbget will not start as server or daemon).
+When rustyget is started with this parameter it executes the nserv-module; none of other rustyget code is executed in this case (rustyget will not start as server or daemon).
 
 The command `--nserv` without other parameters only prints usage instructions for NServ. To start NServ as server it requires one additional parameter:
 
 ```bash
-  /path/to/nzbget --nserv -d /path/to/datadir
+  /path/to/rustyget --nserv -d /path/to/datadir
 ```
 
 **Datadir** is any directory whose content becomes available for NNTP clients.
 
-There are also few other optional parameters to control logging level etc. A help screen printed by `nzbget --nserv` briefly explains them.
+There are also few other optional parameters to control logging level etc. A help screen printed by `rustyget --nserv` briefly explains them.
 
 After NServ is started it keeps running until terminated with `Ctrl+C`.
 
@@ -39,12 +37,12 @@ NServ binds to all IP-addresses (0.0.0.0) and to port set via parameter `-p` (67
 By default NServ works in plain mode but can also be started in TLS/SSL mode using parameter `-s` followed by paths to certificate-file and key-file:
 
 ```bash
-/path/to/nzbget --nserv -d /path/to/datadir -s /path/to/nserv.cert /path/to/nserv.key
+/path/to/rustyget --nserv -d /path/to/datadir -s /path/to/nserv.cert /path/to/nserv.key
 ```
 If you want a trusted certificate, and have a working Let's Encrypt setup, you can use the certifcate from there:
 
 ```bash
-/path/to/nzbget --nserv -d /path/to/datadir -s /etc/letsencrypt/live/host.example.com/fullchain.pem /etc/letsencrypt/live/host.example.com/privkey.pem
+/path/to/rustyget --nserv -d /path/to/datadir -s /etc/letsencrypt/live/host.example.com/fullchain.pem /etc/letsencrypt/live/host.example.com/privkey.pem
 ```
 Note: you probably need to be root to read from those letsencrypt directories. Or copy the keys to another, safe place.
 
@@ -88,7 +86,7 @@ where:
 NServ supports testing of main and backup news servers. To perform such a test NServ must be started with multiple server instances, using parameter `-i `, for example:
 
 ```bash
-  /path/to/nzbget --nserv -d /path/to/datadir -p 6781 -i 3
+  /path/to/rustyget --nserv -d /path/to/datadir -p 6781 -i 3
 ```
 
 The first instance runs on port 6781, the second on 6782 and so on. Each server instance has an id associated with it, starting from 1.
@@ -102,7 +100,7 @@ This makes it possible to construct nzb-files which work on certain server insta
 Nzb-files can be constructed manually using format described above. To make life easier NServ can generate nzb-files for you; use parameter `-z` for that:
 
 ```bash
-  /path/to/nzbget --nserv -d /path/to/datadir -z 500000 -q
+  /path/to/rustyget --nserv -d /path/to/datadir -z 500000 -q
 ```
 
 Here `500000` is article size to use and additional parameter `-q` tells NServ to terminate after the files are generated. If executed without that parameter NServ will start normally.
@@ -116,7 +114,7 @@ NServ serves articles in yEnc format. Encoding takes CPU resources. By default e
 To activate caching add parameter `-c ` when starting NNTP server:
 
 ```bash
-  /path/to/nzbget --nserv -d /path/to/datadir -c /path/to/cachedir
+  /path/to/rustyget --nserv -d /path/to/datadir -c /path/to/cachedir
 ```
 
 The first download of nzb will take more time due to disk activity needed to save encoded articles into disk. Sub-sequential downloads of the same nzb should be much faster compared to using NServ without cache. Make sure to use SSD or RAM-drive as cache directory. Putting cache on a convenient HDD may decrease performance compared to not using cache at all.

@@ -602,6 +602,109 @@ fn closed_startup_ticket_cannot_install_a_session_after_cleanup() {
     streaming_session_forget(id);
 }
 
+/// A damaged file still under an obfuscated name (not renamed yet) is admitted to the live
+/// repair at download end by its queue file's binding, repaired where it is, and its CRC
+/// stays certified after post-processing's par-rename gives it its par2 name: no batch
+/// repair. Before, the target was refused ("not in this PAR set") and the job went to a
+/// batch repair that read the whole download again.
+#[test]
+fn live_repair_takes_an_obfuscated_target_and_certifies_it_through_par_rename() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900145;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.vol00+1.PAR2"), &fx.0, 500 << 20)
+        .unwrap();
+    let first = set.main.as_ref().unwrap().recoverable_file_ids[0];
+    let ss = set.main.as_ref().unwrap().slice_size;
+    let desc = &set.file_descs[&first];
+    let named = fx.0.join(desc.local_name());
+    let original = std::fs::read(&named).unwrap();
+    for fid in &set.main.as_ref().unwrap().recoverable_file_ids {
+        let file = &set.file_descs[fid];
+        let start = if *fid == first { ss.min(file.file_length) } else { 0 };
+        streaming_session_reconcile_file(
+            id,
+            *fid,
+            &fx.0.join(file.local_name()),
+            &[ByteRange::new(start as i64, (file.file_length - start) as i64)],
+        )
+        .unwrap()
+        .unwrap();
+    }
+    // The download wrote it under an obfuscated name, with its first slice damaged.
+    let obfuscated = fx.0.join("a8f3k2q9z");
+    std::fs::rename(&named, &obfuscated).unwrap();
+    use std::io::{Seek, SeekFrom, Write};
+    let mut disk = std::fs::OpenOptions::new().write(true).open(&obfuscated).unwrap();
+    disk.seek(SeekFrom::Start(0)).unwrap();
+    disk.write_all(&vec![0; (ss as usize).min(original.len())]).unwrap();
+    drop(disk);
+    assert!(streaming_session_status(id).unwrap().early_cutover_possible);
+    // Its queue file (id 40) is matched to the par2 file by its 16k hash.
+    let hash: String = desc.hash_16k.iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(
+        streaming_session_par_name_of(id, (Some(40), b"a8f3k2q9z", hash.as_bytes())).as_deref(),
+        Some(desc.name.as_slice())
+    );
+    let request = streaming_session_prepare_repair(
+        id,
+        vec![crate::parlive::WriterTarget { file_id: 40, path: obfuscated.clone() }],
+        reserve_control(id, 4096, 500 << 20).unwrap(),
+    )
+    .expect("an obfuscated target is admitted by its binding");
+    let lease = request.acquire().unwrap();
+    let (report, released) = lease.repair_and_publish(|verified| verified.len(), || ()).unwrap();
+    assert!(!report.repaired_slices.is_empty());
+    assert_eq!(released, 1);
+    assert_eq!(std::fs::read(&obfuscated).unwrap(), original);
+    assert!(!named.exists(), "nothing is written under the par2 name");
+    assert_eq!(
+        streaming_session_verified_target_crc(id, &fx.0, 40, b"a8f3k2q9z"),
+        Some(crc32fast::hash(&original))
+    );
+    // Par-rename: the same file under its par2 name keeps its certified CRC.
+    std::fs::rename(&obfuscated, &named).unwrap();
+    assert_eq!(
+        streaming_session_verified_target_crc(id, &fx.0, 40, &desc.name),
+        Some(crc32fast::hash(&original))
+    );
+    // Another file under that name is not certified.
+    std::fs::remove_file(&named).unwrap();
+    std::fs::write(&named, &original).unwrap();
+    assert!(streaming_session_verified_target_crc(id, &fx.0, 40, &desc.name).is_none());
+    streaming_session_cancel(id);
+    streaming_session_forget(id);
+    crate::parlive::forget_download_writes(id);
+}
+
+/// A target whose name is one par2 file's while its queue file is bound to another is
+/// refused: nothing is repaired under the wrong identity.
+#[test]
+fn live_repair_refuses_a_target_whose_name_and_binding_disagree() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900146;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.vol00+1.PAR2"), &fx.0, 500 << 20)
+        .unwrap();
+    let ids = &set.main.as_ref().unwrap().recoverable_file_ids;
+    if ids.len() < 2 {
+        streaming_session_forget(id);
+        return;
+    }
+    let (a, b) = (&set.file_descs[&ids[0]], &set.file_descs[&ids[1]]);
+    let hash_b: String = b.hash_16k.iter().map(|x| format!("{x:02x}")).collect();
+    // Queue file 41 holds b's bytes but sits under a's name.
+    assert!(streaming_session_par_name_of(id, (Some(41), b"zz-unknown", hash_b.as_bytes())).is_some());
+    let result = streaming_session_prepare_repair(
+        id,
+        vec![crate::parlive::WriterTarget { file_id: 41, path: fx.0.join(a.local_name()) }],
+        reserve_control(id, 4096, 500 << 20).unwrap(),
+    );
+    assert!(result.is_err());
+    streaming_session_forget(id);
+    crate::parlive::forget_download_writes(id);
+}
+
 #[test]
 fn live_target_lease_repairs_real_bytes_and_seals_the_same_queue_file() {
     let fx = Fixture::new();

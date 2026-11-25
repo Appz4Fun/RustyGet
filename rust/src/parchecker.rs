@@ -193,6 +193,9 @@ struct ActiveStreamingSession {
     /// cache fence passed, a target opened, an article folded by the drain), so a helper
     /// that is busy admitting its repair is not taken for a stuck one.
     admission_progress: AtomicU64,
+    /// The par2 file each queue file resolved to (by name, 16k hash or the namespace), so a
+    /// repair target still under another (obfuscated) name is admitted by its queue id.
+    queue_bindings: Mutex<HashMap<i32, FileId>>,
     // Drop last, after the session, queue and all owned metadata. Grows with
     // the syndrome slots as damage appears (see `grow_for_damage`).
     budget: Mutex<SessionBudgetLease>,
@@ -578,6 +581,7 @@ fn build_streaming_session_with(
         stop_logged: AtomicBool::new(false),
         committed: Mutex::new(CommittedSources::default()),
         admission_progress: AtomicU64::new(0),
+        queue_bindings: Mutex::new(HashMap::new()),
     }))
 }
 
@@ -1844,6 +1848,22 @@ pub(crate) fn streaming_session_capture_busy(error: &RepairError) -> bool {
 }
 
 fn live_source_id(
+    entry: &ActiveStreamingSession,
+    queue_id: Option<i32>,
+    name: &[u8],
+    hash16k: &[u8],
+) -> Result<FileId, RepairError> {
+    let id = resolve_live_source_id(entry, queue_id, name, hash16k)?;
+    if let Some(queue_id) = queue_id {
+        let mut bindings = entry.queue_bindings.lock().unwrap_or_else(|e| e.into_inner());
+        if bindings.len() < 65536 || bindings.contains_key(&queue_id) {
+            bindings.insert(queue_id, id);
+        }
+    }
+    Ok(id)
+}
+
+fn resolve_live_source_id(
     entry: &ActiveStreamingSession,
     queue_id: Option<i32>,
     name: &[u8],
@@ -3454,7 +3474,14 @@ pub(crate) fn streaming_session_prepare_repair(
             .filter(|id| entry.base_dir.join(&entry.target_names[id]) == target.path);
         // The queue file's live binding: a file still under another (obfuscated) name is
         // repaired where it is, never written to under a par2 name it does not have yet.
-        let bound = live_source_id(&entry, Some(target.file_id), &leaf, &[]).ok();
+        let recorded = entry
+            .queue_bindings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&target.file_id)
+            .copied();
+        let bound = recorded
+            .or_else(|| resolve_live_source_id(&entry, Some(target.file_id), &leaf, &[]).ok());
         let id = match (by_name, bound) {
             (Some(named), Some(bound)) if named != bound => {
                 return Err(live_error(

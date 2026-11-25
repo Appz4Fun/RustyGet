@@ -2007,8 +2007,9 @@ impl NzbgetRsPrePostProcessor {
 
         if !nzb.has_unpack_thread {
             // No direct unpack is paused on this download: its damaged volumes are repaired
-            // and unpacked by the stages below, nothing may stay on hold.
-            crate::postproc::direct_unpack_forget_holds(nzb.id);
+            // and unpacked by the stages below, nothing may stay on hold. Dead volumes
+            // borrowed already are kept for them (written as real volumes, not fetched again).
+            crate::postproc::direct_unpack_forget_holds_keep_borrows(nzb.id);
         }
 
         if ps.start_time == 0 {

@@ -700,7 +700,8 @@ fn live_repair_refuses_a_target_whose_name_and_binding_disagree() {
         vec![crate::parlive::WriterTarget { file_id: 41, path: fx.0.join(a.local_name()) }],
         reserve_control(id, 4096, 500 << 20).unwrap(),
     );
-    assert!(result.is_err());
+    let error = result.err().expect("refused").to_string();
+    assert!(error.contains("name and queue binding disagree"), "{error}");
     streaming_session_forget(id);
     crate::parlive::forget_download_writes(id);
 }
@@ -2064,6 +2065,51 @@ fn live_binds_an_obfuscated_file_by_its_first_article() {
     assert!(entry.articles.lock().unwrap().unbound.is_empty());
     // The completed file under its obfuscated name resolves to its par2 file.
     assert!(streaming_session_par_name_of(id, (Some(70), b"q0000000", &[])).is_some());
+    drop(entry);
+    streaming_session_forget(id);
+}
+
+/// The first article of a file not bound yet fails, or the file completes without one:
+/// what waited for it is dropped and its charge returned, and nothing waits any more.
+#[test]
+fn live_unbound_articles_are_released_when_the_first_article_cannot_bind() {
+    let fx = Fixture::new();
+    let id = -1900191;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 * 1024 * 1024)
+        .unwrap();
+    let data: Vec<u8> = (0..40_000u32).map(|i| (i * 13) as u8).collect();
+    let entry = active_streaming_session(id).unwrap();
+    for queue_id in [101, 102, 103] {
+        streaming_session_defer_committed_article(
+            id, (Some(queue_id), b"q-obf", &[]), 20_000, 20_000, crc32fast::hash(&data[20_000..]),
+            None, || Some(data[20_000..].to_vec()),
+        )
+        .unwrap()
+        .unwrap();
+    }
+    assert_eq!(entry.articles.lock().unwrap().bytes, 60_000);
+    // 101: its first article failed on every server.
+    assert!(streaming_session_defer_failure_for_queue(id, (Some(101), b"q-obf", &[]), 0, 20_000)
+        .unwrap()
+        .is_err());
+    // 102: its first article left the cache before its capture.
+    assert!(streaming_session_defer_committed_article(
+        id, (Some(102), b"q-obf", &[]), 0, 20_000, 0, None, || None,
+    )
+    .unwrap()
+    .is_err());
+    assert_eq!(entry.articles.lock().unwrap().bytes, 20_000);
+    // 103: the file completes without its first article captured.
+    entry.release_unbound(103);
+    assert_eq!(entry.articles.lock().unwrap().bytes, 0);
+    assert!(entry.articles.lock().unwrap().unbound.is_empty());
+    // None of them waits any more.
+    assert!(streaming_session_defer_committed_article(
+        id, (Some(101), b"q-obf", &[]), 20_000, 20_000, 0, None, || Some(data[20_000..].to_vec()),
+    )
+    .unwrap()
+    .is_err());
+    assert_eq!(entry.articles.lock().unwrap().bytes, 0);
     drop(entry);
     streaming_session_forget(id);
 }

@@ -5183,8 +5183,9 @@ impl NzbgetRsDirectUnpack {
             return;
         }
 
-        if extracted {
-            // Direct unpack read the borrowed dead volumes: nothing else needs them.
+        if extracted || cancelled {
+            // Direct unpack read the borrowed dead volumes, or the download is going away:
+            // nothing else needs them.
             direct_unpack_forget_holds(self.nzb_id);
         } else {
             // Post-processing repairs and unpacks the download: its borrowed dead volumes

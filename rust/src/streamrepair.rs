@@ -10806,10 +10806,26 @@ impl CrossPackRepairSession {
         v: &crate::deadvolume::VirtualVolume,
     ) -> Result<(), String> {
         use std::io::{Read, Write};
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let target = crate::fsops::path(&d.volume_path).to_path_buf();
         let dir = target.parent().ok_or("the volume has no folder")?;
         let leaf = target.file_name().ok_or("the volume has no name")?;
-        let mut temp_name = std::ffi::OsString::from(".rustyget-dead-");
+        // The same barrier as every donor write, held through the rename: no write to a
+        // file live PAR has sealed (certified), none during a live repair.
+        let context = self
+            .target_files
+            .write_root
+            .as_ref()
+            .map(|root| root.for_path(&target))
+            .ok_or("no write permission for the volume")?;
+        let _permit = context
+            .try_permit()
+            .map_err(|blocked| format!("the volume is not writable now ({blocked:?})"))?;
+        let mut temp_name = std::ffi::OsString::from(format!(
+            ".rustyget-dead-{}-{}-",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         temp_name.push(leaf);
         temp_name.push(".tmp");
         let temp = dir.join(temp_name);
@@ -10834,18 +10850,14 @@ impl CrossPackRepairSession {
             let _ = std::fs::remove_file(&temp);
             return Err(e.to_string());
         }
-        // The same barrier as every donor write: live PAR drops what it knew of this file.
-        if let Some(context) = self
-            .target_files
-            .write_root
-            .as_ref()
-            .map(|root| root.for_path(&target))
-        {
-            context.invalidate_identity();
-        }
+        // Live PAR drops what it knew of this file.
+        context.invalidate_identity();
         if let Err(e) = std::fs::rename(&temp, &target) {
             let _ = std::fs::remove_file(&temp);
             return Err(e.to_string());
+        }
+        if let Ok(folder) = std::fs::File::open(dir) {
+            let _ = folder.sync_all();
         }
         if crate::deadvolume::is_scratch(&v.data) {
             let _ = std::fs::remove_file(&v.data);

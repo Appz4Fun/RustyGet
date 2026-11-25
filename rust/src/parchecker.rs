@@ -196,6 +196,8 @@ struct ActiveStreamingSession {
     /// The par2 file each queue file resolved to (by name, 16k hash or the namespace), so a
     /// repair target still under another (obfuscated) name is admitted by its queue id.
     queue_bindings: Mutex<HashMap<i32, FileId>>,
+    /// 16k hashes several par2 files share: a first article never binds by one of them.
+    shared_hash16k: HashSet<[u8; 16]>,
     // Drop last, after the session, queue and all owned metadata. Grows with
     // the syndrome slots as damage appears (see `grow_for_damage`).
     budget: Mutex<SessionBudgetLease>,
@@ -529,6 +531,17 @@ fn build_streaming_session_with(
     let main = set.main.as_ref().ok_or(RepairError::NoMainPacket)?;
     let mut lengths = HashMap::new();
     let mut target_names = HashMap::new();
+    let mut hash_counts: HashMap<[u8; 16], usize> = HashMap::new();
+    for id in &main.recoverable_file_ids {
+        if let Some(desc) = set.file_descs.get(id) {
+            *hash_counts.entry(desc.hash_16k).or_default() += 1;
+        }
+    }
+    let shared_hash16k: HashSet<[u8; 16]> = hash_counts
+        .into_iter()
+        .filter(|(_, count)| *count > 1)
+        .map(|(hash, _)| hash)
+        .collect();
     for id in &main.recoverable_file_ids {
         let desc = set
             .file_descs
@@ -589,6 +602,7 @@ fn build_streaming_session_with(
         committed: Mutex::new(CommittedSources::default()),
         admission_progress: AtomicU64::new(0),
         queue_bindings: Mutex::new(HashMap::new()),
+        shared_hash16k,
     }))
 }
 
@@ -735,41 +749,85 @@ impl ActiveStreamingSession {
                 });
             }
         }
-        let mut queue = self.articles.lock().unwrap_or_else(|e| e.into_inner());
-        let limit = self.article_byte_limit.load(Ordering::Acquire);
-        let mut handed = 0;
-        for &(offset, bytes) in items {
-            let size = bytes.len() as u64;
-            // Captured from RAM already (and folded, or parked again below).
-            let captured = queue.captured.remove(&(id, offset));
-            if size == 0 {
-                continue;
-            }
-            let room = queue.bytes.checked_add(size).is_some_and(|n| n <= limit);
-            if let Some(&(_, _, crc32)) = ready.iter().find(|&&(o, _, _)| o == offset) {
-                if queue.pending.len() >= 4096 || (!room && !in_file) {
-                    continue; // the completion replay covers it
+        enum Plan {
+            /// Waited for this write: queue it, with a copy of its bytes when charged.
+            Queue { crc32: u32, copy: bool },
+            /// Not captured yet: keep a copy for its capture (charged).
+            Stash,
+        }
+        // Decide and charge under the lock; copy with no lock held (captures take this lock
+        // under the daemon queue lock); insert under it again.
+        let mut plans: Vec<(usize, Plan)> = Vec::new();
+        {
+            let mut queue = self.articles.lock().unwrap_or_else(|e| e.into_inner());
+            let limit = self.article_byte_limit.load(Ordering::Acquire);
+            let mut queued = queue.pending.len();
+            let mut stashed = queue.stash.len();
+            for (index, &(offset, bytes)) in items.iter().enumerate() {
+                let size = bytes.len() as u64;
+                // Captured from RAM already (and folded, or parked: handled as waiting).
+                let captured = queue.captured.remove(&(id, offset));
+                if size == 0 {
+                    continue;
                 }
-                let copy = room.then(|| bytes.to_vec());
-                if copy.is_some() {
+                let room = queue.bytes.checked_add(size).is_some_and(|n| n <= limit);
+                if let Some(&(_, _, crc32)) = ready.iter().find(|&&(o, _, _)| o == offset) {
+                    if queued >= 4096 || (!room && !in_file) {
+                        continue; // the completion replay covers it
+                    }
+                    if room {
+                        queue.bytes += size;
+                    }
+                    queued += 1;
+                    plans.push((index, Plan::Queue { crc32, copy: room }));
+                } else if !captured && room && stashed < LIVE_STASH_LIMIT {
                     queue.bytes += size;
-                    self.metrics.captured_bytes.fetch_add(size, Ordering::Relaxed);
-                    self.metrics.written_handoffs.fetch_add(1, Ordering::Relaxed);
+                    stashed += 1;
+                    plans.push((index, Plan::Stash));
                 }
-                queue.pending.push_back(DeferredArticle {
-                    file_id: id,
-                    offset,
-                    crc32,
-                    size,
-                    bytes: copy,
-                    committed: in_file,
-                });
-                handed += 1;
-            } else if !captured && room && queue.stash.len() < LIVE_STASH_LIMIT {
-                if let Some(old) = queue.stash.insert((id, offset), bytes.to_vec()) {
-                    queue.bytes -= old.len() as u64;
+            }
+        }
+        if plans.is_empty() {
+            return 0;
+        }
+        let copies: Vec<Option<Vec<u8>>> = plans
+            .iter()
+            .map(|(index, plan)| match plan {
+                Plan::Queue { copy: false, .. } => None,
+                _ => Some(items[*index].1.to_vec()),
+            })
+            .collect();
+        let mut queue = self.articles.lock().unwrap_or_else(|e| e.into_inner());
+        let mut handed = 0;
+        for ((index, plan), copy) in plans.into_iter().zip(copies) {
+            let (offset, bytes) = items[index];
+            let size = bytes.len() as u64;
+            match plan {
+                Plan::Queue { crc32, copy: copied } => {
+                    if copied {
+                        self.metrics.captured_bytes.fetch_add(size, Ordering::Relaxed);
+                        self.metrics.written_handoffs.fetch_add(1, Ordering::Relaxed);
+                    }
+                    queue.pending.push_back(DeferredArticle {
+                        file_id: id,
+                        offset,
+                        crc32,
+                        size,
+                        bytes: copy,
+                        committed: in_file,
+                    });
+                    handed += 1;
                 }
-                queue.bytes += size;
+                Plan::Stash => {
+                    // A capture that came meanwhile took it from the cache: not needed.
+                    if queue.captured.contains(&(id, offset)) {
+                        queue.bytes -= size;
+                        continue;
+                    }
+                    if let Some(old) = queue.stash.insert((id, offset), copy.unwrap_or_default()) {
+                        queue.bytes -= old.len() as u64;
+                    }
+                }
             }
         }
         handed
@@ -778,10 +836,15 @@ impl ActiveStreamingSession {
     /// An article of a queue file not matched to a par2 file yet. The file's first article
     /// binds it by the MD5 of its first 16 KiB (par2's 16k hash), from RAM; until then its
     /// other articles wait here with their bytes, within half of the snapshot byte limit,
-    /// so none has to be read back from the file. Past that, or for a file that matched no
-    /// par2 file, the article is refused as before (the completion replay covers it).
+    /// so none has to be read back from the file. A first article that cannot bind (gone
+    /// from the cache, shorter than 16 KiB in a longer file, a 16k hash several par2 files
+    /// share, or no match) releases what waited and stops further waiting for that file
+    /// ([`Self::release_unbound`]); so do its failure and its completion. Those articles
+    /// are refused as before, and the completion replay covers them.
+    #[allow(clippy::too_many_arguments)]
     fn defer_unbound(
         &self,
+        nzb_id: i32,
         identity: (Option<i32>, &[u8], &[u8]),
         offset: u64,
         size: u64,
@@ -811,10 +874,15 @@ impl ActiveStreamingSession {
             return Err(unknown());
         }
         let Some(bytes) = snapshot().filter(|b| b.len() as u64 == size) else {
+            if offset == 0 {
+                drop(queue);
+                self.release_unbound(queue_id);
+            }
             return Err(unknown());
         };
+        // Charged from here; returned below on every refusal.
+        queue.bytes += size;
         if offset != 0 {
-            queue.bytes += size;
             queue
                 .unbound
                 .entry(queue_id)
@@ -822,28 +890,28 @@ impl ActiveStreamingSession {
                 .push((offset, size, crc32, bytes));
             return Ok(());
         }
-        // The first article: bind the file by its 16k hash.
-        let hint = first_article_hash16k(&bytes);
         drop(queue);
-        let bound = live_source_id(self, Some(queue_id), identity.1, hint.as_bytes())
-            .ok()
-            .filter(|id| bytes.len() >= 16 * 1024 || self.file_lengths[id] == size);
-        let mut queue = self.articles.lock().unwrap_or_else(|e| e.into_inner());
-        let waiting = queue.unbound.remove(&queue_id).unwrap_or_default();
-        let Some(id) = bound else {
-            queue.not_in_set.insert(queue_id);
-            for (_, _, _, data) in &waiting {
-                queue.bytes -= data.len() as u64;
-            }
+        // The first article: bind the file by its 16k hash, never by one several share.
+        let hint = first_article_hash16k(&bytes);
+        let bound = live_hash16k(hint.as_bytes())
+            .filter(|hash| !self.shared_hash16k.contains(hash))
+            .and_then(|_| live_source_id(self, Some(queue_id), identity.1, hint.as_bytes()).ok())
+            .filter(|id| {
+                let length = self.file_lengths[id];
+                size <= length && (bytes.len() >= 16 * 1024 || length == size)
+            });
+        let current = ensure_current_generation(nzb_id, self).is_ok();
+        let Some(id) = bound.filter(|_| current) else {
+            self.articles.lock().unwrap_or_else(|e| e.into_inner()).bytes -= size;
+            self.release_unbound(queue_id);
             return Err(unknown());
         };
         if let Some(path) = written {
-            drop(queue);
             self.note_written(id, path);
-            queue = self.articles.lock().unwrap_or_else(|e| e.into_inner());
         }
         let length = self.file_lengths[&id];
-        queue.bytes += size;
+        let mut queue = self.articles.lock().unwrap_or_else(|e| e.into_inner());
+        let waiting = queue.unbound.remove(&queue_id).unwrap_or_default();
         if queue.captured.len() < LIVE_MARK_LIMIT {
             queue.captured.insert((id, 0));
         }
@@ -872,8 +940,35 @@ impl ActiveStreamingSession {
                 committed: false,
             });
         }
-        self.metrics.bound_by_first_article.fetch_add(1, Ordering::Relaxed);
+        drop(queue);
+        self.metrics
+            .bound_by_first_article
+            .fetch_add(1, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Queue file `queue_id` cannot be bound from RAM (its first article failed, left the
+    /// cache, or matched no par2 file) or completed: its waiting articles are dropped with
+    /// their charge, and none of its articles waits any more.
+    fn release_unbound(&self, queue_id: i32) {
+        let mut queue = self.articles.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(waiting) = queue.unbound.remove(&queue_id) {
+            let freed: u64 = waiting.iter().map(|a| a.3.len() as u64).sum();
+            queue.bytes -= freed;
+        }
+        if queue.not_in_set.len() < LIVE_MARK_LIMIT {
+            queue.not_in_set.insert(queue_id);
+        }
+    }
+
+    /// The article of `id` at `offset` was captured from RAM and its cache write is still
+    /// to come.
+    fn write_pending(&self, id: FileId, offset: u64) -> bool {
+        self.articles
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .captured
+            .contains(&(id, offset))
     }
 
     /// Takes the stashed bytes of the article of `id` at `offset` of `size` bytes, if any.
@@ -1416,7 +1511,7 @@ pub(crate) fn streaming_session_defer_committed_article(
             Err(RepairError::UnknownFile(FileId(unknown))) if unknown == [0; 16] => {
                 // Not matched to a par2 file yet: an obfuscated name whose 16k hash is not
                 // known. Its first article binds it from RAM; the others wait for that.
-                return entry.defer_unbound(identity, offset, size, crc32, written, snapshot);
+                return entry.defer_unbound(nzb_id, identity, offset, size, crc32, written, snapshot);
             }
             Err(error) => return Err(error),
         };
@@ -1567,7 +1662,16 @@ pub(crate) fn streaming_session_defer_failure_for_queue(
     let entry = active_streaming_session(nzb_id)?;
     Some(entry.record((|| {
         ensure_current_generation(nzb_id, &entry)?;
-        let id = live_source_id(&entry, identity.0, identity.1, identity.2)?;
+        let id = match live_source_id(&entry, identity.0, identity.1, identity.2) {
+            Ok(id) => id,
+            Err(error) => {
+                // A file not bound yet loses its first article: it cannot bind from RAM.
+                if let (Some(queue_id), true) = (identity.0, offset == 0) {
+                    entry.release_unbound(queue_id);
+                }
+                return Err(error);
+            }
+        };
         if size == 0
             || offset
                 .checked_add(size)
@@ -1648,9 +1752,13 @@ fn drain_live_articles_locked(
             if matches!(&result, Err(error) if entry.lend_memory(error)) {
                 result = entry.timed(nzb_id, || article.fold());
             }
+            // Only while its cache write is still to come (it hands the bytes over again);
+            // after it, the refusal is reported and the completion replay covers it.
             let parked = matches!(&result, Err(RepairError::StreamingMemoryLimit { .. }))
                 && article.article.as_ref().is_some_and(|a| {
-                    a.bytes.is_some() && entry.await_commit(a.file_id, a.offset, a.size, a.crc32)
+                    a.bytes.is_some()
+                        && entry.write_pending(a.file_id, a.offset)
+                        && entry.await_commit(a.file_id, a.offset, a.size, a.crc32)
                 });
             // The file was renamed (completed) before par-rs learned its new path: an article
             // read from its file, or a slice par-rs completes from the file, finds nothing
@@ -1658,7 +1766,7 @@ fn drain_live_articles_locked(
             let renamed = article
                 .article
                 .as_ref()
-                .is_some_and(|a| renamed_away(&result, a.bytes.is_none() && a.committed));
+                .is_some_and(|a| renamed_away(&result, a.committed));
             let parked = parked || renamed;
             drop(article);
             if parked {
@@ -1922,7 +2030,15 @@ pub(crate) fn streaming_session_queue_completed_file(
         ));
     }
     let writers = download_writes(nzb_id, &file.base_dir).map_err(|_| RepairError::Cancelled)?;
-    let generation = active_streaming_session(nzb_id).map(|entry| entry.generation);
+    let entry = active_streaming_session(nzb_id);
+    // The file is complete: articles still waiting for it to be bound never will be.
+    if let (Some(entry), Some(queue_id)) = (
+        entry.as_ref(),
+        file.queued_id.and_then(|id| i32::try_from(id).ok()),
+    ) {
+        entry.release_unbound(queue_id);
+    }
+    let generation = entry.map(|entry| entry.generation);
     COMPLETED_LIVE_FILES
         .lock()
         .unwrap_or_else(|e| e.into_inner())

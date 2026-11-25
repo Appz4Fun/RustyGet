@@ -637,6 +637,16 @@ impl RepairWriteLease {
         verified: &[(i32, u32)],
         publish: impl FnOnce() -> T,
     ) -> Result<T, WriteBlocked> {
+        // Stamped with no lock held; the targets are named and the repair has written
+        // them. On a filesystem with coarse modification times (1-2 s) a same-length
+        // rewrite within that time keeps the stamp: only a coordinated write (which cancels
+        // the generation and with it every certificate) is ruled out there.
+        let stamps: Vec<(i32, FileStamp)> = self
+            .targets
+            .iter()
+            .filter(|target| verified.iter().any(|(id, _)| *id == target.file_id))
+            .filter_map(|target| Some((target.file_id, FileStamp::of(&target.path)?)))
+            .collect();
         let mut state = self
             .coordinator
             .state
@@ -663,11 +673,6 @@ impl RepairWriteLease {
         }
         self.targets
             .retain(|target| verified.iter().any(|(id, _)| *id == target.file_id));
-        let stamps = self
-            .targets
-            .iter()
-            .filter_map(|target| Some((target.file_id, FileStamp::of(&target.path)?)))
-            .collect();
         state.certified.push(CertifiedTargets {
             generation: self.generation,
             targets: std::mem::take(&mut self.targets),

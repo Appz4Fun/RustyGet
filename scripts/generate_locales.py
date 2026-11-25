@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-#  This file is part of nzbget. See <https://nzbget.com>.
+#  This file is part of RustyGet.
 #
 #  Copyright (C) 2026 Denis <denis@nzbget.com>
 #
@@ -18,7 +18,7 @@
 #  along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 """
-generate_locales.py - Generate translation entries for NZBGet config options or extensions.
+generate_locales.py - Generate translation entries for RustyGet config options or extensions.
 
 Purpose:
   Reads either rustyget.conf or an extension's manifest.json and generates or updates
@@ -106,8 +106,8 @@ def extract_from_manifest(manifest):
         do_not_translate = ""
         if ext_name and re.search(rf"\b{re.escape(ext_name)}\b", about_text):
             do_not_translate = f" DO NOT translate '{ext_name}'."
-        if re.search(r"\bNZBGet\b", about_text):
-            do_not_translate += " DO NOT translate 'NZBGet'."
+        if re.search(r"\bRustyGet\b", about_text):
+            do_not_translate += " DO NOT translate 'RustyGet'."
         entries["about"] = {
             "message": about_text,
             "description": f"Short description of the {ext_name} extension shown in settings." + do_not_translate,
@@ -119,8 +119,8 @@ def extract_from_manifest(manifest):
         do_not_translate = ""
         if ext_name and re.search(rf"\b{re.escape(ext_name)}\b", desc_text):
             do_not_translate = f" DO NOT translate '{ext_name}'."
-        if re.search(r"\bNZBGet\b", desc_text):
-            do_not_translate += " DO NOT translate 'NZBGet'."
+        if re.search(r"\bRustyGet\b", desc_text):
+            do_not_translate += " DO NOT translate 'RustyGet'."
         entries["description"] = {
             "message": desc_text,
             "description": "Full description of the extension shown in settings." + do_not_translate,

@@ -1,5 +1,5 @@
 /*!
- * This file is part of nzbget. See <https://nzbget.com>.
+ * This file is part of RustyGet.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -16,7 +16,7 @@
  */
 
 /*
- * Web UI skin: restyles the existing Bootstrap 2 markup with the NZBGet
+ * Web UI skin: restyles the existing Bootstrap 2 markup with the RustyGet
  * Design System. Every value comes from tokens.css; component classes for
  * new markup live in ds.css. Loaded last in the combined stylesheet, after
  * Bootstrap's layout rules; light and dark use the same token-based skin.

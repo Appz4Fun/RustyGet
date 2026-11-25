@@ -1,5 +1,5 @@
 /*
- * This file is part of nzbget. See <https://nzbget.com>.
+ * This file is part of RustyGet.
  *
  * Copyright (C) 2012-2019 Andrey Prygunkov <hugbug@users.sourceforge.net>
  * Copyright (C) 2024-2026 Denis <denis@nzbget.com>
@@ -1324,7 +1324,7 @@ var StatDialog = (new function($)
 
 		$('.volume-month', menu).remove();
 
-		// does computer running NZBGet has correct date (after 1-Jan-2013)?
+		// does computer running RustyGet has correct date (after 1-Jan-2013)?
 		clockOK = firstDay > 0 && servervolumes[0].DaySlot > -1;
 
 		if (!clockOK)

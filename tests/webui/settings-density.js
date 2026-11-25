@@ -1,4 +1,4 @@
-// Run only against an isolated NZBGet fixture. Requests to saveconfig are intercepted.
+// Run only against an isolated RustyGet fixture. Requests to saveconfig are intercepted.
 const { chromium } = require('playwright');
 const assert = require('node:assert/strict');
 

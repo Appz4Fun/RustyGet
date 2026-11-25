@@ -1,5 +1,5 @@
 /*
- * This file is part of nzbget. See <https://nzbget.com>.
+ * This file is part of RustyGet.
  *
  * Copyright (C) 2012-2017 Andrey Prygunkov <hugbug@users.sourceforge.net>
  * Copyright (C) 2024 Denis <denis@nzbget.com>
@@ -28,7 +28,7 @@
  *   6) Popup notifications.
  */
 
-/*** WEB-INTERFACE SETTINGS (THIS IS NOT NZBGET CONFIG!) ***********************************/
+/*** WEB-INTERFACE SETTINGS (THIS IS NOT RUSTYGET CONFIG!) ***********************************/
 
 var UISettings = (new function($)
 {
@@ -94,7 +94,7 @@ var UISettings = (new function($)
 	// The default value sets the interval on first use only.
 	this.refreshInterval = 1;
 
-	// URL for communication with NZBGet via JSON-RPC
+	// URL for communication with RustyGet via JSON-RPC
 	this.rpcUrl = './jsonrpc';
 
 

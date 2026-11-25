@@ -1,5 +1,5 @@
 /*
- * This file is part of nzbget. See <https://nzbget.com>.
+ * This file is part of RustyGet.
  *
  * Copyright (C) 2026 Denis <denis@nzbget.com>
  * 

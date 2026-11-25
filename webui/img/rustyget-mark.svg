@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="160 160 704 704" width="704" height="704">
-  <title>NZBGet</title>
+  <title>RustyGet</title>
   <defs>
     <mask id="ring" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
     <circle cx="512.0" cy="512.0" r="262" fill="white"/>

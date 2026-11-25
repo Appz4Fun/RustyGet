@@ -1,5 +1,5 @@
 /*
- * This file is part of nzbget. See <https://nzbget.com>.
+ * This file is part of RustyGet.
  *
  * Copyright (C) 2012-2019 Andrey Prygunkov <hugbug@users.sourceforge.net>
  * Copyright (C) 2024-2026 Denis <denis@nzbget.com>
@@ -63,7 +63,7 @@ var Options = (new function($)
 
 	this.update = function()
 	{
-		// RPC-function "config" returns CURRENT configuration settings loaded in NZBGet
+		// RPC-function "config" returns CURRENT configuration settings loaded in RustyGet
 		RPC.call('config', [], function(_options)
 		{
 			_this.options = _options;
@@ -177,9 +177,9 @@ var Options = (new function($)
 		loadConfigError = callbacks.configError;
 		loadServerTemplateError = callbacks.serverTemplateError;
 
-		// RPC-function "loadconfig" reads the configuration settings from NZBGet configuration file.
+		// RPC-function "loadconfig" reads the configuration settings from RustyGet configuration file.
 		// that's not neccessary the same settings returned by RPC-function "config". This could be the case,
-		// for example, if the settings were modified but NZBGet was not restarted.
+		// for example, if the settings were modified but RustyGet was not restarted.
 		RPC.call('loadconfig', [], serverValuesLoaded, loadConfigError);
 	}
 
@@ -645,7 +645,7 @@ var Config = (new function($)
 		par: 'par', par2: 'par2', api: 'API', ui: 'UI', id: 'ID', cpu: 'CPU', crc: 'CRC', mb: 'MB', kb: 'KB',
 		ok: 'OK', http: 'HTTP', https: 'HTTPS', cert: 'certificate', dir: 'folder', cmd: 'command',
 		ext: 'extensions', exts: 'extensions', max: 'maximum', min: 'minimum', sec: 'seconds', msec: 'milliseconds',
-		dupe: 'duplicate', nntp: 'NNTP', unrar: 'UnRAR', rustyget: 'RustyGet', nzbget: 'NZBGet', yenc: 'yEnc'
+		dupe: 'duplicate', nntp: 'NNTP', unrar: 'UnRAR', rustyget: 'RustyGet', yenc: 'yEnc'
 	};
 
 	// Whole-name labels where splitting the name would read badly.
@@ -6925,7 +6925,9 @@ var UpdateDialog = (new function($)
 			Refresher.pause();
 		}
 
-		RPC.call('readurl', ['https://nzbget.com/info/nzbget-version.json?nocache=' + new Date().getTime(), 'nzbget version info'], loadedUpstreamInfo, error);
+		// RustyGet has no public release feed: updates come only from the package's
+		// own update source (package-info.json), never from another program's site.
+		loadPackageInfo();
 	}
 
 	function error(e)
@@ -6957,7 +6959,7 @@ var UpdateDialog = (new function($)
 		PackageInfo = parseJsonP(data);
 		if (PackageInfo['update-info-link'])
 		{
-			RPC.call('readurl', [PackageInfo['update-info-link'], 'nzbget update info'], loadedUpdateInfo, loadedAll);
+			RPC.call('readurl', [PackageInfo['update-info-link'], 'update info'], loadedUpdateInfo, loadedAll);
 		}
 		else if (PackageInfo['update-info-script'])
 		{

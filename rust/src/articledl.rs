@@ -772,48 +772,40 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
         })
         .collect();
 
-    let (flushed_articles, flushed_size) = article_writer_flush_cache_guarded(
+    let hand_off = live.is_some() && !skip_disk_write;
+    let (flushed_articles, flushed_size) = flush_cache_then_hand_off(
         &items,
-        direct_write,
-        skip_disk_write,
-        &output_filename,
-        &write_context,
-        || qh.file_cache_is_deleted_unparked(file_ptr),
+        hand_off,
+        |discard| {
+            article_writer_flush_cache_guarded(
+                &items,
+                direct_write,
+                skip_disk_write,
+                &output_filename,
+                &write_context,
+                || qh.file_cache_is_deleted_unparked(file_ptr),
+                discard,
+                |msg| {
+                    if nzb_ptr.is_some() {
+                        qh.nzb_print_message(nzb_ptr, MK_ERROR, msg);
+                    } else {
+                        crate::log::log_active_bytes(MK_ERROR, msg);
+                    }
+                },
+            )
+        },
         |idx| qh.file_cache_discard_article_segment(file_ptr, metas[idx].0),
-        |msg| {
-            if nzb_ptr.is_some() {
-                qh.nzb_print_message(nzb_ptr, MK_ERROR, msg);
-            } else {
-                crate::log::log_active_bytes(MK_ERROR, msg);
+        |written_items| {
+            if let Some((nzb_id, file_id, name, hash16k)) = live.as_ref() {
+                crate::parchecker::streaming_session_articles_written(
+                    *nzb_id,
+                    (Some(*file_id), name, hash16k),
+                    direct_write,
+                    written_items,
+                );
             }
         },
     );
-
-    // Live PAR: hand over the bytes just written, so par-rs never reads them back from the
-    // file: articles that waited for this write, and ones written before their capture.
-    // Only those written, up to the first failed write.
-    if let Some((nzb_id, file_id, name, hash16k)) = live
-        .as_ref()
-        .filter(|_| !skip_disk_write && flushed_articles > 0)
-    {
-        let written = usize::try_from(flushed_articles).unwrap_or(0).min(items.len());
-        let all: i64 = items[..written]
-            .iter()
-            .map(|item| i64::from(item.segment_size))
-            .sum();
-        let good = if all == flushed_size { written } else { written - 1 };
-        let written_items: Vec<(u64, &[u8])> = items[..good]
-            .iter()
-            .filter(|item| item.segment_content.len() as i64 == i64::from(item.segment_size))
-            .filter_map(|item| Some((u64::try_from(item.segment_offset).ok()?, item.segment_content)))
-            .collect();
-        crate::parchecker::streaming_session_articles_written(
-            *nzb_id,
-            (Some(*file_id), name, hash16k),
-            direct_write,
-            &written_items,
-        );
-    }
     let skip_after = qh.file_cache_flush_finish(file_ptr, flushed_articles)
         || crate::options::active_options().is_some_and(|o| o.scalars().skip_write != 0);
     cache_unlock_flush();
@@ -827,6 +819,57 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
     };
     crate::log::log_active_bytes(MK_DETAIL, &join_c_slices(&[prefix.as_bytes(), &info_name]));
     true
+}
+
+/// The flushed items live PAR receives: those written, up to the first failed write, whose
+/// bytes are all present.
+fn live_written_items<'a>(
+    items: &[ArticleWriterFlushItem<'a>],
+    flushed_articles: i32,
+    flushed_size: i64,
+) -> Vec<(u64, &'a [u8])> {
+    let written = usize::try_from(flushed_articles).unwrap_or(0).min(items.len());
+    if written == 0 {
+        return Vec::new();
+    }
+    let all: i64 = items[..written]
+        .iter()
+        .map(|item| i64::from(item.segment_size))
+        .sum();
+    let good = if all == flushed_size { written } else { written - 1 };
+    items[..good]
+        .iter()
+        .filter(|item| item.segment_content.len() as i64 == i64::from(item.segment_size))
+        .filter_map(|item| Some((u64::try_from(item.segment_offset).ok()?, item.segment_content)))
+        .collect()
+}
+
+/// Commits a cache flush (`flush`, which calls the `discard` it is given for each item it
+/// is done with) and, when `hand_off`, gives live PAR the bytes just written (`live`), so
+/// par-rs never reads them back from the file.
+///
+/// `discard` frees an item's cache segment, the memory its `segment_content` points into.
+/// With a hand-off the discards wait until `live` has copied the written bytes: freeing
+/// them first left live PAR copying freed (for large articles unmapped) cache memory.
+fn flush_cache_then_hand_off<'a>(
+    items: &[ArticleWriterFlushItem<'a>],
+    hand_off: bool,
+    flush: impl FnOnce(&mut dyn FnMut(usize)) -> (i32, i64),
+    mut discard: impl FnMut(usize),
+    live: impl FnOnce(&[(u64, &'a [u8])]),
+) -> (i32, i64) {
+    if !hand_off {
+        return flush(&mut discard);
+    }
+    let mut done: Vec<usize> = Vec::with_capacity(items.len());
+    let (flushed_articles, flushed_size) = flush(&mut |index| done.push(index));
+    if flushed_articles > 0 {
+        live(&live_written_items(items, flushed_articles, flushed_size));
+    }
+    for index in done {
+        discard(index);
+    }
+    (flushed_articles, flushed_size)
 }
 
 fn daemon_article_cache_run() {
@@ -4108,6 +4151,80 @@ mod tests {
         assert!(super::live_flush_reports(false, true));
         assert!(!super::live_flush_reports(true, true), "a par2 file would stop live PAR");
         assert!(!super::live_flush_reports(false, false));
+    }
+
+    /// The cache flush frees each article's cache segment as it is written. Live PAR copies
+    /// the written bytes after the flush, so the segments it reads must still be allocated
+    /// (server 6790, cf007ba0: the article-cache thread segfaulted in that copy).
+    #[test]
+    fn live_par_copies_flushed_articles_before_their_cache_segments_are_freed() {
+        use std::cell::RefCell;
+        const N: usize = 4;
+        const SIZE: usize = 4096;
+        // Cache segments as the article cache holds them: separate heap blocks, freed by
+        // the discard callback, referenced by the flush items through raw pointers.
+        let raw: Vec<*mut u8> = (0..N)
+            .map(|i| Box::into_raw(vec![i as u8 + 1; SIZE].into_boxed_slice()).cast::<u8>())
+            .collect();
+        let freed = RefCell::new([false; N]);
+        let items: Vec<ArticleWriterFlushItem<'_>> = raw
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| ArticleWriterFlushItem {
+                segment_offset: (i * SIZE) as i64,
+                segment_size: SIZE as i32,
+                segment_content: unsafe { std::slice::from_raw_parts(p, SIZE) },
+                result_filename: None,
+            })
+            .collect();
+        let handed = RefCell::new(Vec::new());
+        let result = super::flush_cache_then_hand_off(
+            &items,
+            true,
+            |discard| {
+                // As `article_writer_flush_cache_guarded`: write, then discard, per item.
+                for i in 0..N {
+                    discard(i);
+                }
+                (N as i32, (N * SIZE) as i64)
+            },
+            |i| {
+                assert!(!freed.borrow()[i], "segment {i} freed twice");
+                freed.borrow_mut()[i] = true;
+                drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(raw[i], SIZE)) });
+            },
+            |written| {
+                for &(offset, bytes) in written {
+                    let i = offset as usize / SIZE;
+                    assert!(!freed.borrow()[i], "live PAR read article {i} after its segment was freed");
+                    assert_eq!(bytes, &vec![i as u8 + 1; SIZE][..]);
+                    handed.borrow_mut().push(i);
+                }
+            },
+        );
+        assert_eq!(result, (N as i32, (N * SIZE) as i64));
+        assert_eq!(*handed.borrow(), (0..N).collect::<Vec<_>>());
+        assert_eq!(*freed.borrow(), [true; N], "every written segment is freed");
+    }
+
+    #[test]
+    fn live_par_receives_only_articles_written_before_a_failed_write() {
+        let bufs: Vec<Vec<u8>> = (0..3).map(|i| vec![i as u8; 100]).collect();
+        let items: Vec<ArticleWriterFlushItem<'_>> = bufs
+            .iter()
+            .enumerate()
+            .map(|(i, b)| ArticleWriterFlushItem {
+                segment_offset: (i * 100) as i64,
+                segment_size: 100,
+                segment_content: b,
+                result_filename: None,
+            })
+            .collect();
+        // Three counted, the third failed (its size not counted).
+        let written = super::live_written_items(&items, 3, 200);
+        assert_eq!(written.iter().map(|w| w.0).collect::<Vec<_>>(), [0, 100]);
+        assert!(super::live_written_items(&items, 0, 0).is_empty());
+        assert_eq!(super::live_written_items(&items, 3, 300).len(), 3);
     }
 
     #[test]

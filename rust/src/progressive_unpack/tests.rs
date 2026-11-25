@@ -1016,6 +1016,38 @@ fn copied_outputs_keep_mode_and_mtime() {
     assert_eq!(mtime, 1_700_000_000);
 }
 
+/// A `.rustyget-<pid>-<n>.part` a crashed daemon left goes with the next copy into that
+/// folder; this process's own, a running process's and other names stay.
+#[cfg(unix)]
+#[test]
+fn a_crashed_daemons_part_files_go_with_the_next_copy() {
+    let t = TestDir::new("staleparts");
+    let mut child = std::process::Command::new("true").spawn().unwrap();
+    let dead = child.id();
+    child.wait().unwrap();
+    let stale = t.out().join(format!(".rustyget-{dead}-7.part"));
+    let own = t.out().join(format!(".rustyget-{}-99999.part", std::process::id()));
+    let running = t.out().join(".rustyget-1-3.part"); // init/launchd: always running
+    let other = t.out().join(format!(".rustyget-{dead}-x.part"));
+    let stale_dir = t.out().join(format!(".rustyget-{dead}-8.part"));
+    for f in [&stale, &own, &running, &other] {
+        std::fs::write(f, b"partial").unwrap();
+    }
+    std::fs::create_dir(&stale_dir).unwrap();
+    let data = pattern(50_000);
+    let first = write_set(&t.dl(), &rar5_volumes("movie.mkv", &data, 1 << 30));
+    let (r, log) = run(&first, &t.out(), Box::new(Growing));
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    assert!(!stale.exists(), "the crashed daemon's part file is removed");
+    assert!(own.exists() && running.exists() && other.exists());
+    assert!(stale_dir.is_dir(), "never a directory");
+    assert_eq!(stale_part_pid(".rustyget-123-4.part"), Some(123));
+    for name in [".rustyget-0-4.part", ".rustyget-12-.part", ".rustyget--4.part", ".rustyget-1-2.tmp"] {
+        assert_eq!(stale_part_pid(name), None, "{name}");
+    }
+}
+
 #[test]
 fn copying_into_place_never_touches_other_paths() {
     let t = TestDir::new("tmpname");

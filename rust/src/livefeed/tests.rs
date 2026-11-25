@@ -407,3 +407,38 @@ fn a_hole_in_a_stored_member_is_read_past_and_filled_after_its_repair() {
     assert_eq!(std::fs::read(dest.join("movie.mkv")).unwrap(), movie);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_split_numbered_from_zero_is_left_to_post_processing() {
+    let all = names(&["m.mkv.000", "m.mkv.001", "m.mkv.002"]);
+    assert!(live_set(b"m.mkv.001", &all).is_none());
+    let firsts: Vec<&[u8]> = vec![b"m.mkv.001"];
+    assert!(
+        !in_extracted_set(b"m.mkv.000", &firsts),
+        "piece 0 is never another set's"
+    );
+    assert!(is_infozip_last(b"dir/m.zip", &names(&["m.z01", "m.z02"])));
+    assert!(!is_infozip_last(b"m.zip", &names(&["other.z01"])));
+    assert!(is_split_first(b"m.mkv.001") && !is_split_first(b"m.7z.001"));
+}
+
+#[test]
+fn split_pieces_that_are_rar_volumes_are_not_joined() {
+    let dir = scratch("split-rar");
+    let mut first = b"Rar!\x1a\x07\x00".to_vec();
+    first.extend(payload(1000, 1));
+    std::fs::write(dir.join("dl/x.avi.001"), &first).unwrap();
+    std::fs::write(dir.join("dl/x.avi.002"), payload(500, 2)).unwrap();
+    let set = live_set(b"x.avi.001", &names(&["x.avi.001", "x.avi.002"])).unwrap();
+    let mut feed = DiskFeed {
+        finished: Arc::new(AtomicBool::new(true)),
+        damaged: Vec::new(),
+    };
+    let (outcome, _) = run(&dir, &set, &mut feed);
+    assert!(matches!(outcome, Outcome::Declined(_)), "{outcome:?}");
+    assert!(
+        !dir.join("out").exists(),
+        "nothing prepared, nothing written"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

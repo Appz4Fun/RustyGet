@@ -42,8 +42,9 @@ use crate::progressive_unpack::{VolumeFeed, VolumeView};
 const IDLE: Duration = Duration::from_millis(25);
 /// How often a map that could not be built yet is tried again without any volume arriving.
 const MAP_RETRY: Duration = Duration::from_secs(2);
-/// Members of one 7z folder decoded live at most: each decoder of a later member decodes the
-/// folder's output in front of it again.
+/// Members of one stored (Copy) 7z folder fed live at most. A compressed folder is fed live only
+/// when it holds one member: every member's decoder would decode the folder again from its
+/// start and hold a dictionary of its own.
 const MAX_FOLDER_MEMBERS: u64 = 64;
 
 /// What kind of set a volume belongs to.
@@ -177,6 +178,22 @@ pub fn is_live_volume(name: &[u8]) -> bool {
     matches!(classify(basename(name)), Some((_, _, n, _)) if n >= 1)
 }
 
+/// Whether `name` is the `.zip` that ends an Info-ZIP split set among `names` (a matching
+/// `.z01` is there): it is a volume of that set.
+pub fn is_infozip_last(name: &[u8], names: &[Vec<u8>]) -> bool {
+    let Some((SetKind::ZipSplit, stem, 0, _)) = classify(basename(name)) else {
+        return false;
+    };
+    names.iter().any(|n| {
+        matches!(classify(basename(n)), Some((SetKind::ZipSplit, s, 1, _)) if s == stem)
+    })
+}
+
+/// Whether `first` is the first volume of a split file (`name.ext.001`), not of an archive set.
+pub fn is_split_first(first: &[u8]) -> bool {
+    matches!(classify(basename(first)), Some((SetKind::Split, _, 1, _)))
+}
+
 /// The set whose first volume is `first`, from the names of the download's files: every volume
 /// numbered from 1 without a gap, at least two of them.
 pub fn live_set(first: &[u8], names: &[Vec<u8>]) -> Option<LiveSet> {
@@ -193,7 +210,9 @@ pub fn live_set(first: &[u8], names: &[Vec<u8>]) -> Option<LiveSet> {
             continue;
         }
         if n == 0 {
-            if last_zip.replace(name.clone()).is_some() {
+            // Info-ZIP's .zip comes last. Any other set numbered from 0 (`split -d`: .000,
+            // .001, ...) is left to post-processing's join.
+            if kind != SetKind::ZipSplit || last_zip.replace(name.clone()).is_some() {
                 return None;
             }
             continue;
@@ -221,9 +240,13 @@ pub fn live_set(first: &[u8], names: &[Vec<u8>]) -> Option<LiveSet> {
 /// Whether `name` is a volume of a set whose first volume is one of `firsts` (the archives
 /// direct unpack extracted): post-processing leaves such volumes alone.
 pub fn in_extracted_set(name: &[u8], firsts: &[&[u8]]) -> bool {
-    let Some((kind, stem, _, _)) = classify(name) else {
+    let Some((kind, stem, n, _)) = classify(name) else {
         return false;
     };
+    // Volume 0 belongs to a set only as an Info-ZIP set's .zip (`live_set`).
+    if n == 0 && kind != SetKind::ZipSplit {
+        return false;
+    }
     firsts
         .iter()
         .any(|first| matches!(classify(first), Some((k, s, 1, _)) if k == kind && s == stem))
@@ -607,7 +630,9 @@ impl FeedSink for OutFile {
 /// A member being fed.
 struct Member {
     name: String,
-    decoder: FeedDecoder,
+    /// Dropped once the member is done: a decoder holds its window and packed bytes.
+    decoder: Option<FeedDecoder>,
+    size: u64,
     out: OutFile,
     tmp: PathBuf,
     target: PathBuf,
@@ -713,7 +738,16 @@ fn feed_members(
 ) -> Outcome {
     // Everything that could decline first: nothing is written before the set is known to go.
     let pw = (!req.password.is_empty()).then_some(req.password);
-    if map.folders.iter().any(|f| f.members > MAX_FOLDER_MEMBERS) {
+    let stored = |f: &zipfast::map::MapFolder| {
+        f.coders
+            .iter()
+            .all(|c| matches!(c.kind, zipfast::map::CoderKind::Copy))
+    };
+    if map
+        .folders
+        .iter()
+        .any(|f| f.members > if stored(f) { MAX_FOLDER_MEMBERS } else { 1 })
+    {
         return Outcome::Declined("a 7z folder holds too many members to feed live".into());
     }
     struct Planned {
@@ -787,9 +821,13 @@ fn feed_members(
     let mut members: Vec<Member> = Vec::new();
     let mut dirs: Vec<(PathBuf, Option<(i64, u32)>)> = Vec::new();
     let mut summary = (0u64, 0u64, 0u64);
-    let fail = |members: &[Member], why: String| {
+    let mut empties: Vec<PathBuf> = Vec::new();
+    let fail = |members: &[Member], empties: &[PathBuf], why: String| {
         for m in members {
             let _ = std::fs::remove_file(if m.done { &m.target } else { &m.tmp });
+        }
+        for e in empties {
+            let _ = std::fs::remove_file(e);
         }
         Outcome::Failed(why)
     };
@@ -797,34 +835,35 @@ fn feed_members(
         let target = dest.join(&p.rel);
         if let Err(why) = crate::unpacklimits::check(&target, p.is_dir) {
             log(1, &why);
-            return fail(&members, why);
+            return fail(&members, &empties, why);
         }
         if p.is_dir {
             match crate::archive_native::create_dir_all_no_follow(&dest, &p.rel) {
                 Ok(dir) => dirs.push((dir, p.mtime)),
-                Err(e) => return fail(&members, format!("cannot create {}: {e}", p.rel.display())),
+                Err(e) => return fail(&members, &empties, format!("cannot create {}: {e}", p.rel.display())),
             }
             summary.1 += 1;
             continue;
         }
         if let Some(parent) = p.rel.parent().filter(|d| !d.as_os_str().is_empty()) {
             if let Err(e) = crate::archive_native::create_dir_all_no_follow(&dest, parent) {
-                return fail(&members, format!("cannot create {}: {e}", parent.display()));
+                return fail(&members, &empties, format!("cannot create {}: {e}", parent.display()));
             }
         } else if let Err(e) = std::fs::create_dir_all(&dest) {
-            return fail(&members, format!("cannot create {}: {e}", dest.display()));
+            return fail(&members, &empties, format!("cannot create {}: {e}", dest.display()));
         }
         let (tmp, file) = match crate::progressive_unpack::create_unique_sibling(&target) {
             Ok(created) => created,
-            Err(e) => return fail(&members, format!("cannot write {}: {e}", target.display())),
+            Err(e) => return fail(&members, &empties, format!("cannot write {}: {e}", target.display())),
         };
         let Some(decoder) = p.decoder else {
             // An empty file: nothing to feed.
             drop(file);
             if let Err(e) = std::fs::rename(&tmp, &target) {
                 let _ = std::fs::remove_file(&tmp);
-                return fail(&members, format!("cannot write {}: {e}", target.display()));
+                return fail(&members, &empties, format!("cannot write {}: {e}", target.display()));
             }
+            empties.push(target);
             summary.0 += 1;
             continue;
         };
@@ -832,7 +871,8 @@ fn feed_members(
         log(4, &format!("Unrar: Extracting  {}", p.name));
         members.push(Member {
             name: p.name,
-            decoder,
+            decoder: Some(decoder),
+            size: p.size,
             out: OutFile {
                 file,
                 written: Ranges::default(),
@@ -847,7 +887,7 @@ fn feed_members(
     // Decode as the volumes arrive.
     loop {
         if is_cancelled() {
-            return fail(&members, "Aborted".into());
+            return fail(&members, &empties, "Aborted".into());
         }
         let mut progressed = false;
         let mut failure: Option<String> = None;
@@ -858,13 +898,13 @@ fn feed_members(
             }
             if m.done {
                 summary.0 += 1;
-                summary.2 += m.decoder.size();
+                summary.2 += m.size;
             }
         }
         let failure = failure.or_else(|| vols.wrong.take().map(|why| format!("Unrar: ERROR: {why}")));
         if let Some(why) = failure {
             log(1, &why);
-            return fail(&members, why);
+            return fail(&members, &empties, why);
         }
         if members.iter().all(|m| m.done) {
             break;
@@ -883,7 +923,7 @@ fn feed_members(
                 names.join(", ")
             );
             log(1, &why);
-            return fail(&members, why);
+            return fail(&members, &empties, why);
         } else {
             waiting.idle();
         }
@@ -899,25 +939,31 @@ fn feed_members(
 /// Runs one member's decoder over what is on disk; publishes its output once it is complete and
 /// verified.
 fn step(m: &mut Member, vols: &mut Volumes<'_>, progressed: &mut bool) -> Result<(), String> {
-    let before = m.decoder.stats().written;
+    let Some(decoder) = m.decoder.as_mut() else {
+        return Ok(());
+    };
+    let before = decoder.stats().written;
     let status = loop {
-        match m.decoder.run(vols, &mut m.out) {
+        match decoder.run(vols, &mut m.out) {
             Ok(s) if s.more => continue,
             Ok(s) => break s,
             Err(e) => return Err(format!("Unrar: ERROR in {}: {e}", m.name)),
         }
     };
-    *progressed |= m.decoder.stats().written != before;
+    *progressed |= decoder.stats().written != before;
     if !status.done {
         return Ok(());
     }
-    if status.crc_ok == Some(false) || status.auth_ok == Some(false) {
+    // Output decoded from a window that nothing proved (no CRC, a restart past a hole) is not
+    // published as extracted.
+    if status.crc_ok == Some(false) || status.auth_ok == Some(false) || status.unproven {
         return Err(format!("Unrar: {} - CRC failed", m.name));
     }
     let io = |e: std::io::Error| format!("cannot write {}: {e}", m.target.display());
     m.out.file.sync_all().map_err(io)?;
     apply_meta(&m.out.file, m.unix_mode, m.mtime);
     std::fs::rename(&m.tmp, &m.target).map_err(io)?;
+    m.decoder = None;
     m.done = true;
     *progressed = true;
     Ok(())
@@ -977,6 +1023,10 @@ fn join_live(
     let Ok(rel) = zipfast::path::sanitize(&name, false) else {
         return Outcome::Declined(format!("{name:?} is not a safe path"));
     };
+    // Pieces that are really RAR volumes are no split file (post-processing's join leaves them).
+    if crate::unpack::file_has_rar_signature(&req.dir.join(crate::fsops::path(first))) {
+        return Outcome::Declined("its pieces are RAR volumes".into());
+    }
     let Some((dest, guard)) = prepare() else {
         return Outcome::Declined("no unpack folder".into());
     };

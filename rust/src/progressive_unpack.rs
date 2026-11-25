@@ -260,6 +260,9 @@ pub fn place_holes(path: &Path, holes: &[(u64, u64)]) -> HolePlacement {
         None => return HolePlacement::Unknown,
         Some(Ok(map)) => match map.end {
             VolumeEnd::Complete => (map, None),
+            // A RAR 1.5-2.x volume may end without an end of archive header: the walk ran to the
+            // end of the file right behind the last member's data.
+            VolumeEnd::Truncated { offset } if offset >= file_len => (map, None),
             VolumeEnd::Locked { .. } => return HolePlacement::Unknown,
             _ => return HolePlacement::Header,
         },

@@ -1948,15 +1948,22 @@ impl NzbgetRsUnpackController {
             st.unpack_guard = Some(guard);
 
             if st.has_live_extracted {
-                if st.unpack_dir_created {
-                    // What direct unpack extracted live is gone: extract those sets again.
-                    self.print_message(
-                        q,
-                        &mut st,
-                        MK_WARNING,
-                        b"Could not find files unpacked by direct unpack, unpacking them again",
-                    );
-                    st.extracted_archives.retain(|a| !crate::livefeed::is_live_first(a));
+                // What direct unpack extracted live is gone, or par2 repaired volumes since: a
+                // split file has no checksum of its own, so its join is redone from the repaired
+                // pieces (archive members were verified against their checksums).
+                let gone = st.unpack_dir_created;
+                let redo = |a: &Vec<u8>| {
+                    crate::livefeed::is_live_first(a)
+                        && (gone || crate::livefeed::is_split_first(a))
+                };
+                if gone || (st.par_repaired && st.extracted_archives.iter().any(redo)) {
+                    let txt: &[u8] = if gone {
+                        b"Could not find files unpacked by direct unpack, unpacking them again"
+                    } else {
+                        b"Par-repair changed the pieces of a file joined by direct unpack, joining it again"
+                    };
+                    self.print_message(q, &mut st, if gone { MK_WARNING } else { MK_INFO }, txt);
+                    st.extracted_archives.retain(|a| !redo(a));
                     let dl_refs: Vec<&[u8]> =
                         st.downloaded_files.iter().map(Vec::as_slice).collect();
                     let ex_refs: Vec<&[u8]> =
@@ -1971,8 +1978,9 @@ impl NzbgetRsUnpackController {
                     st.has_seven_zip_files |= chk.has_seven_zip_files;
                     st.has_seven_zip_multi_files |= chk.has_seven_zip_multi_files;
                     st.has_splitted_files |= chk.has_splitted_files;
-                    st.has_live_extracted = false;
-                } else if !st.has_rar_files {
+                    st.has_live_extracted = chk.has_live_extracted;
+                }
+                if st.has_live_extracted && !st.has_rar_files {
                     self.print_message(q, &mut st, MK_INFO, b"Using directly unpacked files");
                 }
             }

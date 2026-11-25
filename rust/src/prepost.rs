@@ -2549,11 +2549,15 @@ impl NzbgetRsPrePostProcessor {
             // A damaged archive volume is put on hold: direct unpack pauses in front of it
             // until a repair releases it, instead of being cancelled.
             let file = host.file_snap(file_ptr);
+            // The .zip that ends an Info-ZIP split set is a volume of that set (`livefeed`).
+            let infozip_last = file.failed_articles > 0
+                && crate::livefeed::is_infozip_last(&file.filename, &nzb_file_names(host, nzb_ptr));
             if file.failed_articles > 0
-                && crate::filetypes::may_hold_for_direct_unpack(
-                    &file.filename,
-                    file.success_articles,
-                )
+                && (infozip_last
+                    || crate::filetypes::may_hold_for_direct_unpack(
+                        &file.filename,
+                        file.success_articles,
+                    ))
             {
                 let full = [
                     nzb.dest_dir.as_slice(),
@@ -2567,10 +2571,13 @@ impl NzbgetRsPrePostProcessor {
                 let ranges =
                     crate::dupefallback::compute_holes_slice(&articles, file.decoded_file_size);
                 // Where the holes fall against the volume's own headers: a hole inside a
-                // member piece's data is read past wherever it lies in the volume.
+                // member piece's data is read past wherever it lies in the volume. Placing them
+                // reads only the volume's header chain (a few small reads, no key derivation:
+                // encrypted headers are not opened here), so it stays on this thread; writing a
+                // rebuilt head or tail goes to the thread below.
                 // A volume of a 7z, ZIP or split-file set: its feed decoders read past any
                 // lost range they can, and its headers wait for the repair on their own.
-                let live = crate::livefeed::is_live_volume(&file.filename);
+                let live = infozip_last || crate::livefeed::is_live_volume(&file.filename);
                 let placement = if live {
                     crate::progressive_unpack::HolePlacement::Data(
                         crate::progressive_unpack::merge_holes(&byte_spans(&ranges)),
@@ -3081,6 +3088,17 @@ fn spawn_head_rebuild(
                 crate::log::log_active_bytes(crate::queuesubsys_host::MK_INFO, &msg);
             }
         });
+}
+
+/// The names of every file of download `nzb_ptr`, queued and completed.
+fn nzb_file_names(host: &crate::queuesubsys_host::QueueSubsysHost, nzb_ptr: NzbRef) -> Vec<Vec<u8>> {
+    let mut names: Vec<Vec<u8>> = (0..host.nzb_file_len(nzb_ptr))
+        .map(|i| crate::cstr::until_nul(&host.file_snap(host.nzb_file_at(nzb_ptr, i)).filename).to_vec())
+        .collect();
+    names.extend(
+        (0..host.nzb_completed_files_len(nzb_ptr)).map(|i| crate::cstr::until_nul(&host.nzb_completed_file_at(nzb_ptr, i).filename).to_vec()),
+    );
+    names
 }
 
 /// `ranges` as (`offset`, `len`) pairs, dropping empty and negative ones.

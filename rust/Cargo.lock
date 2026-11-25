@@ -1019,12 +1019,12 @@ dependencies = [
 [[package]]
 name = "zip-container"
 version = "0.1.0"
-source = "git+https://github.com/Appz4Fun/zipfast?rev=96d44eb93f9d82debe21a4d80d66728136eccddc#96d44eb93f9d82debe21a4d80d66728136eccddc"
+source = "git+https://github.com/Appz4Fun/zipfast?rev=e011073da7a6775281169cb31899749564526d5a#e011073da7a6775281169cb31899749564526d5a"
 
 [[package]]
 name = "zipfast"
 version = "0.1.0"
-source = "git+https://github.com/Appz4Fun/zipfast?rev=96d44eb93f9d82debe21a4d80d66728136eccddc#96d44eb93f9d82debe21a4d80d66728136eccddc"
+source = "git+https://github.com/Appz4Fun/zipfast?rev=e011073da7a6775281169cb31899749564526d5a#e011073da7a6775281169cb31899749564526d5a"
 dependencies = [
  "bzip2",
  "crc32fast",
@@ -1037,7 +1037,7 @@ dependencies = [
  "subtle",
  "tempfile",
  "zip-container",
- "zipview 0.1.0 (git+https://github.com/Appz4Fun/zipfast?rev=96d44eb93f9d82debe21a4d80d66728136eccddc)",
+ "zipview 0.1.0 (git+https://github.com/Appz4Fun/zipfast?rev=e011073da7a6775281169cb31899749564526d5a)",
  "zstd",
 ]
 
@@ -1052,7 +1052,7 @@ dependencies = [
 [[package]]
 name = "zipview"
 version = "0.1.0"
-source = "git+https://github.com/Appz4Fun/zipfast?rev=96d44eb93f9d82debe21a4d80d66728136eccddc#96d44eb93f9d82debe21a4d80d66728136eccddc"
+source = "git+https://github.com/Appz4Fun/zipfast?rev=e011073da7a6775281169cb31899749564526d5a#e011073da7a6775281169cb31899749564526d5a"
 dependencies = [
  "flate2",
  "subtle",

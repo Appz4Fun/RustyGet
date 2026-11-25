@@ -39,7 +39,7 @@ use zipfast::progressive::{
 use crate::progressive_unpack::{VolumeFeed, VolumeView};
 
 /// How long the extraction sleeps when no volume brought anything new.
-const IDLE: Duration = Duration::from_millis(100);
+const IDLE: Duration = Duration::from_millis(25);
 /// How often a map that could not be built yet is tried again without any volume arriving.
 const MAP_RETRY: Duration = Duration::from_secs(2);
 /// Members of one 7z folder decoded live at most: each decoder of a later member decodes the

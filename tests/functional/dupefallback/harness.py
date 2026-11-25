@@ -6577,6 +6577,16 @@ class _LogClock:
         return 'n/a'
 
 
+def _live_scale():
+    """RG_LIVE_SCALE multiplies the sizes of the timed live-extraction scenarios
+    (live7zsplit, liveedgehole5), to measure the time from the last article to the
+    extracted file with sets where extraction takes long."""
+    try:
+        return max(1, int(os.environ.get('RG_LIVE_SCALE', '1')))
+    except ValueError:
+        return 1
+
+
 def _live_clock(t, name):
     """The download's end and the moments its files were extracted."""
     return _LogClock(t, ['Collection %s completely downloaded' % name,
@@ -6641,10 +6651,12 @@ def _live_archive(daemon, t, label, name, tag, volumes, files):
 def scenario_live7zsplit(daemon, t):
     """A store-mode 7z cut into byte pieces (movie.7z.001 ...) holding a movie and its
     nfo is extracted while it downloads; nothing is extracted after the download."""
-    movie = _payload(48_000_000, 7101)
+    scale = _live_scale()
+    movie = _payload(48_000_000 * scale, 7101)
     nfo = _payload(4_000, 7102)
     arch = generators.seven_zip_copy_checked([('movie.mkv', movie), ('movie.nfo', nfo)])
-    pieces = generators.split_bytes(arch, [6_000_000] * (len(arch) // 6_000_000))
+    piece = 6_000_000 * scale
+    pieces = generators.split_bytes(arch, [piece] * (len(arch) // piece))
     volumes = [('Movie.7z.%03d' % (i + 1), p) for i, p in enumerate(pieces)]
     return _live_archive(daemon, t, 'live7zsplit', 'RelL7z', 'l7zA', volumes,
                          [('movie.mkv', movie), ('movie.nfo', nfo)])
@@ -6753,9 +6765,10 @@ def scenario_liveedgehole5(daemon, t):
     if not generators.HAVE_RAR:
         return ('liveedgehole5', None, 'SKIP: rar not installed')
     seg = 20_000
-    movie = _payload(12_000_000, 9982)
+    scale = _live_scale()
+    movie = _payload(12_000_000 * scale, 9982)
     with tempfile.TemporaryDirectory(prefix='leh5-') as workdir:
-        vols = generators.rar5_store_volumes_hp('movie.mkv', movie, 1_000_000, None, workdir)
+        vols = generators.rar5_store_volumes_hp('movie.mkv', movie, 1_000_000 * scale, None, workdir)
     tag = 'LE5'
     work = t.path('data', tag)
     os.makedirs(work, exist_ok=True)

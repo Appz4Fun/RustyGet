@@ -6685,15 +6685,22 @@ def scenario_fleetnodupecheck(daemon, t):
 
 
 def _yenc_part(data, name='a.rar'):
-    """A one-part yEnc article holding ``data``."""
-    enc = bytearray()
+    """A one-part yEnc article holding ``data``. A line never ends inside an
+    escape: cutting the encoded bytes every 128 split "=X" pairs, so data
+    with a random salt (rar -hp) sometimes decoded to the wrong length."""
+    lines_out, line = [], bytearray()
     for b in data:
         c = (b + 42) & 255
         if c in (0, 10, 13, 61, 46):
-            enc += b'=' + bytes([(c + 64) & 255])
+            line += b'=' + bytes([(c + 64) & 255])
         else:
-            enc.append(c)
-    lines = b'\r\n'.join(bytes(enc[i:i + 128]) for i in range(0, len(enc), 128))
+            line.append(c)
+        if len(line) >= 128:
+            lines_out.append(bytes(line))
+            line = bytearray()
+    if line:
+        lines_out.append(bytes(line))
+    lines = b'\r\n'.join(lines_out)
     crc = zlib.crc32(data) & 0xffffffff
     return (b'=ybegin part=1 total=1 line=128 size=%d name=%s\r\n=ypart begin=1 end=%d\r\n' % (len(data), name.encode(), len(data))
             + lines + b'\r\n=yend size=%d part=1 pcrc32=%08x\r\n' % (len(data), crc))

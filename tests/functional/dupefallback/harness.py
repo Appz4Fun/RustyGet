@@ -6587,11 +6587,18 @@ def _live_scale():
         return 1
 
 
-def _live_clock(t, name):
+def _live_clock(t, name, extra=()):
     """The download's end and the moments its files were extracted."""
     return _LogClock(t, ['Collection %s completely downloaded' % name,
                          'Direct unpack for %s successful' % name,
-                         'Unpack for %s successful' % name])
+                         'Unpack for %s successful' % name] + list(extra))
+
+
+def _before_download_end(clock, name, needle):
+    """Whether ``needle`` was logged before the download ended."""
+    end = clock.seen.get('Collection %s completely downloaded' % name)
+    at = clock.seen.get(needle)
+    return end is not None and at is not None and at < end
 
 
 def _live_timing(clock, name):
@@ -6742,7 +6749,8 @@ def scenario_liveedgehole(daemon, t):
         members.append(('%s/%s' % (tag, n), n, len(d), seg, damage.get(i, set())))
     members += _edge_hole_par(t, work, names, seg)
     api = daemon.wait_ready()
-    clock = _live_clock(t, 'RelLEH')
+    past = 'Unrar: Extracting from Rel.part04.rar'
+    clock = _live_clock(t, 'RelLEH', [past])
     daemon.append(api, 'RelLEH', build_multi_nzb(members), False, 'leh-key', 100)
     h = daemon.wait_history(api, 'RelLEH', timeout=300)
     clock.close()
@@ -6750,9 +6758,13 @@ def scenario_liveedgehole(daemon, t):
     skipped = _grep_log(t, 'extracted past damage in movie.mkv')
     patched = _grep_log(t, 'repaired movie.mkv from the repaired volumes')
     paused = _grep_log(t, 'Pausing direct unpack at')
-    good = ok and h['Status'].startswith('SUCCESS') and skipped >= 1 and patched >= 1 and paused == 0
-    return ('liveedgehole', good, 'status=%s par=%s unpack=%s extracted_ok=%s skipped=%d patched=%d paused=%d %s' % (
-        h['Status'], h['ParStatus'], h['UnpackStatus'], ok, skipped, patched, paused, _live_timing(clock, 'RelLEH')))
+    went_on = _before_download_end(clock, 'RelLEH', past)
+    good = (ok and h['Status'].startswith('SUCCESS') and skipped >= 1 and patched >= 1 and paused == 0 and
+            went_on)
+    return ('liveedgehole', good, 'status=%s par=%s unpack=%s extracted_ok=%s skipped=%d patched=%d paused=%d '
+            'past_damage_before_download_end=%s %s' % (
+                h['Status'], h['ParStatus'], h['UnpackStatus'], ok, skipped, patched, paused, went_on,
+                _live_timing(clock, 'RelLEH')))
 
 
 def scenario_liveedgehole5(daemon, t):
@@ -6781,7 +6793,8 @@ def scenario_liveedgehole5(daemon, t):
         members.append(('%s/%s' % (tag, n), n, len(d), seg, damage.get(i, set())))
     members += _edge_hole_par(t, work, names, seg)
     api = daemon.wait_ready()
-    clock = _live_clock(t, 'RelLE5')
+    past = 'Unrar: Extracting from Rel.part04.rar'
+    clock = _live_clock(t, 'RelLE5', [past])
     daemon.append(api, 'RelLE5', build_multi_nzb(members), False, 'le5-key', 100)
     h = daemon.wait_history(api, 'RelLE5', timeout=300)
     clock.close()
@@ -6789,12 +6802,14 @@ def scenario_liveedgehole5(daemon, t):
     rebuilt = _grep_log(t, 'Rebuilt the end of Rel.part03.rar')
     skipped = _grep_log(t, 'extracted past damage in movie.mkv')
     patched = _grep_log(t, 'repaired movie.mkv from the repaired volumes')
-    paused = _grep_log(t, 'Pausing direct unpack at')
+    # (the volume is held while its tail is rebuilt, a moment after it finishes)
+    went_on = _before_download_end(clock, 'RelLE5', past)
     good = (ok and h['Status'].startswith('SUCCESS') and rebuilt == 1 and skipped >= 1 and patched >= 1 and
-            paused == 0)
+            went_on)
     return ('liveedgehole5', good, 'status=%s par=%s unpack=%s extracted_ok=%s tail_rebuilt=%d skipped=%d patched=%d '
-            'paused=%d %s' % (h['Status'], h['ParStatus'], h['UnpackStatus'], ok, rebuilt, skipped, patched, paused,
-                              _live_timing(clock, 'RelLE5')))
+            'past_damage_before_download_end=%s %s' % (
+                h['Status'], h['ParStatus'], h['UnpackStatus'], ok, rebuilt, skipped, patched, went_on,
+                _live_timing(clock, 'RelLE5')))
 
 
 

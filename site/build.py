@@ -319,8 +319,8 @@ def options_page(conf: Path, upstream_file: Path) -> tuple[str, list, list]:
     changed = sum(o["changed"] for s in sections for o in s["options"])
     parts.append(
         f'<p class="lede-sm">{total} options in {len(sections)} sections. '
-        f'<span class="tag tag-new">new</span> marks the {new} options that NZBGet doesn\'t have, and '
-        f'<span class="tag tag-ref">changed</span> marks the {changed} option{"s" if changed != 1 else ""} whose values or meaning differ from NZBGet. '
+        f'<span class="tag tag-new">new</span> marks the {new} options that RustyGet added, and '
+        f'<span class="tag tag-ref">changed</span> marks the {changed} option{"s" if changed != 1 else ""} whose values or meaning RustyGet changed. '
         "This page is generated from <code>rustyget.conf</code> on every build, "
         "so it always matches the code.</p>"
     )
@@ -339,7 +339,7 @@ def options_page(conf: Path, upstream_file: Path) -> tuple[str, list, list]:
         for o in section["options"]:
             tag = '<span class="tag tag-new">new</span>' if o["new"] else ""
             if o["changed"]:
-                tag = '<span class="tag tag-ref" title="NZBGet has this option with other values or another meaning">changed</span>'
+                tag = '<span class="tag tag-ref" title="RustyGet changed the values or meaning of this option">changed</span>'
             default = html.escape(o["default"]) if o["default"] else "<em>empty</em>"
             values = f'<span class="conf-values">{html.escape(o["values"])}</span>' if o["values"] else ""
             parts.append(

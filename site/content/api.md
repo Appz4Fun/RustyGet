@@ -1,23 +1,23 @@
 +++
 title = "API and compatibility"
-description = "RustyGet's JSON-RPC and XML-RPC API: what stays compatible with NZBGet, the new appendfleet method and fields, security changes, and the plan for SABnzbd compatibility."
+description = "RustyGet's JSON-RPC and XML-RPC API: compatibility with media managers, the new appendfleet method and fields, security changes, and the plan for SABnzbd compatibility."
 eyebrow = "Reference"
-lede = "RustyGet speaks NZBGet's API today, so media managers and the Kodi add-on work unchanged. As the rewrite moves on, the API may change, and RustyGet may add a SABnzbd-compatible API next to it."
+lede = "RustyGet answers the widely supported NZBGet-compatible API, so media managers and the Kodi add-on work unchanged. The API may grow, and RustyGet may add a SABnzbd-compatible API next to it."
 +++
 
 ## Compatibility
 
 > [!IMPORTANT] Compatibility isn't guaranteed
-> RustyGet is a rewrite, not a fork that tracks NZBGet. Today it answers every NZBGet API method, but future versions may change or drop parts of the NZBGet API, and may add a SABnzbd-compatible API. Release notes list every change that breaks a client.
+> Today RustyGet answers every method of the NZBGet-compatible API. Future versions may change or drop parts of it where the old behavior is unsafe, and may add a SABnzbd-compatible API. Release notes list every change that breaks a client.
 
 | Interface | Today | Plan |
 |---|---|---|
-| NZBGet JSON-RPC and XML-RPC | Every method, with the changes on this page | Kept while clients depend on it. Methods may change where the old behavior is unsafe or in the way of the rewrite. |
-| NZBGet JSON-P | Off unless option `JsonP` turns it on; then the methods that read, with the restricted user's access | Kept as an option for old clients |
+| JSON-RPC and XML-RPC (NZBGet-compatible) | Every method, with the changes on this page | Kept while clients depend on it. Methods may change where the old behavior is unsafe. |
+| JSON-P | Off unless option `JsonP` turns it on; then the methods that read, with the restricted user's access | Kept as an option for old clients |
 | `appendfleet` | Available | Kept and extended |
 | SABnzbd API | Not available | Under consideration, so that clients that only speak SABnzbd can use RustyGet |
-| `rustyget.conf` (`nzbget.conf` still read) | NZBGet's format, plus new options | Kept |
-| Queue and history files | NZBGet's formats, plus a trailer that NZBGet ignores | Kept for now |
+| `rustyget.conf` (an existing `nzbget.conf` is read too) | The classic `Name=value` format, plus new options | Kept |
+| Queue and history files | The classic queue formats, with RustyGet's data in a trailer | Kept for now |
 
 ## Connecting
 
@@ -44,7 +44,7 @@ JSON-RPC takes positional parameters only: names are ignored, and the order matt
 
 ## Methods
 
-This is every method that RustyGet answers. All but `appendfleet` and the three `tlscipher` methods are inherited from NZBGet, and the repository's [API reference](https://github.com/Appz4Fun/RustyGet/blob/HEAD/docs/api/API.md) documents most of them in detail.
+This is every method that RustyGet answers. The repository's [API reference](https://github.com/Appz4Fun/RustyGet/blob/HEAD/docs/api/API.md) documents most of them in detail.
 
 | Area | Methods |
 |---|---|
@@ -130,11 +130,11 @@ RustyGet also stores its findings as NZB parameters, which the API returns in `P
 
 ## Changes to existing methods
 
-RustyGet fixes several problems in NZBGet's API. Clients that rely on the old behavior may need changes:
+RustyGet closes several security problems of the classic API. Clients that rely on the old behavior may need changes:
 
-- **JSON-P off by default.** Any web page can make a browser send a JSON-P request, with the login the browser keeps, and read the answer. RustyGet answers JSON-P only with option `JsonP=yes`, and then with the restricted user's access, so user names, passwords, and API keys come back as `***`. Otherwise every JSON-P request answers error 403. NZBGet answered JSON-P with full access.
-- **POST for methods that change something.** Plain GET and JSON-P run only the methods that read: `config`, `configtemplates`, `dump`, `history`, `listfiles`, `listgroups`, `loadconfig`, `loadlog`, `log`, `logupdate`, `postqueue`, `servervolumes`, `status`, `sysinfo`, `systemhealth`, `urlqueue`, and `version`. Every other method answers error 4 there. `readurl`, `testserverspeed`, `testdiskspeed`, and `testnetworkspeed` joined the methods that need POST. In NZBGet, JSON-P ran every method, so a `<script>` tag on any web page could edit the queue, change settings, or shut NZBGet down with the browser's saved login.
-- **Access checks in multicalls.** The XML-RPC `system.multicall` method runs each call with the caller's access level. In NZBGet, a restricted account could read passwords through it.
+- **JSON-P off by default.** Any web page can make a browser send a JSON-P request, with the login the browser keeps, and read the answer. RustyGet answers JSON-P only with option `JsonP=yes`, and then with the restricted user's access, so user names, passwords, and API keys come back as `***`. Otherwise every JSON-P request answers error 403. The classic API answered JSON-P with full access.
+- **POST for methods that change something.** Plain GET and JSON-P run only the methods that read: `config`, `configtemplates`, `dump`, `history`, `listfiles`, `listgroups`, `loadconfig`, `loadlog`, `log`, `logupdate`, `postqueue`, `servervolumes`, `status`, `sysinfo`, `systemhealth`, `urlqueue`, and `version`. Every other method answers error 4 there. `readurl`, `testserverspeed`, `testdiskspeed`, and `testnetworkspeed` joined the methods that need POST. In the classic API, JSON-P ran every method, so a `<script>` tag on any web page could edit the queue, change settings, or shut the program down with the browser's saved login.
+- **Access checks in multicalls.** The XML-RPC `system.multicall` method runs each call with the caller's access level. In the classic API, a restricted account could read passwords through it.
 - **Range checks.** Integers outside the 32-bit range are rejected instead of wrapping around. `editqueue` checks scores, priorities, parameters, and duplicate modes.
 - **Safe configuration saves.** `saveconfig` refuses an empty or malformed option list instead of truncating the file.
 - **Decoding.** `append` decodes post-processing parameters, so passwords with quotes work. Numeric escapes decode to UTF-8, and characters outside the Basic Multilingual Plane come out as valid JSON.

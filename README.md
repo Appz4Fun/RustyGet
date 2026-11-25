@@ -7,55 +7,43 @@
 
 <p align="center">
   <a href="https://rustyget.xbmc4lyfe.com/"><img alt="Documentation" src="https://img.shields.io/badge/docs-rustyget.xbmc4lyfe.com-a8400f"></a>
-  <a href="https://github.com/Appz4Fun/RustyGet/actions/workflows/pages.yml"><img alt="Docs build" src="https://github.com/Appz4Fun/RustyGet/actions/workflows/pages.yml/badge.svg"></a>
   <img alt="Rust 1.99.0" src="https://img.shields.io/badge/rust-1.99.0-1d6f60">
-  <img alt="Status: rewrite in progress" src="https://img.shields.io/badge/status-rewrite%20in%20progress-8a5a00">
   <a href="COPYING"><img alt="License: GPL v2 or later" src="https://img.shields.io/badge/license-GPL--2.0--or--later-3d5a73"></a>
 </p>
 
-RustyGet is a Usenet downloader that started as a fork of [NZBGet](https://github.com/nzbgetcom/nzbget) and is being rewritten in Rust. It carries every improvement from NZBGet [pull request 850](https://github.com/nzbgetcom/nzbget/pull/850), which NZBGet never merged, and builds on them: RustyGet treats every copy of a release as one **fleet**, so an article that's missing on every news server comes from another copy instead of failing the download.
+RustyGet is a Usenet downloader written in Rust. It treats every copy of a release as one **fleet**: an article that's missing on every news server comes from another copy instead of failing the download, and when a copy can't complete, the next best one takes over within seconds.
 
 **[Read the documentation](https://rustyget.xbmc4lyfe.com/)**
 
-> [!IMPORTANT]
-> RustyGet is no longer a fork. The repository has left GitHub's fork network and is a standalone rewrite. It still speaks NZBGet's API today, but future versions may break NZBGet API compatibility, and may add a SABnzbd-compatible API. See [API and compatibility](https://rustyget.xbmc4lyfe.com/api.html).
-
 ## Contents
 
-- [What's different from NZBGet](#whats-different-from-nzbget)
+- [What RustyGet does](#what-rustyget-does)
 - [How deduplication works](#how-deduplication-works)
-- [Pull request 850](#pull-request-850)
-- [A rewrite, not a fork](#a-rewrite-not-a-fork)
+- [Built in Rust](#built-in-rust)
 - [Build and run](#build-and-run)
+- [Works with your tools](#works-with-your-tools)
 - [Documentation](#documentation)
 - [Contribute](#contribute)
-- [License and credits](#license-and-credits)
+- [License](#license)
 
-## What's different from NZBGet
+## What RustyGet does
 
-| Area | NZBGet | RustyGet |
-|---|---|---|
-| Language | C++ | Rust, ported module by module, each port proven identical by differential tests |
-| An article missing on every server | Lost, and left to par2 repair or failure | Fetched from a matching file in another copy of the release. A borrowed yEnc article must fit its place in the file, and, where they're available, it's checked against its yEnc checksum and the download's par2 block checksums |
-| Duplicates of a release | Spare downloads, tried one after another from scratch | One fleet: copies lend each other articles, bytes, and par2 recovery volumes |
-| Byte-identical copies | Not detected | **Twins** proven by par2 checksums (MD5, 16 KB hash, and length of every file); other encodes are **alts**, kept mainly as failover backups |
-| Not enough par2 blocks | Repair fails | Repairs with the fewest recovery volumes of a twin that cover the damage |
-| Holes after the download | Left to par2 | Stream repair patches verified bytes from duplicates, even across RAR, ZIP, 7-Zip, raw splits, and encrypted RAR |
-| A download that can't complete | Runs to the end, then fails over | `HealthCheck=dupe` fails over within seconds, and a probe parks dead copies before they download |
-| Finding more copies | Only what feeds and clients send | The app that sends a fleet finds the copies; RustyGet trusts them and checks each one on your servers |
-| Clients with many copies | One `append` per copy | One `appendfleet` call: RustyGet checks every copy and downloads the most complete one |
-| Configuration | 155 options | 23 new options and a new `HealthCheck` value, off unless the configuration file turns them on; RustyGet's configuration template turns on live repair and early failover |
-| API | NZBGet API | NZBGet API, plus `appendfleet`, new fields, POST for every method that changes something (plain GET runs only the methods that read), JSON-P off unless option `JsonP` turns it on, and access checks in multicalls |
-| Queue and history files | NZBGet formats | NZBGet formats, with RustyGet's data in a trailer that NZBGet ignores |
-| Inherited bugs | | About 100 fixed, 96 of them [reported to NZBGet as its issues 940 to 1046](https://github.com/nzbgetcom/nzbget/issues?q=is%3Aissue+author%3Axbmc4lyfe): downloads, post-processing, queue edits, state files, scripts, feeds, and the web interface |
-| Unpacking | External `unrar` and `7z` programs | Built in, with no external programs |
-| CI workflows | Builds and tests for every platform | Builds and tests on Linux x86-64 and macOS for every pull request and push to `main` |
-
-The new options are `DupeArticleFallback`, `DupeStreamDecompress`, `DupeStreamTimeout`, `DupeBorrowFirst`, `DupeWatch`, `DupeHealthPreset`, `DupeHealthPercent`, `DupeHealthMin`, `DupeHealthMax`, `DupeBodyChecks`, `DupeHealthBudget`, `DupeMinAlive`, `DupeBodyPercent`, `DupeCheckConcurrency`, and `DupeCheckConnections`, plus `JsonP` in the security settings. The full list of changes is in [Differences from NZBGet](https://rustyget.xbmc4lyfe.com/differences.html).
+| Area | RustyGet |
+|---|---|
+| An article missing on every server | Fetched from a matching file in another copy of the release. A borrowed yEnc article must fit its place in the file, and, where they're available, it's checked against its yEnc checksum and the download's par2 block checksums |
+| Copies of a release | One fleet: copies lend each other articles, bytes, and par2 recovery volumes |
+| Byte-identical copies | **Twins** proven by par2 checksums (MD5, 16 KB hash, and length of every file); the same video in other packaging is an **alt** |
+| Not enough par2 blocks | Repairs with the fewest recovery volumes of a twin that cover the damage |
+| Holes after the download | Stream repair patches verified bytes from other copies, even across RAR, ZIP, 7-Zip, raw splits, and encrypted RAR |
+| PAR2 repair | With `LiveParRepair=yes`, runs while the download arrives and finishes as the last article lands |
+| A download that can't complete | `HealthCheck=dupe` fails over within seconds, and a probe parks dead copies before they download |
+| Clients with many copies | One `appendfleet` call: RustyGet checks every copy and downloads the most complete one |
+| Unpacking | Built in, with no external programs |
+| First start | Starts with no configuration file or a broken one, with a setup guide and Settings that check every value before saving |
 
 ## How deduplication works
 
-The same release usually exists as many postings: reposts, listings on several indexers, and other encodes. NZBGet keeps them as spares. RustyGet uses them together, and it pairs with the beta version of the [NeNeTeePee Stream](https://github.com/Appz4Fun/NeNeTeePee-Stream-Kodi) add-on for Kodi, which can use RustyGet as its download backbone.
+The same release usually exists as many postings: reposts, listings on several indexers, and other encodes. RustyGet uses them together, and it pairs with the beta version of the [NeNeTeePee Stream](https://github.com/Appz4Fun/NeNeTeePee-Stream-Kodi) add-on for Kodi, which can use RustyGet as its download backbone.
 
 ### The add-on finds and deduplicates the fleet
 
@@ -68,43 +56,23 @@ The same release usually exists as many postings: reposts, listings on several i
 ### RustyGet picks the copy and keeps the rest working
 
 1. **Check every copy on your servers.** RustyGet checks a sample of each posting's articles on all of your news servers at once, and downloads a few in full to verify their checksums. It marks copies of the same posting that the add-on couldn't see.
-2. **Rank.** Copies that are alive come first, then unknown, then dead. Within a group, the most complete copy wins, then the one whose size is closest to the fleet's median, which is usually the release's own packaging.
-3. **Queue the best, keep the rest.** The top copy downloads, and the others wait in history as scored backups, with their measured health.
-4. **Borrow, repair, fail over.** During the download, a missing article comes from a matching file in another copy. A yEnc article must fit its place in the file, and, where they're available, it's checked against its yEnc checksum and the download's par2 block checksums. [Duplicate fleets](https://rustyget.xbmc4lyfe.com/duplicate-fleets.html#making-sure-the-bytes-are-right) lists when a check can't run. Holes are patched from verified bytes. If the copy can't complete, the best backup takes over within seconds, and the add-on follows the duplicate key to the new download.
+2. **Rank.** Copies that are alive come first, then unknown, then dead. Within a group, the most complete copy wins, then the easiest one to borrow from: plain or split files, then stored archives, then compressed, then encrypted.
+3. **Queue the best, keep the rest.** The top copy downloads, and the others wait in Downloads as a collapsed fleet, in the order they'd take over, with their measured health.
+4. **Borrow, repair, fail over.** During the download, a missing article comes from a matching file in another copy. Holes are patched from verified bytes. If the copy can't complete, the best backup takes over within seconds, and the add-on follows the duplicate key to the new download.
 
-The add-on decides *which release* you get. RustyGet decides *which copy* of it downloads, because only your news servers know which copies still exist. Fleet submission with `appendfleet` came in add-on pull requests [514](https://github.com/Appz4Fun/NeNeTeePee-Stream-Kodi/pull/514), [518](https://github.com/Appz4Fun/NeNeTeePee-Stream-Kodi/pull/518), and [519](https://github.com/Appz4Fun/NeNeTeePee-Stream-Kodi/pull/519), and shipped in the add-on's [2.0.0-beta.3](https://github.com/Appz4Fun/NeNeTeePee-Stream-Kodi/releases/tag/v2.0.0-beta.3) pre-release on 2026-10-11. With stock NZBGet, the add-on falls back to one `append` per copy.
+The add-on decides *which release* you get. RustyGet decides *which copy* of it downloads, because only your news servers know which copies still exist.
 
 For more detail, see [Duplicate fleets](https://rustyget.xbmc4lyfe.com/duplicate-fleets.html), [Streaming with Kodi](https://rustyget.xbmc4lyfe.com/kodi.html), and [NZBHydra2](https://rustyget.xbmc4lyfe.com/nzbhydra2.html).
 
-## Pull request 850
+## Built in Rust
 
-NZBGet pull request [850](https://github.com/nzbgetcom/nzbget/pull/850), "Add DupeArticleFallback: recover missing articles from duplicate releases," opened in July 2026. Over three months it grew from article fallback to the whole fleet: stream repair across packaging and encryption, live repair, early failover with `HealthCheck=dupe`, donor search through NZBHydra2, `appendfleet`, a queue format that NZBGet can still read, about 100 fixes to inherited bugs, and a functional test harness with more than 100 scenarios. It reached 385 commits and about 45,000 added lines, much of it tests.
+RustyGet has no external helper programs. Archives, parity, yEnc, compression and XML are handled in-process by Rust libraries:
 
-What the pull request's comments documented, in order:
+- **[zipfast](https://github.com/xbmc4lyfe/zipfast) and zipview:** RAR (1.5 through 5.0, multi-volume, encrypted data and headers), 7-Zip (including split `.7z.001`), ZIP, TAR, Gzip, Bzip2, XZ and Zstandard, extracted while the download arrives, with no `unrar` or `7z` executables. Nested archives, obfuscated archive names and file permissions are handled in the unpack pipeline.
+- **[par-rs](https://github.com/xbmc4lyfe/par-rs)** handles par2 verification, repair while downloading, Reed-Solomon repair and the renaming of obfuscated files.
+- **SIMD yEnc, `crc32fast`, `flate2` (`zlib-rs`) and `quick-xml`.**
 
-- **July 8–12: article fallback.** An article that fails on every server is fetched from a duplicate posting of the same release; a borrowed yEnc article is checked by its header before anything is written. A per-file "Recovered N of M" log line and the `DupeRecoveredArticles` counter in the API and web interface. Cutover after three recoveries in a file, lead rotation after three misses in a row, and a fix for a use-after-free crash with many duplicates.
-- **July 9–12: stream repair.** `DupeArticleFallback` became `no`, `article`, `stream`, or `live`. Byte-level repair from same-byte reposts, across packaging (store-mode RAR, ZIP, 7-Zip, raw splits), and across RAR encryption with the NZB password. `DupeStreamDecompress` repairs from compressed duplicates, live mode repairs during the download, and a fully repaired release without par2 completes with `SUCCESS`.
-- **September 10: par2 first.** In the `stream` and `live` modes, when a download's own par2 files can repair the damage, they repair it first; in `article` mode, articles are borrowed right away. articles of recognized par2 files are never borrowed. The first article of each file is the exception: RustyGet borrows it at once, because it needs that article to identify and rename the file. Later work added another: when par2 clearly can't cover the damage, duplicates go first.
-- **September 12: no more stalls.** A repair that waited hours on an unavailable duplicate moves on to the next one; requests for one release dropped from 258 to 9.
-- **October 2: renamed and obfuscated duplicates.** Up to 8 probe articles per file, up to 32 same-size files of an obfuscated posting checked, a full par check instead of the quick one when par check runs after a donor write, and the repair after the download fetching with a quarter of the main servers' connections, but between 4 and 16 of them; live repair fetches one article at a time.
-- **October 5: failover and search.** `HealthCheck=dupe` with a dead-copy probe, `DupeStreamTimeout`, `DupeSearch` through Newznab or NZBHydra2 with a dry run, whole files rebuilt from a byte-identical duplicate, server answer 451 treated as missing when downloading and probing, and the yEnc checksum of articles fetched for stream repair checked whenever the article carries one, even with `CrcCheck=no`.
-- **October 5: compatibility and pairing.** Queue files written in NZBGet's own format again, with this work's data in a trailer NZBGet ignores; pairing by the part counts that subjects declare; a dead download fails over once 64 articles beyond the first of each file have failed, instead of after up to 1,000.
-
-After the last comment, the branch added `appendfleet`, twins and alts from par2 file lists, repair with a twin's par2 volumes, about 100 fixes to inherited bugs, and the start of the Rust port.
-
-On 2026-10-09 the NZBGet maintainers closed it without merging, along with the related bug reports. No formal review was submitted, and no reason was given. That work is the starting point of RustyGet.
-
-## A rewrite, not a fork
-
-- **Left the fork network.** This repository is standalone on GitHub. It no longer tracks NZBGet's development or sends changes back as pull requests.
-- **Rewriting in Rust with zero external helper binaries.** RustyGet rolls its own 7-Zip, unrar, yEnc, compression, XML, terminal UI, and parity engines directly into the Rust source:
-  - **Built-in unrar & 7-Zip (`zipfast` & `zipview`):** archive inspection and extraction for RAR (RAR 1.5/2.0/2.9/4.x/5.0, multi-volume `.partNN.rar` and `.rNN`, password-encrypted data and headers), 7-Zip (`.7z` and split `.7z.001`), ZIP, TAR, Gzip, Bzip2, XZ, and Zstandard run 100% in-process in Rust without external `unrar` or `7z` executables.
-  - **First-class Extended Unpacker, Extended Unrar, and Permission Fixer:** recursive extraction of nested archives, obfuscated archive header-magic detection, and POSIX permission normalization (`0644` for files, `0755` for directories) are built directly into the core unpack pipeline rather than relying on external Python extension scripts or an Extension Manager.
-  - **Built-in SIMD yEnc & Compression (`nntmux-yenc`, `crc32fast`, `flate2`):** uses Atlas's SIMD yEnc crate (`nntmux-yenc`), `crc32fast`, `flate2` (`zlib-rs`), and `quick-xml` instead of legacy C/C++ `rapidyenc`, `zlib`, `libxml2`, `ncurses`, or `Boost`.
-  - **Built-in Parity (`par-rs`):** purpose-built Rust PAR2 verification, repair-while-downloading (`StreamingParSession`), post-download Reed-Solomon repair (`Par2Repairer`), and deobfuscation rename (`ParRenamer`) engine rolled directly into RustyGet (replacing `par2-turbo` and `rust-par2`).
-- **Target platforms.** RustyGet targets macOS (Apple Silicon and Intel) and x86_64 Linux with tuned, zero-warning default settings out of the box.
-- **API compatibility may change.** Today RustyGet answers NZBGet's API, so Sonarr, Radarr, and the Kodi add-on work unchanged. Future versions may break NZBGet API compatibility where the old behavior is unsafe or in the way, and may add a SABnzbd-compatible API.
-- **New name.** The project is RustyGet. The binary is `rustyget`, and it reads `rustyget.conf` or, failing that, an existing `nzbget.conf`, so NZBGet setups keep working. The configuration template in the repository is still named `nzbget.conf`.
+RustyGet targets macOS (Apple Silicon) and x86_64 Linux. Every build runs on an Intel Coffee Lake desktop and an Apple M4; newer CPU instructions are used where a benchmark proves them faster.
 
 ## Build and run
 
@@ -113,37 +81,34 @@ RustyGet runs on Linux and macOS. It has no release packages yet, so build it fr
 ```bash
 git clone https://github.com/Appz4Fun/RustyGet.git rustyget
 cd rustyget
-just build
 [ -e ~/.rustyget ] || install -m 600 rustyget.conf ~/.rustyget
-build/release/rustyget -c ~/.rustyget -o WebDir="$PWD/webui" -o ConfigTemplate="$PWD/rustyget.conf" -D
+just run ~/.rustyget
 ```
 
-The configuration template in the repository is `rustyget.conf`. `~/.rustyget` is where RustyGet saves your configuration, and the web interface writes your settings there. The test keeps an existing copy when you run these steps again to upgrade. Then open `http://<host>:6789`. The default login is `rustyget` with the password `tegbzn6789`. Change it first. See [Install and build](https://rustyget.xbmc4lyfe.com/install.html) for the libraries each platform needs, and [Quick start](https://rustyget.xbmc4lyfe.com/quick-start.html) for the first settings.
+`just run <config>` builds the release binary and starts it with that configuration file, which the line before copies from the template on the first run. Then open `http://127.0.0.1:6789` on the same computer: the template listens on `127.0.0.1`, and the default login is `rustyget` with the password `tegbzn6789`. Change the password first, and set `ControlIP` to reach RustyGet from other devices. Started with no configuration file at all, `rustyget -D` creates one with a random password and prints it once. See [Install and build](https://rustyget.xbmc4lyfe.com/install.html) for the libraries each platform needs, and [Quick start](https://rustyget.xbmc4lyfe.com/quick-start.html) for the first settings.
 
-To move from NZBGet, stop it, back up the queue directory and `nzbget.conf`, and start RustyGet with the same configuration file.
+## Works with your tools
+
+RustyGet answers the widely supported NZBGet-compatible JSON-RPC API, so Sonarr, Radarr, Prowlarr and the Kodi add-on connect to it unchanged: in those apps, add RustyGet as an **NZBGet** download client. RustyGet adds `appendfleet` and new fields, runs methods that change something only by POST, and checks access in multicalls. An existing `nzbget.conf` and queue directory are read as they are. Future versions may also add a SABnzbd-compatible API. See [API and compatibility](https://rustyget.xbmc4lyfe.com/api.html).
 
 ## Documentation
 
-[NZBGet Observe](tools/nzbget-observe/README.md) is an opt-in Rust watcher that
-tracks job progress, records Linux resource observations, and saves bounded
-evidence when an active job stops showing progress. Its guide explains how to
-investigate downloading, storage, PAR repair, and unpacking symptoms.
-
 The **[documentation site](https://rustyget.xbmc4lyfe.com/)** covers:
 
-- [Feature highlights](https://rustyget.xbmc4lyfe.com/features.html) and [Differences from NZBGet](https://rustyget.xbmc4lyfe.com/differences.html)
+- [Feature highlights](https://rustyget.xbmc4lyfe.com/features.html)
 - [Duplicate handling](https://rustyget.xbmc4lyfe.com/duplicates.html) and [Duplicate fleets](https://rustyget.xbmc4lyfe.com/duplicate-fleets.html)
 - [Check, repair, and unpack](https://rustyget.xbmc4lyfe.com/post-processing.html), [Servers, RSS, and scheduling](https://rustyget.xbmc4lyfe.com/automation.html), and [Performance tuning](https://rustyget.xbmc4lyfe.com/performance.html)
 - [Configuration options](https://rustyget.xbmc4lyfe.com/options.html), generated from `rustyget.conf`
 - [API and compatibility](https://rustyget.xbmc4lyfe.com/api.html) and the [Design system](https://rustyget.xbmc4lyfe.com/design-system.html)
-- [Offline benchmark viewer and evidence](benchmarks/nanobench-poc.tar.gz), a fixture-only proof of concept with its production performance hold unchanged. Unpack it and open `nanobench-poc/index.html`.
 
-The site's source is in [`site/`](site). It deploys on every push to the default branch, after Vale checks the prose against the Google developer documentation style.
+[RustyGet Observe](tools/nzbget-observe/README.md) is an opt-in Rust watcher that tracks job progress, records Linux resource observations, and saves bounded evidence when an active job stops showing progress.
+
+The site's source is in [`site/`](site), with the prose checked by Vale against the Google developer documentation style.
 
 ## Contribute
 
 Issues and pull requests are welcome in this repository. Write new code in Rust, keep ports byte-identical with the code they replace, and add tests that fail without your change. AI-assisted work is welcome if you say which tools you used and understand every line. See [Contributing](https://rustyget.xbmc4lyfe.com/contributing.html).
 
-## License and credits
+## License
 
-RustyGet is free software under the [GNU General Public License](COPYING), version 2 or, at your option, any later version. It's built on NZBGet, created by its original author and continued by the NZBGet team; their copyright notices stay in the source.
+RustyGet is free software under the [GNU General Public License](COPYING), version 2 or, at your option, any later version. The copyright notices of everyone whose work it contains stay in the source files.

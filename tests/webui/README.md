@@ -16,7 +16,7 @@ copy in the daemon's failover order (DupeFleetOrder) with its label and state,
 desktop and phone widths.
 
 The WebUI density regression check uses Playwright and Chrome against an isolated,
-loopback NZBGet instance serving the current WebUI. The fixture should start with
+loopback RustyGet instance serving the current WebUI. The fixture should start with
 one configured news server. Never use a production instance: the check changes
 the browser's unsaved configuration, and intercepts `saveconfig` before it reaches
 the daemon.

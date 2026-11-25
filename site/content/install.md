@@ -6,7 +6,7 @@ lede = "RustyGet runs on Linux and macOS, and builds from source with Just and R
 +++
 
 > [!IMPORTANT] No release packages yet
-> The NZBGet installers, Docker images, and NAS packages install stock NZBGet, not RustyGet. Until RustyGet publishes its own packages, build it from source.
+> RustyGet has no installers, Docker images, or NAS packages yet. Until it publishes its own packages, build it from source.
 
 ## Requirements
 
@@ -149,17 +149,14 @@ Start it with `sudo systemctl enable --now rustyget`. These paths assume `/usr/l
 
 On other systems, start RustyGet with `rustyget -D` from your init system and stop it with `rustyget -Q`.
 
-## Move from NZBGet
+## Use an existing configuration
 
-RustyGet reads NZBGet's configuration file, queue, and history, so you can point it at an existing setup.
+RustyGet reads an existing `nzbget.conf`, queue and history as they are, so you can point it at a setup you already have.
 
-1. Stop NZBGet.
+1. Stop the program that uses them.
 2. Back up the queue directory (`QueueDir`) and `nzbget.conf`.
 3. Start RustyGet with the same configuration file, or rename it to `rustyget.conf`. Without `-c`, RustyGet reads `nzbget.conf` only when it finds no `rustyget.conf`, and logs a notice when it does.
 
-RustyGet writes the queue in NZBGet's format and keeps its own extra data in a trailer that NZBGet ignores, so NZBGet can still read the queue afterward. Some RustyGet-only state is lost if you go back.
+RustyGet keeps its own extra data, such as stream-repair progress and recovery counters, in a trailer of the queue files.
 
-> [!WARNING] Back up before you switch back
-> If you return to NZBGet, back up the queue directory first. NZBGet keeps the queue and history but drops RustyGet's extra data, such as stream-repair progress and recovery counters, the first time it saves.
-
-Options that your NZBGet configuration file doesn't list take RustyGet's built-in values. The duplicate-fleet settings are off in those, so your setup behaves as before until you turn them on, one at a time, as described in [Duplicate fleets](duplicate-fleets.md). A few other built-in values differ from NZBGet's; [Differences from NZBGet](differences.md#defaults) lists them.
+Options that your configuration file doesn't list take RustyGet's built-in values, and those turn duplicate fleets on: `DupeArticleFallback=live`, `DupeStreamDecompress=yes`, `DupeBorrowFirst=yes`, `DupeWatch=yes`, and `HealthCheck=dupe`. To keep the old behavior, set those options in the file; [Duplicate fleets](duplicate-fleets.md) explains each one.

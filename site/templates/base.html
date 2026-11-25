@@ -63,7 +63,7 @@
     </nav>
     {% endif %}
     <footer class="footer">
-      <span>{{ site.name }} is free software under the <a href="{{ site.repo }}/blob/{{ site.branch }}/COPYING">GNU GPL v2</a>. It started from NZBGet and keeps its copyright notices.</span>
+      <span>{{ site.name }} is free software under the <a href="{{ site.repo }}/blob/{{ site.branch }}/COPYING">GNU GPL v2</a>. It keeps the copyright notices of everyone whose work it contains.</span>
       {% if page.slug != "404" %}<a href="{{ site.repo }}/edit/{{ site.branch }}/site/content/{{ page.slug }}.md">Edit this page</a>{% endif %}
       <a href="{{ site.repo }}/issues">Report an issue</a>
       <span class="built">built from {{ sha or "a local tree" }}{% if built %} · {{ built }}{% endif %}</span>

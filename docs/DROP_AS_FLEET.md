@@ -105,7 +105,7 @@ get the DupeKey `dupes:<group name>` and a DupeScore in the order they came
 (`DupePrimaryScore`, 100 by default, for the first, then 99, 98, ...;
 `dupecoord::next_group_score`), and the log says "Grouping X with N other
 copy(ies) of the same release". The duplicate check that follows then does what
-NzbGet's DupeMode SCORE always did: the copy that came first downloads, the
+DupeMode SCORE always did: the copy that came first downloads, the
 rest wait in history as backups, and TwinCheck labels each one (it only looks at
 downloads with a DupeKey).
 

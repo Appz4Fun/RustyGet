@@ -1,45 +1,20 @@
-# How to Contribute #
+# How to contribute
 
-While we are working on NZBGet project all the time, we still would really like and need help on many areas:
+Help is welcome in every area: code for features and bugs, tests, and documentation. Open an [issue](https://github.com/Appz4Fun/RustyGet/issues/new) or a [pull request](https://github.com/Appz4Fun/RustyGet/compare), and share how you use RustyGet.
 
-- Major - code contributions on features and bugs
-- Improvements in tests 
-- Improvements on documentation
+## Documentation
 
-We entice our users to participate in the project, please don't hesitate to get involved - create a [new issue](https://github.com/nzbgetcom/nzbget/issues/new) or [pull request](https://github.com/nzbgetcom/nzbget/compare) - that would also greatly help if you'll share your usage experience.
+The user documentation is the [documentation site](https://rustyget.xbmc4lyfe.com/); its source is in `site/`. The rules for agents and reviewers are in [AGENTS.md](../AGENTS.md).
 
-## Documentation ##
+## Development
 
-Main documentation is available on the NZBGet.com website - [https://nzbget.com/documentation/](https://nzbget.com/documentation/)
+- Build and run on Linux and macOS: see [Build and run](../README.md#build-and-run).
+- Work on a feature branch and open a pull request against `main`. Before every push, run the checks listed in AGENTS.md under "Build and test before every push" on macOS and Linux.
+- Pull requests are squash-merged into `main` as one signed commit.
 
-## Development ##
+### Version changes
 
-NZBGet natively supports for multiple platforms and build options, so each platform has their own development documenation, including:
-
-- [Linux and macOS](../README.md#build-and-run)
-- [Docker](https://github.com/nzbgetcom/nzbget/blob/develop/docker/README.md)
-
-### Branches naming policy ###
-
-- `main` is a protected branch that contains only release code
-- `develop` is a protected branch for development
-- new branches should follow the following convention:
-  - `hotfix/brief-description` for any small hotfixes
-  - `feature/brief-description` for any new developments
-  - `bugfix/brief-description` for bugs
-
-### Pull requests flow for `develop` and `main` branches ### 
-
-1. For PRs targeting `develop` branch `Squash and merge` mode must be used.
-2. After merging branch to `develop`, branch must be deleted.
-3. For release PR (`develop` -> `main`) `Create a merge commit` mode must be used.
-4. After merging `develop` -> `main`, must be back merge `main` -> `develop` before any changes in `develop` branch.
-
-This flow results to the fact that in the PR to master branch we see only the squashed commits that correspond to the PRs in the develop branch in current release cycle.
-
-### Version changes in release cycle
-
-After the release has been published (from the `main` branch), the minor version in the `develop` branch should be increased so that subsequent test builds are a higher version than the release.
+After a release has been published from `main`, the minor version should be increased so that subsequent test builds are a higher version than the release.
 
 List of files to change version:
 

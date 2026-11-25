@@ -2,7 +2,7 @@
 title = "Feature highlights"
 description = "What makes RustyGet fast and reliable: efficient native code, fast deobfuscation, quick par verification, multicore repair, article retries, a complete API, RSS duplicate checks, and duplicate fleets."
 eyebrow = "Features"
-lede = "RustyGet keeps everything that made NZBGet fast and adds a new layer: it treats every copy of a release as one fleet, so a missing article on one posting no longer means a failed download."
+lede = "RustyGet is built to be fast on small devices and adds a new layer: it treats every copy of a release as one fleet, so a missing article on one posting no longer means a failed download."
 +++
 
 ## Efficient by design
@@ -15,7 +15,7 @@ People new to Usenet often assume that download speed depends only on the connec
 
 A downloader reverses all three for every article: it decodes the text, checks each piece, joins the pieces into files, and repairs what's missing. That's real computation, and on a small device it decides how fast you can download.
 
-RustyGet inherits NZBGet's answer: native code compiled for your CPU, efficient algorithms, no wasted work, and no loading whole files into memory. NZBGet runs on devices with 32 MB of RAM and a 200 MHz CPU, and RustyGet keeps that budget as a design goal. The rewrite moves the code to Rust one module at a time and measures each step. Some ports are much faster than the C++ they replace: combining article checksums runs about 135 times faster, and deobfuscation about 16 times faster.
+RustyGet's answer: native code compiled for your CPU, efficient algorithms, no wasted work, and no loading whole files into memory. Small devices stay a design goal. Every change is measured: combining article checksums runs about 135 times faster than the code it replaced, and deobfuscation about 16 times faster.
 
 The same design pays off on large machines. Extra memory becomes an article cache that cuts disk writes, and extra cores run more connections and faster par repair. See [Performance tuning](performance.md).
 
@@ -25,7 +25,7 @@ Many postings hide their real filenames. A typical obfuscated posting has a 32-c
 
 The par2 files of a posting record the original names. The usual fix is to run par2cmdline, whose command is `par2 r <name>.par2`, which reads every downloaded file before it restores the names. How long that takes depends on the size and the disk: from several minutes to tens of minutes.
 
-RustyGet's par-rename restores the names in seconds, even on slow devices, because it reads only the names that the par2 files store and needs no verification pass. NZBGet's own example: a 4 GB download with 75 renamed files, restored in two seconds on a slow Linux device. The download's log shows each step:
+RustyGet's par-rename restores the names in seconds, even on slow devices, because it reads only the names that the par2 files store and needs no verification pass: a 4 GB download with 75 renamed files is restored in about two seconds. The download's log shows each step:
 
 ```text
 INFO  Checking renamed files for Example.Release
@@ -36,7 +36,7 @@ INFO  Successfully renamed 75 file(s) for Example.Release
 
 ### RAR-rename
 
-RAR-rename, added in NZBGet 18.0, restores the names of multi-volume RAR archives from the archive headers. It works when a posting has no par2 files at all, and when the files were obfuscated before the par2 files were created. In RustyGet the RAR header parser and the renaming of volume sets run in Rust.
+RAR-rename restores the names of multi-volume RAR archives from the archive headers. It works when a posting has no par2 files at all, and when the files were obfuscated before the par2 files were created. The RAR header parser and the renaming of volume sets run in Rust.
 
 ## Quick par verification
 
@@ -87,7 +87,7 @@ Other programs often download the same title several times, because several post
 
 ## Duplicate fleets
 
-This is where RustyGet goes beyond NZBGet. NZBGet uses duplicates one at a time: when a download fails, the next copy starts from scratch. RustyGet uses them together:
+This is what sets RustyGet apart. Instead of trying copies one at a time, each from scratch, RustyGet uses them together:
 
 - **Article fallback.** RustyGet fetches an article that no server has from another posting of the same release.
 - **Twins and alts.** A *twin* is a copy whose files are byte-identical, proven by par2 checksums; RustyGet can borrow its articles and par2 volumes. An *alt* holds the same video file in another container (another archive, other packing), verified by reading the video inside both copies, never by par2: other par2 checksums only mean another container, so until the video inside is compared such a copy is labelled *container*, and *other* if the video turns out to differ.

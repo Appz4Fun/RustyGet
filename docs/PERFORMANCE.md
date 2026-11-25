@@ -1,10 +1,10 @@
-# NZBGet performance
+# RustyGet performance
 
 The options that matter most for download, repair and unpack throughput, and how to find the bottleneck. RustyGet runs on Linux and macOS; the commands below are for those systems.
 
 ## 1. Find the bottleneck first
 
-NZBGet is rarely the limiting factor itself. Look for the component that is saturated:
+RustyGet is rarely the limiting factor itself. Look for the component that is saturated:
 
 | Symptom | Likely bottleneck |
 |---|---|
@@ -15,13 +15,13 @@ NZBGet is rarely the limiting factor itself. Look for the component that is satu
 
 Measure before changing anything:
 
-- **CPU** — `top` or `htop` on the machine running NZBGet. Add up all NZBGet threads.
+- **CPU** — `top` or `htop` on the machine running RustyGet. Add up all RustyGet threads.
 - **Network** — the WebUI shows the current download speed; compare it with the link speed of the network interface.
 - **Disks** — use the built-in disk speed test (section 2).
 
 ## 2. Disk I/O
 
-- Put `InterDir` on the fastest disk available (NVMe/SSD). During download NZBGet writes only to `InterDir`; the files are moved to `DestDir` when the download completes.
+- Put `InterDir` on the fastest disk available (NVMe/SSD). During download RustyGet writes only to `InterDir`; the files are moved to `DestDir` when the download completes.
 - Do not use a network filesystem (NFS, SMB) for `InterDir`, and avoid filesystems with compression or deduplication enabled.
 - Separate physical drives for `InterDir` and `DestDir` improve unpack performance.
 - When `DirectRename` is enabled, `InterDir` and `DestDir` must be on the same file system.
@@ -57,7 +57,7 @@ See [testdiskspeed](api/API.md#api-method-testdiskspeed) for the parameters. `fi
 - Each connection costs one thread and its own write buffer (section 3).
 - More connections reduce the effect of the round-trip time to the provider. Once the line is saturated, additional connections no longer add speed and only cost CPU and memory.
 - To check whether the connection count is limiting, change it and measure again.
-- The TLS cipher affects the CPU cost of every connection; see [Optimizing NZBGet speed by choosing the best TLS cipher](FINDING_BEST_TLS_CIPHER.md).
+- The TLS cipher affects the CPU cost of every connection; see [Optimizing RustyGet speed by choosing the best TLS cipher](FINDING_BEST_TLS_CIPHER.md).
 - `DownloadRate` (KB/s, 0 = unlimited) caps the download speed by design — make sure it is 0 unless a limit is wanted.
 
 ## 5. Post-processing
@@ -70,5 +70,5 @@ See [testdiskspeed](api/API.md#api-method-testdiskspeed) for the parameters. `fi
 
 ## 6. Check the configuration
 
-- NZBGet checks the most important options on startup and reports suboptimal values in the WebUI (option `SystemHealthCheck`, RPC method [systemhealth](api/API.md#api-method-systemhealth)).
-- `nzbget -p` prints the configuration that the daemon will use, including all defaults and values inherited from other options.
+- RustyGet checks the most important options on startup and reports suboptimal values in the WebUI (option `SystemHealthCheck`, RPC method [systemhealth](api/API.md#api-method-systemhealth)).
+- `rustyget -p` prints the configuration that the daemon will use, including all defaults and values inherited from other options.

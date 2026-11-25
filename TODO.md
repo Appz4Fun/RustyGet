@@ -41,9 +41,9 @@ independent; none blocks a release.
 
 ## Upstream items deliberately not ported
 
-- nzbgetcom #1053 replaces the webui icon font with an SVG sprite. Our webui
+- Upstream PR 1053 replaces the webui icon font with an SVG sprite. Our webui
   diverged; worth redoing on our tree to drop the 3 MB font.
-- nzbgetcom #1056 (TLS minimum protocol) collides with the cipher optimizer;
+- Upstream PR 1056 (TLS minimum protocol) collides with the cipher optimizer;
   re-evaluate if the optimizer changes.
 - Version-format change, FreeBSD/musl/Android/runner commits: retired
   platforms, skip for good.

@@ -4,7 +4,7 @@ Use this section for WebUI and documentation work. Keep UI-only validation and d
 
 ### Isolated UI validation
 
-- Run destructive editor exercises against an isolated loopback NZBGet service serving the exact candidate WebUI. The fixture should include one news server and example list entries, including an empty Scheduler case. Use the Playwright and Chrome runtime already available to the job.
+- Run destructive editor exercises against an isolated loopback RustyGet service serving the exact candidate WebUI. The fixture should include one news server and example list entries, including an empty Scheduler case. Use the Playwright and Chrome runtime already available to the job.
 - The committed Settings checks reject non-loopback targets. Preserve that guard. Intercept saveconfig for editor tests so assertions inspect the payload without changing daemon configuration. Simulate health notices through read-only RPC fixture responses.
 - Exercise light and dark themes at desktop and phone widths. Cover native keyboard activation, Edit/Close, unsaved summaries, adding, deleting, reordering, renumbering, retained save values, search, and health navigation. Feed URLs and scheduler parameters must stay out of compact summaries.
 - Test programmatic section changes separately from focused keyboard links. Native focus can scroll a menu automatically and conceal a search-navigation defect. Keep the active link visible by scrolling only the bounded phone menu, preserving the document position, and focus.

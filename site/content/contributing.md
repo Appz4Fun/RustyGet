@@ -13,7 +13,6 @@ Open an issue in the [repository](https://github.com/Appz4Fun/RustyGet/issues). 
 - The settings involved, especially `DupeArticleFallback`, `HealthCheck`, and `DupeWatch`.
 - The download's log from the **History** tab. Remove server names, user names, and NZB names that you don't want to share.
 
-Report problems in stock NZBGet to the [NZBGet project](https://github.com/nzbgetcom/nzbget) instead.
 
 ## Propose a change
 
@@ -74,7 +73,7 @@ This site lives in `site/` in the repository. Pages are Markdown files in `site/
 
 4. Preview it with `python3 -m http.server -d build/site`.
 
-The site deploys to GitHub Pages on every push to the default branch. The build fails on any Vale warning or error and on any broken link. [Configuration options](options.md) and part of [Rust port status](rust-port.md) are generated from `nzbget.conf` and `rust/PORTING.md`, so edit those files, not the pages.
+The site deploys to GitHub Pages on every push to the default branch. The build fails on any Vale warning or error and on any broken link. [Configuration options](options.md) and part of [Rust port status](rust-port.md) are generated from `rustyget.conf` and `rust/PORTING.md`, so edit those files, not the pages.
 
 See [Design system](design-system.md) for the colors, components, and voice.
 
@@ -88,4 +87,4 @@ Much of RustyGet is written with AI coding tools. That's welcome, on three condi
 
 ## License
 
-RustyGet is free software under the GNU General Public License, version 2 or later, like the NZBGet code it started from. Keep existing copyright notices when you change a file.
+RustyGet is free software under version 2 or later of the GNU General Public License. Keep existing copyright notices when you change a file.

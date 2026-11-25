@@ -6,27 +6,27 @@ During functional testing the program is tested as a whole. This is much like if
 
 ## Infrastructure
 
-The functional testing in NZBGet is controlled by scripts, which do things like:
+The functional testing in RustyGet is controlled by scripts, which do things like:
 
-- automatically start nzbget binary with a specific configuration;
-- communicate with nzbget using nzbget API to control the program;
+- automatically start rustyget binary with a specific configuration;
+- communicate with rustyget using rustyget API to control the program;
 - create test data files and nzb-files referring to them;
 - automatically start a special NNTP server, which serves test data files;
-- tell nzbget to download test nzb-files from the test NNTP server;
-- control the status of nzbget during download;
+- tell rustyget to download test nzb-files from the test NNTP server;
+- control the status of rustyget during download;
 - check if the test downloads go as expected (success, failure);
 - collect the results of all tests and represent the result summary.
 
 ## NServ - built-in NNTP server
 
   
-NZBGet downloads from Usenet servers. However it would be unreliable and slow to use global Usenet servers for functional testing. Instead we need to do all the testing locally using our set of test files. For this purpose a simple NNTP server called **NServ** was developed.
+RustyGet downloads from Usenet servers. However it would be unreliable and slow to use global Usenet servers for functional testing. Instead we need to do all the testing locally using our set of test files. For this purpose a simple NNTP server called **NServ** was developed.
 
-Technically NServ is integrated into NZBGet as a sub-module. NServ is automatically controlled (started, stopped) by functional testing scripts but it can also be used standalone for other purposes such as debugging NZBGet or for speed tests of NZBGet or even other download clients. For more info see [NServ NNTP server](NSERV.md).
+Technically NServ is integrated into RustyGet as a sub-module. NServ is automatically controlled (started, stopped) by functional testing scripts but it can also be used standalone for other purposes such as debugging RustyGet or for speed tests of RustyGet or even other download clients. For more info see [NServ NNTP server](NSERV.md).
 
 ## Testing framework
   
-Functional tests for NZBGet are written in python language (Python 3). We are using testing framework [pytest](https://pytest.org) to organize test execution and collect test results. Therefore in order to run functional tests pytest [must be installed](https://docs.pytest.org/en/latest/getting-started.html) on your system.
+Functional tests for RustyGet are written in python language (Python 3). We are using testing framework [pytest](https://pytest.org) to organize test execution and collect test results. Therefore in order to run functional tests pytest [must be installed](https://docs.pytest.org/en/latest/getting-started.html) on your system.
   
 ## Running tests
 
@@ -34,7 +34,7 @@ Functional tests and supporting modules are stored in directory `tests/functiona
 
 ### Configuring tests
   
-Tests can be run without extra configuration in which case the test files are stored in `tests/testdata/nserv.temp` and temporary files created by NZBGet during testing are stored in `tests/testdata/nzbget.temp`. Both of these directories take several gigabytes of disk space and can be reconfigured to use other locations.
+Tests can be run without extra configuration in which case the test files are stored in `tests/testdata/nserv.temp` and temporary files created by RustyGet during testing are stored in `tests/testdata/nzbget.temp`. Both of these directories take several gigabytes of disk space and can be reconfigured to use other locations.
 
 Create text file `tests/functional/pytest.ini` with the following content:
 
@@ -80,9 +80,9 @@ For more filter possibilities please see [pytest](https://docs.pytest.org/en/lat
 
 ### Test failures
   
-Directory used by NZBGet during testing (`tests/testdata/nzbget.temp` by default) is automatically deleted if all tests succeed. If a test fails the directory is kept in order to preserve log-files and queue-files for failure analysis. However during testing NZBGet is started and stopped multiple times. If the failed test wasn’t the last test the preserved NZBGet directory may not contain data of the failed test. In such case it’s better to rerun the specific failed test as the only test (using specific command line).
+Directory used by RustyGet during testing (`tests/testdata/nzbget.temp` by default) is automatically deleted if all tests succeed. If a test fails the directory is kept in order to preserve log-files and queue-files for failure analysis. However during testing RustyGet is started and stopped multiple times. If the failed test wasn’t the last test the preserved RustyGet directory may not contain data of the failed test. In such case it’s better to rerun the specific failed test as the only test (using specific command line).
 
-After test completion NZBGet is terminated. To analyze a test failure it can be useful to have NZBGet running, for example to inspect the state in web-interface. Pass extra parameter `--hold` to achieve this:
+After test completion RustyGet is terminated. To analyze a test failure it can be useful to have RustyGet running, for example to inspect the state in web-interface. Pass extra parameter `--hold` to achieve this:
 
 ```bash
   pytest -v parcheck/parcheck_auto_test.py::test_parchecker_repair --hold
@@ -90,7 +90,7 @@ After test completion NZBGet is terminated. To analyze a test failure it can be 
 
 ## DupeArticleFallback harness
 
-`tests/functional/dupefallback/harness.py` drives a scratch daemon and nzbget's
+`tests/functional/dupefallback/harness.py` drives a scratch daemon and rustyget's
 own test news server (`nzbget --nserv`) through several hundred offline
 scenarios of the duplicate features: article borrowing, stream and live repair,
 whole-file recreation, par-repair hand-offs, `HealthCheck=dupe` failover, the
@@ -144,9 +144,9 @@ publish such a directory.
 
 ## TLS cipher optimizer fixture
 
-`fixture.py` starts a candidate NZBGet binary with a new configuration, queue,
+`fixture.py` starts a candidate RustyGet binary with a new configuration, queue,
 folders and four synthetic TLS/NNTP servers on loopback. It never reads an
-existing NZBGet configuration. All servers are disabled for ordinary downloads;
+existing RustyGet configuration. All servers are disabled for ordinary downloads;
 the optimizer deliberately includes disabled encrypted backup servers.
 
 Run this only in the runtime stage assigned under the repository evidence and
@@ -188,7 +188,7 @@ interactive runtime stage. Open the printed loopback URL, choose **Settings →
 News Servers → Optimize TLS ciphers**, and inspect speed estimates, per-server
 compatibility details and saved results. This local fixture uses blank WebUI
 control credentials and binds only to loopback. Ctrl-C closes its owned daemon
-and providers. It does not reload NZBGet after saving ciphers.
+and providers. It does not reload RustyGet after saving ciphers.
 
 OpenSSL is used to generate synthetic fixture certificates. The product measures
 the daemon's linked TLS library through native callbacks and has no external

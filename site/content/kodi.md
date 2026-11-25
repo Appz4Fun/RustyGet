@@ -28,7 +28,7 @@ The add-on decides *which release* you get. RustyGet decides *which copy* of tha
 [NeNeTeePee Stream](https://github.com/Appz4Fun/NeNeTeePee-Stream-Kodi) is a Kodi 21 add-on (`plugin.video.nzbdav`) that plays movies and episodes from Usenet. TMDb Helper calls it as a player. It supports three backends:
 
 - **nzbdav or InfiniDysk**, which stream over WebDAV while downloading.
-- **NZBGet**, which downloads and unpacks the whole release, then plays the finished file. RustyGet is a drop-in for this backend.
+- **NZBGet** (the add-on's name for this backend), which downloads and unpacks the whole release, then plays the finished file. Choose it for RustyGet.
 - **StreamNZB**, which returns a direct HTTP stream.
 
 Fleet submission with `appendfleet` came in add-on pull requests [514](https://github.com/Appz4Fun/NeNeTeePee-Stream-Kodi/pull/514), [518](https://github.com/Appz4Fun/NeNeTeePee-Stream-Kodi/pull/518), and [519](https://github.com/Appz4Fun/NeNeTeePee-Stream-Kodi/pull/519). It shipped in [2.0.0-beta.3](https://github.com/Appz4Fun/NeNeTeePee-Stream-Kodi/releases/tag/v2.0.0-beta.3), released on 2026-10-11 in the add-on's beta channel, which publishes every pre-release. Earlier betas send backups one at a time with `append`.
@@ -119,10 +119,6 @@ The add-on follows the duplicate key: if RustyGet fails over, the add-on tracks 
 
 See [Duplicate fleets](duplicate-fleets.md) for how twins, alts, and failover work.
 
-## Stock NZBGet
-
-The add-on also works with stock NZBGet. When `appendfleet` is missing, it falls back to one `append` per copy, with the pick at the highest duplicate score and the backups below it. NZBGet's duplicate handling then fails over between copies, but no copy is checked before downloading and nothing is borrowed between them.
-
 ## Settings
 
 In the add-on:
@@ -134,7 +130,7 @@ In the add-on:
 | NZBGet category | A category that RustyGet knows |
 | Completed folder | The SMB share or local path where that category's `DestDir` appears to Kodi |
 | Maximum duplicate backups | `-1` for all, `0` for none, or a cap |
-| Enable fallback streams | On. This also turns the NZBGet fleet on. |
+| Enable fallback streams | On. This also turns fleet submission on. |
 | Enable NZBHydra2, NZBHydra2 URL, API key | Your NZBHydra2 instance |
 
 In RustyGet:

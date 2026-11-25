@@ -733,7 +733,9 @@ impl ActiveStreamingSession {
         let mut handed = 0;
         for &(offset, bytes) in items {
             let size = bytes.len() as u64;
-            if size == 0 || queue.captured.remove(&(id, offset)) {
+            // Captured from RAM already (and folded, or parked again below).
+            let captured = queue.captured.remove(&(id, offset));
+            if size == 0 {
                 continue;
             }
             let room = queue.bytes.checked_add(size).is_some_and(|n| n <= limit);
@@ -756,7 +758,7 @@ impl ActiveStreamingSession {
                     committed: in_file,
                 });
                 handed += 1;
-            } else if room && queue.stash.len() < LIVE_STASH_LIMIT {
+            } else if !captured && room && queue.stash.len() < LIVE_STASH_LIMIT {
                 if let Some(old) = queue.stash.insert((id, offset), bytes.to_vec()) {
                     queue.bytes -= old.len() as u64;
                 }

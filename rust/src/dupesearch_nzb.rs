@@ -1324,7 +1324,17 @@ impl DonorServer {
     }
 
     pub fn ask<F: Fn() -> bool>(&self, batch: &[DonorRequest], cancelled: F) -> Vec<DonorAnswer> {
+        self.ask_opts(batch, cancelled, false)
+    }
+
+    /// [`Self::ask`]; with `skip_paused` a pause found on entry (another
+    /// walker's third failure since the caller looked) leaves the batch
+    /// unreached at once instead of sleeping through it.
+    pub fn ask_opts<F: Fn() -> bool>(&self, batch: &[DonorRequest], cancelled: F, skip_paused: bool) -> Vec<DonorAnswer> {
         let over = || donor_stopping() || cancelled();
+        if skip_paused && self.paused() {
+            return vec![DonorAnswer::Unreached; batch.len()];
+        }
         while self.down_until_ms.load(std::sync::atomic::Ordering::SeqCst) - donor_now_ms() > 0
             && !over()
         {
@@ -1563,9 +1573,21 @@ pub fn donor_check_items_lanes(
                         })
                         .collect();
                     let st_cancel = st.clone();
-                    server.ask(&batch, move || {
-                        st_cancel.stop.load(std::sync::atomic::Ordering::SeqCst)
-                    })
+                    let answers = server.ask_opts(
+                        &batch,
+                        move || st_cancel.stop.load(std::sync::atomic::Ordering::SeqCst),
+                        skip_paused,
+                    );
+                    if skip_paused
+                        && !others_can_answer
+                        && server.paused()
+                        && answers.iter().all(|a| *a == DonorAnswer::Unreached)
+                    {
+                        for &idx in &todo {
+                            st.pause_skipped[idx].store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
+                    answers
                 };
 
                 let mut guard = st.mutex.lock().unwrap_or_else(|e| e.into_inner());
@@ -4738,6 +4760,35 @@ mod tests {
         assert_eq!((h.present, h.missing, h.error), (0, 0, 0), "{h:?}");
         assert_eq!(h.paused, h.checked, "every article left by the pause: {h:?}");
         assert_eq!(fleet(&h), (-1, false, false));
+        // review of 36e4f2cb: a few real 430s, then the only server pauses:
+        // the rest of the sample (and the extra STATs) is left by the pause,
+        // counted in `paused`, so the copy is not judged on the few answers
+        struct Then {
+            exchanges: AtomicI32,
+        }
+        impl DonorServerExchange for Arc<Then> {
+            fn exchange(&self, batch: &[DonorRequest]) -> Result<Vec<DonorAnswer>, DonorExchangeError> {
+                if self.exchanges.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Ok(vec![DonorAnswer::Missing; batch.len()])
+                } else {
+                    Err(DonorExchangeError::default())
+                }
+            }
+        }
+        let then = Arc::new(Then { exchanges: AtomicI32::new(0) });
+        let server = Arc::new(DonorServer::new(8, then));
+        server.set_retry_after_ms(30_000);
+        let one_lane = DonorOptions { lanes: 1, ..opts(true) };
+        let got = std::sync::Mutex::new(Vec::new());
+        let start = std::time::Instant::now();
+        donor_check_postings_timed(&[server.clone()], std::slice::from_ref(&posting), &one_lane, true, 1, None, |_, h, _| {
+            got.lock().unwrap().push(*h)
+        });
+        assert!(start.elapsed() < std::time::Duration::from_millis(1000), "{:?}", start.elapsed());
+        let h = got.lock().unwrap()[0];
+        assert!(h.missing > 0 && h.present == 0, "{h:?}");
+        assert!(h.paused > 0, "the pause cut the sample: {h:?}");
+        assert!(server.paused());
         // without skip_paused the check waits for the pause, cut only by the
         // copy's 3 s budget (an ordinary DupeSearch check keeps that)
         let start = std::time::Instant::now();
@@ -6095,6 +6146,7 @@ mod tests {
             error,
             body_checked: 0,
             body_bad: 0,
+            paused: 0,
         };
         assert_eq!(mk_h(300, 0, 1, 299).alive(), 0.0);
         assert_eq!(mk_h(300, 150, 0, 150).alive(), 0.5);

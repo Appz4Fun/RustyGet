@@ -1113,6 +1113,14 @@ pub fn fleet_switch_allowed(downloaded: i64) -> bool {
     downloaded < FLEET_SWITCH_MAX_BYTES
 }
 
+/// Whether the early primary may still be held again for an easier copy:
+/// under [`FLEET_SWITCH_MAX_BYTES`], not in post-processing, and with
+/// something left to download (`left`: remaining bytes not paused). A small
+/// release that finished downloading or is unpacking keeps the lead.
+pub fn fleet_leader_switchable(downloaded: i64, post_processing: bool, left: i64) -> bool {
+    fleet_switch_allowed(downloaded) && !post_processing && left > 0
+}
+
 /// Whether the probe's findings may be written onto a fleet copy already in
 /// history: filed as DELETED/DUPE by its primary's success, or a copy that
 /// itself succeeded; never a copy the user deleted or one that failed (a
@@ -1183,7 +1191,7 @@ fn fleet_lead_release(
                 old_q.current_success_size + old_q.current_failed_size,
                 old_q.success_size + old_q.failed_size,
             );
-            if !fleet_switch_allowed(downloaded) {
+            if !fleet_leader_switchable(downloaded, old_q.has_post_info, old_q.remaining_size - old_q.paused_size) {
                 return false;
             }
             crate::fleethold::hold_host(
@@ -7683,7 +7691,10 @@ pub unsafe fn fleet_append(
                     // replaces the first one only when it measured as much
                     let emit = |again: bool, key: &str, h: &DonorHealthResult, ms: i64| {
                         if let Ok(idx) = key.parse::<usize>() {
-                            let cut = probe_was_cut(h, ms, posting_budget_ms);
+                            // the fleet's own deadline cuts a check as well as
+                            // the copy's budget does
+                            let cut = probe_was_cut(h, ms, posting_budget_ms)
+                                || (h.answered() < h.checked && donor_now_ms() + 250 >= options.deadline_ms);
                             let mut msg = b"Fleet probe of ".to_vec();
                             msg.extend_from_slice(probe_names.get(&idx).map_or(&[][..], |n| n.as_slice()));
                             if again {
@@ -7751,7 +7762,9 @@ pub unsafe fn fleet_append(
                     if unmeasured.is_empty() {
                         return;
                     }
-                    while servers.iter().all(|srv| srv.paused())
+                    // other fleets' checks are not kept waiting meanwhile
+                    drop(_cg);
+                    while servers.iter().any(|srv| srv.paused())
                         && donor_now_ms() + 1000 < options.deadline_ms
                         && !donor_stopping()
                         && !http_stopped()
@@ -7765,6 +7778,11 @@ pub unsafe fn fleet_append(
                     {
                         return;
                     }
+                    let Some(_cg) = fleet_check_mutex()
+                        .try_lock_for((options.deadline_ms - donor_now_ms() - 1000).max(0))
+                    else {
+                        return;
+                    };
                     crate::dupesearch_nzb::donor_check_postings_timed(
                         servers,
                         &unmeasured,
@@ -8571,6 +8589,12 @@ mod tests {
         assert!(!fleet_switch_allowed(leader_downloaded_bytes(0, 600 * mb, 0)));
         assert!(fleet_switch_allowed(leader_downloaded_bytes(40 * mb, 40 * mb, 0)));
         assert_eq!(leader_downloaded_bytes(0, 0, 700 * mb), 700 * mb);
+        // review of 36e4f2cb: a small leader that finished downloading or is
+        // unpacking keeps the lead; an easier copy is only ranked
+        assert!(fleet_leader_switchable(40 * mb, false, 200 * mb));
+        assert!(!fleet_leader_switchable(40 * mb, true, 0), "in post-processing");
+        assert!(!fleet_leader_switchable(40 * mb, false, 0), "nothing left to download");
+        assert!(!fleet_leader_switchable(600 * mb, false, 200 * mb));
         // review: an early leader parked on health or deleted during the
         // probe gives the lead to the next healthy probed copy
         assert!(leader_gone(false, DeleteStatus::None, true));
@@ -8586,9 +8610,6 @@ mod tests {
         assert_eq!(pick_lead(&[v(2, true, 3, 1000)], None), Some(2));
     }
 
-    /// B1a: a copy's check is cut only when its budget ran out with sampled
-    /// articles unanswered; the kind probe reads healthy copies first and
-    /// never a dead one.
     /// F6/F7: only answers are evidence. A copy a paused server left with
     /// errors or unreached articles measured nothing and is checked once
     /// more after the pause; a copy with any present or missing answer, or
@@ -8622,6 +8643,9 @@ mod tests {
         assert!(retry_replaces(None, &h(40, 0, 10, 0)));
     }
 
+    /// B1a: a copy's check is cut only when its budget ran out with sampled
+    /// articles unanswered; the kind probe reads healthy copies first and
+    /// never a dead one.
     #[test]
     fn a_copy_check_is_cut_only_at_its_budget() {
         let h = |checked, present, missing| DonorHealthResult { checked, present, missing, ..Default::default() };

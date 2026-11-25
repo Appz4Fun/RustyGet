@@ -487,6 +487,14 @@ Review fixes (76a80014 review):
   why nothing downloads; the probe's findings are written onto a copy in
   history only when its primary's success filed it or it succeeded itself
   (`fleet_history_writable`), and no copy in history keeps a hold or probe mark.
+- An early primary that finished downloading or is in post-processing is
+  never held again for an easier copy (`fleet_leader_switchable`); the
+  easier copy is only ranked.
+- A check the fleet's own deadline cut counts as cut, like one its copy's
+  budget cut. The check after a pause waits until no server is paused (within
+  the fleet's deadline) and does not hold the fleet check lock meanwhile; a
+  pause another walker set after a walker looked is not slept through either
+  (`DonorServer::ask_opts`).
 - The icon subset is pinned (`revision`, `sha256`, `font_size`, checked by
   `fleet-downloads.js`) and `docs/rust-migration/dependency-sources.json`
   records its new bytes; the NzbDir summary never cuts a UTF-8 character.
@@ -537,7 +545,7 @@ Review fixes (76a80014 review):
 | Review C: no password in a key, a log line or a reply; write-back keeps category and priority. | Rust `releasename::tests::an_old_key_with_the_password_is_rebuilt`, `a_password_in_the_name_never_reaches_the_key`, `dupesearch_coord::tests::a_fleet_that_never_ran_keeps_its_uploads_for_the_next_scan`, `scanner::tests::a_kept_priority_is_hidden_and_read_once`; functional `dropjoinrestart` (an old key with the password rebuilt), `droppasswordlogs` (web and NzbDir fleets) |
 | The release parser finds the group behind a copy suffix. | Rust `releasename::tests::copy_suffix_never_hides_the_group`; Playwright `release-names.js` |
 | The name rule strips only a copy suffix. | Rust `releasename::tests::copy_suffixes_strip_only_after_a_group_tag`; web UI `dupe-group.js` (the same cases) |
-| B1: no copy's check exceeds its 60 s; behind a server slow on missing articles the healthy copy downloads within seconds; a cut copy keeps its share. | functional `fleetslowprobe` (nserv `-x 3000`: primary released under 15 s, every probe line at most 61 s, the mostly missing copy cut with `DupeAliveCut`); Rust `dupesearch_nzb::tests::slow_servers_are_asked_in_lanes_within_the_posting_budget`, `dupesearch_coord::tests::the_first_healthy_copy_leads_while_the_others_are_probed`, `a_copy_check_is_cut_only_at_its_budget` |
+| B1: no copy's check exceeds its 60 s; behind a server slow on missing articles the healthy copy downloads within seconds; a cut copy keeps its share. | functional `fleetslowprobe` (nserv `-x 2000`: primary released under 15 s, every probe line at most 61 s, the mostly missing copy cut with `DupeAliveCut`); Rust `dupesearch_nzb::tests::slow_servers_are_asked_in_lanes_within_the_posting_budget`, `dupesearch_coord::tests::the_first_healthy_copy_leads_while_the_others_are_probed`, `a_copy_check_is_cut_only_at_its_budget` |
 | B2: after a failover the probe's alive shares and the failover order stay. | functional `fleetfailoverkeepsalive` (a 27% donor keeps its share and its place above the dead copy, no backup pass); Rust `dupesearch_coord::tests::the_backup_pass_leaves_held_fleets_alone` |
 | B3: the fleet toggle shows an icon. | Playwright `fleet-downloads.js` ("the toggle shows an icon, not its name": both glyphs in the subset, icon-sized) |
 | B4: the NzbDir summary is split, never cut, and names what downloads. | Rust `scanner::tests::a_fleet_summary_is_split_never_cut` |

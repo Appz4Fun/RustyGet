@@ -398,7 +398,7 @@ fn backup_continues_extraction(
     nzb.direct_unpack_status == DirectUnpackStatus::Running
         && alt_covers_lost_articles(
             true,
-            opts.dupe_article_fallback == crate::queuesubsys_host::DAF_LIVE && opts.direct_unpack,
+            live_borrowing(opts),
             crate::donorkind::DonorKind::from_param(
                 host.nzb_get_param(nzb.ptr, crate::donorkind::KIND_PARAM).as_deref(),
             ),
@@ -1339,16 +1339,40 @@ const BACKUP_CLASSIFY_GRACE_SEC: i64 = 120;
 /// its kind and age, the fleet intake is still `checking` its video (a nested alt can take
 /// longer to open down to it). That check is bounded on its own: it reads until its deadline,
 /// then lets go.
+///
+/// The grace for an unknown kind is only worth its wait while a backup can lend at all
+/// (`lending_possible`): with `RawArticle` the articles stay encoded, nothing is decoded,
+/// borrowed or extracted, so no kind found later could save anything, and waiting would only
+/// download the dead copy in full (B25, functional `dupefailoverraw`).
 fn backup_still_unclassified(
     kind: crate::donorkind::DonorKind,
     parked_at: i64,
     now: i64,
     checking: bool,
+    lending_possible: bool,
 ) -> bool {
     // the packing kind says nothing about the video: a copy still being read may carry another
     checking
-        || (kind == crate::donorkind::DonorKind::Unknown
+        || (lending_possible
+            && kind == crate::donorkind::DonorKind::Unknown
             && now - parked_at < BACKUP_CLASSIFY_GRACE_SEC)
+}
+
+/// Whether any duplicate can lend this download data: not with `RawArticle`, which keeps
+/// articles encoded (article borrowing, stream repair and extraction all skip it).
+#[cfg(unix)]
+fn dupe_lending_possible(opts: &crate::queuesubsys_host::GlobalOptsSnap) -> bool {
+    !opts.raw_article
+}
+
+/// Whether the live dead-volume borrow can feed a running extraction (the `live_borrowing`
+/// argument of [`alt_covers_lost_articles`]): `DupeArticleFallback=live` with `DirectUnpack`,
+/// and a duplicate can lend at all.
+#[cfg(unix)]
+fn live_borrowing(opts: &crate::queuesubsys_host::GlobalOptsSnap) -> bool {
+    opts.dupe_article_fallback == crate::queuesubsys_host::DAF_LIVE
+        && opts.direct_unpack
+        && dupe_lending_possible(opts)
 }
 #[cfg(unix)]
 const DUPE_PROBE_SAMPLE_COUNT: i32 = 10;
@@ -4855,6 +4879,7 @@ impl NzbgetRsQueueCoordinator {
                 backup_hi.time,
                 now,
                 crate::dupesearch_coord::intake_pending(backup_nzb.id, &nzb.dupe_key),
+                dupe_lending_possible(opts),
             ) && !download_hopeless(nzb.total_articles, nzb.current_success_articles, failed)
             {
                 // Not checked yet: the next round looks again instead of waiting for
@@ -4873,8 +4898,7 @@ impl NzbgetRsQueueCoordinator {
             let lendable =
                 alt_covers_lost_articles(
                     false,
-                    opts.dupe_article_fallback == crate::queuesubsys_host::DAF_LIVE
-                        && opts.direct_unpack,
+                    live_borrowing(opts),
                     crate::donorkind::DonorKind::from_param(
                         host.nzb_get_param(nzb.ptr, crate::donorkind::KIND_PARAM)
                             .as_deref(),
@@ -5129,7 +5153,7 @@ impl NzbgetRsQueueCoordinator {
         );
         if alt_covers_lost_articles(
             dead_rate,
-            opts.dupe_article_fallback == crate::queuesubsys_host::DAF_LIVE && opts.direct_unpack,
+            live_borrowing(opts),
             own_kind,
             backup_kind,
             eval.projected,
@@ -5165,7 +5189,13 @@ impl NzbgetRsQueueCoordinator {
                 .map_or(0, |d| d.as_secs() as i64);
             if !hopeless
                 && crate::dupesearch_coord::intake_pending(backup_nzb.id, &nzb.dupe_key)
-                && backup_still_unclassified(backup_kind, backup_hi.time, now, true)
+                && backup_still_unclassified(
+                    backup_kind,
+                    backup_hi.time,
+                    now,
+                    true,
+                    dupe_lending_possible(opts),
+                )
             {
                 return;
             }
@@ -5207,6 +5237,7 @@ impl NzbgetRsQueueCoordinator {
                 backup_hi.time,
                 now,
                 crate::dupesearch_coord::intake_pending(backup_nzb.id, &nzb.dupe_key),
+                dupe_lending_possible(opts),
             ) {
                 return;
             }
@@ -6550,15 +6581,19 @@ mod tests {
         use crate::donorkind::DonorKind;
         let parked = 1_000;
         let unclassified = super::backup_still_unclassified;
-        assert!(unclassified(DonorKind::Unknown, parked, parked + 2, false));
-        assert!(unclassified(DonorKind::Unknown, parked, parked + 119, false));
-        assert!(!unclassified(DonorKind::Unknown, parked, parked + 120, false));
+        assert!(unclassified(DonorKind::Unknown, parked, parked + 2, false, true));
+        assert!(unclassified(DonorKind::Unknown, parked, parked + 119, false, true));
+        assert!(!unclassified(DonorKind::Unknown, parked, parked + 120, false, true));
         // still being read in the background: held while the check runs, however old
-        assert!(unclassified(DonorKind::Unknown, parked, parked + 3_600, true));
+        assert!(unclassified(DonorKind::Unknown, parked, parked + 3_600, true, true));
         for kind in [DonorKind::Twin, DonorKind::Borrowable, DonorKind::Unborrowable] {
-            assert!(!unclassified(kind, parked, parked + 2, false));
-            assert!(unclassified(kind, parked, parked + 3_600, true));
+            assert!(!unclassified(kind, parked, parked + 2, false, true));
+            assert!(unclassified(kind, parked, parked + 3_600, true, true));
         }
+        // nothing can lend (RawArticle): an unknown kind is no reason to wait, but the
+        // fleet intake still reading the copy's video is (it may drop another video)
+        assert!(!unclassified(DonorKind::Unknown, parked, parked + 2, false, false));
+        assert!(unclassified(DonorKind::Unknown, parked, parked + 2, true, false));
     }
 
     #[test]

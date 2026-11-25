@@ -324,6 +324,13 @@ struct DeferredArticles {
     /// capture takes them here instead of par-rs reading them back from the file. Charged
     /// to the snapshot byte limit like queued snapshots; dropped with the file's completion.
     stash: HashMap<(FileId, u64), Vec<u8>>,
+    /// Articles (offset, size, CRC32, bytes) of queue files not matched to a par2 file yet
+    /// (an obfuscated name, no 16k hash known yet), by queue id: queued once the file's
+    /// first article binds it, instead of par-rs reading them back at its completion.
+    /// Charged like snapshots, at most half of the byte limit.
+    unbound: HashMap<i32, Vec<(u64, u64, u32, Vec<u8>)>>,
+    /// Queue files whose first article matched no par2 file: not part of the set.
+    not_in_set: HashSet<i32>,
 }
 
 /// At most this many captured-article marks and stashed articles per session.
@@ -766,6 +773,107 @@ impl ActiveStreamingSession {
             }
         }
         handed
+    }
+
+    /// An article of a queue file not matched to a par2 file yet. The file's first article
+    /// binds it by the MD5 of its first 16 KiB (par2's 16k hash), from RAM; until then its
+    /// other articles wait here with their bytes, within half of the snapshot byte limit,
+    /// so none has to be read back from the file. Past that, or for a file that matched no
+    /// par2 file, the article is refused as before (the completion replay covers it).
+    fn defer_unbound(
+        &self,
+        identity: (Option<i32>, &[u8], &[u8]),
+        offset: u64,
+        size: u64,
+        crc32: u32,
+        written: Option<&Path>,
+        snapshot: impl FnOnce() -> Option<Vec<u8>>,
+    ) -> Result<(), RepairError> {
+        let unknown = || RepairError::UnknownFile(FileId([0; 16]));
+        let Some(queue_id) = identity.0 else {
+            return Err(unknown());
+        };
+        let mut queue = self.articles.lock().unwrap_or_else(|e| e.into_inner());
+        let limit = self.article_byte_limit.load(Ordering::Acquire);
+        let parked: usize = queue.unbound.values().map(Vec::len).sum();
+        let unbound_bytes: u64 = queue
+            .unbound
+            .values()
+            .flat_map(|list| list.iter().map(|a| a.1))
+            .sum();
+        if queue.not_in_set.contains(&queue_id)
+            || size == 0
+            || parked >= 4096
+            || queue.pending.len() >= 4096
+            || queue.bytes.checked_add(size).is_none_or(|n| n > limit)
+            || (offset != 0 && unbound_bytes + size > limit / 2)
+        {
+            return Err(unknown());
+        }
+        let Some(bytes) = snapshot().filter(|b| b.len() as u64 == size) else {
+            return Err(unknown());
+        };
+        if offset != 0 {
+            queue.bytes += size;
+            queue
+                .unbound
+                .entry(queue_id)
+                .or_default()
+                .push((offset, size, crc32, bytes));
+            return Ok(());
+        }
+        // The first article: bind the file by its 16k hash.
+        let hint = first_article_hash16k(&bytes);
+        drop(queue);
+        let bound = live_source_id(self, Some(queue_id), identity.1, hint.as_bytes())
+            .ok()
+            .filter(|id| bytes.len() >= 16 * 1024 || self.file_lengths[id] == size);
+        let mut queue = self.articles.lock().unwrap_or_else(|e| e.into_inner());
+        let waiting = queue.unbound.remove(&queue_id).unwrap_or_default();
+        let Some(id) = bound else {
+            queue.not_in_set.insert(queue_id);
+            for (_, _, _, data) in &waiting {
+                queue.bytes -= data.len() as u64;
+            }
+            return Err(unknown());
+        };
+        if let Some(path) = written {
+            drop(queue);
+            self.note_written(id, path);
+            queue = self.articles.lock().unwrap_or_else(|e| e.into_inner());
+        }
+        let length = self.file_lengths[&id];
+        queue.bytes += size;
+        if queue.captured.len() < LIVE_MARK_LIMIT {
+            queue.captured.insert((id, 0));
+        }
+        queue.pending.push_back(DeferredArticle {
+            file_id: id,
+            offset: 0,
+            crc32,
+            size,
+            bytes: Some(bytes),
+            committed: false,
+        });
+        for (offset, size, crc32, data) in waiting {
+            if offset.checked_add(size).is_none_or(|end| end > length) {
+                queue.bytes -= data.len() as u64;
+                continue;
+            }
+            if queue.captured.len() < LIVE_MARK_LIMIT {
+                queue.captured.insert((id, offset));
+            }
+            queue.pending.push_back(DeferredArticle {
+                file_id: id,
+                offset,
+                crc32,
+                size,
+                bytes: Some(data),
+                committed: false,
+            });
+        }
+        self.metrics.bound_by_first_article.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Takes the stashed bytes of the article of `id` at `offset` of `size` bytes, if any.
@@ -1303,7 +1411,15 @@ pub(crate) fn streaming_session_defer_committed_article(
     let entry = active_streaming_session(nzb_id)?;
     let result = (|| {
         ensure_current_generation(nzb_id, &entry)?;
-        let id = live_source_id(&entry, identity.0, identity.1, identity.2)?;
+        let id = match live_source_id(&entry, identity.0, identity.1, identity.2) {
+            Ok(id) => id,
+            Err(RepairError::UnknownFile(FileId(unknown))) if unknown == [0; 16] => {
+                // Not matched to a par2 file yet: an obfuscated name whose 16k hash is not
+                // known. Its first article binds it from RAM; the others wait for that.
+                return entry.defer_unbound(identity, offset, size, crc32, written, snapshot);
+            }
+            Err(error) => return Err(error),
+        };
         let length = entry.file_lengths[&id];
         if size == 0 || offset.checked_add(size).is_none_or(|end| end > length) {
             return Err(live_error(
@@ -1889,7 +2005,25 @@ fn resolve_live_source_id(
         .session
         .file_id_by_name(name)
         .or_else(|| live_hash16k(hash16k).and_then(|hash| entry.session.file_id_by_hash16k(&hash)))
+        .or_else(|| {
+            // Bound earlier by its first article's 16k hash (an obfuscated name).
+            let queue_id = queue_id?;
+            entry
+                .queue_bindings
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&queue_id)
+                .copied()
+        })
         .ok_or(RepairError::UnknownFile(FileId([0; 16])))
+}
+
+/// The par2 16k hash (hex) of a file whose first article is `bytes`: the MD5 of its first
+/// 16 KiB, or of the whole article when shorter (then right only for a file that short).
+fn first_article_hash16k(bytes: &[u8]) -> String {
+    use md5::{Digest, Md5};
+    let digest = Md5::digest(&bytes[..bytes.len().min(16 * 1024)]);
+    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn live_hash16k(bytes: &[u8]) -> Option<[u8; 16]> {

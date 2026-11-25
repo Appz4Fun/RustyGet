@@ -2017,6 +2017,86 @@ fn live_tee_of_an_uncached_article_feeds_its_capture() {
     streaming_session_forget(id);
 }
 
+/// Obfuscated names and no 16k hash known (DirectRename off): before, live PAR matched
+/// no article and every file was read back whole at its completion, and the job went to a
+/// batch repair. Now the first article binds its file by its 16k hash from RAM, and the
+/// articles that arrived before it wait with their bytes: nothing is read back.
+#[test]
+fn live_binds_an_obfuscated_file_by_its_first_article() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900189;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 * 1024 * 1024)
+        .unwrap();
+    let files = written_copies(&fx, &set);
+    for (n, (_, path, bytes)) in files.iter().enumerate() {
+        let name = format!("q{n:07x}");
+        let queue_id = 70 + n as i32;
+        let article = 20_000;
+        let mut offsets: Vec<usize> = (0..bytes.len()).step_by(article).collect();
+        offsets.reverse(); // the first article arrives last
+        for offset in offsets {
+            let end = (offset + article).min(bytes.len());
+            let chunk = bytes[offset..end].to_vec();
+            let crc = crc32fast::hash(&chunk);
+            streaming_session_defer_committed_article(
+                id,
+                (Some(queue_id), name.as_bytes(), &[]),
+                offset as u64,
+                chunk.len() as u64,
+                crc,
+                Some(path),
+                || Some(chunk),
+            )
+            .unwrap()
+            .unwrap();
+        }
+    }
+    streaming_session_drain_articles(id).unwrap().unwrap();
+    let status = streaming_session_status(id).unwrap();
+    assert_eq!(status.verified, status.total);
+    assert_eq!(streaming_session_io_stats(id).unwrap().source_bytes_read, 0);
+    let entry = active_streaming_session(id).unwrap();
+    assert_eq!(
+        entry.metrics.bound_by_first_article.load(Ordering::Relaxed),
+        files.len() as u64
+    );
+    assert!(entry.articles.lock().unwrap().unbound.is_empty());
+    // The completed file under its obfuscated name resolves to its par2 file.
+    assert!(streaming_session_par_name_of(id, (Some(70), b"q0000000", &[])).is_some());
+    drop(entry);
+    streaming_session_forget(id);
+}
+
+/// A queue file whose first article matches no par2 file is not part of the set: what
+/// waited for it is dropped and its charge returned.
+#[test]
+fn live_unbound_articles_of_a_file_outside_the_set_are_dropped() {
+    let fx = Fixture::new();
+    let id = -1900190;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 * 1024 * 1024)
+        .unwrap();
+    let other: Vec<u8> = (0..40_000u32).map(|i| (i * 7) as u8).collect();
+    let crc = crc32fast::hash(&other[20_000..]);
+    streaming_session_defer_committed_article(
+        id, (Some(99), b"sample.nfo", &[]), 20_000, 20_000, crc, None, || Some(other[20_000..].to_vec()),
+    )
+    .unwrap()
+    .unwrap();
+    let entry = active_streaming_session(id).unwrap();
+    assert_eq!(entry.articles.lock().unwrap().bytes, 20_000);
+    assert!(streaming_session_defer_committed_article(
+        id, (Some(99), b"sample.nfo", &[]), 0, 20_000, crc32fast::hash(&other[..20_000]), None,
+        || Some(other[..20_000].to_vec()),
+    )
+    .unwrap()
+    .is_err());
+    assert_eq!(entry.articles.lock().unwrap().bytes, 0);
+    assert!(entry.articles.lock().unwrap().not_in_set.contains(&99));
+    drop(entry);
+    streaming_session_forget(id);
+}
+
 #[test]
 fn live_session_plans_recovery_slots_for_the_expected_damage() {
     let fx = Fixture::new();

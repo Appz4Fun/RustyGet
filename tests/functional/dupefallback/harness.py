@@ -4181,7 +4181,14 @@ def _failcont_bytes(ids, prefix):
     return served, count, again, par_again
 
 
-def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKind'):
+def _log_text(t):
+    try:
+        return t.read_file('nzbget.log').decode(errors='replace')
+    except Exception:
+        return ''
+
+
+def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKind', need_live=False):
     """The ultimate goal (extract while downloading, 2026-11-25): a stored rar
     set of movie.mkv extracts while it downloads, and the primary dies at
     ``die`` (a fraction of its data: every article from there on is gone). Its
@@ -4306,6 +4313,12 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
     backup_unpacks = _grep_log(t, 'Directly unpacking Backup') + _grep_log(t, 'Unpacking Backup')
     du_ok = _grep_log(t, 'Direct unpack for Primary successful')
     used_direct = _grep_log(t, 'Using directly unpacked files')
+    # an extraction that started over (persistent session falling back) or stopped at a volume
+    # read as it was written
+    restarts = (_grep_log(t, 'cannot continue from its rebuilt copy') +
+                len(re.findall(r'Unrar: progressive direct unpack \((?!volume count)', _log_text(t))))
+    reads = _live_reads(t)
+    as_written = reads[0] if reads else 0.0
     integ = _verify_output(t, movie, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
     winner = 'Primary' if hp['Status'].startswith('SUCCESS') else (
         'Backup' if hb['Status'].startswith('SUCCESS') else 'none')
@@ -4339,18 +4352,21 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
         ok = integ and winner == 'Backup' and du_ok == 0 and lent == 0
     else:
         # the extraction that ran before the cut is the one that finished: direct unpack of
-        # the primary succeeded and post-processing took its files, extracting nothing again
+        # the primary succeeded and post-processing took its files, extracting nothing again,
+        # and it never started over (a volume read as it was written goes on from its rebuilt
+        # copy at the payload frontier)
         ok = (integ and winner == 'Primary' and failed_over == 0 and cancelled == 0 and backup_unpacks == 0
               and du_ok == 1 and used_direct == 1 and a_again == 0 and b_again <= b_again_ok
-              and b_bytes <= b_budget and b_before == 0)
+              and b_bytes <= b_budget and b_before == 0 and restarts == 0
+              and (not need_live or as_written > 0))
     return (name, ok,
             'winner=%s primary=%s backup=%s secs=%.1f primary_served=%d/%d B (%d articles, %d again, '
             'par2 %d again) backup_served=%d B of %d (budget %d, %d articles, %d again, par2 %d again) '
             'twin_before_frontier=%d failover_logs=%d du_cancelled=%d du_ok=%d used_direct=%d '
-            'backup_unpacks=%d extracted_ok=%s'
+            'backup_unpacks=%d extracted_ok=%s restarts=%d as_written_mb=%s'
             % (winner, hp['Status'], hb['Status'], elapsed, a_bytes, total, a_count, a_again, a_par_again,
                b_bytes, donor_total, b_budget, b_count, b_again, b_par_again, b_before, failed_over, cancelled,
-               du_ok, used_direct, backup_unpacks, integ))
+               du_ok, used_direct, backup_unpacks, integ, restarts, as_written))
 
 
 def scenario_failcont_twin25(daemon, t):
@@ -4375,6 +4391,13 @@ def scenario_failcont_alt50(daemon, t):
 
 def scenario_failcont_alt90(daemon, t):
     return _failcont(daemon, t, 'failcont_alt90', 'alt', 0.90)
+
+
+def scenario_failcont_altlive(daemon, t):
+    """failcont_alt50 with the dying volume read as it was written (writer-fed): the
+    extraction goes on from the alt's rebuilt copy at the payload frontier, with zero
+    restarts."""
+    return _failcont(daemon, t, 'failcont_altlive', 'alt', 0.60, need_live=True)
 
 
 def scenario_failcont_aes25(daemon, t):
@@ -14442,6 +14465,7 @@ SCENARIOS = {
     'failcont_twin90': scenario_failcont_twin90,
     'failcont_alt25': scenario_failcont_alt25,
     'failcont_alt50': scenario_failcont_alt50,
+    'failcont_altlive': scenario_failcont_altlive,
     'failcont_alt90': scenario_failcont_alt90,
     'failcont_aes25': scenario_failcont_aes25,
     'failcont_aes50': scenario_failcont_aes50,
@@ -14885,6 +14909,7 @@ SCENARIO_OPTIONS = {
     'failcont_twin90': PROD_OPTIONS + ['DownloadRate=4000'],
     'failcont_alt25': PROD_OPTIONS + ['DownloadRate=4000'],
     'failcont_alt50': PROD_OPTIONS + ['DownloadRate=4000'],
+    'failcont_altlive': PROD_OPTIONS + ['DownloadRate=4000'],
     'failcont_alt90': PROD_OPTIONS + ['DownloadRate=4000'],
     'failcont_aes25': PROD_OPTIONS + ['DownloadRate=4000'],
     'failcont_aes50': PROD_OPTIONS + ['DownloadRate=4000'],
@@ -14951,7 +14976,7 @@ def _promote_fallback(options, mode):
 FALLBACK_MODE_BOUND = {'livegate', 'streamrestartcredit', 'wholefilerestart', 'wholefilestale'}
 # scenarios that read nserv's request log (nserv.log)
 CAPTURE_REQUESTS = {'repost', 'wholefileproofcost', 'dropnzbdir', 'fleetstaysqueued', 'fleetprimaryfirst'} | {
-    'failcont_twin25', 'failcont_twin50', 'failcont_twin90', 'failcont_alt25', 'failcont_alt50', 'failcont_alt90', 'failcont_aes25', 'failcont_aes50', 'failcont_aes90', 'failcont_compressed', 'failcont_othervideo', 'failcont_twinlabel', 'failcont_fleettwin', 'failcont_fleetalt', 'failcont_fleetaes'}
+    'failcont_twin25', 'failcont_twin50', 'failcont_twin90', 'failcont_alt25', 'failcont_alt50', 'failcont_altlive', 'failcont_alt90', 'failcont_aes25', 'failcont_aes50', 'failcont_aes90', 'failcont_compressed', 'failcont_othervideo', 'failcont_twinlabel', 'failcont_fleettwin', 'failcont_fleetalt', 'failcont_fleetaes'}
 # extra nserv arguments per scenario (-w: response latency in ms)
 SCENARIO_NSERV_ARGS = {'fleetslowprobe': ['-x', '2000'], 'fleetprobespeed': ['-w', '300'], 'fleetprobebusy': ['-w', '300'], 'fleetprobehealthfail': ['-w', '800'], 'finaldeletemidway': ['-w', '300'], 'finaldeleterestart': ['-w', '300'], 'restartmidway': ['-w', '300'], 'xpacklatency': ['-w', '1000'], 'deadpickprobe': ['-w', '500'], 'deadpickafterreload': ['-w', '500'],
                        'deadpickpartial': ['-w', '100'], 'deadpickstray': ['-w', '500'], 'forcefailover': ['-w', '500'], 'copybackup': ['-w', '500'], 'copyoffailed': ['-w', '500'], 'deaddownloadstray2': ['-w', '300'], 'deaddownloadrestart': ['-w', '300'], 'deadbackupsonly': ['-w', '500'], 'backuporder': ['-w', '500'], 'deaddownloadlate': ['-w', '300'], 'deadpickservers': ['-w', '200'],

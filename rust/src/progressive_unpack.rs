@@ -3055,6 +3055,9 @@ struct WrittenSource {
     served: Vec<std::ops::Range<u64>>,
     /// `done` is a stand-in rebuilt from a duplicate: every byte is read from it.
     rebuilt: bool,
+    /// The download died in this volume after bytes were read: the rest comes from its rebuilt
+    /// copy at the payload frontier.
+    continuation: Option<Continuation>,
 }
 
 impl WrittenSource {
@@ -3101,6 +3104,7 @@ impl WrittenSource {
             long_holes,
             served: Vec::new(),
             rebuilt: false,
+            continuation: None,
         })
     }
 
@@ -3211,32 +3215,117 @@ impl WrittenSource {
 
     /// The download died in this volume and its part was borrowed from a duplicate: read the
     /// rest from the rebuilt volume, which has the volume's layout and length.
-    /// Only when every byte already read from what the download wrote reads the same from the
-    /// stand-in (a twin's bytes): a stand-in with its own layout (rebuilt headers, an alt) cannot
-    /// be mixed into one read. The session then fails and the extraction starts over on the
-    /// copy path, which reads the stand-in from its start (see `persistent::Run::stop`).
+    /// The download died in this volume and its part was rebuilt from a duplicate (a twin's
+    /// articles, or an alt's video bytes placed by the content map, see `crate::deadvolume`).
+    ///
+    /// Before any byte was read here the stand-in simply replaces the volume. Once bytes were
+    /// read, the extraction continues at its payload frontier without comparing container bytes:
+    /// what the download wrote stays as read, the rest of this volume's member data comes from
+    /// the stand-in's member data at the same payload offset, and the volume's end (its end of
+    /// archive block, which sends the extraction on to the next volume) from the stand-in's end.
     fn finish_virtual(&mut self, v: crate::deadvolume::VirtualVolume) -> ProgressiveResult<()> {
-        let mut source = VirtualSource::open(&self.path, v).map_err(|cause| {
+        let head = v.head.len() as u64;
+        let data_len = v.data_len;
+        let source = VirtualSource::open(&self.path, v).map_err(|cause| {
             ProgressiveFailure::new(FailureKind::Input {
                 operation: zipfast::progressive::InputOperation::Open,
                 cause,
             })
         })?;
-        if source.info.length != self.info.length || !self.served_matches(&mut source) {
-            return Err(ProgressiveFailure::new(FailureKind::Input {
-                operation: zipfast::progressive::InputOperation::Read,
-                cause: std::io::Error::other(
-                    "the volume being read as it was written was rebuilt from a duplicate",
-                ),
-            }));
-        }
-        self.rebuilt = true;
         // No file of the set: never declared.
         (self.on_finished)(&self.path, &[], true);
         self.live.stop_waiting();
-        self.done = Some(Box::new(source));
+        if self.served.is_empty() {
+            if source.info.length != self.info.length {
+                return Err(self.cannot_continue("the rebuilt volume has another length"));
+            }
+            self.rebuilt = true;
+            self.done = Some(Box::new(source));
+            return Ok(());
+        }
+        // The member data of this volume as the download wrote its headers.
+        let Some((data_at, packed)) = first_member_data(self.live.out_path()) else {
+            return Err(self.cannot_continue("its headers do not name one member's data"));
+        };
+        if packed != data_len {
+            return Err(self.cannot_continue("the rebuilt volume holds another part of the member"));
+        }
+        self.continuation = Some(Continuation {
+            source,
+            data_at,
+            data_end: data_at + packed,
+            source_data_at: head,
+        });
         Ok(())
     }
+
+    /// Logged once and returned: this volume cannot go on from the duplicate here.
+    fn cannot_continue(&self, why: &str) -> ProgressiveFailure {
+        ProgressiveFailure::new(FailureKind::Input {
+            operation: zipfast::progressive::InputOperation::Read,
+            cause: std::io::Error::other(format!(
+                "{} was read as it was written and cannot continue from its rebuilt copy: {why}",
+                self.path.display()
+            )),
+        })
+    }
+
+    /// Reads `offset` of this volume through the stand-in at the same payload offset.
+    fn read_continued(
+        &mut self,
+        offset: u64,
+        buf: &mut [u8],
+        cx: &mut Context<'_>,
+    ) -> ProgressiveResult<RangeRead> {
+        let c = self.continuation.as_mut().expect("continuing");
+        let next_written = self.live.next_written(offset).unwrap_or(u64::MAX);
+        let (at, limit) = if offset < c.data_at {
+            return Err(self.cannot_continue("a header of it was never written"));
+        } else if offset < c.data_end {
+            (offset - c.data_at + c.source_data_at, c.data_end.min(next_written) - offset)
+        } else {
+            // Behind the member data: the stand-in's end of volume.
+            let tail = c.source_data_at + (c.data_end - c.data_at);
+            (tail + (offset - c.data_end), u64::MAX)
+        };
+        let source_len = c.source.info.length.value();
+        if at >= source_len {
+            // Past the stand-in's end of archive block, which the extraction never reads past.
+            let n = buf.len().min(self.info.extent.saturating_sub(offset) as usize).max(1);
+            return Ok(RangeRead::Hole { len: n as u64 });
+        }
+        let n = (buf.len() as u64).min(limit).min(source_len - at) as usize;
+        let read = c.source.read_at(at, &mut buf[..n], cx)?;
+        if let RangeRead::Filled { count } = read {
+            crate::livewrite::count_read(count as u64, crate::livewrite::ReadKind::Back);
+        }
+        Ok(read)
+    }
+}
+
+/// The data a volume's first member block holds: (offset, length), from the volume's headers.
+fn first_member_data(path: &Path) -> Option<(u64, u64)> {
+    use zipfast::rar5::reader::{Block, Volume};
+    let mut vol = Volume::open(path).ok()?;
+    for _ in 0..64 {
+        match vol.next_block() {
+            Ok(Some(Block::File(h))) => return Some((h.data_at, h.packed_size)),
+            Ok(Some(Block::Main(_))) | Ok(Some(Block::Service(_))) | Ok(Some(Block::Unknown)) => {}
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// A volume read as it was written whose download died in it, going on from its rebuilt copy
+/// at the payload frontier (see [`WrittenSource::finish_virtual`]).
+struct Continuation {
+    source: VirtualSource,
+    /// The member data in this volume, as its own headers place it.
+    data_at: u64,
+    data_end: u64,
+    /// Where the same member data starts in the stand-in.
+    source_data_at: u64,
 }
 
 impl Drop for WrittenSource {
@@ -3297,6 +3386,9 @@ impl RangeSource for WrittenSource {
                 PackedRead::Hole { .. } => true,
                 PackedRead::NotYet { .. } => false,
             };
+            if self.continuation.is_some() {
+                return self.read_continued(offset, buf, cx);
+            }
             if let Some(v) = self.done.as_mut() {
                 // Never reported (lost, or repaired since): the finished volume's answer.
                 return v.read_at(offset, buf, cx);

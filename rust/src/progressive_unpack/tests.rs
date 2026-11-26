@@ -6776,6 +6776,7 @@ struct DyingFeed {
     nzb_id: i32,
     dead: PathBuf,
     stand_in: Arc<Mutex<Option<crate::deadvolume::VirtualVolume>>>,
+    volumes: u64,
 }
 
 impl VolumeFeed for DyingFeed {
@@ -6798,9 +6799,29 @@ impl VolumeFeed for DyingFeed {
         }
         crate::livewrite::lookup(self.nzb_id, crate::fsops::path_to_bytes(path))
     }
+    fn expected_volumes(&self) -> u64 {
+        self.volumes
+    }
 }
 
-fn dying_volume_run(tag: &str, nzb_id: i32, write_header: bool, other_layout: bool) -> (Result<zipfast::extract::Summary, Error>, Vec<String>, Vec<u8>, TestDir) {
+fn dying_volume_run(tag: &str, nzb_id: i32, write_header: bool, other_layout: bool) -> (
+    Result<zipfast::extract::Summary, Error>,
+    Vec<String>,
+    Vec<u8>,
+    TestDir,
+) {
+    dying_volume_run_on(tag, nzb_id, write_header, other_layout, true)
+}
+
+/// `persistent`: the feed gives a volume count (a persistent session); without one the copy
+/// path extracts.
+fn dying_volume_run_on(
+    tag: &str,
+    nzb_id: i32,
+    write_header: bool,
+    other_layout: bool,
+    persistent: bool,
+) -> (Result<zipfast::extract::Summary, Error>, Vec<String>, Vec<u8>, TestDir) {
     let t = TestDir::new(tag);
     let data = pattern(400_000);
     let chunk = 100_000;
@@ -6826,30 +6847,40 @@ fn dying_volume_run(tag: &str, nzb_id: i32, write_header: bool, other_layout: bo
         f.write_all_at(&vols[2][..10_000], 0).unwrap();
         crate::livewrite::written(nzb_id, 2, 0, 10_000);
     }
-    // The stand-in: the volume's own bytes, its middle in a scratch file.
-    let head = 1_000;
-    let tail = 500;
+    // The stand-in: the volume's member data in a scratch file between its headers and its
+    // end. An alt's is laid out otherwise: other (here shorter) headers, the same member data
+    // placed by the content map, its own end.
+    let whole = t.dl().join("whole-2.bin");
+    std::fs::write(&whole, &vols[2]).unwrap();
+    let (data_at, packed) = super::first_member_data(&whole).unwrap();
+    let (data_at, packed) = (data_at as usize, packed as usize);
     let mid = t.dl().join("borrowed.bin");
-    std::fs::write(&mid, &vols[2][head..vols[2].len() - tail]).unwrap();
-    let mut head_bytes = vols[2][..head].to_vec();
-    if other_layout {
-        // Rebuilt headers that differ from the volume's (an alt's stand-in).
-        head_bytes[600] ^= 0xff;
-    }
+    std::fs::write(&mid, &vols[2][data_at..data_at + packed]).unwrap();
+    let head_bytes = if other_layout {
+        vols[2][..data_at - 4].to_vec()
+    } else {
+        vols[2][..data_at].to_vec()
+    };
     let v = crate::deadvolume::VirtualVolume {
         head: head_bytes,
         data: mid,
-        data_len: (vols[2].len() - head - tail) as u64,
-        tail: vols[2][vols[2].len() - tail..].to_vec(),
+        data_len: packed as u64,
+        tail: vols[2][data_at + packed..].to_vec(),
         holes: Vec::new(),
     };
     let stand_in = Arc::new(Mutex::new(None));
     let set = stand_in.clone();
+    let live = crate::livewrite::lookup(nzb_id, crate::fsops::path_to_bytes(&dead)).unwrap();
     let rebuilt = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(300));
+        // The download dies once the extraction read what it wrote (when it wrote anything).
+        let t0 = std::time::Instant::now();
+        while write_header && live.read_live() == 0 && t0.elapsed() < Duration::from_secs(20) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::thread::sleep(Duration::from_millis(100));
         *set.lock().unwrap() = Some(v);
     });
-    let feed = DyingFeed { nzb_id, dead, stand_in };
+    let feed = DyingFeed { nzb_id, dead, stand_in, volumes: if persistent { n as u64 } else { 0 } };
     let first = t.dl().join(volume_name(0, n));
     let (r, log) = run(&first, &t.out(), Box::new(feed));
     rebuilt.join().unwrap();
@@ -6872,13 +6903,19 @@ fn a_twin_stand_in_takes_over_a_volume_after_bytes_were_read() {
 }
 
 #[test]
-fn a_stand_in_with_another_layout_is_never_mixed_into_bytes_already_read() {
-    let (r, log, _, t) = dying_volume_run("written-rebuilt-alt", -7_320_007, true, true);
-    // This feed runs the copy path (no volume count), whose session stops at the stand-in; a
-    // persistent session stopping there falls back to it and starts over (`Run::stop`).
-    match r {
-        Err(Error::Failed(f)) => assert!(format!("{f:?}").contains("rebuilt from a duplicate"), "{f:?}"),
-        other => panic!("expected the session to stop, got ok={}: {log:?}", other.is_ok()),
-    }
-    assert!(!t.out().join("movie.mkv").exists());
+fn an_alt_stand_in_continues_the_volume_at_its_payload_frontier_without_a_restart() {
+    let (r, log, data, t) = dying_volume_run("written-rebuilt-alt", -7_320_007, true, true);
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    assert!(
+        !log.iter().any(|l| l.contains("progressive direct unpack")),
+        "the extraction started over: {log:?}"
+    );
+}
+
+#[test]
+fn an_alt_stand_in_continues_the_volume_on_the_copy_path_too() {
+    let (r, log, data, t) = dying_volume_run_on("written-rebuilt-alt-copy", -7_320_008, true, true, false);
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
 }

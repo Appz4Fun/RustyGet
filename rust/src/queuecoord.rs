@@ -2908,7 +2908,8 @@ impl NzbgetRsQueueCoordinator {
                         let prop_wait = is_propagation_wait(f.time, propagation_delay, cur_date);
                         if !prop_wait {
                             // A volume of a set extracted live, within the window: taken in
-                            // extraction order before the download's other files.
+                            // extraction order before the download's other files (a par2
+                            // file ahead of it keeps its place: live PAR reads it early).
                             let rank = order.as_ref().and_then(|o| o.window_rank(&f.filename));
                             let higher = match &best_file {
                                 None => true,
@@ -2918,7 +2919,10 @@ impl NzbgetRsQueueCoordinator {
                                         || (f.extra_priority && !bf.extra_priority)
                                         || (f.extra_priority == bf.extra_priority
                                             && best_nzb.ptr == nzb.ptr
-                                            && rank.is_some_and(|r| best_rank.is_none_or(|b| r < b)))
+                                            && rank.is_some_and(|r| match best_rank {
+                                                Some(b) => r < *b,
+                                                None => !bf.par_file,
+                                            }))
                                 }
                             };
                             if higher {

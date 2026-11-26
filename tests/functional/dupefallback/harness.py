@@ -7555,13 +7555,14 @@ def _live_order(daemon, t, label, name, tag, volumes, movie, nzb_order):
 
 
 def scenario_liveorder7z(daemon, t):
-    """A stored 7z cut into eight volumes, listed in the NZB last volume first: the volumes
+    """A stored 7z cut into nine volumes, listed in the NZB last volume first: the volumes
     finish in extraction order (the directory at the end of the last one is fetched first,
     by offset), and the extraction starts while the first volume is still downloading."""
     if not generators.HAVE_7Z:
         return ('liveorder7z', None, 'SKIP: 7z not installed')
     scale = _live_scale()
-    movie = _video_like(40_000_000 * scale, 7401)
+    # (eight whole volumes and a last one of several articles)
+    movie = _video_like(42_500_000 * scale, 7401)
     with tempfile.TemporaryDirectory(prefix='lo7z-') as workdir:
         volumes = _seven_zip_volumes(movie, 5_000_000 * scale, workdir)
     return _live_order(daemon, t, 'liveorder7z', 'RelLO7', 'lo7A', volumes, movie,
@@ -7569,13 +7570,13 @@ def scenario_liveorder7z(daemon, t):
 
 
 def scenario_liveorderrar(daemon, t):
-    """A RAR5 store set of eight volumes listed in the NZB in a scrambled order: the volumes
+    """A RAR5 store set of nine volumes listed in the NZB in a scrambled order: the volumes
     finish in extraction order and the extraction starts from the first volume's headers,
     before that volume is complete."""
     if not generators.HAVE_RAR:
         return ('liveorderrar', None, 'SKIP: rar not installed')
     scale = _live_scale()
-    movie = _payload(40_000_000 * scale, 7402)
+    movie = _payload(42_500_000 * scale, 7402)
     with tempfile.TemporaryDirectory(prefix='lorar-') as workdir:
         vols = generators.rar5_method_volumes('movie.mkv', movie, 5_000_000 * scale, 0, workdir)
     volumes = [('Rel.part%02d.rar' % (i + 1), v) for i, v in enumerate(vols)]

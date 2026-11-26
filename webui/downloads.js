@@ -48,6 +48,7 @@ var Downloads = (new function($)
 	var nameColumnWidth = null;
 	var cached = false;
 	var lastDownloadRate;
+	var drawnHistory;
 	var listGroupsSubs = [];
 
 	var statusData = {
@@ -181,7 +182,9 @@ var Downloads = (new function($)
 			return;
 		}
 
-		if (cached && !force && lastDownloadRate === Status.status.DownloadRate)
+		// the copies listed under a row come from History: a new History
+		// reply redraws even when the queue is unchanged
+		if (cached && !force && lastDownloadRate === Status.status.DownloadRate && drawnHistory === History.items)
 		{
 			return;
 		}
@@ -209,10 +212,14 @@ var Downloads = (new function($)
 	// F16: a fleet of copies grouped by name is ONE row in Downloads, its
 	// primary's, with the other copies listed under it when opened. The order
 	// is the daemon's failover order (DupeFleetOrder), never re-ranked here.
+	// A download with copies under its DupeKey that are no fleet (backups in
+	// History, other queued copies) gets the same toggle and list; its own row
+	// stays, and so do the rows of its queued siblings.
 	function redraw_table()
 	{
 		var data = [];
-		var fleets = DownloadsUI.buildFleets(groups);
+		drawnHistory = History.items;
+		var fleets = DownloadsUI.buildFleets(groups, History.items);
 
 		for (var i=0; i < groups.length; i++)
 		{
@@ -226,6 +233,10 @@ var Downloads = (new function($)
 					continue;
 				}
 				group.fleet = fleet;
+			}
+			else if (fleets.copiesById[group.NZBID])
+			{
+				group.fleet = fleets.copiesById[group.NZBID];
 			}
 
 			group.name = group.NZBName + ' ' + ReleaseName.forGroup(group).headline;
@@ -416,6 +427,12 @@ var Downloads = (new function($)
 		var nzbid = $(this).attr('data-nzbid');
 		var area = $(this).attr('data-area');
 		$(this).blur();
+		if ($(this).attr('data-fleet-source') === 'history')
+		{
+			// a copy in History listed under the row: its History panel
+			DetailsPanel.open('history', nzbid);
+			return;
+		}
 		DownloadsEditDialog.showModal(nzbid, groups, area);
 	}
 
@@ -1005,13 +1022,31 @@ var DownloadsUI = (new function($)
 	// holds or orders (DupeHeld, DupeProbing, DupeFleetOrder). The leader is
 	// the primary (order 0), else the copy with the best score while every
 	// copy is being probed; the others follow in the daemon's failover order.
-	this.buildFleets = function(groups)
+	//
+	// Every other copy under a queued download's DupeKey joins its list too,
+	// the way the daemon finds donors and failover copies
+	// (dupefallback.rs collect_donors_host, dupecoord.rs same_name_or_key: the
+	// key ignoring ASCII case): copies in History (DELETED/DUPE backups first,
+	// in the daemon's donor order, then failed or finished ones) and, for a
+	// download that is no fleet, its queued siblings. History is indexed by
+	// key once per call, never scanned per row.
+	//   history: the History reply (History.items), may be missing.
+	// Returns { byKey, byId (fleets of 2+ queued copies, as before),
+	//   copiesById (the list of a download that is no such fleet's member and
+	//   has another copy) }.
+	this.buildFleets = function(groups, history)
 	{
 		var byKey = {};
 		var keys = [];
+		var queuedByKey = {};
 		for (var i = 0; i < groups.length; i++)
 		{
 			var g = groups[i];
+			var copyKey = DownloadsUI.copyKey(g);
+			if (copyKey)
+			{
+				(queuedByKey[copyKey] = queuedByKey[copyKey] || []).push(g);
+			}
 			var key = DownloadsUI.fleetKey(g);
 			if (!key)
 			{
@@ -1024,6 +1059,7 @@ var DownloadsUI = (new function($)
 			}
 			byKey[key].members.push(g);
 		}
+		var inHistory = DownloadsUI.historyCopies(history, queuedByKey);
 		var byId = {};
 		keys.forEach(function(key)
 		{
@@ -1037,8 +1073,86 @@ var DownloadsUI = (new function($)
 			fleet.leader = fleet.members[0];
 			fleet.probing = fleet.members.some(function(m) { return DownloadsUI.fleetFlag(m, 'DupeProbing'); });
 			fleet.members.forEach(function(m) { byId[m.NZBID] = fleet; });
+			fleet.members = fleet.members.concat(inHistory[key] || []);
 		});
-		return { byKey: byKey, byId: byId };
+		var copiesById = {};
+		Object.keys(queuedByKey).forEach(function(key)
+		{
+			var queued = queuedByKey[key];
+			var hist = inHistory[key] || [];
+			queued.forEach(function(g)
+			{
+				var fleet = byId[g.NZBID];
+				if ((fleet && fleet.members.length > 1) || queued.length + hist.length < 2)
+				{
+					return;
+				}
+				// the download itself first, its queued siblings in queue order,
+				// then the copies in History
+				var members = [g].concat(queued.filter(function(o) { return o !== g; }), hist);
+				copiesById[g.NZBID] = { key: key, members: members, leader: g, probing: false };
+			});
+		});
+		return { byKey: byKey, byId: byId, copiesById: copiesById };
+	}
+
+	// the DupeKey a copy is matched by, lowercased; '' for none or a URL
+	this.copyKey = function(item)
+	{
+		var key = String(item.DupeKey || '');
+		return key && item.Kind !== 'URL' ? key.toLowerCase() : '';
+	}
+
+	// History's NZB copies of the queued keys, by key, in the order they are
+	// listed: DELETED/DUPE backups first (the copies failover and donor search
+	// take), ranked as dupefallback.rs compare_donor_ranks ranks donors (twin,
+	// then DupeCopyKind, then score, then ID); then every other History copy,
+	// newest first. Each copy is marked `inHistory`.
+	this.historyCopies = function(history, queuedByKey)
+	{
+		var out = {};
+		for (var i = 0; history && i < history.length; i++)
+		{
+			var h = history[i];
+			if (h.Kind !== 'NZB')
+			{
+				continue;
+			}
+			var key = DownloadsUI.copyKey(h);
+			if (key && queuedByKey[key])
+			{
+				h.inHistory = true;
+				(out[key] = out[key] || []).push(h);
+			}
+		}
+		Object.keys(out).forEach(function(key)
+		{
+			out[key].sort(function(a, b)
+			{
+				var ba = DownloadsUI.historyBackup(a) ? 0 : 1, bb = DownloadsUI.historyBackup(b) ? 0 : 1;
+				if (ba !== bb) return ba - bb;
+				if (ba === 1) return (b.HistoryTime || 0) - (a.HistoryTime || 0) || b.NZBID - a.NZBID;
+				var ra = donorRank(a), rb = donorRank(b);
+				return ra - rb || (b.DupeScore || 0) - (a.DupeScore || 0) || a.NZBID - b.NZBID;
+			});
+		});
+		return out;
+	}
+
+	// a copy waiting in History as a backup (failover and donor search take it)
+	this.historyBackup = function(item)
+	{
+		return item.Status === 'DELETED/DUPE';
+	}
+
+	// donorkind.rs DonorKind order: twin, borrowable, borrowable-encrypted,
+	// not known, unborrowable
+	function donorRank(item)
+	{
+		var kind = DownloadsUI.parameterValue(item.Parameters, 'DupeKind');
+		var copyKind = DownloadsUI.parameterValue(item.Parameters, 'DupeCopyKind');
+		if (kind === 'twin' || /^twin:\d+\/\d+$/.test(kind) || copyKind === 'twin') return 0;
+		return { 'borrowable': 1, 'borrowable-encrypted': 2, 'unborrowable': 4 }[copyKind] || 3;
 	}
 
 	this.fleetKey = function(group)
@@ -1176,6 +1290,11 @@ var DownloadsUI = (new function($)
 		var parked = parseFloat(DownloadsUI.parameterValue(p, 'DupeParked'));
 		var probed = DownloadsUI.probedAlive(p);
 		var alive = !isNaN(parked) ? parked : probed >= 0 ? probed / 10 : -1;
+		// never probed, but downloaded in part: the share of its tried articles
+		if (alive < 0 && (group.SuccessArticles || 0) + (group.FailedArticles || 0) > 0)
+		{
+			alive = DownloadsUI.shownHealth(group) / 10;
+		}
 		var cls = 'is-good';
 		// how many sampled articles the probe's share rests on ("0/40"), and
 		// whether its check was cut at the copy's budget (a less sure share)
@@ -1197,11 +1316,39 @@ var DownloadsUI = (new function($)
 				I18n.translate('fleet_label_alive', alive.toFixed(1)));
 			cls = alive >= 97.5 ? 'is-good' : 'is-warn';
 		}
+		var lends = DownloadsUI.borrowLabel(group);
+		if (lends)
+		{
+			parts.push(lends);
+		}
 		return { text: parts.join(' · '), cls: cls };
+	}
+
+	// whether a copy can lend by range (DupeCopyKind, donorkind.rs); a twin
+	// lends article by article and its kind says so already
+	this.borrowLabel = function(group)
+	{
+		switch (DownloadsUI.parameterValue(group.Parameters, 'DupeCopyKind'))
+		{
+			case 'borrowable': return I18n.translate('fleet_label_borrowable');
+			case 'borrowable-encrypted': return I18n.translate('fleet_label_borrowable_encrypted');
+			case 'unborrowable': return I18n.translate('fleet_label_unborrowable');
+		}
+		return '';
 	}
 
 	this.fleetMemberState = function(group)
 	{
+		if (group.inHistory)
+		{
+			return DownloadsUI.historyBackup(group) ? I18n.translate('fleet_state_history_backup') :
+				HistoryUI.buildStatusText(group) + ' · ' + I18n.translate('fleet_in_history');
+		}
+		if (!DownloadsUI.fleetKey(group))
+		{
+			// a download that is no fleet member: its queue status
+			return DownloadsUI.buildStatusText(group);
+		}
 		if (DownloadsUI.fleetFlag(group, 'DupeProbing'))
 		{
 			return I18n.translate('fleet_state_probing');
@@ -1240,8 +1387,19 @@ var DownloadsUI = (new function($)
 		return isNaN(alive) || alive > 0;
 	}
 
-	this.fleetPosition = function(group)
+	// `leader`: the download whose row the list is under
+	this.fleetPosition = function(group, leader)
 	{
+		if (group.inHistory)
+		{
+			return DownloadsUI.historyBackup(group) ? I18n.translate('fleet_pos_backup') : I18n.translate('fleet_in_history');
+		}
+		if (leader && !DownloadsUI.fleetKey(group))
+		{
+			// no fleet: the row's own download is the copy downloading for the
+			// key, a queued sibling one more copy in the queue
+			return group === leader ? I18n.translate('fleet_pos_primary') : I18n.translate('fleet_pos_queued');
+		}
 		var order = parseInt(DownloadsUI.parameterValue(group.Parameters, 'DupeFleetOrder'), 10);
 		if (DownloadsUI.fleetFlag(group, 'DupeProbing') || isNaN(order))
 		{
@@ -1275,10 +1433,11 @@ var DownloadsUI = (new function($)
 			var label = DownloadsUI.fleetMemberLabel(m);
 			// never a {{password}} on screen (releasename.rs without_password)
 			var name = DupeGroup.withoutPassword(m.NZBNicename || m.NZBName);
-			return '<li class="fleet-sub" data-nzbid="' + m.NZBID + '" data-fleet-order="' +
-				Util.textToAttr(DownloadsUI.parameterValue(m.Parameters, 'DupeFleetOrder')) + '">' +
-				'<span class="fleet-sub-pos">' + Util.textToHtml(DownloadsUI.fleetPosition(m)) + '</span>' +
-				'<a href="#" class="fleet-sub-name" data-nzbid="' + m.NZBID + '" title="' + Util.textToAttr(name) + '">' + Util.textToHtml(name) + '</a>' +
+			var source = m.inHistory ? 'history' : 'queue';
+			return '<li class="fleet-sub' + (m.inHistory ? ' is-history' : '') + '" data-nzbid="' + m.NZBID + '" data-fleet-source="' + source +
+				'" data-fleet-order="' + Util.textToAttr(DownloadsUI.parameterValue(m.Parameters, 'DupeFleetOrder')) + '">' +
+				'<span class="fleet-sub-pos">' + Util.textToHtml(DownloadsUI.fleetPosition(m, fleet.leader)) + '</span>' +
+				'<a href="#" class="fleet-sub-name" data-nzbid="' + m.NZBID + '" data-fleet-source="' + source + '" title="' + Util.textToAttr(name) + '">' + Util.textToHtml(name) + '</a>' +
 				(label.text ? '<span class="fleet-sub-label ' + label.cls + '">' + Util.textToHtml(label.text) + '</span>' : '') +
 				'<span class="fleet-sub-state">' + Util.textToHtml(DownloadsUI.fleetMemberState(m)) + '</span></li>';
 		});

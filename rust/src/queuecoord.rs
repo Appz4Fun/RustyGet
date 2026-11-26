@@ -55,23 +55,14 @@ impl LiveOrder {
     }
 }
 
-/// The volumes, in extraction order, of the set whose first volume's headers download `nzb_id`
-/// has written (`livewrite::heads`), from the names of its files: what direct unpack registers
-/// once it starts (`liveorder::set_order`).
+/// The volumes, in extraction order, of the set whose first volume is named `first`, from the
+/// names of download `nzb_ptr`'s files: what direct unpack registers once it starts
+/// (`liveorder::set_order`).
 fn live_set_order(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     nzb_ptr: NzbRef,
-    nzb_id: i32,
+    first: Option<&[u8]>,
 ) -> Option<Vec<Vec<u8>>> {
-    let heads = crate::livewrite::heads(nzb_id);
-    let first_path = heads.first()?;
-    let first = match first_path
-        .iter()
-        .rposition(|&b| b == b'/' || b == crate::paths::PATH_SEPARATOR)
-    {
-        Some(i) => &first_path[i + 1..],
-        None => first_path.as_slice(),
-    };
     let mut names: Vec<Vec<u8>> = (0..host.nzb_file_len(nzb_ptr))
         .map(|i| host.file_snap(host.nzb_file_at(nzb_ptr, i)))
         .filter(|f| !f.deleted)
@@ -80,15 +71,40 @@ fn live_set_order(
     names.extend((0..host.nzb_completed_files_len(nzb_ptr)).map(|i| {
         crate::cstr::until_nul(&host.nzb_completed_file_at(nzb_ptr, i).filename).to_vec()
     }));
-    if crate::livefeed::is_live_first(first) {
-        return crate::livefeed::live_set(first, &names).map(|set| set.volumes);
+    // Without a first volume whose headers are written: the first one the names show.
+    let first = match first {
+        Some(f) => f.to_vec(),
+        None => names
+            .iter()
+            .find(|n| crate::unpack::direct_unpack_is_main_archive(n))?
+            .clone(),
+    };
+    if crate::livefeed::is_live_first(&first) {
+        return crate::livefeed::live_set(&first, &names).map(|set| set.volumes);
     }
     let rars = names
         .iter()
         .filter(|n| crate::filetypes::is_rar_file(n))
         .count() as u64;
-    Some(crate::postproc::rar_volume_names(first, rars))
+    (rars > 1).then(|| crate::postproc::rar_volume_names(&first, rars))
 }
+
+/// The name of the first volume download `nzb_id` has written the headers of, if any.
+fn head_name(nzb_id: i32) -> Option<Vec<u8>> {
+    let heads = crate::livewrite::heads(nzb_id);
+    let path = heads.first()?;
+    Some(match path
+        .iter()
+        .rposition(|&b| b == b'/' || b == crate::paths::PATH_SEPARATOR)
+    {
+        Some(i) => path[i + 1..].to_vec(),
+        None => path.clone(),
+    })
+}
+
+/// Downloads whose file names were looked at for a set to take in extraction order.
+static ORDER_BY_NAME_SEEN: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
+static NEXT_ORDER_BY_NAME_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// The live extraction order of download `nzb_id` (`nzb_ptr`), from `cache` or looked up (once
 /// per download): the files still queued give the lowest unfinished volume.
@@ -2234,6 +2250,7 @@ impl NzbgetRsQueueCoordinator {
             crate::parchecker::streaming_session_retry_completion_tick();
             self.drain_live_par_completed_files(host);
             Self::drain_live_par_articles(host);
+            self.order_by_names(host);
             self.drain_live_heads(host);
             self.restart_live_stragglers(host);
 
@@ -3163,10 +3180,12 @@ impl NzbgetRsQueueCoordinator {
                     // Running (it picks the volume up itself), done, or the download is over.
                     continue;
                 }
-                // The set's extraction order from now on, also while direct rename runs: what
-                // follows its first-article pass already goes in that order.
-                if host.opts().direct_unpack && crate::liveorder::ranks(id).is_none() {
-                    if let Some(order) = live_set_order(host, nzb_ptr, id) {
+                // The set's extraction order from now on (by the names it has now, after a
+                // direct rename), also while direct rename runs.
+                if host.opts().direct_unpack {
+                    if let Some(order) = head_name(id)
+                        .and_then(|first| live_set_order(host, nzb_ptr, Some(&first)))
+                    {
                         crate::liveorder::set_order(id, &order);
                     }
                 }
@@ -3192,6 +3211,44 @@ impl NzbgetRsQueueCoordinator {
                 }
             }
         }
+    }
+
+    /// Downloads whose file names already show a set direct unpack will extract (its first
+    /// volume and the rest) take it in extraction order from their start: the names are only a
+    /// download preference, direct unpack itself starts from the headers once they are written
+    /// (`drain_live_heads`), and registers the order again then by the names it has by then.
+    fn order_by_names(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
+        let now = crate::liveorder::now_ms();
+        if now < NEXT_ORDER_BY_NAME_MS.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        NEXT_ORDER_BY_NAME_MS.store(now + 500, std::sync::atomic::Ordering::Relaxed);
+        let opts = host.opts();
+        if !opts.direct_unpack {
+            return;
+        }
+        host.with_locked_queue(|dq_ptr| {
+            let mut seen = ORDER_BY_NAME_SEEN.lock().unwrap_or_else(|e| e.into_inner());
+            let mut present = Vec::new();
+            for i in 0..host.queue_len(dq_ptr) {
+                let nzb_ptr = host.queue_at(dq_ptr, i);
+                let nzb = host.nzb_snap(nzb_ptr, false);
+                present.push(nzb.id);
+                if seen.contains(&nzb.id) {
+                    continue;
+                }
+                seen.push(nzb.id);
+                if nzb.direct_unpack_status != DirectUnpackStatus::None
+                    || crate::liveorder::ranks(nzb.id).is_some()
+                {
+                    continue;
+                }
+                if let Some(order) = live_set_order(host, nzb_ptr, None) {
+                    crate::liveorder::set_order(nzb.id, &order);
+                }
+            }
+            seen.retain(|id| present.contains(id));
+        });
     }
 
     /// Asks again for articles a live extraction will wait for that run far longer than the

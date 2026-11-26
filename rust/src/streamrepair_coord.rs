@@ -573,9 +573,6 @@ pub struct NzbgetRsStreamRepairCtrl {
     /// fetched a moment ago is served from [`RECENT_SINGLES`] in its place; the others come
     /// from `batch_fetcher`, in order, and are kept there too (see [`PrefetchSlot`]).
     prefetch_plan: Mutex<std::collections::VecDeque<PrefetchSlot>>,
-    /// Set by [`Self::stop`]: articles held in memory are not served past it either, so a
-    /// repair asked to stop stops as promptly as one waiting on the network.
-    stopping: AtomicBool,
     timed_out: Arc<AtomicBool>,
     progress_bytes: Arc<AtomicI64>,
     checking_donor: Arc<AtomicI32>,
@@ -598,9 +595,6 @@ impl NzbgetRsStreamRepairCtrl {
     /// already held is served without the network; one fetched now is kept for a later run.
     /// Bytes fetched count into `fetch_stats`, held ones do not.
     fn next_planned_article(&self) -> Option<FetchedDonorArticle> {
-        if self.stopping.load(Ordering::SeqCst) {
-            return None;
-        }
         let slot = self.prefetch_plan.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
         let message_id = match slot {
             Some(PrefetchSlot::Held(hit)) => return Some(hit),
@@ -647,7 +641,6 @@ impl NzbgetRsStreamRepairCtrl {
             fetcher: ArticleFetcher::new(crate::light_pool::light(nntp_host)),
             batch_fetcher: BatchFetcherPool::new(nntp_host),
             prefetch_plan: Mutex::new(std::collections::VecDeque::new()),
-            stopping: AtomicBool::new(false),
             timed_out: Arc::new(AtomicBool::new(false)),
             progress_bytes: Arc::new(AtomicI64::new(0)),
             checking_donor: Arc::new(AtomicI32::new(0)),
@@ -659,8 +652,6 @@ impl NzbgetRsStreamRepairCtrl {
     }
 
     pub fn stop(&self) {
-        self.stopping.store(true, Ordering::SeqCst);
-        self.prefetch_plan.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.batch_fetcher.stop();
         self.fetcher.stop();
     }
@@ -1918,9 +1909,6 @@ impl NzbgetRsStreamRepairCtrl {
                     }
                     let df = self.donor_files.get(member_index as usize)?;
                     let msg_id = df.article_msg_ids.get(part_index as usize)?;
-                    if self.ctrl.stopping.load(Ordering::SeqCst) {
-                        return None;
-                    }
                     if let Some(hit) = recent_single(msg_id) {
                         return Some(hit);
                     }

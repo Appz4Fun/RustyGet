@@ -3128,7 +3128,18 @@ impl NzbgetRsQueueCoordinator {
         // Downloads extracted live, by id: their volumes' extraction order and the lowest
         // unfinished volume (see `liveorder`), looked up once per call.
         let mut orders: Vec<(i32, Option<LiveOrder>)> = Vec::new();
-        // The queue's copies by duplicate key, read once per call when first needed (see
+        // The queue, read once per call: each pass of the loop below that finds a file with
+        // nothing left to fetch (all its articles in flight) goes round again, and re-reading a
+        // thousand-item queue per pass, with a hundred primaries' files in flight, kept the
+        // coordinator busy most of the time (6790). Choosing an article changes nothing these
+        // snapshots hold; the chosen collection is read afresh before it is used.
+        let queue: Vec<(crate::queuesubsys_host::NzbSnap, usize)> = (0..host.queue_len(dq_ptr))
+            .map(|i| {
+                let nzb_ptr = host.queue_at(dq_ptr, i);
+                (host.nzb_snap(nzb_ptr, false), host.nzb_file_len(nzb_ptr))
+            })
+            .collect();
+        // The queue's copies by duplicate key, indexed once per call when first needed (see
         // `has_active_dupe`).
         let mut copies_by_key: Option<CopiesByKey> = None;
 
@@ -3143,11 +3154,8 @@ impl NzbgetRsQueueCoordinator {
                 crate::queuesubsys_host::FileSnap,
             )> = None;
 
-            let qlen = host.queue_len(dq_ptr);
-            for i in 0..qlen {
-                let nzb_ptr = host.queue_at(dq_ptr, i);
-                let nzb = host.nzb_snap(nzb_ptr, false);
-                let flen = host.nzb_file_len(nzb_ptr);
+            for (nzb, flen) in &queue {
+                let (nzb_ptr, flen) = (nzb.ptr, *flen);
 
                 let nzb_higher = match &best_file {
                     None => true,
@@ -3164,7 +3172,7 @@ impl NzbgetRsQueueCoordinator {
 
                 if nzb_higher
                     && !nzb_paused
-                    && !self.has_active_dupe(host, dq_ptr, &nzb, &mut copies_by_key)
+                    && !self.has_active_dupe(host, &queue, nzb, &mut copies_by_key)
                     && ((!opts.pause_download && !opts.quota_reached) || nzb.force_priority)
                 {
                     let propagation_delay = opts.propagation_delay;
@@ -3247,6 +3255,8 @@ impl NzbgetRsQueueCoordinator {
                 }
                 break;
             };
+            // The snapshot was taken at the start of the call (see `queue`).
+            nzb = host.nzb_snap(nzb.ptr, false);
 
             if opts.direct_rename
                 && nzb.direct_rename_status <= DirectRenameStatus::Running
@@ -5661,13 +5671,14 @@ impl NzbgetRsQueueCoordinator {
     }
 
     /// Whether another queued copy of `nzb`'s duplicate key downloads or is processed, so this
-    /// one waits. `copies` is the queue grouped by key, read on first need and kept for the
-    /// rest of the caller's pass: read per candidate, a queue of a thousand items with a
-    /// hundred fleets' primaries cost a hundred whole-queue reads every few milliseconds (6790).
+    /// one waits. `queue` is the caller's snapshot of the queue and `copies` its entries grouped
+    /// by key, built on first need and kept for the rest of the caller's pass: read per
+    /// candidate, a queue of a thousand items with a hundred fleets' primaries cost a hundred
+    /// whole-queue reads every few milliseconds (6790).
     fn has_active_dupe(
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
-        dq_ptr: usize,
+        queue: &[(crate::queuesubsys_host::NzbSnap, usize)],
         nzb: &crate::queuesubsys_host::NzbSnap,
         copies: &mut Option<CopiesByKey>,
     ) -> bool {
@@ -5683,14 +5694,9 @@ impl NzbgetRsQueueCoordinator {
         let self_completed_empty = host.nzb_completed_files(nzb.ptr).is_empty();
         let copies = copies.get_or_insert_with(|| {
             let mut by_key = CopiesByKey::new();
-            for i in 0..host.queue_len(dq_ptr) {
-                let qp = host.queue_at(dq_ptr, i);
-                if qp.is_none() {
-                    continue;
-                }
-                let queued = host.nzb_snap(qp, false);
-                if !queued.dupe_key.is_empty() {
-                    by_key.entry(queued.dupe_key.to_ascii_lowercase()).or_default().push(queued);
+            for (i, (queued, _)) in queue.iter().enumerate() {
+                if !queued.ptr.is_none() && !queued.dupe_key.is_empty() {
+                    by_key.entry(queued.dupe_key.to_ascii_lowercase()).or_default().push(i);
                 }
             }
             by_key
@@ -5698,7 +5704,7 @@ impl NzbgetRsQueueCoordinator {
         let Some(same_key) = copies.get(&nzb.dupe_key.to_ascii_lowercase()) else {
             return false;
         };
-        for queued in same_key {
+        for queued in same_key.iter().map(|&i| &queue[i].0) {
             if queued.ptr == nzb.ptr {
                 continue;
             }
@@ -7702,8 +7708,9 @@ fn downloaded_ranges(
     merged
 }
 
-/// Queued copies grouped by lowercased duplicate key (see `has_active_dupe`).
-type CopiesByKey = std::collections::HashMap<Vec<u8>, Vec<crate::queuesubsys_host::NzbSnap>>;
+/// Positions in the caller's queue snapshot grouped by lowercased duplicate key (see
+/// `has_active_dupe`).
+type CopiesByKey = std::collections::HashMap<Vec<u8>, Vec<usize>>;
 
 #[cfg(test)]
 mod tests {

@@ -15033,7 +15033,10 @@ def scenario_fleetbigqueue(daemon, t):
     cpu_dl = queue_coord_cpu(15)
     lg_dl = listgroups_secs()
     api.editqueue('GroupPause', 0, '', primaries)
-    time.sleep(25)
+    # The held articles end by timeout and retries (ArticleTimeout=20), not at the pause.
+    freed_by = time.time() + 240
+    while time.time() < freed_by and any(g.get('ActiveDownloads', 0) for g in api.listgroups()):
+        time.sleep(2)
     # an ordinary download behind them goes through post-processing (unpack) at once
     members = _rarrenamer_members(t, 'bqP', ['testfile3'])
     added = time.time()

@@ -679,6 +679,16 @@ impl NzbgetRsDupeProbe {
                     pool.is_server_blocked(&wanted) || (bt > 0 && now_sec() - bt < 60)
                 }
             };
+            if let Some(wanted) = pool.server_by_id(server_id) {
+                let mut line = b"Dupe probe on ".to_vec();
+                line.extend_from_slice(wanted.name.to_bytes());
+                line.extend_from_slice(if result.unreachable {
+                    b": no connection (the server is blocked)".as_slice()
+                } else {
+                    b": no free connection within the wait".as_slice()
+                });
+                crate::log::log_active_bytes(crate::log::MK_DETAIL, &line);
+            }
             return (false, result);
         }
 

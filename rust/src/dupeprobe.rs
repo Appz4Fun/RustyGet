@@ -520,9 +520,9 @@ impl NzbgetRsDupeProbe {
     }
 
     /// The sample walk through the shared nntp-rs pool: one connection of
-    /// server `idx` checked out as light work (the RustyGet check slot the
-    /// caller holds keeps the duplicate health checks' share), a STAT per
-    /// sample still unfound. Returns whether the server answered anything,
+    /// server `idx` checked out (light work when the caller holds a light
+    /// slot, else a download connection ahead of the waiting downloads), a
+    /// STAT per sample still unfound. Returns whether the server answered anything,
     /// and whether it could not be reached at all.
     #[cfg(unix)]
     fn walk_pooled(
@@ -540,9 +540,9 @@ impl NzbgetRsDupeProbe {
             timeout: Some(timeout),
             ..Default::default()
         };
-        // the RustyGet slot the caller holds says which share this is: a light
-        // one runs in nntp-rs's light reserve, a check slot of the main pool on
-        // one of the server's download slots, ahead of waiting downloads
+        // a light RustyGet slot runs in nntp-rs's light reserve; otherwise the
+        // walk takes one of the server's download connections, ahead of the
+        // waiting downloads
         let (work, priority) = if light {
             (nntp_rs::Work::Light, nntp_rs::Priority::Next)
         } else {
@@ -624,6 +624,45 @@ impl NzbgetRsDupeProbe {
         (true, false)
     }
 
+    /// [`Self::probe_server_native`] through the shared nntp-rs pool without
+    /// a RustyGet slot: the walk's checkout waits for the server's next free
+    /// connection ahead of the waiting downloads.
+    #[cfg(unix)]
+    fn probe_pooled_unslotted(
+        &mut self,
+        pool: &crate::net::NzbgetRsServerPool,
+        shared: &crate::nntprs_pool::Shared,
+        idx: usize,
+        server_id: i32,
+        probed: &mut BTreeSet<i32>,
+    ) -> (bool, ServerResult) {
+        let mut result = ServerResult::default();
+        let Some(srv) = pool.server_by_id(server_id) else {
+            self.end_connection_wait();
+            return (false, result);
+        };
+        if pool.is_server_blocked(&srv) {
+            // a blocked server frees no connection for the probe
+            self.end_connection_wait();
+            result.unreachable = true;
+            let mut line = b"Dupe probe on ".to_vec();
+            line.extend_from_slice(srv.name.to_bytes());
+            line.extend_from_slice(b": no connection (the server is blocked)");
+            crate::log::log_active_bytes(crate::log::MK_DETAIL, &line);
+            return (false, result);
+        }
+        if !probed.insert(server_id) || self.is_stopped() {
+            self.end_connection_wait();
+            return (false, result);
+        }
+        let name = srv.name.to_bytes().to_vec();
+        let (answered, unreachable) = self.walk_pooled(shared, idx, &name, false, &mut result);
+        // the walk had its connection (or gave up waiting): the download goes on
+        self.end_connection_wait();
+        result.unreachable = unreachable;
+        (answered, result)
+    }
+
     #[cfg(unix)]
     fn probe_server_native(
         &mut self,
@@ -641,6 +680,30 @@ impl NzbgetRsDupeProbe {
         let mut actual_server_id: i32 = 0;
         let mut join_group = false;
         let mut server_name: Vec<u8> = Vec::new();
+        // With the shared nntp-rs pool a download holds its RustyGet slot (a
+        // server's, but only an admission token) for its whole fetch across
+        // every server, so a check slot of this server may not come free while
+        // downloads run, although nntp-rs's connections of it do between
+        // their requests. A free light slot is still taken (light work);
+        // without one the walk checks out a connection of the server in
+        // nntp-rs directly, ahead of the waiting downloads (Priority::Next),
+        // as fleet probe reads do (#719).
+        let pooled = crate::nntprs_pool::shared()
+            .and_then(|s| s.index_of(server_id).map(|idx| (s, idx)));
+        if let Some((shared, idx)) = &pooled {
+            let light = pool
+                .server_by_id(server_id)
+                .map_or(std::ptr::null_mut(), |srv| pool.get_light_connection(&srv));
+            if light.is_null() {
+                return self.probe_pooled_unslotted(pool, shared, *idx, server_id, probed);
+            }
+            let c = unsafe { &*light };
+            conn_ptr = light as usize;
+            actual_server_id = c.server.id;
+            join_group = c.server.join_group;
+            server_name = c.server.name.to_bytes().to_vec();
+            self.end_connection_wait();
+        }
         let wait_start = now_sec();
         // a pool a config reload retired hands out nothing more: don't wait on it
         while conn_ptr == 0

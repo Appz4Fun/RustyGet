@@ -4102,7 +4102,7 @@ impl NzbgetRsArticleDownloader {
                 observer: Some(attempts.observer_with(shared, Some({
                     let dl = std::sync::Arc::clone(self);
                     std::sync::Arc::new(move || dl.set_status(AD_WAITING, true))
-                }))),
+                }), None)),
                 pacer: Some(nntp_rs::Pace::new(DownloadPacer {
                     dl: std::sync::Arc::clone(self),
                 })),

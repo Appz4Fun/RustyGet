@@ -24,8 +24,8 @@ par-rs = { git = "https://github.com/Appz4Fun/par-rs", rev = "cd1703f58dfb29f40d
 zipfast = { git = "https://github.com/Appz4Fun/zipfast", rev = "ed2ee346a5b18724c55aec6a90c73e86d5909614", features = ["persistent-partials"] }
 vidmatch = { git = "https://github.com/Appz4Fun/vidmatch", rev = "636facc1223d2a87e5ca7a43bc1d2e169c39deb6" }
 zipview = { git = "https://github.com/xbmc4lyfe/zipview", rev = "2c3d73a06b29987cea1510e903e437a482076745" }
-# nntp-rs v0.4.2
-nntp-rs = { git = "https://github.com/Appz4Fun/nntp-rs", rev = "e3a3d8ef9313d6746091b308407a2f8119805a04", default-features = false, features = ["blocking", "openssl"] }
+# nntp-rs v0.4.4
+nntp-rs = { git = "https://github.com/Appz4Fun/nntp-rs", rev = "48be0a9e0eb61e47325756eed52625777bdef9a0", default-features = false, features = ["blocking", "openssl"] }
 crc32fast = "1.5"
 flate2 = { version = "1.1", features = ["zlib-rs"] }
 bzip2 = "0.6"

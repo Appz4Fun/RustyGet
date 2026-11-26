@@ -45,7 +45,7 @@ var Libraries = (new function()
 		{ name: 'nntp-rs', kind: 'engine', license: 'AGPL-3.0-or-later AND GPL-2.0-or-later',
 			author: OWNER + ', thedancingdeveloper and the NZBGet contributors',
 			url: 'https://github.com/Appz4Fun/nntp-rs',
-			desc: 'Article decoding (SIMD yEnc, CRC checks) and finding the servers that share an article store.' },
+			desc: 'News server connections (one pool for downloads, repair, checks and probes), article decoding (SIMD yEnc, CRC checks) and finding the servers that share an article store.' },
 		{ name: 'flate2', kind: 'engine', license: 'MIT / Apache-2.0', author: 'The Rust Project Developers',
 			url: 'https://github.com/rust-lang/flate2-rs',
 			desc: 'Deflate, zlib and gzip streams.' },

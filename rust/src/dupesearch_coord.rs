@@ -1750,7 +1750,9 @@ fn pooled_donor_exchange(
             .map(|p| match p {
                 nntp_rs::Presence::Present => DonorAnswer::Present,
                 nntp_rs::Presence::Absent => DonorAnswer::Missing,
-                nntp_rs::Presence::Unknown => DonorAnswer::Error,
+                // 451 (removed, or a proxy whose backend timed out) proves no
+                // dead copy: an error, as the per-server exchange took it
+                nntp_rs::Presence::Removed | nntp_rs::Presence::Unknown => DonorAnswer::Error,
             })
             .collect(),
         Err(_) => {

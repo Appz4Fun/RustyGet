@@ -608,7 +608,8 @@ impl NzbgetRsDupeProbe {
                         self.found_on.push(b')');
                     }
                 }
-                nntp_rs::Presence::Absent => result.missing += 1,
+                // a 451 counts as missing, as `classify` takes it
+                nntp_rs::Presence::Absent | nntp_rs::Presence::Removed => result.missing += 1,
                 nntp_rs::Presence::Unknown => result.unknown += 1,
             }
         }

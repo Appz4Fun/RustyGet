@@ -363,63 +363,156 @@ pub struct AttemptLog(std::sync::Arc<std::sync::Mutex<Vec<Rec>>>);
 impl AttemptLog {
     /// The observer for one fetch's `FetchOptions::observer`.
     pub fn observer(&self, shared: &Shared) -> nntp_rs::Observe {
-        self.observer_with(shared, None)
+        self.observer_with(shared, None, None)
     }
 
     /// [`Self::observer`], also calling `on_miss` (quickly: it runs on
-    /// nntp-rs's I/O threads) after every attempt that brought no article.
+    /// nntp-rs's I/O threads) after every attempt that brought no article,
+    /// and keeping `wait` in step with whether the fetch has a connection.
     pub fn observer_with(
         &self,
         shared: &Shared,
         on_miss: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+        wait: Option<WaitMark>,
     ) -> nntp_rs::Observe {
-        let log = self.clone();
-        let ids: Vec<i32> = shared.servers.iter().map(|s| s.id).collect();
-        nntp_rs::Observe::new(move |a: &nntp_rs::Attempt<'_>| {
-            use nntp_rs::Outcome;
-            let (outcome, fail) = match &a.outcome {
-                Outcome::Have { .. } => (Seen::Have, None),
-                Outcome::Missing { .. } => (Seen::Missing, None),
-                Outcome::Unreachable(t) => (Seen::Unreachable((*t).to_string()), None),
-                Outcome::Failed(e) => {
-                    let kind = match e {
-                        nntp_rs::Error::Decode(st) => FailKind::Decode(*st),
-                        nntp_rs::Error::Timeout(_) => FailKind::Timeout,
-                        nntp_rs::Error::Auth { .. } | nntp_rs::Error::ConnectionLimit { .. } => {
-                            FailKind::Login
-                        }
-                        _ => FailKind::Other,
-                    };
-                    (Seen::Failed(e.to_string()), Some(kind))
-                }
-            };
-            if a.wire_bytes > 0 {
-                if let (Some(sm), Some(&id)) = (crate::statmeter::active_statmeter(), ids.get(a.server)) {
-                    let off = crate::ffi::active_workstate().map_or(0, |w| w.local_time_offset());
-                    sm.add_server_stats(i32::try_from(a.wire_bytes).unwrap_or(i32::MAX), 0, 0, id, off);
-                }
-            }
-            if !matches!(a.outcome, Outcome::Have { .. }) {
-                if let Some(f) = &on_miss {
-                    f();
-                }
-            }
-            if let Ok(mut g) = log.0.lock() {
-                g.push(Rec {
-                    server: a.server,
-                    outcome,
-                    fail,
-                    reply: a.reply.map(str::to_string),
-                    wire_bytes: a.wire_bytes,
-                    fresh: a.fresh,
-                });
-            }
+        nntp_rs::Observe::new(LogObserver {
+            log: self.clone(),
+            ids: shared.servers.iter().map(|s| s.id).collect(),
+            on_miss,
+            wait,
         })
     }
 
     /// The attempts so far, oldest first; the log is emptied.
     pub fn take(&self) -> Vec<Rec> {
         self.0.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default()
+    }
+}
+
+/// [`AttemptLog`]'s observer.
+#[cfg(unix)]
+struct LogObserver {
+    log: AttemptLog,
+    ids: Vec<i32>,
+    on_miss: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+    wait: Option<WaitMark>,
+}
+
+#[cfg(unix)]
+impl nntp_rs::Observer for LogObserver {
+    fn attempt(&self, a: &nntp_rs::Attempt<'_>) {
+        use nntp_rs::Outcome;
+        // until the next started(), the fetch waits for a connection again
+        // (the next server's, or a retry's)
+        if let Some(w) = &self.wait {
+            w.set_waiting(true);
+        }
+        let (outcome, fail) = match &a.outcome {
+            Outcome::Have { .. } => (Seen::Have, None),
+            Outcome::Missing { .. } => (Seen::Missing, None),
+            Outcome::Unreachable(t) => (Seen::Unreachable((*t).to_string()), None),
+            Outcome::Failed(e) => {
+                let kind = match e {
+                    nntp_rs::Error::Decode(st) => FailKind::Decode(*st),
+                    nntp_rs::Error::Timeout(_) => FailKind::Timeout,
+                    nntp_rs::Error::Auth { .. } | nntp_rs::Error::ConnectionLimit { .. } => {
+                        FailKind::Login
+                    }
+                    _ => FailKind::Other,
+                };
+                (Seen::Failed(e.to_string()), Some(kind))
+            }
+        };
+        if a.wire_bytes > 0 {
+            if let (Some(sm), Some(&id)) = (crate::statmeter::active_statmeter(), self.ids.get(a.server)) {
+                let off = crate::ffi::active_workstate().map_or(0, |w| w.local_time_offset());
+                sm.add_server_stats(i32::try_from(a.wire_bytes).unwrap_or(i32::MAX), 0, 0, id, off);
+            }
+        }
+        if !matches!(a.outcome, Outcome::Have { .. }) {
+            if let Some(f) = &self.on_miss {
+                f();
+            }
+        }
+        if let Ok(mut g) = self.log.0.lock() {
+            g.push(Rec {
+                server: a.server,
+                outcome,
+                fail,
+                reply: a.reply.map(str::to_string),
+                wire_bytes: a.wire_bytes,
+                fresh: a.fresh,
+            });
+        }
+    }
+
+    fn started(&self, _server: usize, _id: &str, _fresh: bool) {
+        if let Some(w) = &self.wait {
+            w.set_waiting(false);
+        }
+    }
+}
+
+/// Counts one fetch in a "waiting for a connection" counter (a stream
+/// repair's watchdog stops its clock while any of its fetches wait): from
+/// [`WaitMark::start`] to nntp-rs's first `started()`, and again from each
+/// attempt to the next `started()`, until [`WaitMark::finish`]. Cheap to
+/// clone; every clone is the same mark.
+#[derive(Clone)]
+pub struct WaitMark(std::sync::Arc<WaitMarkInner>);
+
+struct WaitMarkInner {
+    counter: std::sync::Arc<std::sync::atomic::AtomicI32>,
+    /// WAITING (counted), RUNNING (has a connection) or FINISHED.
+    state: std::sync::atomic::AtomicU8,
+}
+
+impl WaitMark {
+    const WAITING: u8 = 0;
+    const RUNNING: u8 = 1;
+    const FINISHED: u8 = 2;
+
+    /// Counts the fetch as waiting.
+    pub fn start(counter: std::sync::Arc<std::sync::atomic::AtomicI32>) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self(std::sync::Arc::new(WaitMarkInner {
+            counter,
+            state: std::sync::atomic::AtomicU8::new(Self::WAITING),
+        }))
+    }
+
+    /// Whether the fetch is counted as waiting now.
+    pub fn is_waiting(&self) -> bool {
+        self.0.state.load(Ordering::SeqCst) == Self::WAITING
+    }
+
+    /// Marks the fetch waiting (true) or holding a connection (false); a
+    /// finished mark stays finished (nntp-rs may report late).
+    pub fn set_waiting(&self, waiting: bool) {
+        let (from, to) = if waiting {
+            (Self::RUNNING, Self::WAITING)
+        } else {
+            (Self::WAITING, Self::RUNNING)
+        };
+        if self
+            .0
+            .state
+            .compare_exchange(from, to, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            if waiting {
+                self.0.counter.fetch_add(1, Ordering::SeqCst);
+            } else {
+                self.0.counter.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    /// The fetch is over: it no longer counts, whatever nntp-rs reports later.
+    pub fn finish(&self) {
+        if self.0.state.swap(Self::FINISHED, Ordering::SeqCst) == Self::WAITING {
+            self.0.counter.fetch_sub(1, Ordering::SeqCst);
+        }
     }
 }
 
@@ -847,6 +940,59 @@ fn identify(generation: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wait_mark_counts_only_while_waiting() {
+        let c = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0));
+        let w = WaitMark::start(std::sync::Arc::clone(&c));
+        assert_eq!(c.load(Ordering::SeqCst), 1);
+        assert!(w.is_waiting());
+        w.set_waiting(false);
+        w.set_waiting(false);
+        assert_eq!(c.load(Ordering::SeqCst), 0);
+        w.clone().set_waiting(true);
+        w.set_waiting(true);
+        assert_eq!(c.load(Ordering::SeqCst), 1);
+        w.finish();
+        assert_eq!(c.load(Ordering::SeqCst), 0);
+        // late reports after the fetch ended change nothing
+        w.set_waiting(true);
+        w.set_waiting(false);
+        w.finish();
+        assert_eq!(c.load(Ordering::SeqCst), 0);
+        // finishing while it holds a connection leaves the count alone
+        let w2 = WaitMark::start(std::sync::Arc::clone(&c));
+        w2.set_waiting(false);
+        w2.finish();
+        assert_eq!(c.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn observer_waits_until_started_and_after_each_attempt() {
+        use nntp_rs::Observer;
+        let c = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0));
+        let w = WaitMark::start(std::sync::Arc::clone(&c));
+        let log = AttemptLog::default();
+        let obs = LogObserver { log: log.clone(), ids: vec![3, 4], on_miss: None, wait: Some(w.clone()) };
+        obs.started(0, "<a@b>", true);
+        assert_eq!(c.load(Ordering::SeqCst), 0, "a connection in hand is the server's time");
+        obs.attempt(&nntp_rs::Attempt {
+            id: "<a@b>",
+            server: 0,
+            outcome: nntp_rs::Outcome::Missing { removed: false },
+            wire_bytes: 0,
+            elapsed: Duration::ZERO,
+            reply: Some("430 no such article"),
+            fresh: true,
+        });
+        assert_eq!(c.load(Ordering::SeqCst), 1, "waiting for the next server's connection");
+        obs.started(1, "<a@b>", false);
+        assert_eq!(c.load(Ordering::SeqCst), 0);
+        w.finish();
+        assert_eq!(c.load(Ordering::SeqCst), 0);
+        assert_eq!(log.take().len(), 1);
+    }
 
     fn server(group: i32, user: &[u8]) -> RsNewsServer {
         RsNewsServer::new(

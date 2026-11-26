@@ -1098,10 +1098,24 @@ impl ArticleFetcher {
         while self.host.status().quota_reached && !self.is_stopped() {
             std::thread::sleep(Duration::from_millis(100));
         }
-        let wc = self.wait_counter.lock().ok().and_then(|g| g.clone());
-        if let Some(ref c) = wc {
-            c.fetch_add(1, Ordering::SeqCst);
+        // counted as waiting (the stream watchdog's clock stops) until nntp-rs
+        // has a connection for it, and again after each attempt, as the
+        // per-server path counts its wait for a connection
+        let wait = self
+            .wait_counter
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .map(crate::nntprs_pool::WaitMark::start);
+        struct FinishWait(Option<crate::nntprs_pool::WaitMark>);
+        impl Drop for FinishWait {
+            fn drop(&mut self) {
+                if let Some(w) = &self.0 {
+                    w.finish();
+                }
+            }
         }
+        let wait_done = FinishWait(wait.clone());
         let attempts = crate::nntprs_pool::AttemptLog::default();
         let opts = nntp_rs::FetchOptions {
             cancel: Some(self.cancel.clone()),
@@ -1110,16 +1124,14 @@ impl ArticleFetcher {
             work,
             only_server,
             priority,
-            observer: Some(attempts.observer(shared)),
+            observer: Some(attempts.observer_with(shared, None, wait)),
             pacer: Some(nntp_rs::Pace::new(RepairPacer {
                 unthrottled: self.unthrottled.load(Ordering::Relaxed),
             })),
             ..Default::default()
         };
         let got = shared.pool.fetch_shared(&id, &opts);
-        if let Some(ref c) = wc {
-            c.fetch_sub(1, Ordering::SeqCst);
-        }
+        drop(wait_done);
         let recs = attempts.take();
         for a in &recs {
             // stream-repair lines name the server alone, as before

@@ -539,8 +539,8 @@ dependencies = [
 
 [[package]]
 name = "nntp-rs"
-version = "0.4.2"
-source = "git+https://github.com/Appz4Fun/nntp-rs?rev=e3a3d8ef9313d6746091b308407a2f8119805a04#e3a3d8ef9313d6746091b308407a2f8119805a04"
+version = "0.4.4"
+source = "git+https://github.com/Appz4Fun/nntp-rs?rev=48be0a9e0eb61e47325756eed52625777bdef9a0#48be0a9e0eb61e47325756eed52625777bdef9a0"
 dependencies = [
  "crc32fast",
  "memchr",

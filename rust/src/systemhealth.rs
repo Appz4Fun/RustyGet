@@ -2666,7 +2666,7 @@ pub const BUNDLED_LIBRARIES: &[(&str, &str)] = &[
     ("zipfast", "0.1.0"),
     ("zipview", "0.1.0"),
     ("par-rs", "0.2.0"),
-    ("nntp-rs", "0.4.2"),
+    ("nntp-rs", "0.4.4"),
     ("flate2", "1.1.11"),
     ("zlib-rs", "0.6.8"),
     ("zstd", "0.14.3"),

@@ -4319,6 +4319,8 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
                 len(re.findall(r'Unrar: progressive direct unpack \((?!volume count)', _log_text(t))))
     reads = _live_reads(t)
     as_written = reads[0] if reads else 0.0
+    # the dying volume, read as it was written, went on from its rebuilt copy
+    continued = _grep_log(t, 'goes on from its rebuilt copy at the payload frontier')
     integ = _verify_output(t, movie, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
     winner = 'Primary' if hp['Status'].startswith('SUCCESS') else (
         'Backup' if hb['Status'].startswith('SUCCESS') else 'none')
@@ -4358,15 +4360,15 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
         ok = (integ and winner == 'Primary' and failed_over == 0 and cancelled == 0 and backup_unpacks == 0
               and du_ok == 1 and used_direct == 1 and a_again == 0 and b_again <= b_again_ok
               and b_bytes <= b_budget and b_before == 0 and restarts == 0
-              and (not need_live or as_written > 0))
+              and (not need_live or (as_written > 0 and continued >= 1)))
     return (name, ok,
             'winner=%s primary=%s backup=%s secs=%.1f primary_served=%d/%d B (%d articles, %d again, '
             'par2 %d again) backup_served=%d B of %d (budget %d, %d articles, %d again, par2 %d again) '
             'twin_before_frontier=%d failover_logs=%d du_cancelled=%d du_ok=%d used_direct=%d '
-            'backup_unpacks=%d extracted_ok=%s restarts=%d as_written_mb=%s'
+            'backup_unpacks=%d extracted_ok=%s restarts=%d as_written_mb=%s continued=%d'
             % (winner, hp['Status'], hb['Status'], elapsed, a_bytes, total, a_count, a_again, a_par_again,
                b_bytes, donor_total, b_budget, b_count, b_again, b_par_again, b_before, failed_over, cancelled,
-               du_ok, used_direct, backup_unpacks, integ, restarts, as_written))
+               du_ok, used_direct, backup_unpacks, integ, restarts, as_written, continued))
 
 
 def scenario_failcont_twin25(daemon, t):

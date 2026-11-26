@@ -2636,7 +2636,7 @@ impl crate::progressive_unpack::VolumeFeed for DirectUnpackFeed {
             return None;
         }
         // Only once its first article (its headers) is written: a volume whose download dies
-        // before any article of it lands is rebuilt from a duplicate (`deadvolume`) with its own
+        // before any article of it lands is rebuilt (`deadvolume`) with its own
         // layout, which the extraction must read from its start.
         crate::livewrite::lookup(self.nzb_id, &full).filter(|v| v.written_end(0).is_some())
     }

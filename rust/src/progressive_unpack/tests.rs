@@ -6810,7 +6810,16 @@ fn dying_volume_run(tag: &str, nzb_id: i32, write_header: bool, other_layout: bo
     Vec<u8>,
     TestDir,
 ) {
-    dying_volume_run_on(tag, nzb_id, write_header, other_layout, true)
+    dying_volume_run_on(tag, nzb_id, write_header, other_layout, true, Stand::Rar5)
+}
+
+/// How the dying volume's set and stand-in are made.
+#[derive(Clone, Copy, PartialEq)]
+enum Stand {
+    Rar5,
+    Rar4,
+    /// RAR5, the stand-in holding another part of the member (one byte moved to its end).
+    OtherPart,
 }
 
 /// `persistent`: the feed gives a volume count (a persistent session); without one the copy
@@ -6821,11 +6830,16 @@ fn dying_volume_run_on(
     write_header: bool,
     other_layout: bool,
     persistent: bool,
+    stand: Stand,
 ) -> (Result<zipfast::extract::Summary, Error>, Vec<String>, Vec<u8>, TestDir) {
     let t = TestDir::new(tag);
     let data = pattern(400_000);
     let chunk = 100_000;
-    let vols = rar5_volumes("movie.mkv", &data, chunk);
+    let vols = if stand == Stand::Rar4 {
+        rar4_store_volumes("movie.mkv", &data, chunk)
+    } else {
+        rar5_volumes("movie.mkv", &data, chunk)
+    };
     let n = vols.len();
     for i in [0, 1, 3] {
         std::fs::write(t.dl().join(volume_name(i, n)), &vols[i]).unwrap();
@@ -6853,7 +6867,10 @@ fn dying_volume_run_on(
     let whole = t.dl().join("whole-2.bin");
     std::fs::write(&whole, &vols[2]).unwrap();
     let (data_at, packed) = super::first_member_data(&whole).unwrap();
-    let (data_at, packed) = (data_at as usize, packed as usize);
+    let (data_at, mut packed) = (data_at as usize, packed as usize);
+    if stand == Stand::OtherPart {
+        packed -= 1;
+    }
     let mid = t.dl().join("borrowed.bin");
     std::fs::write(&mid, &vols[2][data_at..data_at + packed]).unwrap();
     let head_bytes = if other_layout {
@@ -6915,7 +6932,33 @@ fn an_alt_stand_in_continues_the_volume_at_its_payload_frontier_without_a_restar
 
 #[test]
 fn an_alt_stand_in_continues_the_volume_on_the_copy_path_too() {
-    let (r, log, data, t) = dying_volume_run_on("written-rebuilt-alt-copy", -7_320_008, true, true, false);
+    let (r, log, data, t) = dying_volume_run_on("written-rebuilt-alt-copy", -7_320_008, true, true, false, Stand::Rar5);
     expect_ok(r, &log);
     assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+}
+
+#[test]
+fn a_rar4_alt_stand_in_continues_the_volume_at_its_payload_frontier() {
+    let (r, log, data, t) =
+        dying_volume_run_on("written-rebuilt-rar4", -7_320_009, true, true, true, Stand::Rar4);
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    assert!(!log.iter().any(|l| l.contains("progressive direct unpack")), "{log:?}");
+}
+
+#[test]
+fn a_stand_in_holding_another_part_stops_the_copy_path_and_restarts_a_persistent_session() {
+    let (r, log, _, t) =
+        dying_volume_run_on("written-otherpart-copy", -7_320_010, true, false, false, Stand::OtherPart);
+    match r {
+        Err(Error::Failed(f)) => assert!(format!("{f:?}").contains("another part of the member"), "{f:?}"),
+        other => panic!("expected the copy path to stop, got ok={}: {log:?}", other.is_ok()),
+    }
+    assert!(!t.out().join("movie.mkv").exists());
+    let (_, log, _, _) =
+        dying_volume_run_on("written-otherpart-persist", -7_320_011, true, false, true, Stand::OtherPart);
+    assert!(
+        log.iter().any(|l| l.contains("progressive direct unpack") && l.contains("another part of the member")),
+        "{log:?}"
+    );
 }

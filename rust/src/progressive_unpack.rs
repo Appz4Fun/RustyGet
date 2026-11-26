@@ -3053,7 +3053,8 @@ struct WrittenSource {
     long_holes: bool,
     /// Byte ranges handed to the session from what the download wrote, merged.
     served: Vec<std::ops::Range<u64>>,
-    /// `done` is a stand-in rebuilt from a duplicate: every byte is read from it.
+    /// `done` is a rebuilt stand-in (a twin's articles or an alt's video bytes): every byte is
+    /// read from it.
     rebuilt: bool,
     /// The download died in this volume after bytes were read: the rest comes from its rebuilt
     /// copy at the payload frontier.
@@ -3109,7 +3110,7 @@ impl WrittenSource {
     }
 
     /// Whether every byte served so far reads the same from `other` (the finished volume, or a
-    /// stand-in rebuilt from a duplicate).
+    /// rebuilt stand-in).
     fn served_matches(&mut self, other: &mut dyn RangeSource) -> bool {
         use zipfast::map::{PackedRead, PackedSource};
         let waker = Waker::noop();
@@ -3213,10 +3214,8 @@ impl WrittenSource {
         Ok(())
     }
 
-    /// The download died in this volume and its part was borrowed from a duplicate: read the
-    /// rest from the rebuilt volume, which has the volume's layout and length.
-    /// The download died in this volume and its part was rebuilt from a duplicate (a twin's
-    /// articles, or an alt's video bytes placed by the content map, see `crate::deadvolume`).
+    /// The download died in this volume and its part was rebuilt (from a twin's articles, or an
+    /// alt's video bytes placed by the content map, see `crate::deadvolume`).
     ///
     /// Before any byte was read here the stand-in simply replaces the volume. Once bytes were
     /// read, the extraction continues at its payload frontier without comparing container bytes:
@@ -3250,6 +3249,15 @@ impl WrittenSource {
         if packed != data_len {
             return Err(self.cannot_continue("the rebuilt volume holds another part of the member"));
         }
+        let read: u64 = self.served.iter().map(|r| r.end - r.start).sum();
+        crate::log::log_active_bytes(
+            crate::log::MK_INFO,
+            format!(
+                "Unrar: {} goes on from its rebuilt copy at the payload frontier ({read} bytes read as written, member data at {data_at})",
+                self.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+            )
+            .as_bytes(),
+        );
         self.continuation = Some(Continuation {
             source,
             data_at,
@@ -3278,7 +3286,12 @@ impl WrittenSource {
         cx: &mut Context<'_>,
     ) -> ProgressiveResult<RangeRead> {
         let c = self.continuation.as_mut().expect("continuing");
-        let next_written = self.live.next_written(offset).unwrap_or(u64::MAX);
+        // A written byte that could not be read back is read from the copy too.
+        let next_written = match self.live.next_written(offset) {
+            Some(n) if n == offset => self.live.written_end(offset).unwrap_or(offset + 1),
+            Some(n) => n,
+            None => u64::MAX,
+        };
         let (at, limit) = if offset < c.data_at {
             return Err(self.cannot_continue("a header of it was never written"));
         } else if offset < c.data_end {
@@ -3366,6 +3379,11 @@ impl RangeSource for WrittenSource {
                 if let Some(v) = self.done.as_mut() {
                     return v.read_at(offset, buf, cx);
                 }
+            }
+            // Behind the member data of a continued volume everything comes from the rebuilt
+            // copy's end: its blocks need not be the original's.
+            if self.continuation.as_ref().is_some_and(|c| offset >= c.data_end) {
+                return self.read_continued(offset, buf, cx);
             }
             // Bytes the writer reported are read from what it wrote, also once the volume is
             // finished (the same file, or the same bytes).

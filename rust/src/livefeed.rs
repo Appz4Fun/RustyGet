@@ -438,7 +438,12 @@ impl PackedSource for Volumes<'_> {
                     .read_growing(i, offset, buf)
                     .unwrap_or(PackedRead::NotYet { len: u64::MAX })
             }
-            View::Missing => return PackedRead::Hole { len: u64::MAX },
+            View::Missing => {
+                if let Some((live, _)) = self.live[i].as_ref() {
+                    live.stop_waiting();
+                }
+                return PackedRead::Hole { len: u64::MAX };
+            }
         };
         if offset >= len {
             return PackedRead::Hole { len: u64::MAX };

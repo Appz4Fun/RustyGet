@@ -195,7 +195,8 @@ badge, and shows a kept donor's `DupeParked` the same way.
   passworded 7-Zip is classed encrypted from the password alone.
 - **Other par2 checksums are other packing, not another video (F9).** TwinCheck
   labels such a copy `container` until the video inside both copies matches
-  (`DupeInner`), which makes it an `alt`. The web UI shows `container` as
+  (`DupeInner`), or a live borrow matched its video bytes with the download's
+  own (`DupeLiveVideo`), which makes it an `alt`. The web UI shows `container` as
   "unverified" (`DupeGroup.kindLabel`), never as another encode.
 - **The primary is the healthy copy easiest to borrow into (F10).** After
   ranking, the healthy copy (at least 97.5% alive, not locked) with the easiest
@@ -558,15 +559,24 @@ What made a dead tail fail before, now fixed:
   hole to compare (the rest of the set is dead), so the backup was refused as
   "content identity not confirmed". A backup confirmed once now stays
   confirmed for that download, for its video only, only when no check of
-  that run found it different, and only for a backup labelled as holding the
-  same video (TwinCheck `twin`/`alt`, or a fleet intake that read the video
-  inside, `DupeVideo=same`; a packing kind alone is not enough, nor a fleet
-  kind `twin`, which is a twin of some fleet member, not necessarily of this
-  download), for the payload size it was made for, and never for an encrypted
-  download (its check cannot tell bytes apart); any other backup must match in
-  every run (`postproc::dead_volume_donor_confirmed`, keyed
-  by the backup's NZBID; `CrossPackRepairSession::set_donor_known_same`); a
-  check that compares in full and differs still refuses it.
+  that run found it different, for the payload size it was made for, and
+  never for an encrypted download (its check cannot tell bytes apart)
+  (`postproc::dead_volume_donor_confirmed`, keyed by the backup's NZBID;
+  `CrossPackRepairSession::set_donor_known_same`); a check that compares in
+  full and differs still refuses it. The match itself is the proof: it
+  compared the backup's video, reached through the payload map, with the
+  download's own bytes. So it carries over whatever the backup's label, unless
+  a label says it holds another video (TwinCheck `other`, or the intake's
+  `DupeVideo=different`): a `container` copy (par2 checksums differ, nothing
+  read the video inside both copies) is an alt once its video matched (F9).
+  The match is recorded on the backup as `DupeLiveVideo=same:<NZBID>`, and a
+  `container` backup (or one TwinCheck could not compare) is labelled an
+  `alt` of that download: "B is an alt of A (another container, the same
+  video inside: a live borrow matched its video bytes with the download's
+  own)". TwinCheck keeps that label while the download is its primary
+  (`twin::live_alt`). On #715 the carry-over still needed a twin/alt label,
+  and the real XB copy 05 on 6790 (an AES RAR5 alt labelled `container`)
+  lent only the first dead volume before every later one was refused.
 - A dead volume's headers are rebuilt from a sibling; the nearest sibling may
   have lost its own end block (the volume the primary died in). A sibling laid
   out alike whose headers and tail all arrived is taken instead.
@@ -582,7 +592,12 @@ What made a dead tail fail before, now fixed:
   each for batched articles and for header singles,
   120 s, checked whenever a repair run fetches or ends), so on a large set this narrows
   refetches rather than ruling them out; the process-wide body cache of
-  nntp-rs is meant to close the rest.
+  nntp-rs is meant to close the rest. The fetch cost line counts articles
+  served from memory (`taken from memory`) apart from what the network
+  served; the article-use line's `needed again` counts articles a member's
+  cache dropped and needed again, which come from memory while it holds them
+  (the 4 "fetched again" of the 6790 XB run A50 were all served from memory:
+  each pass's batch requests were its wave and read articles less those).
 - A copy whose files TwinCheck proved different (`container`, `other`, a
   near twin, or `alt` unless its samples found the same files cut into other
   article sizes) is never compared or copied as whole files (the whole-file
@@ -601,8 +616,10 @@ Tests: functional `failcont_{twin,alt,aes}{25,50,90}` (the primary dies at
 25, 50 and 90% of its data), `failcont_fleet{twin,alt,aes}` (the backup held
 in the queue by its fleet), `failcont_twinlabel` (a twin known only from
 TwinCheck's label), `failcont_othervideo` (another video labelled
-`container` never lends a byte) and `failcont_compressed` (the clean
-fallback).
+`container` never lends a byte), `failcont_aescontainer` (the 6790 XB case:
+an AES RAR5 alt with the password only in its nzb, labelled `container`, lends
+ten dead tail volumes and the holes, and ends labelled `alt`) and
+`failcont_compressed` (the clean fallback).
 Each continuing scenario checks the movie's bytes, that direct unpack of the
 primary succeeded and was used (never cancelled, never run for the backup),
 that no data article was fetched twice, that a twin served no article before
@@ -610,10 +627,9 @@ the frontier, and that the backup served at most what lies past the frontier
 plus its headers and two articles. The fallback scenarios check the release
 completes from the backup and, for another video, that nothing was lent.
 
-Limits: an alt in a fleet grouped by name whose video the intake did not
-read (labelled `container`) must match in every borrow run, so its dead
-tail is lent only while the download's own bytes still border the holes;
-a dead last volume of a RAR 1.5-4 set is not rebuilt (its header
+Limits: an alt whose video the intake did not read (labelled `container`)
+must match once, while the download's own bytes still border a hole, before
+it lends the rest of the dead tail; a dead last volume of a RAR 1.5-4 set is not rebuilt (its header
 carries the whole file's checksum); compressed backups fall back to a full
 failover until zipfast's `fill_lost` (#288) and `open_at` for compressed
 members are wired in; TwinCheck still reads the download's own par2 index
@@ -638,7 +654,7 @@ from the server once more.
 | F6: a copy whose checks timed out is unverified, never dead. | Rust `dupesearch_nzb::tests::timeouts_leave_a_fleet_copy_unverified`; functional `fleettimeoutunverified` |
 | F7: the check budget is per copy. | Rust `dupesearch_coord::tests::grouped_fleets_check_each_copy_for_a_minute` |
 | F8: encrypted headers are read with the nzb's password. | Rust `dupesearch_coord::tests::fleet_copies_carry_the_nzb_password`, `donorkind::tests::header_encrypted_rar_with_its_password_is_borrowable_encrypted`; functional `fleetnzbpassword` (RAR5 -hp fixture, password only in the nzb meta: borrowable-encrypted; missing password locked; never DEAD), `fleetencryptedpassword` (needs `rar`) |
-| F9: another container shows unverified until the video inside matches. | Rust `twin::tests::par2_differences_alone_never_make_an_alt`; web UI `dupe-group.js` "F9: another container is unverified" |
+| F9: another container shows unverified until the video inside matches. | Rust `twin::tests::par2_differences_alone_never_make_an_alt`, `twin::tests::live_video_match_makes_a_container_an_alt_of_that_download`, `streamrepair_coord::tests::only_a_label_of_another_video_stops_a_confirmation_carrying`; functional `failcont_aescontainer` (a live video match makes the container an alt and lends the whole dead tail); web UI `dupe-group.js` "F9: another container is unverified" |
 | F11: alt identity without par2; a header-sized difference is a likely alt, never other. | Rust `twinfields::tests` (same_inner_key: an 11,245-byte shorter video gives no verdict, a difference over 1 MiB is another file), `dupeintake::tests` (inner keys); functional `dropdune` (the shorter bare mkv stays a container) |
 | F12: borrowed alt bytes pass a structural check before use. | Rust `streamrepair` test `borrowed_ranges_pass_the_validator_hook` (vidmatch: the right bytes in a CRC-32-covered Cluster are Ok, one bit flipped is Bad, no Tracks is Unknown) |
 | F16: every copy stays in Downloads (held, lowest priority, lending) until the primary succeeds or every copy failed; copies show "probing…" at once. | functional `fleetstaysqueued` (all copies queued and probing within seconds, none in History while open, held copies PAUSED at -100, the primary borrows 2 articles from a held copy that never downloads, DELETED/DUPE after success, nzb-files kept), `dropjoin`, `dropkeepdonor`, `dropallfail`, `dropallfailnonzb`; Rust `fleethold::tests`; Playwright `tests/webui/fleet-downloads.js` |

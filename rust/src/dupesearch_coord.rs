@@ -1586,11 +1586,11 @@ pub fn nntp_health_servers(host_ctx: *mut c_void, host_cb: DupeHostFn) -> Vec<Ar
     if let Some(pool) = crate::net::active_server_pool() {
         for s in pool.servers_snapshot() {
             let active = s.active.load(Ordering::SeqCst);
-            raw_servers.push((s.id, c_int::from(active), s.max_connections, s.group));
+            raw_servers.push((s.id, c_int::from(active), s.max_connections, s.group()));
             ranks.push(HealthServerRank {
                 id: s.id,
                 usable: active && s.max_connections != 0,
-                group: s.group,
+                group: s.group(),
                 retention: s.retention,
                 level: s.norm_level.load(Ordering::SeqCst),
             });

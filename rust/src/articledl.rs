@@ -4094,7 +4094,7 @@ impl NzbgetRsArticleDownloader {
                 level = srv.norm_level.load(Ordering::SeqCst);
                 let retention = srv.retention;
                 let server_id = srv.id;
-                let backbone = srv.group;
+                let backbone = srv.group();
                 let join_group = srv.join_group;
                 let mut remained_retries = transient_retries.remained_retries(last_server);
 
@@ -4349,7 +4349,7 @@ impl NzbgetRsArticleDownloader {
                                             LevelCandidate {
                                                 id: s.id,
                                                 level: s.norm_level.load(Ordering::SeqCst),
-                                                group: s.group,
+                                                group: s.group(),
                                                 retention: s.retention,
                                                 available,
                                             },

@@ -2427,7 +2427,12 @@ pub struct RsNewsServer {
     pub retention: i32,
     pub level: i32,
     pub norm_level: AtomicI32,
-    pub group: i32,
+    /// The backbone id (`crate::backbones`; 0 = none): configured, or set by
+    /// backend identification ([`Self::set_group`]). Read with [`Self::group`].
+    group_id: AtomicI32,
+    /// The backbone id from `ServerN.Backbone` (0 = none): what backend
+    /// identification starts from each time, never one it made itself.
+    pub configured_group: i32,
     pub optional: bool,
     pub block_time: AtomicI64,
     pub cert_verif_level: u32,
@@ -2486,7 +2491,8 @@ impl RsNewsServer {
             retention,
             level,
             norm_level: AtomicI32::new(level),
-            group,
+            group_id: AtomicI32::new(group),
+            configured_group: group,
             optional,
             block_time: AtomicI64::new(0),
             check_in_use: AtomicUsize::new(0),
@@ -2494,6 +2500,17 @@ impl RsNewsServer {
             io_errors: AtomicUsize::new(0),
             cert_verif_level,
         }
+    }
+
+    /// The backbone id: servers with the same id above 0 share one article
+    /// store, so a 430 on one rules out the others (`crate::nntp::BackboneMiss`).
+    pub fn group(&self) -> i32 {
+        self.group_id.load(Ordering::SeqCst)
+    }
+
+    /// Puts the server on backbone `group` (backend identification).
+    pub fn set_group(&self, group: i32) {
+        self.group_id.store(group, Ordering::SeqCst);
     }
 
     /// Counts a connect or request outcome for the light reserve's flakiness test.
@@ -3519,7 +3536,7 @@ impl NzbgetRsServerPool {
             .iter()
             .map(|s| crate::nntp::ServerPoolServerView {
                 id: s.id,
-                group: s.group,
+                group: s.group(),
                 norm_level: s.norm_level.load(Ordering::SeqCst),
                 active: s.active.load(Ordering::SeqCst),
                 optional: s.optional,
@@ -3571,7 +3588,7 @@ impl NzbgetRsServerPool {
             }
         }
 
-        let want_tuple = want_srv.map(|s| (s.id, s.group));
+        let want_tuple = want_srv.map(|s| (s.id, s.group()));
         let ignore_ids: Vec<i32> = if want_srv.is_none() {
             ignore_srvs.iter().map(|s| s.id).collect()
         } else {
@@ -3795,6 +3812,10 @@ impl NzbgetRsServerPool {
         crate::articlefetcher::forget_missing_everywhere();
         self.init_connections();
         self.close_unused_connections();
+        #[cfg(unix)]
+        if let Some(me) = active_server_pool().filter(|p| std::ptr::eq(&**p, self)) {
+            crate::nntprs_pool::spawn_identification(&me);
+        }
     }
 
     /// News server connections checked out right now (downloads and checks).
@@ -3873,7 +3894,7 @@ impl NzbgetRsServerPool {
                 name: s.name.to_bytes().to_vec(),
                 level: s.level,
                 optional: s.optional,
-                group: s.group,
+                group: s.group(),
                 host: s.host.to_bytes().to_vec(),
                 port: s.port,
                 username: s.user.to_bytes().to_vec(),

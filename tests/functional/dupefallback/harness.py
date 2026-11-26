@@ -1159,8 +1159,10 @@ def scenario_rejectnextserver(daemon, t):
 
 def scenario_backbonemiss(daemon, t):
     """Backbone routing: Server1 (priority 1) and Server2 (priority 2) are on
-    the backbone "TestBone", Server3 (priority 2) is independent; all three
-    serve the same article store, which lacks two articles. The 430 from
+    the backbone "TestBone", Server3 (priority 2) is independent (reached as
+    "localhost", another endpoint, so backend identification does not put it
+    with them); all three serve the same article store, which lacks two
+    articles. The 430 from
     Server1 rules out Server2 for those articles (same article store), so they
     are asked of Server3 only, and every other article comes from Server1."""
     size, seg = 1_000_000, 100_000
@@ -1175,6 +1177,32 @@ def scenario_backbonemiss(daemon, t):
     ok = skipped >= 2 and on_server2 == 0 and on_server3 >= 2
     return ('backbonemiss', ok, 'status=%s skipped_logs=%d server2_logs=%d server3_logs=%d'
             % (h['Status'], skipped, on_server2, on_server3))
+
+
+def scenario_backendauto(daemon, t):
+    """Backend identification (nntp-rs): Server1 (priority 1) and Server2
+    (priority 2) are the same host and port with no Backbone configured;
+    Server3 (priority 2) is reached as "localhost" (another endpoint). The
+    daemon identifies Server1 and Server2 as one article store at start and
+    puts them on one backbone, so the 430s from Server1 for the two missing
+    articles are not asked again on Server2: only Server3 is asked."""
+    size, seg = 1_000_000, 100_000
+    data = _payload(size, 9701)
+    pp = _place_copy(t, 'baA', data, 'file.bin')
+    api = daemon.wait_ready()
+    deadline = time.time() + 60
+    while time.time() < deadline and _grep_log(t, 'backbone Store of Server1 (backend identification)') < 2:
+        time.sleep(0.2)
+    grouped = _grep_log(t, 'backbone Store of Server1 (backend identification)')
+    daemon.append(api, 'RelBA', build_nzb(pp, 'BA.bin', size, seg, {3, 4}), False, 'ba-key', 100)
+    h = daemon.wait_history(api, 'RelBA')
+    skipped = _grep_log(t, 'not asking other servers on backbone Store of Server1')
+    on_server2 = _grep_log(t, '@ Server2 (')
+    on_server3 = _grep_log(t, '@ Server3 (')
+    shared = _grep_log(t, 'Backend of Server1: store 0 shared with Server2')
+    ok = grouped == 2 and shared >= 1 and skipped >= 2 and on_server2 == 0 and on_server3 >= 2
+    return ('backendauto', ok, 'status=%s grouped=%d shared=%d skipped_logs=%d server2_logs=%d server3_logs=%d'
+            % (h['Status'], grouped, shared, skipped, on_server2, on_server3))
 
 
 def scenario_nzbgapborrow(daemon, t):
@@ -6811,6 +6839,12 @@ def scenario_authrejected(daemon, t):
     size, seg = 2_000_000, 500_000
     pp = _place_copy(t, 'arA', _payload(size, 7878), 'f.bin')
     api = daemon.wait_ready()
+    # backend identification logs in to every server at start: count only the
+    # logins the download makes
+    deadline = time.time() + 60
+    while time.time() < deadline and _grep_log(t, 'Backend of Server2') == 0:
+        time.sleep(0.2)
+    before = daemon.reject_nntp.logins
     daemon.append(api, 'RelAR', build_nzb(pp, 'ar.bin', size, seg, {2}), False, 'ar-key', 100)
     deadline = time.time() + 90
     h = None
@@ -6819,7 +6853,7 @@ def scenario_authrejected(daemon, t):
         if h:
             break
         time.sleep(0.5)
-    logins = daemon.reject_nntp.logins
+    logins = daemon.reject_nntp.logins - before
     ok = h is not None and logins >= 1
     return ('authrejected', ok, 'completed=%s status=%s refused_logins=%d' % (h is not None, h and h['Status'], logins))
 
@@ -14552,6 +14586,7 @@ SCENARIOS = {
     'declaredcountnopair': scenario_declaredcountnopair,
     'rejectnextserver': scenario_rejectnextserver,
     'backbonemiss': scenario_backbonemiss,
+    'backendauto': scenario_backendauto,
     'cutover': scenario_cutover,
     'transientretry': scenario_transientretry,
     'transientexhausted': scenario_transientexhausted,
@@ -15035,6 +15070,7 @@ SCENARIO_OPTIONS = {
     'streamdeaddonor': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'rejectnextserver': ['DupeArticleFallback=article', 'ArticleRetries=0'],
     'backbonemiss': ['DupeCheck=no', 'ArticleRetries=0', 'DetailTarget=log', 'Server1.Backbone=TestBone'],
+    'backendauto': ['DupeCheck=no', 'ArticleRetries=0', 'DetailTarget=log'],
     'nzbgapborrow': ['DupeArticleFallback=article'],
     'sidefilenorepair': ['DupeArticleFallback=stream'],
     'partialnzb': ['DupeArticleFallback=stream'],
@@ -15589,9 +15625,15 @@ def main():
             if name in SCENARIO_EXTRA_SERVERS:
                 live, dead = SCENARIO_EXTRA_SERVERS[name]
                 number = 1
+                # each extra live server is a server of its own (its own port, through a
+                # plain forwarding proxy to nserv): servers on one host and port are one
+                # article store to the daemon's backend identification
+                daemon.extra_proxies = []
                 for _ in range(live - 1):
                     number += 1
-                    options += ['Server%d.Host=127.0.0.1' % number, 'Server%d.Port=%d' % (number, nserv_port),
+                    port = free_port()
+                    daemon.extra_proxies.append(FlakyNntpProxy(port, nserv_port, '\x00never\x00', None))
+                    options += ['Server%d.Host=127.0.0.1' % number, 'Server%d.Port=%d' % (number, port),
                                 'Server%d.Connections=2' % number, 'Server%d.Level=0' % number,
                                 'Server%d.Encryption=no' % number]
                 for _ in range(dead):
@@ -15599,9 +15641,10 @@ def main():
                     options += ['Server%d.Host=127.0.0.1' % number, 'Server%d.Port=1' % number,
                                 'Server%d.Connections=2' % number, 'Server%d.Level=0' % number,
                                 'Server%d.Encryption=no' % number, 'Server%d.Optional=yes' % number]
-            if name == 'backbonemiss':
-                for number, backbone in ((2, 'TestBone'), (3, '')):
-                    options += ['Server%d.Active=yes' % number, 'Server%d.Host=127.0.0.1' % number,
+            if name in ('backbonemiss', 'backendauto'):
+                bone = 'TestBone' if name == 'backbonemiss' else ''
+                for number, backbone, host in ((2, bone, '127.0.0.1'), (3, '', 'localhost')):
+                    options += ['Server%d.Active=yes' % number, 'Server%d.Host=%s' % (number, host),
                                 'Server%d.Port=%d' % (number, nserv_port), 'Server%d.Connections=2' % number,
                                 'Server%d.Priority=2' % number, 'Server%d.Encryption=no' % number,
                                 'Server%d.Backbone=%s' % (number, backbone)]
@@ -15649,6 +15692,8 @@ def main():
                 daemon.proxy.close()
             if daemon.fake_nntp:
                 daemon.fake_nntp.close()
+            for extra in getattr(daemon, 'extra_proxies', []):
+                extra.close()
             # a failed scenario keeps its work directory
             if failed and not args.keep and args.target == 'local':
                 print('       kept: %s' % target.work)

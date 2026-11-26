@@ -52,6 +52,8 @@ pub mod log;
 pub(crate) mod maintenance;
 #[cfg(unix)]
 pub mod net;
+#[cfg(unix)]
+pub mod nntprs_pool;
 pub mod nntp;
 pub mod nserv;
 pub mod nzbfile;

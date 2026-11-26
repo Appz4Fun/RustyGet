@@ -136,7 +136,7 @@ fn server_info(s: &Arc<crate::net::RsNewsServer>) -> ServerInfo {
         handle: ServerHandle(s.uid as usize),
         active: s.active.load(Ordering::SeqCst),
         norm_level: s.norm_level.load(Ordering::SeqCst),
-        group: s.group,
+        group: s.group(),
         id: s.id,
         max_connections: s.max_connections,
         join_group: s.join_group,

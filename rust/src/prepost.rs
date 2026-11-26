@@ -1437,10 +1437,15 @@ impl NzbgetRsPrePostProcessor {
                 }
                 continue;
             }
+            // (only a job the post queue would start were the slot free: not one paused by
+            // PausePostProcess, nor one held at its duplicate key's post gate)
             if waiting_job.is_none()
                 && nzb.post_info_ptr.is_some()
                 && nzb.is_download_completed
                 && !active.contains(&nzb_ptr)
+                && (!opts.pause_post_process || nzb.force_priority)
+                && !(dupe_gate_has(&DUPE_GATE_HELD, nzb.id)
+                    && dupe_post_gate_host(host, dq_ptr, &nzb).0 != GateVerdict::Pass)
             {
                 let ps = host.post_snap(nzb.post_info_ptr);
                 if ps.need_unpack && !ps.working && ps.stage == PostStage::Queued {

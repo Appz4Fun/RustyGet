@@ -571,18 +571,46 @@ mod host {
         }
 
         /// Reads `ptrs` again after their fleet's refresh changed them (a
-        /// raise, a release, a new place); `gone` when the refresh ended the
-        /// fleet: its copies left the queue and may be freed already.
-        fn update(&mut self, host: &QueueSubsysHost, ptrs: &[NzbRef], gone: bool) {
+        /// raise, a release, a new place).
+        fn update(&mut self, host: &QueueSubsysHost, ptrs: &[NzbRef]) {
             for r in self.0.iter_mut().filter(|r| ptrs.contains(&r.ptr)) {
-                if gone {
-                    r.competes = false;
-                    continue;
-                }
                 let o = host.nzb_snap(r.ptr, false);
                 r.priority = o.priority;
                 r.competes = competes(host, &o);
             }
+        }
+
+        /// Drops `ptrs` after their fleet ended: its copies left the queue
+        /// and may be freed already, so they are never read again.
+        fn forget(&mut self, ptrs: &[NzbRef]) {
+            for r in self.0.iter_mut().filter(|r| ptrs.contains(&r.ptr)) {
+                r.competes = false;
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod rival_tests {
+        use super::*;
+
+        fn rival(addr: usize, key: &[u8], priority: i32, competes: bool) -> Rival {
+            Rival { ptr: NzbRef::from_addr(addr), key: key.to_vec(), priority, competes }
+        }
+
+        #[test]
+        fn a_primary_competes_with_other_fleets_and_plain_items_only() {
+            let mut rivals = Rivals(vec![
+                rival(1, b"dupes:a", 50, true),  // the primary itself
+                rival(2, b"DUPES:A", 70, true),  // its own fleet, any case
+                rival(3, b"dupes:b", 20, true),  // another fleet's item
+                rival(4, b"", 10, true),         // a plain item
+                rival(5, b"dupes:c", 99, false), // held, raised or paused whole
+            ]);
+            assert_eq!(rivals.others(b"dupes:a", NzbRef::from_addr(1)), vec![20, 10]);
+            // an ended fleet's copies never count (nor are they read) again
+            rivals.forget(&[NzbRef::from_addr(3)]);
+            assert_eq!(rivals.others(b"dupes:a", NzbRef::from_addr(1)), vec![10]);
+            assert_eq!(rivals.others(b"dupes:b", NzbRef::from_addr(3)), vec![50, 70, 10]);
         }
     }
 
@@ -1037,7 +1065,11 @@ mod host {
             if outcome != Refresh::Unchanged {
                 let ptrs: Vec<NzbRef> = members.iter().map(|q| q.ptr).collect();
                 if let Some(r) = rivals.as_mut() {
-                    r.update(host, &ptrs, outcome == Refresh::Ended);
+                    if outcome == Refresh::Ended {
+                        r.forget(&ptrs);
+                    } else {
+                        r.update(host, &ptrs);
+                    }
                 }
             }
         }

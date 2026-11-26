@@ -7178,7 +7178,9 @@ def _live_reads(t):
 
 
 def _writer_fed(daemon, t, label, name, tag, volumes, files, first):
-    """A set with big volumes extracted while it downloads, its volumes read article by
+    """A set (enough volumes that several download while it extracts, so the result does not
+    depend on which volumes four connections finish together) extracted while it downloads,
+    its volumes read article by
     article as the writer puts them in place (writer-fed, see rust/src/livewrite.rs): when
     the last article lands nearly everything is extracted, so the extracted files are in
     place a moment after the download ends, and no packed byte is read back from a
@@ -7216,7 +7218,7 @@ def scenario_livefedrar5store(daemon, t):
     scale = _live_scale()
     movie = _payload(60_000_000 * scale, 7301)
     with tempfile.TemporaryDirectory(prefix='lfr5s-') as workdir:
-        vols = generators.rar5_method_volumes('movie.mkv', movie, 20_000_000 * scale, 0, workdir)
+        vols = generators.rar5_method_volumes('movie.mkv', movie, 8_000_000 * scale, 0, workdir)
     volumes = [('Rel.part%02d.rar' % (i + 1), v) for i, v in enumerate(vols)]
     return _writer_fed(daemon, t, 'livefedrar5store', 'RelWF5', 'wf5A', volumes, [('movie.mkv', movie)],
                        volumes[0][0])
@@ -7230,7 +7232,7 @@ def scenario_livefedrar5m3(daemon, t):
     scale = _live_scale()
     movie = _video_like(60_000_000 * scale, 7302)
     with tempfile.TemporaryDirectory(prefix='lfr5c-') as workdir:
-        vols = generators.rar5_method_volumes('movie.mkv', movie, 10_000_000 * scale, 3, workdir)
+        vols = generators.rar5_method_volumes('movie.mkv', movie, 5_000_000 * scale, 3, workdir)
     volumes = [('Rel.part%02d.rar' % (i + 1), v) for i, v in enumerate(vols)]
     return _writer_fed(daemon, t, 'livefedrar5m3', 'RelWFC', 'wfcA', volumes, [('movie.mkv', movie)],
                        volumes[0][0])
@@ -7247,7 +7249,7 @@ def scenario_livefed7z(daemon, t):
         with open(os.path.join(workdir, 'movie.mkv'), 'wb') as f:
             f.write(movie)
         subprocess.run([generators.SEVENZIP_PATH, 'a', '-bd', '-m0=LZMA2', '-mx5', '-mmt=4',
-                        '-v%dm' % (10 * scale), 'out.7z', 'movie.mkv'], cwd=workdir, check=True,
+                        '-v%dm' % (5 * scale), 'out.7z', 'movie.mkv'], cwd=workdir, check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         names = sorted(n for n in os.listdir(workdir) if n.startswith('out.7z.'))
         volumes = [('Movie' + n[len('out'):], open(os.path.join(workdir, n), 'rb').read()) for n in names]

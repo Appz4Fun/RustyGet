@@ -130,6 +130,7 @@ pub(crate) mod qqueue;
 pub mod queuecoord;
 pub(crate) mod queuesubsys_host;
 pub mod sevenzraw;
+pub mod frontiercut;
 pub mod restartlend;
 pub mod streamrepair;
 #[cfg(unix)]

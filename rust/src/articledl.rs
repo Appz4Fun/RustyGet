@@ -3775,6 +3775,9 @@ impl NzbgetRsArticleDownloader {
             let extra_priority = fsnap.extra_priority;
             let has_desired_server = nzb.has_desired_server;
             let dupe_fallback_round = art.dupe_fallback_round;
+            // A weak primary cut at its frontier (`frontiercut`): its data articles not fetched
+            // yet are lent by its alt, so none goes to a server.
+            let cut_at_frontier = !fsnap.par_file && crate::frontiercut::is_cut(nzb.id);
             let file_time = fsnap.time;
 
             let (retries, interval_sec) = match crate::options::active_options().as_deref() {
@@ -3870,6 +3873,14 @@ impl NzbgetRsArticleDownloader {
             };
 
             loop {
+                if cut_at_frontier {
+                    host.log(
+                        MK_DETAIL,
+                        &join_c_slices(&[b"Not fetching ", &self.info_name, b": its download is cut at its frontier, the alt lends the rest"]),
+                    );
+                    status = AD_NOT_FOUND;
+                    break;
+                }
                 let (stopped, _, _, _, _, _, _) = runtime_flags();
                 if stopped {
                     break;

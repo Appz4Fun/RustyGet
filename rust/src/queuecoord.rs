@@ -402,9 +402,15 @@ pub const WEAK_SWITCH_MAX_DONE_PERMILLE: i32 = 500;
 pub enum WeakSwitch {
     /// keep it as it is (borrowing what it lacks)
     Stay,
-    /// fail over to the alt now, while little of the primary came (a frontier
-    /// handover into a live alt is an OPEN ITEM)
+    /// fail over to the alt now, while little of the primary came: the alt
+    /// downloads and extracts from its first byte (only when the primary's
+    /// extraction is not running or the alt cannot lend live)
     FailOver,
+    /// cut the primary at its frontier (`frontiercut`): its extraction goes on,
+    /// it fetches none of its own data articles left, and the alt lends every
+    /// byte past the frontier (failover-continue), so nothing the primary
+    /// downloaded is fetched again
+    ContinueAtFrontier,
 }
 
 /// The facts [`weak_primary_switch`] decides on.
@@ -431,6 +437,12 @@ pub struct WeakSwitchFacts {
     pub done: i32,
     /// direct unpack already finished and verified the extraction
     pub extraction_verified: bool,
+    /// the primary's extraction runs and the alt can lend what lies past its
+    /// frontier live (live borrowing on, the alt not refused by a check or a
+    /// restart): the switch cuts the primary there instead of failing over
+    pub continuable: bool,
+    /// the primary is cut at its frontier already
+    pub cut: bool,
 }
 
 /// Dune on 6790: a 77% primary downloaded for hours, borrowing hole by hole
@@ -446,6 +458,7 @@ pub struct WeakSwitchFacts {
 pub fn weak_primary_switch(f: &WeakSwitchFacts) -> WeakSwitch {
     let weak = f.held_in_fleet
         && !f.primary_held
+        && !f.cut
         && f.same_video
         && !f.backup_twin
         && !f.backup_locked
@@ -456,10 +469,12 @@ pub fn weak_primary_switch(f: &WeakSwitchFacts) -> WeakSwitch {
         && f.backup_alive >= SWITCH_BACKUP_ALIVE_PERMILLE
         && f.backup_alive >= f.projected + 50
         && f.done < WEAK_SWITCH_MAX_DONE_PERMILLE;
-    if weak {
-        WeakSwitch::FailOver
-    } else {
+    if !weak {
         WeakSwitch::Stay
+    } else if f.continuable {
+        WeakSwitch::ContinueAtFrontier
+    } else {
+        WeakSwitch::FailOver
     }
 }
 
@@ -5365,9 +5380,48 @@ impl NzbgetRsQueueCoordinator {
             backup_locked: crate::dupecoord::locked_host(host, backup_nzb.ptr),
             done: data_done_permille(&nzb),
             extraction_verified: direct_unpack_verified(nzb.direct_unpack_status),
+            continuable: nzb.direct_unpack_status == DirectUnpackStatus::Running
+                && live_borrowing(opts)
+                && !crate::postproc::dead_volume_donor_cannot_lend(nzb.id, &backup_nzb.queued_filename)
+                && crate::restartlend::refusal(nzb.id, &backup_nzb.queued_filename).is_none(),
+            cut: crate::frontiercut::is_cut(nzb.id),
         };
+        // A primary cut at its frontier keeps its extraction while its alt lends the rest:
+        // its own articles fail by design, so the dead-download check does not fail it over
+        // unless the alt turned out unable to lend (a check found its video different, or
+        // it could not be restarted).
+        if facts.cut {
+            if facts.continuable {
+                return;
+            }
+            crate::frontiercut::forget(nzb.id);
+        }
         match weak_primary_switch(&facts) {
             WeakSwitch::Stay => {}
+            WeakSwitch::ContinueAtFrontier => {
+                crate::frontiercut::cut(nzb.id);
+                let mut msg = b"Continuing ".to_vec();
+                msg.extend_from_slice(&nzb.name);
+                msg.extend_from_slice(b" at its frontier from alt ");
+                msg.extend_from_slice(&backup_nzb.name);
+                msg.extend_from_slice(
+                    format!(
+                        ": weak, {} of {} tried article(s) of its own arrived (projected {:.1}%), {:.1}% of it downloaded; the alt holds the same video (equal inner keys) and is {:.0}% alive, so it lends everything past the frontier and the extraction carries on (nothing downloaded is fetched again)",
+                        eval.own,
+                        eval.tried,
+                        (eval.projected as f64) / 10.0,
+                        (facts.done as f64) / 10.0,
+                        (facts.backup_alive as f64) / 10.0
+                    )
+                    .as_bytes(),
+                );
+                host.nzb_print_message(
+                    nzb.ptr,
+                    crate::queuesubsys_host::MK_WARNING,
+                    &crate::releasename::log_name(&msg),
+                );
+                return;
+            }
             WeakSwitch::FailOver => {
                 // the fleet's failover order picked this alt (no dupe score
                 // check: held copies of a fleet are ranked by it already)
@@ -6823,8 +6877,20 @@ mod tests {
             backup_locked: false,
             done: 300,
             extraction_verified: false,
+            continuable: false,
+            cut: false,
         };
         assert_eq!(weak_primary_switch(&dune), WeakSwitch::FailOver);
+        assert_eq!(
+            weak_primary_switch(&WeakSwitchFacts { continuable: true, ..dune }),
+            WeakSwitch::ContinueAtFrontier,
+            "the extraction runs and the alt lends live: cut at the frontier, not from zero"
+        );
+        assert_eq!(
+            weak_primary_switch(&WeakSwitchFacts { continuable: true, cut: true, ..dune }),
+            WeakSwitch::Stay,
+            "cut once"
+        );
         assert_eq!(weak_primary_switch(&WeakSwitchFacts { backup_twin: true, ..dune }), WeakSwitch::Stay, "a twin lends one for one");
         assert_eq!(weak_primary_switch(&WeakSwitchFacts { primary_held: true, ..dune }), WeakSwitch::Stay, "failed over already");
         assert_eq!(weak_primary_switch(&WeakSwitchFacts { done: 600, ..dune }), WeakSwitch::Stay, "most of it came: borrow on");

@@ -1760,7 +1760,10 @@ const TARGET_NAMES: [&CStr; 4] = [c"screen", c"log", c"both", c"none"];
 const TARGET_VALUES: [i32; 4] = [1, 2, 3, 0];
 
 /// How many rolled-over (10MB, gzipped) log files are kept by default; 0 keeps all.
-pub const LOG_ROTATIONS_DEFAULT: i32 = 10;
+/// 500: with DETAIL lines from hundreds of connections a part fills in about a
+/// minute, and 10 kept only the last 15 minutes; 500 keeps hours (a gzipped
+/// part of such a log is about 0.4 MB, so about 200 MB on disk).
+pub const LOG_ROTATIONS_DEFAULT: i32 = 500;
 
 const COMMAND_NAMES: [&CStr; 26] = [
     c"pausedownload",
@@ -1839,7 +1842,7 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"LogFile", c"${MainDir}/rustyget.log"),
         (c"RequiredDir", c""),
         (c"LogToFile", c"yes"),
-        (c"LogRotations", c"10"),
+        (c"LogRotations", c"500"),
         (c"AppendCategoryDir", c"yes"),
         (c"OutputMode", output_mode),
         (c"DupeCheck", c"yes"),

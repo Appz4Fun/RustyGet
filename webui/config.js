@@ -2394,8 +2394,8 @@ var Config = (new function($)
 			[120, 'Long', 'Allows big repairs to finish.']] },
 		LogRotations: { min: 0, max: 1000, scale: 'sqrt', presets: [
 			[0, 'Unlimited', 'Rolled-over logs are never deleted.'],
-			[10, 'Normal', 'About 100 MB of log before compression.'],
-			[100, 'Long', 'Keeps a long history.']] },
+			[10, 'Short', 'About 100 MB of log before compression: minutes on a busy server.'],
+			[500, 'Normal', 'Hours of history on a busy server; about 200 MB once gzipped.']] },
 		LogBuffer: { min: 0, max: 100000, scale: 'sqrt', presets: [
 			[0, 'Unlimited', 'Keeps every message until RustyGet restarts; memory use grows with it.'],
 			[100, 'Small', 'The Messages tab shows only recent lines.'],

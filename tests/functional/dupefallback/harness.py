@@ -4419,15 +4419,17 @@ def _weakswitch(daemon, t, name, twin):
     the same video whole (equal DupeInnerCrc; ``twin``: the same files). Before,
     the primary downloaded on, borrowing hole by hole (2.6 times the bytes it
     recovered, hours on 6790). Now, once enough of its own articles are tried,
-    an alt takes over while little of the primary came, and a twin leads every
-    later article one for one. The movie is byte-identical either way."""
+    an alt takes over while little of the primary came. A twin is left to the
+    article fallback (one for one): the switch never fires for it, and nothing
+    is fetched twice. The movie is byte-identical either way."""
     if not generators.HAVE_RAR:
         return (name, None, 'SKIP: rar not installed')
     tag = 'ws' + ('t' if twin else 'a')
-    seg = 20_000
-    movie = _payload(15_000_000, 25210)
+    seg = 50_000
+    # over twinfields::MIN_KEY_SIZE (50 MiB): smaller videos' inner keys link nothing
+    movie = _payload(55_000_000, 25210)
     with tempfile.TemporaryDirectory(prefix='ws-') as workdir:
-        vols = generators.rar5_store_volumes_hp('movie.mkv', movie, 1_000_000, None, workdir)
+        vols = generators.rar5_store_volumes_hp('movie.mkv', movie, 5_000_000, None, workdir)
     total = sum(len(v) for v in vols)
     names = ['Show.part%02d.rar' % (i + 1) for i in range(len(vols))]
     members = []
@@ -4451,7 +4453,7 @@ def _weakswitch(daemon, t, name, twin):
         donor_seg = seg
         labels = [('DupeKind', 'twin'), ('DupeCopyKind', 'twin')]
     else:
-        alt = generators.rar3_store_volumes_valid('movie.mkv', movie, 1_400_000)
+        alt = generators.rar3_store_volumes_valid('movie.mkv', movie, 7_000_000)
         donor_vols = [('Other.part%02d.rar' % (i + 1), d) for i, d in enumerate(alt)]
         donor_seg = 100_000
         labels = [('DupeCopyKind', 'borrowable'), ('DupeVideo', 'same'), ('DupeKind', 'alt')]
@@ -4490,8 +4492,7 @@ def _weakswitch(daemon, t, name, twin):
     ids = _failcont_requests(t)
     a_bytes, a_count, a_again, _ = _failcont_bytes(ids, tag + 'A/')
     b_bytes, b_count, b_again, _ = _failcont_bytes(ids, tag + 'B/')
-    switched = _grep_log(t, 'Failing over Primary to duplicate Backup: weak')
-    led = _grep_log(t, 'Leading Primary with its twin from here on')
+    switched = _grep_log(t, 'Failing over Primary to alt Backup: weak')
     integ = _verify_output(t, movie, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
     if twin:
         # the primary stays and extracts; its lost articles come from the twin one
@@ -4501,9 +4502,9 @@ def _weakswitch(daemon, t, name, twin):
         # the alt took over early: less than half of the primary was fetched
         ok = integ and winner == 'Backup' and switched == 1 and a_bytes < total // 2
     return (name, ok,
-            'winner=%s switched=%d led=%d secs=%.1f primary_served=%d/%d B (%d articles, %d again) '
+            'winner=%s switched=%d secs=%.1f primary_served=%d/%d B (%d articles, %d again) '
             'backup_served=%d B (%d articles, %d again) extracted_ok=%s'
-            % (winner, switched, led, elapsed, a_bytes, total, a_count, a_again, b_bytes, b_count, b_again, integ))
+            % (winner, switched, elapsed, a_bytes, total, a_count, a_again, b_bytes, b_count, b_again, integ))
 
 
 def scenario_weakswitchalt(daemon, t):

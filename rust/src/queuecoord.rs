@@ -5340,7 +5340,11 @@ impl NzbgetRsQueueCoordinator {
         let far_below = eval.far_below != 0;
         let below = eval.below != 0;
 
-        if !dead && !doomed && self.check_par_damage(host, opts, dq_ptr, &nzb) {
+        // A doomed download (projected health near critical) still gets the par2 check: the
+        // doomed failover below needs a backup known alive enough and may decline, and par2
+        // damage it cannot repair is the surer verdict (functional `pardamageborrow`, projected
+        // 84.5-85% against critical 81% plus the margin, missed its par failover).
+        if !dead && self.check_par_damage(host, opts, dq_ptr, &nzb) {
             return;
         }
         if (!dead && !doomed) || (probing >= 0 && !hopeless) {

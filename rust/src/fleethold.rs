@@ -667,6 +667,11 @@ mod host {
     /// is left, the fleet failed: its held copies go to history as failures
     /// with it.
     pub(crate) fn park_on_health_host(host: &QueueSubsysHost, dq_ptr: usize, nzb: &NzbSnap) {
+        // a download failed over or parked is no longer cut at its frontier: if its fleet
+        // releases it again, it fetches its own articles
+        crate::frontiercut::forget(nzb.id);
+        // its compressed restarts too: their scratch files are not kept while it is parked
+        crate::restartlend::forget(nzb.id);
         // a copy already held (failed over a moment ago: its last articles in
         // flight still report) is not failed over again: that would release a
         // second copy

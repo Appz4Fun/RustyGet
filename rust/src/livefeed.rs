@@ -31,7 +31,7 @@ use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 use zipfast::map::{
-    FeedDecoder, FeedError, FeedOptions, FeedSink, MapBuilder, MapError, MapOptions, MemberMap,
+    FeedDecoder, FeedError, FeedOptions, FeedSink, FeedThreads, MapBuilder, MapError, MapOptions, MemberMap,
     PackedRead, PackedSource,
 };
 use zipfast::progressive::{
@@ -920,13 +920,31 @@ pub fn extract(
 
 /// The options every member's feed decoder runs with. The decode keeps up with the download
 /// on one thread for stored members; an LZMA2 member decodes at about the line rate of a
-/// gigabit link (92 MB/s measured), so it ends only a little after the last article. zipfast's
-/// parallel LZMA2 decoder (`FeedOptions::threads`, its feed-lzma2-par branch) is enabled here
-/// once RustyGet's zipfast has it; nothing else depends on it.
+/// gigabit link (92 MB/s measured on one thread), so its independent blocks (the dictionary
+/// resets 7-Zip `-mmt` writes) are decoded on worker threads too (option `FeedThreads`, see
+/// [`feed_threads`]).
 fn feed_options(password: Option<&str>) -> FeedOptions {
+    let option = crate::options::active_options().map_or(0, |o| o.scalars().feed_threads);
+    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
     FeedOptions {
         max_needs: 8,
+        threads: feed_threads(option, cores),
         ..FeedOptions::new(password)
+    }
+}
+
+/// The worker threads for a 7z LZMA2 member's independent blocks from option `FeedThreads`
+/// on a computer with `cores` logical CPUs. 0 (the default) picks: 4 workers with 8 or more
+/// cores (zipfast #295: 4 workers 277-314 MB/s against ~75 on one thread for a 32-block
+/// 2.1 GB member, while leaving room for downloading, yEnc and PAR2), otherwise zipfast's
+/// `Auto` (a third of the cores, at least one). 1 decodes on the extraction's own thread
+/// alone; 2 or more runs that many workers (at most 64).
+pub(crate) fn feed_threads(option: i32, cores: usize) -> FeedThreads {
+    match option {
+        i32::MIN..=0 if cores >= 8 => FeedThreads::Count(4),
+        i32::MIN..=0 => FeedThreads::Auto,
+        1 => FeedThreads::One,
+        n => FeedThreads::Count((n as usize).min(64)),
     }
 }
 

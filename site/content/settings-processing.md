@@ -35,7 +35,7 @@ Key options: [`ParCheck`](options.md#parcheck), [`ParRepair`](options.md#parrepa
 
 ## Unpack
 
-Turn `Unpack` on when you want archive extraction. RustyGet extracts RAR, 7-Zip, ZIP, and tar archives itself, so it needs no external tools. `DirectUnpack` extracts RAR archives while articles arrive and pauses at a damaged volume until it's repaired; `UseTempUnpackDir` controls temporary extraction folders.
+Turn `Unpack` on when you want archive extraction. RustyGet extracts RAR, 7-Zip, ZIP, and tar archives itself, so it needs no external tools. `DirectUnpack` extracts RAR archives while articles arrive and pauses at a damaged volume until it's repaired; `UseTempUnpackDir` controls temporary extraction folders. `FeedThreads` sets how many threads decode a 7-Zip LZMA2 archive during live extraction.
 
 `UnpackCleanupDisk` removes archive files after successful extraction. Choose it according to what you want the completed folder to retain. `UnpackIgnoreExt` lists nonstandard RAR extensions, such as `.cbr`, that should keep their names during RAR renaming. It also suppresses the failure for finding only nonstandard RAR archives with those extensions. Recognized `.rar` and `.7z` archives still follow normal extraction. `UnpackPassFile` supplies a password-list file when needed.
 
@@ -43,7 +43,7 @@ A category can override the global unpack setting. Nested archives are unpacked 
 
 Every unpack is checked before each file or folder is created. Unpacked names are made ASCII: accents are dropped, other characters become `_`, and upper and lower case are kept. `../` and absolute paths are refused. Names and paths must fit the file systems of both the unpack folder and the final folder. A download may unpack at most `UnpackMaxFiles` files (default 100), `UnpackMaxFolders` folders (default 10) and `UnpackMaxDepth` levels of folders (default 2; `Release/Sample/sample.mkv` is 2 deep). The volumes of an archive inside an archive are unpacked further and, when `UnpackCleanupDisk` deletes them, do not count; only what comes out does. A download over a limit stops unpacking and fails post-processing, with a message that names the limit and the file. No par repair is tried. Set a limit to 0 to turn it off.
 
-Key options: [`Unpack`](options.md#unpack), [`DirectUnpack`](options.md#directunpack), [`UseTempUnpackDir`](options.md#usetempunpackdir), [`UnpackCleanupDisk`](options.md#unpackcleanupdisk), [`UnpackIgnoreExt`](options.md#unpackignoreext), [`UnpackMaxFiles`](options.md#unpackmaxfiles), [`UnpackMaxDepth`](options.md#unpackmaxdepth), [`UnpackMaxFolders`](options.md#unpackmaxfolders).
+Key options: [`Unpack`](options.md#unpack), [`DirectUnpack`](options.md#directunpack), [`UseTempUnpackDir`](options.md#usetempunpackdir), [`FeedThreads`](options.md#feedthreads), [`UnpackCleanupDisk`](options.md#unpackcleanupdisk), [`UnpackIgnoreExt`](options.md#unpackignoreext), [`UnpackMaxFiles`](options.md#unpackmaxfiles), [`UnpackMaxDepth`](options.md#unpackmaxdepth), [`UnpackMaxFolders`](options.md#unpackmaxfolders).
 
 <figure class="settings-figure">
 <a class="settings-shot" href="assets/settings/unpack.jpg" aria-label="Open full-size picture: Archive extraction and cleanup settings"><img src="assets/settings/unpack.jpg" width="1280" height="908" loading="lazy" alt="Archive extraction and cleanup settings"></a>

@@ -1685,7 +1685,7 @@ var Config = (new function($)
 		],
 		UNPACK: [
 			{ key: 'unpack', title: 'Unpack', options: ['Unpack', 'DirectUnpack', 'UnpackPassFile', 'UseTempUnpackDir', 'UnpackPauseQueue'],
-				advanced: ['UnpackMaxFiles', 'UnpackMaxDepth', 'UnpackMaxFolders'] },
+				advanced: ['FeedThreads', 'UnpackMaxFiles', 'UnpackMaxDepth', 'UnpackMaxFolders'] },
 			{ key: 'cleanup', title: 'Cleanup', options: ['UnpackCleanupDisk', 'ExtCleanupDisk', 'UnpackIgnoreExt'] }
 		],
 		PATHS: [
@@ -3278,6 +3278,7 @@ var Config = (new function($)
 		{ option: 'UnpackPassFile', when: { name: 'Unpack', values: ['yes'], orCategory: 'Unpack' } },
 		{ option: 'UseTempUnpackDir', when: { name: 'Unpack', values: ['yes'], orCategory: 'Unpack' } },
 		{ option: 'UnpackPauseQueue', when: { name: 'Unpack', values: ['yes'], orCategory: 'Unpack' } },
+		{ option: 'FeedThreads', when: { name: 'DirectUnpack', values: ['yes'] } },
 		{ option: 'UnpackMaxFiles', when: { name: 'Unpack', values: ['yes'], orCategory: 'Unpack' } },
 		{ option: 'UnpackMaxDepth', when: { name: 'Unpack', values: ['yes'], orCategory: 'Unpack' } },
 		{ option: 'UnpackMaxFolders', when: { name: 'Unpack', values: ['yes'], orCategory: 'Unpack' } },

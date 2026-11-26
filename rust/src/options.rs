@@ -1829,7 +1829,7 @@ pub(crate) fn known_enum_names(option: &str) -> Option<&'static [&'static CStr]>
 /// Emits all default option `(name, value)` pairs for `Options::InitDefaults`.
 pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &CStr)) {
     let output_mode = if disable_curses { c"color" } else { c"curses" };
-    let defaults: [(&CStr, &CStr); 133] = [
+    let defaults: [(&CStr, &CStr); 134] = [
         (c"MainDir", c"~/downloads"),
         (c"WebDir", c""),
         (c"ConfigTemplate", c""),
@@ -1941,6 +1941,7 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"KeepHistory", c"7"),
         (c"Unpack", c"yes"),
         (c"DirectUnpack", c"yes"),
+        (c"FeedThreads", c"0"),
         (c"UseTempUnpackDir", c"yes"),
         (c"UnpackCleanupDisk", c"yes"),
         (c"UnrarCmd", c""),
@@ -2221,6 +2222,9 @@ pub struct NzbgetRsParsedOptions {
     pub unpack_max_folders: i32,
     /// Most light connections per news server (`crate::light_pool`); 0 turns them off.
     pub light_connections: i32,
+    /// Worker threads for a 7z LZMA2 member's independent blocks in live extraction
+    /// (`livefeed::feed_threads`): 0 picks, 1 is none, more is that many (at most 64).
+    pub feed_threads: i32,
 }
 
 impl NzbgetRsParsedOptions {
@@ -2748,6 +2752,7 @@ pub fn init_scalar_options_host<H: OptionsHost>(
     s.light_connections = host
         .parse_int_value(c"LightConnections", 10)
         .clamp(0, crate::light_pool::LIGHT_MAX);
+    s.feed_threads = host.parse_int_value(c"FeedThreads", 10).clamp(0, 64);
     s.url_force = i32::from(host.parse_bool_value(c"UrlForce"));
     s.cert_check = i32::from(host.parse_bool_value(c"CertCheck"));
     s.reorder_files = i32::from(host.parse_bool_value(c"ReorderFiles"));

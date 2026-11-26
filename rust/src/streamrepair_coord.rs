@@ -100,6 +100,11 @@ struct CandSnap {
     password: Vec<u8>,
     other_container: bool,
     same_video_label: bool,
+    /// TwinCheck labelled it `DupeKind=other` (another video): never restarted.
+    other_video: bool,
+    /// A fleet found its video compressed (or encrypted with no password): it can lend only
+    /// through a restart near the frontier (`restartlend`) or a whole decompression.
+    unborrowable: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -304,6 +309,9 @@ struct DonorSource {
     /// Labelled as holding the same video (see [`same_video_label`]): only then may a check that
     /// matched in one run let later runs lend it unchecked.
     same_video_label: bool,
+    /// TwinCheck labelled it another video (`DupeKind=other`): its compressed video is never
+    /// restarted near the frontier (`restartlend`).
+    other_video: bool,
 }
 
 /// Whether a copy's labels say it holds the same video as the download: TwinCheck's `twin` or
@@ -852,6 +860,12 @@ impl NzbgetRsStreamRepairCtrl {
                     host.nzb_get_param(cand, b"DupeKind").as_deref(),
                     host.nzb_get_param(cand, crate::dupesearch_coord::VIDEO_PARAM).as_deref(),
                 ),
+                other_video: host
+                    .nzb_get_param(cand, b"DupeKind")
+                    .is_some_and(|k| k.trim_ascii() == b"other"),
+                unborrowable: crate::donorkind::DonorKind::from_param(
+                    host.nzb_get_param(cand, crate::donorkind::KIND_PARAM).as_deref(),
+                ) == crate::donorkind::DonorKind::Unborrowable,
             },
         ))
     }
@@ -996,6 +1010,8 @@ impl NzbgetRsStreamRepairCtrl {
             password: Vec<u8>,
             other_container: bool,
             same_video_label: bool,
+            other_video: bool,
+            unborrowable: bool,
         }
         let mut cand_rows: Vec<CandRow> = Vec::new();
         for (from_history, count) in [(false, queue_count), (true, history_count)] {
@@ -1021,12 +1037,19 @@ impl NzbgetRsStreamRepairCtrl {
                     password: cand.password,
                     other_container: cand.other_container,
                     same_video_label: cand.same_video_label,
+                    other_video: cand.other_video,
+                    unborrowable: cand.unborrowable,
                 });
             }
         }
 
+        // Donor order: copies that lend by range (twins, stored alts) before those a fleet found
+        // compressed, which lend only through a restart reading from the first hole on, or a
+        // whole decompression; by score within each.
         cand_rows.sort_by(|a, b| {
-            if a.dupe_score != b.dupe_score {
+            if a.unborrowable != b.unborrowable {
+                a.unborrowable.cmp(&b.unborrowable)
+            } else if a.dupe_score != b.dupe_score {
                 b.dupe_score.cmp(&a.dupe_score)
             } else {
                 a.id.cmp(&b.id)
@@ -1047,6 +1070,7 @@ impl NzbgetRsStreamRepairCtrl {
                 password: row.password,
                 other_container: row.other_container,
                 same_video_label: row.same_video_label,
+                other_video: row.other_video,
             });
         }
         // Donor order: a copy labelled the same video (a proven twin, an alt, or the fleet
@@ -1936,6 +1960,10 @@ impl NzbgetRsStreamRepairCtrl {
                     self.ctrl.finishing_volume.store(on, Ordering::SeqCst);
                 }
 
+                fn finishing_volume(&self) -> bool {
+                    self.ctrl.finishing_volume.load(Ordering::SeqCst)
+                }
+
                 fn fetch_donor_part(
                     &mut self,
                     member_index: i32,
@@ -2160,6 +2188,7 @@ impl NzbgetRsStreamRepairCtrl {
                     .filter(|_| donor.same_video_label)
                     .and_then(|id| crate::postproc::dead_volume_donor_confirmed(id, donor.id)),
             );
+            session.set_donor_restartable(!donor.other_video);
             session.process_donor(
                 &donor.queued_filename,
                 &donor.info_name,

@@ -5405,6 +5405,38 @@ fn media_size_differs(all_mapped: bool, donor_size: Option<i64>, target_size: Op
     all_mapped && donor_size.is_some() && target_size.is_some() && donor_size != target_size
 }
 
+/// A 7z set that failed to map because a coder other than Copy codes its folder.
+fn is_coded_7z_skip(reason: &MapError) -> bool {
+    matches!(reason, MapError::Layer(why) if why.starts_with("non-Copy 7z coder"))
+}
+
+/// The output a restarted compressed duplicate decoded (`restartlend`), as the one member of a
+/// bare set: the video's bytes from the restart to its end. Bytes before the restart are not
+/// there.
+#[derive(Clone)]
+struct RestartSource(std::sync::Arc<crate::restartlend::Restarted>);
+
+impl ContentSource for RestartSource {
+    fn size(&self) -> i64 {
+        i64::try_from(self.0.size).unwrap_or(0)
+    }
+
+    fn read(&self, offset: i64, buf: &mut [u8]) -> ReadResult {
+        let offset = u64::try_from(offset).map_err(|_| ReadError::OutOfRange)?;
+        if self.0.read(offset, buf) {
+            Ok(())
+        } else {
+            Err(ReadError::Unavailable)
+        }
+    }
+}
+
+impl ContentSourceSet for RestartSource {
+    fn get_source(&self, member_index: i32) -> Option<&dyn ContentSource> {
+        (member_index == 0).then_some(self as &dyn ContentSource)
+    }
+}
+
 /// Whether a set failed to map only because its data is compressed (a zip entry or RAR file
 /// not stored): a fact of the archive, not a failed read. A 7z is told by its LZMA2 probe, as
 /// raw chunks in it can still be lent.
@@ -8697,12 +8729,57 @@ pub fn nothing_arrived(decoded_file_size: i64, holes: &[NzbgetRsByteRange]) -> b
     holes.iter().map(|h| h.size.max(0)).sum::<i64>() >= decoded_file_size
 }
 
+/// Gaps between lost stretches joined into one run by [`holes_form_one_run`]: an article that
+/// came between failed ones.
+const ONE_TAIL_GAP: i64 = 1 << 20;
+
+/// True when `holes` (video offsets) form one run, gaps under [`ONE_TAIL_GAP`] joined.
+fn holes_form_one_run(holes: &[crate::dupefallback::NzbgetRsByteRange]) -> bool {
+    let mut runs: Vec<(i64, i64)> = holes.iter().map(|h| (h.offset, h.offset + h.size)).collect();
+    runs.sort_unstable();
+    let mut it = runs.into_iter();
+    let Some((_, mut end)) = it.next() else {
+        return false;
+    };
+    for (start, stop) in it {
+        if start > end + ONE_TAIL_GAP {
+            return false;
+        }
+        end = end.max(stop);
+    }
+    true
+}
+
+/// The decision of [`CrossPackRepairSession::dying_at_frontier`]: the download is `kept` for
+/// borrowing and its lost video bytes `holes` form one run reaching `arrived_end`, the end of
+/// what arrived of it.
+fn holes_die_at_frontier(kept: bool, holes: &[crate::dupefallback::NzbgetRsByteRange], arrived_end: i64) -> bool {
+    let hole_end = holes.iter().map(|h| h.offset + h.size).max().unwrap_or(0);
+    kept && holes_form_one_run(holes) && hole_end >= arrived_end
+}
+
+/// Whether an earlier run's restart outcome for this download is reused: `restart_from` is the
+/// member output offset its restart decoded from (`None`: the backup was found not
+/// restartable). While downloading (`allow_decompress` false) either outcome stands. After the
+/// download a refusal is not reused (the backup is extracted whole instead), and a restart only
+/// when it covers every hole left (`first_hole`, the lowest hole offset; `None`: none left).
+fn earlier_restart_reusable(restart_from: Option<u64>, allow_decompress: bool, first_hole: Option<i64>) -> bool {
+    match restart_from {
+        Some(from) => !allow_decompress || first_hole.is_none_or(|o| o >= 0 && o as u64 >= from),
+        None => !allow_decompress,
+    }
+}
+
 /// Host callback boundary for [`CrossPackRepairSession::process_donor`].
 pub trait CrossPackDonorEnv {
     fn is_stopped(&mut self) -> bool;
     /// Set while one dead volume's holes are borrowed: a pass yielding for a newly dead volume
     /// lets that volume finish first, so its bytes are handed over instead of fetched again.
     fn set_finishing_volume(&mut self, _on: bool) {}
+    /// Whether [`Self::set_finishing_volume`] is on (a restart puts back what it found).
+    fn finishing_volume(&self) -> bool {
+        false
+    }
     fn has_batch_fetcher(&self) -> bool {
         true
     }
@@ -9864,6 +9941,8 @@ pub struct CrossPackRepairSession {
     /// compared the donor's video against bytes the download holds and found it the same (see
     /// [`Self::set_donor_known_same`]).
     donor_known_same: bool,
+    /// See [`Self::set_donor_restartable`].
+    donor_restartable: bool,
     /// The payload size the earlier confirmation was made for.
     donor_known_size: Option<i64>,
     /// A check of the video of the donor of the last [`Self::process_donor`] call differed.
@@ -10118,6 +10197,7 @@ impl CrossPackRepairSession {
             materialize_dead: dead_context.materialize,
             donor_identity: None,
             donor_known_same: false,
+            donor_restartable: true,
             donor_known_size: None,
             donor_differed: false,
             video_confirmed: false,
@@ -10146,6 +10226,13 @@ impl CrossPackRepairSession {
     /// See `donor_identity`: what the donor of the last [`Self::process_donor`] call showed.
     pub fn donor_identity(&self) -> Option<bool> {
         self.donor_identity
+    }
+
+    /// Whether the next [`Self::process_donor`] call may restart the donor's compressed video
+    /// near the frontier (`restartlend`): not for a copy TwinCheck labelled another video
+    /// (`DupeKind=other`). On by default.
+    pub fn set_donor_restartable(&mut self, restartable: bool) {
+        self.donor_restartable = restartable;
     }
 
     /// Tells the next [`Self::process_donor`] call that an earlier run of this download already
@@ -10236,6 +10323,25 @@ impl CrossPackRepairSession {
         self.dead_fills.iter().any(|d| !d.done)
     }
 
+    /// True when the download is dying at its frontier: the queue keeps it to borrow its lost
+    /// parts (its health fell, `queuecoord::was_kept_for_borrowing`) and repair set
+    /// `repair_set_idx`'s lost video bytes form one run (gaps under [`ONE_TAIL_GAP`] joined)
+    /// that reaches the end of what arrived of it, the tail of a volume that died part way. A
+    /// restart from there reads what a dead tail would. A lone hole in a healthy download, or
+    /// one with data after it, is left to donors that lend by range and to par2.
+    fn dying_at_frontier(&self, repair_set_idx: usize) -> bool {
+        let set = &self.repair_sets[repair_set_idx];
+        let Some(map) = &set.map else {
+            return false;
+        };
+        let arrived_end = map.runs().iter().map(|r| r.inner_offset + r.size).max().unwrap_or(0);
+        holes_die_at_frontier(
+            self.dead_nzb_id > 0 && crate::queuecoord::was_kept_for_borrowing(self.dead_nzb_id),
+            &set.inner_holes,
+            arrived_end,
+        )
+    }
+
     /// Records a donor's identity check against repair set `repair_set_idx`: a confirmed one is
     /// never undone by another set of the same donor that did not match, and an inconclusive
     /// one records nothing. Only a check against the media payload counts: a matching sample or
@@ -10316,6 +10422,11 @@ impl CrossPackRepairSession {
         let mut set_tried: Vec<bool> = vec![false; donor_sets.len()];
         let mut want_maps: std::collections::HashMap<(usize, Vec<u8>, i64), Option<ContentMap>> =
             std::collections::HashMap::new();
+        // Compressed sets whose decoder zipfast restarted near the frontier (`restartlend`):
+        // their decoded output, mapped as a bare file (live only: offline repair decompresses).
+        let mut restart_maps: Vec<Option<(ContentMap, RestartSource)>> = vec![None; donor_sets.len()];
+        // sets whose restart failed on a read and is tried again: no verdict on the backup yet
+        let mut restart_retry: Vec<bool> = vec![false; donor_sets.len()];
 
         for repair_set_idx in 0..self.repair_sets.len() {
             if self.repair_sets[repair_set_idx].map.is_none()
@@ -10372,6 +10483,43 @@ impl CrossPackRepairSession {
                     };
                     donor_map = map;
                 } else {
+                    let restart_key = crate::restartlend::set_key(
+                        donor_queued_filename,
+                        &donor_members[donor_set.members[0] as usize].name,
+                    );
+                    if !set_tried[set_index] && self.is_video_set(repair_set_idx) {
+                        // Restarted (or found not restartable) by an earlier run for this
+                        // download: its headers are not read again, its output is lent on. After
+                        // the download (decompression allowed) only a restart's output is reused:
+                        // the backup is not downloaded and extracted whole for what it already
+                        // decoded.
+                        // (and only when it covers every hole left: holes before its restart point
+                        // still take the whole extraction)
+                        let first_hole = self.repair_sets[repair_set_idx]
+                            .inner_holes
+                            .iter()
+                            .map(|h| h.offset)
+                            .min();
+                        // (a copy labelled another video lends no earlier restart's output either)
+                        let restartable = self.donor_restartable;
+                        let earlier = crate::restartlend::earlier(self.dead_nzb_id, &restart_key)
+                            .filter(|e| {
+                                (restartable || e.is_err())
+                                    && earlier_restart_reusable(
+                                    e.as_ref().ok().map(|r| r.from),
+                                    allow_decompress,
+                                    first_hole,
+                                )
+                            });
+                        if let Some(earlier) = earlier {
+                            set_tried[set_index] = true;
+                            set_compressed[set_index] = earlier.is_err();
+                            if let Ok(r) = earlier {
+                                restart_maps[set_index] = self.restart_map(repair_set_idx, r);
+                                set_compressed[set_index] = restart_maps[set_index].is_none();
+                            }
+                        }
+                    }
                     if !set_tried[set_index] {
                         set_tried[set_index] = true;
                         let mapping_budget = 8 + (donor_set.members.len() as i32) * 4;
@@ -10431,7 +10579,8 @@ impl CrossPackRepairSession {
                         .map_or(0, ContentMap::inner_size);
                     let size_matches = set_maps[set_index]
                         .as_ref()
-                        .is_some_and(|dm| dm.inner_size() == target_inner_size);
+                        .is_some_and(|dm| dm.inner_size() == target_inner_size)
+                        || restart_maps[set_index].is_some();
                     if !size_matches {
                         // A 7z whose LZMA2 coder stored the data in raw chunks holds the inner
                         // bytes in plain form: borrow just the articles around each hole.
@@ -10459,6 +10608,98 @@ impl CrossPackRepairSession {
                             // the coder compressed) are left to the decompression step below.
                             continue;
                         }
+                        // Live: a compressed set is restarted near the frontier instead of
+                        // being downloaded and extracted whole (failover-continue).
+                        let compressed_layer = set_compressed[set_index]
+                            || (donor_set.format == MemberFormat::SevenZip
+                                && set_skips[set_index].as_ref().is_some_and(is_coded_7z_skip));
+                        // a restart whose reads failed a moment ago waits before it is tried
+                        // again, and says nothing of the backup meanwhile
+                        let waiting = self.dead_nzb_id > 0
+                            && crate::restartlend::transient_waiting(self.dead_nzb_id, &restart_key);
+                        restart_retry[set_index] |= waiting;
+                        if !allow_decompress
+                            && set_maps[set_index].is_none()
+                            && compressed_layer
+                            && self.dead_nzb_id > 0
+                            && self.is_video_set(repair_set_idx)
+                            // only for dead volumes (a dead tail): scattered holes are left to
+                            // donors that lend by range, which a restart from the first hole
+                            // would read nearly whole for (donor order: twins, range alts, then
+                            // restarted or whole alts)
+                            // (or a primary cut at its frontier for its alt: everything past
+                            // the cut is a dead tail, holes before it come from the same decode)
+                            && (self.has_pending_dead_fills()
+                                || self.dying_at_frontier(repair_set_idx)
+                                || crate::frontiercut::is_cut(self.dead_nzb_id))
+                            && self.donor_restartable
+                            && crate::restartlend::earlier(self.dead_nzb_id, &restart_key).is_none()
+                            && !waiting
+                            && !env_cell.borrow_mut().is_stopped()
+                        {
+                            // a pass yielding for a newly dead volume waits for the restart to
+                            // finish (its reads would fail half way and be fetched again)
+                            let held = env_cell.borrow().finishing_volume();
+                            env_cell.borrow_mut().set_finishing_volume(true);
+                            let result = self
+                                .exec_restart(
+                                    repair_set_idx,
+                                    &donor_members,
+                                    donor_set,
+                                    &donor_sources,
+                                    donor_password,
+                                    &env_cell,
+                                )
+                                .map(std::sync::Arc::new);
+                            env_cell.borrow_mut().set_finishing_volume(held);
+                            let mut msg = Vec::new();
+                            match &result {
+                                Ok(r) => {
+                                    restart_maps[set_index] = self.restart_map(repair_set_idx, r.clone());
+                                    msg.extend_from_slice(
+                                        format!(
+                                            "Restarted the {} decoder of duplicate ",
+                                            r.layer
+                                        )
+                                        .as_bytes(),
+                                    );
+                                    msg.extend_from_slice(donor_info_name);
+                                    msg.extend_from_slice(
+                                        format!(
+                                            " at {} (frontier {}): read {:.1} MB of it, decoded {:.1} MB, member CRC32 matches, {} ms",
+                                            r.from,
+                                            self.repair_sets[repair_set_idx]
+                                                .inner_holes
+                                                .iter()
+                                                .map(|h| h.offset)
+                                                .min()
+                                                .unwrap_or(0),
+                                            r.fetched as f64 / 1e6,
+                                            (r.size - r.from) as f64 / 1e6,
+                                            r.elapsed.as_millis()
+                                        )
+                                        .as_bytes(),
+                                    );
+                                }
+                                Err(why) => {
+                                    msg.extend_from_slice(b"Cannot restart the compressed video of duplicate ");
+                                    msg.extend_from_slice(donor_info_name);
+                                    msg.extend_from_slice(b" near the frontier: ");
+                                    msg.extend_from_slice(why.as_bytes());
+                                }
+                            }
+                            env_cell.borrow_mut().emit_message_bytes(TargetMessageKind::Info, &msg);
+                            // A read that failed (an article the backup lacks, a timeout) is no
+                            // verdict on the backup: a later run tries again.
+                            restart_retry[set_index] = result.as_ref().is_err_and(|why| {
+                                crate::restartlend::transient(why)
+                                    && !crate::restartlend::transient_gave_up(self.dead_nzb_id, &restart_key)
+                            });
+                            if !restart_retry[set_index] {
+                                crate::restartlend::keep(self.dead_nzb_id, &restart_key, result);
+                            }
+                            set_compressed[set_index] = restart_maps[set_index].is_none();
+                        }
                         let can_decompress =
                             allow_decompress && ContentMapper::is_compressible_archive(donor_set);
                         if can_decompress {
@@ -10484,11 +10725,22 @@ impl CrossPackRepairSession {
                                     && target_media == Some(repair_set_idx);
                             }
                         }
-                        continue;
+                        if restart_maps[set_index].is_none() {
+                            continue;
+                        }
                     }
 
-                    donor_map = set_maps[set_index].as_ref().unwrap();
+                    donor_map = match &restart_maps[set_index] {
+                        Some((map, _)) => map,
+                        None => set_maps[set_index].as_ref().unwrap(),
+                    };
                 }
+                // A restarted set is read through its decoded output, every other one through
+                // the duplicate's articles.
+                let donor_reads: &dyn ContentSourceSet = match (&self.repair_sets[repair_set_idx].want, &restart_maps[set_index]) {
+                    (None, Some((_, decoded))) => decoded,
+                    _ => &donor_sources,
+                };
                 let check = {
                     let mut target_adapter = DiskTargetFileSetAdapter {
                         files: &mut self.target_files,
@@ -10497,9 +10749,19 @@ impl CrossPackRepairSession {
                     };
                     self.repair_sets[repair_set_idx].check_donor_set(
                         donor_map,
-                        &donor_sources,
+                        donor_reads,
                         &mut target_adapter,
                     )
+                };
+                // A restarted set's output is proven already: the whole member's CRC32 matched
+                // the download's own bytes before the restart with the decoded rest, so its video
+                // is the download's (a check of a dead-volume set, with none of the download's
+                // bytes around its holes, cannot tell more). A check that differs still refuses.
+                let check = match (check, &restart_maps[set_index]) {
+                    (DonorCheck::Inconclusive, Some(_)) if self.repair_sets[repair_set_idx].want.is_none() => {
+                        DonorCheck::Same
+                    }
+                    (c, _) => c,
                 };
                 self.note_donor_identity(repair_set_idx, check);
                 let verified = self.donor_accepted(repair_set_idx, check);
@@ -10560,7 +10822,7 @@ impl CrossPackRepairSession {
                         };
                         self.repair_sets[repair_set_idx].patch_from_donor_set(
                             donor_map,
-                            &donor_sources,
+                            donor_reads,
                             &mut target_adapter,
                             &mut self.target_holes,
                             &self.member_targets,
@@ -10621,7 +10883,8 @@ impl CrossPackRepairSession {
             }
         }
         if let Some(media) = donor_media {
-            self.donor_compressed = !allow_decompress && set_compressed[media];
+            // a restart to be tried again says nothing yet: a timeout is no mismatch
+            self.donor_compressed = !allow_decompress && set_compressed[media] && !restart_retry[media];
         }
         self.rebuild_container_tails(&env_cell);
         self.finish_dead_fills(&env_cell);
@@ -10636,6 +10899,128 @@ impl CrossPackRepairSession {
                 .borrow_mut()
                 .emit_message_bytes(TargetMessageKind::Info, &msg);
         }
+    }
+
+    /// Restarts the compressed set `donor_set` of a duplicate near the first hole of the
+    /// download's video (`restartlend`): the download's own output before it is the decoder's
+    /// window, and only the duplicate's packed bytes from the restart on are read.
+    #[allow(clippy::too_many_arguments)]
+    fn exec_restart(
+        &mut self,
+        repair_set_idx: usize,
+        donor_members: &[SetMember],
+        donor_set: &MemberSet,
+        donor_sources: &DonorSetSources<'_, '_>,
+        donor_password: &[u8],
+        env_cell: &std::cell::RefCell<&mut dyn CrossPackDonorEnv>,
+    ) -> Result<crate::restartlend::Restarted, String> {
+        let target_map = self.repair_sets[repair_set_idx]
+            .map
+            .clone()
+            .ok_or_else(|| "the download's video is not mapped".to_string())?;
+        if target_map.encrypted() {
+            return Err("the download's own archive is encrypted (its output is not read as a window)".into());
+        }
+        let frontier = self.repair_sets[repair_set_idx]
+            .inner_holes
+            .iter()
+            .map(|h| h.offset)
+            .min()
+            .ok_or_else(|| "nothing is missing".to_string())?;
+        let size = u64::try_from(target_map.inner_size()).unwrap_or(0);
+        let sizes: Vec<u64> = donor_set
+            .members
+            .iter()
+            .map(|&m| donor_members.get(m as usize).map_or(0, |d| u64::try_from(d.size).unwrap_or(0)))
+            .collect();
+        let first_name = donor_members
+            .get(donor_set.members[0] as usize)
+            .map(|d| d.name.clone())
+            .unwrap_or_default();
+        let password = (!donor_password.is_empty()).then(|| String::from_utf8_lossy(donor_password).into_owned());
+        let mut read = |volume: u32, offset: u64, buf: &mut [u8]| -> bool {
+            let Some(&member) = donor_set.members.get(volume as usize) else {
+                return false;
+            };
+            let Ok(offset) = i64::try_from(offset) else {
+                return false;
+            };
+            donor_sources
+                .get_source(member)
+                .is_some_and(|s| s.read(offset, buf).is_ok())
+        };
+        let mut prefetch = |ranges: &[(u32, u64, u64)]| {
+            let mut by_member: Vec<(i32, Vec<(i64, i64)>)> = Vec::new();
+            for &(volume, offset, len) in ranges {
+                let Some(&member) = donor_set.members.get(volume as usize) else {
+                    continue;
+                };
+                let range = (offset as i64, len as i64);
+                match by_member.iter_mut().find(|(m, _)| *m == member) {
+                    Some((_, rs)) => rs.push(range),
+                    None => by_member.push((member, vec![range])),
+                }
+            }
+            donor_sources.prefetch_member_ranges(&by_member);
+        };
+        let mut adapter = DiskTargetFileSetAdapter {
+            files: &mut self.target_files,
+            members: &self.set_members,
+            env: env_cell,
+        };
+        let mut known = |offset: u64, buf: &mut [u8]| -> bool {
+            let (Ok(at), Ok(len)) = (i64::try_from(offset), i64::try_from(buf.len())) else {
+                return false;
+            };
+            let mut filled = 0usize;
+            for piece in target_map.map_from_inner(NzbgetRsByteRange { offset: at, size: len }) {
+                let Ok(n) = usize::try_from(piece.size) else {
+                    return false;
+                };
+                let Some(dst) = buf.get_mut(filled..filled + n) else {
+                    return false;
+                };
+                if adapter.read_file(piece.member_index, piece.offset, dst).is_err() {
+                    return false;
+                }
+                filled += n;
+            }
+            filled == buf.len()
+        };
+        donor_sources.set_fetch_budget(None);
+        let mut backup = crate::restartlend::Backup {
+            first_name: &first_name,
+            sizes: &sizes,
+            password: password.as_deref(),
+            read: &mut read,
+            prefetch: &mut prefetch,
+        };
+        crate::restartlend::restart(
+            &mut backup,
+            size,
+            u64::try_from(frontier).unwrap_or(0),
+            &mut known,
+            crate::fsops::path(&self.dest_dir),
+        )
+    }
+
+    /// The decoded output of a restart as a donor set: a bare file, mapped by
+    /// [`ContentMapper::build_map_with_tls`] like any other payload, readable from the restart
+    /// on. None when it is not of the video's size.
+    fn restart_map(
+        &self,
+        repair_set_idx: usize,
+        restarted: std::sync::Arc<crate::restartlend::Restarted>,
+    ) -> Option<(ContentMap, RestartSource)> {
+        let target = self.repair_sets.get(repair_set_idx)?.map.as_ref()?;
+        let source = RestartSource(restarted);
+        if source.size() != target.inner_size() {
+            return None;
+        }
+        let members = [SetMember::new(target.inner_name_bytes().to_vec(), source.size())];
+        let set = MemberSet { format: MemberFormat::Bare, members: vec![0] };
+        let map = ContentMapper::build_map_with_tls(&members, &set, &source, None, self.tls_enabled).ok()?;
+        Some((map, source))
     }
 
     /// Dead volumes whose borrowed data is complete: rebuild their headers and hand them to
@@ -12798,6 +13183,46 @@ pub fn process_m1_donor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A restart for a dying download is tried only when the queue keeps it to borrow and its
+    /// lost video bytes are the tail of what arrived: one run (gaps under a MiB joined) reaching
+    /// the arrived end.
+    #[test]
+    fn dying_at_frontier_needs_kept_download_and_one_tail_run() {
+        let r = |offset, size| NzbgetRsByteRange { offset, size };
+        const MB: i64 = 1 << 20;
+        // A volume died part way: everything from 40 MB to the arrived end (50 MB) is lost,
+        // with one article that came between failed ones.
+        let tail = [r(40 * MB, 4 * MB), r(44 * MB + 300_000, 6 * MB - 300_000)];
+        assert!(holes_die_at_frontier(true, &tail, 50 * MB));
+        // The same holes, but the queue does not keep the download to borrow: no restart.
+        assert!(!holes_die_at_frontier(false, &tail, 50 * MB));
+        // A lone hole with data after it is left to range donors and par2.
+        assert!(!holes_die_at_frontier(true, &[r(10 * MB, MB)], 50 * MB));
+        // Two runs more than a MiB apart are no tail, even when the second reaches the end.
+        assert!(!holes_die_at_frontier(true, &[r(10 * MB, MB), r(45 * MB, 5 * MB)], 50 * MB));
+        // No holes: nothing to restart for.
+        assert!(!holes_die_at_frontier(true, &[], 50 * MB));
+    }
+
+    /// An earlier run's restart outcome is reused while downloading either way; after the
+    /// download only a restart that covers every hole left is reused, and a refusal is not (the
+    /// backup is downloaded and extracted whole instead).
+    #[test]
+    fn earlier_restart_reused_after_download_only_when_it_covers_every_hole() {
+        // While downloading: a restart and a refusal both stand.
+        assert!(earlier_restart_reusable(Some(1000), false, Some(10)));
+        assert!(earlier_restart_reusable(None, false, Some(10)));
+        // After the download: a refusal is never reused.
+        assert!(!earlier_restart_reusable(None, true, Some(10)));
+        assert!(!earlier_restart_reusable(None, true, None));
+        // After the download: a restart from 1000 covers holes at or after 1000 only.
+        assert!(earlier_restart_reusable(Some(1000), true, Some(1000)));
+        assert!(earlier_restart_reusable(Some(1000), true, Some(5000)));
+        assert!(earlier_restart_reusable(Some(1000), true, None));
+        assert!(!earlier_restart_reusable(Some(1000), true, Some(999)));
+        assert!(!earlier_restart_reusable(Some(1000), true, Some(-1)));
+    }
 
     /// The UI showed "978 MB borrowed, 0 holes" for cross-packing passes: a
     /// hole they close completely counts, one filled in part does not.

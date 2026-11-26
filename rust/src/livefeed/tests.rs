@@ -810,3 +810,18 @@ fn a_set_is_mapped_from_its_first_and_last_volume_while_they_are_written() {
     assert_eq!(std::fs::read(dir.join("out/movie.mkv")).unwrap(), movie);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Option `FeedThreads`: 0 picks 4 LZMA2 workers on 8 or more cores and zipfast's `Auto`
+/// below; 1 decodes on the extraction's thread alone; more is that many workers, at most 64.
+#[test]
+fn feed_threads_follows_the_option_and_the_core_count() {
+    assert_eq!(feed_threads(0, 8), FeedThreads::Count(4));
+    assert_eq!(feed_threads(0, 32), FeedThreads::Count(4));
+    assert_eq!(feed_threads(0, 7), FeedThreads::Auto);
+    assert_eq!(feed_threads(0, 1), FeedThreads::Auto);
+    assert_eq!(feed_threads(-3, 16), FeedThreads::Count(4));
+    assert_eq!(feed_threads(1, 32), FeedThreads::One);
+    assert_eq!(feed_threads(2, 4), FeedThreads::Count(2));
+    assert_eq!(feed_threads(8, 4), FeedThreads::Count(8));
+    assert_eq!(feed_threads(500, 4), FeedThreads::Count(64));
+}

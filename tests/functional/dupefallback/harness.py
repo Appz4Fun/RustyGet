@@ -1054,6 +1054,19 @@ def _payload(size, seed):
         bytes(bytearray(r.getrandbits(8) for _ in range(size)))
 
 
+def _text_payload(size, seed):
+    """``size`` bytes of compressible text (words drawn from a small
+    vocabulary): an LZMA2 or RAR coder packs it into compressed chunks and
+    blocks, not stored ones."""
+    r = random.Random(seed)
+    words = [bytes(r.choice(b'abcdefghijklmnopqrstuvwxyz') for _ in range(r.randint(2, 9)))
+             for _ in range(4000)]
+    out = bytearray()
+    while len(out) < size:
+        out += b' '.join(r.choice(words) for _ in range(12)) + b'.\n'
+    return bytes(out[:size])
+
+
 def _place_copy(target, subdir, data, filename='file.bin'):
     """Write a payload copy under data/<subdir>/<filename> and return the
     served path (relative to the nserv data dir)."""
@@ -4298,7 +4311,8 @@ def _log_text(t):
         return ''
 
 
-def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKind', need_live=False):
+def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKind', need_live=False,
+              primary='store'):
     """The ultimate goal (extract while downloading, 2026-11-25): a stored rar
     set of movie.mkv extracts while it downloads, and the primary dies at
     ``die`` (a fraction of its data: every article from there on is gone). Its
@@ -4310,8 +4324,32 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
       volume and article sizes), lent by the bytes of the video inside;
     - ``aes``: the same movie in a RAR5 store set with encrypted headers, the
       password in the backup's nzb;
-    - ``compressed``: the same movie compressed (rar -m3): it cannot lend live,
-      so the primary fails over to it as before, with the reason logged;
+    - ``compressed``: the same movie compressed (rar -m3), labelled
+      ``unborrowable`` by a fleet: it cannot lend live, so the primary fails
+      over to it as before, with the reason logged;
+    - ``rar5m3``: the same movie compressed (rar -m3, RAR5), labelled
+      ``DupeVideo=same`` by the fleet intake with no DupeKind (TwinCheck
+      without par2 leaves none):
+      zipfast restarts its decoder near the frontier with the primary's own
+      output as the window (``open_at`` + ``complete_rar5``, held plaintext),
+      so it lends only what lies past the frontier and a search region;
+    - ``rar5m3aes``: as ``rar5m3`` with encrypted headers and data (``-hp``,
+      password in the backup's nzb): its packed bytes are decrypted on the way;
+    - ``lzma2``: the same (compressible) movie in a 7z LZMA2 set, labelled
+      ``alt``: restarted at an LZMA2 chunk before the frontier
+      (``complete_lzma2``) with the primary's output as the dictionary;
+    - ``norestart``: the same movie in a 7z BZip2 set, labelled ``alt``: no
+      restart point inside the member (``StartOnly``), so the primary fails
+      over to it, with the reason logged;
+    - ``aestwin`` / ``aesalt`` (with ``primary='aes'``): the primary itself is
+      a RAR5 store set with encrypted headers and data (password in its nzb);
+      its backup is a twin (the same encrypted volumes: they swap in one for
+      one) or an alt (another RAR5 AES store set with other volume sizes and
+      another password: an OPEN ITEM, the release completes from the alt);
+    - ``rar5m3other``: as ``rar5m3`` (the intake read the video the same), but
+      TwinCheck labelled it ``DupeKind=other`` (its video differs): that verdict
+      stands, so it is never restarted and never lends a byte; the primary fails
+      over to it, with the reason logged;
     - ``other``: another video of the same size in another stored rar set,
       labelled ``container`` (another container, the video inside not
       verified): it never lends a byte (no earlier confirmation stands in for
@@ -4327,14 +4365,26 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
     labels a twin the way TwinCheck does, with no fleet kind."""
     if not generators.HAVE_RAR:
         return (name, None, 'SKIP: rar not installed')
-    tag = 'fc' + backup[0]
+    if backup in ('lzma2', 'norestart') and not generators.HAVE_7Z:
+        return (name, None, 'SKIP: 7z not installed')
+    tag = 'fc' + {'aestwin': 'w', 'aesalt': 'x', 'rar5m3': 'm', 'rar5m3aes': 'q', 'lzma2': 'l', 'norestart': 'n'}.get(
+        backup, backup[0])
     password = 'fleet-pw 9' if backup == 'aes' else None
+    primary_password = 'prim-pw 3' if primary == 'aes' else None
+    if backup == 'aestwin':
+        password = primary_password
+    elif backup == 'aesalt':
+        password = 'alt-pw 7'
+    elif backup == 'rar5m3aes':
+        password = 'alt-pw 8'
     seg = 50_000
-    movie = _payload(15_000_000, 25110)
+    # a 7z LZMA2 coder stores incompressible chunks raw (borrowed by range, not restarted):
+    # its movie compresses, so the frontier lies in LZMA chunks
+    movie = _text_payload(15_000_000, 25110) if backup == 'lzma2' else _payload(15_000_000, 25110)
     # RAR5, as current releases are: a dead last volume of a RAR 1.5-4 set cannot be rebuilt
     # (its header stores the whole file's checksum; deadvolume::synthesize_frame)
     with tempfile.TemporaryDirectory(prefix='fc-') as workdir:
-        vols = generators.rar5_store_volumes_hp('movie.mkv', movie, 1_000_000, None, workdir)
+        vols = generators.rar5_store_volumes_hp('movie.mkv', movie, 1_000_000, primary_password, workdir)
     total = sum(len(v) for v in vols)
     cut = int(total * die)
     names = ['Show.part%02d.rar' % (i + 1) for i in range(len(vols))]
@@ -4350,7 +4400,7 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
     t.write_file(os.path.join('data', '%sA/Show.par2' % tag), par)
     members.append(('%sA/Show.par2' % tag, 'Show.par2', len(par), seg, set()))
     labels = []
-    if backup == 'twin':
+    if backup in ('twin', 'aestwin'):
         # a repost: the same files under the same names
         donor_vols = list(zip(names, vols))
         donor_seg = seg
@@ -4363,32 +4413,61 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
         # as a fleet's intake and TwinCheck label it (another container, the same video)
         labels = ([('DupeCopyKind', 'borrowable'), ('DupeVideo', 'same'), ('DupeKind', 'alt')]
                   if backup == 'alt' else [('DupeKind', 'container')])
+    elif backup in ('lzma2', 'norestart'):
+        with tempfile.TemporaryDirectory(prefix='fc-') as workdir:
+            with open(os.path.join(workdir, 'movie.mkv'), 'wb') as f:
+                f.write(movie)
+            import subprocess as _sp
+            _sp.run([generators.SEVENZIP_PATH, 'a', '-bd', '-m0=' + ('LZMA2' if backup == 'lzma2' else 'BZip2'),
+                     '-v5000000b', 'out.7z', 'movie.mkv'], cwd=workdir, check=True, capture_output=True)
+            outs = sorted(n for n in os.listdir(workdir) if n.startswith('out.7z.'))
+            enc = [open(os.path.join(workdir, n), 'rb').read() for n in outs]
+        donor_vols = [('Other.7z.%03d' % (i + 1), d) for i, d in enumerate(enc)]
+        donor_seg = 100_000
+        # labelled the way a fleet labels a compressed copy whose video it read the same
+        labels = [('DupeCopyKind', 'unborrowable'), ('DupeVideo', 'same'), ('DupeKind', 'alt')]
     else:
         with tempfile.TemporaryDirectory(prefix='fc-') as workdir:
-            if backup == 'aes':
+            if backup in ('aes', 'aesalt'):
                 enc = generators.rar5_store_volumes_hp('movie.mkv', movie, 5_000_000, password, workdir)
             else:
                 with open(os.path.join(workdir, 'movie.mkv'), 'wb') as f:
                     f.write(movie)
                 import subprocess as _sp
-                _sp.run([generators.RAR_PATH, 'a', '-idq', '-m3', '-ma5', '-v5000000b', 'out.rar',
-                         'movie.mkv'], cwd=workdir, check=True, capture_output=True)
+                _sp.run([generators.RAR_PATH, 'a', '-idq', '-m3', '-ma5', '-v5000000b']
+                        + (['-hp' + password] if backup == 'rar5m3aes' else []) + ['out.rar', 'movie.mkv'],
+                        cwd=workdir, check=True, capture_output=True)
                 outs = sorted((n for n in os.listdir(workdir) if n.startswith('out')),
                               key=lambda n: int(''.join(c for c in n if c.isdigit()) or 0))
                 enc = [open(os.path.join(workdir, n), 'rb').read() for n in outs]
         donor_vols = [('Other.part%d.rar' % (i + 1), d) for i, d in enumerate(enc)]
         donor_seg = 100_000
-        labels = ([('DupeCopyKind', 'borrowable-encrypted'), ('DupeLocked', 'yes'), ('DupeVideo', 'same'),
-                   ('DupeKind', 'alt')]
-                  if backup == 'aes' else [('DupeCopyKind', 'unborrowable')])
+        if backup in ('aes', 'aesalt'):
+            labels = [('DupeCopyKind', 'borrowable-encrypted'), ('DupeLocked', 'yes'), ('DupeVideo', 'same'),
+                      ('DupeKind', 'alt')]
+        elif backup in ('rar5m3', 'rar5m3aes'):
+            # no DupeKind (TwinCheck without par2 leaves none): the intake's verdict alone
+            labels = [('DupeCopyKind', 'unborrowable'), ('DupeVideo', 'same')]
+        elif backup == 'rar5m3other':
+            # TwinCheck labels it `other` itself: its own par2 set (other files: an alt by par2)
+            # and a video digest (DupeInner) unlike the primary's; the intake's DupeVideo=same
+            # stays on it
+            labels = [('DupeCopyKind', 'unborrowable'), ('DupeVideo', 'same'),
+                      ('DupeInner', 'movie-mkv.00000000000000bb')]
+        else:
+            labels = [('DupeCopyKind', 'unborrowable')]
     donor_members = []
     for vname, data in donor_vols:
         rel = '%sB/%s' % (tag, vname)
         t.write_file(os.path.join('data', rel), data)
         donor_members.append((rel, vname, len(data), donor_seg, set()))
-    if backup == 'twin':
+    if backup in ('twin', 'aestwin'):
         t.write_file(os.path.join('data', '%sB/Show.par2' % tag), par)
         donor_members.append(('%sB/Show.par2' % tag, 'Show.par2', len(par), seg, set()))
+    elif backup == 'rar5m3other':
+        bpar = generators.par2_index(donor_vols)
+        t.write_file(os.path.join('data', '%sB/Other.par2' % tag), bpar)
+        donor_members.append(('%sB/Other.par2' % tag, 'Other.par2', len(bpar), donor_seg, set()))
     donor_total = sum(len(d) for _, d in donor_vols)
     off = 0
     _failcont_before.offsets = {}
@@ -4397,7 +4476,10 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
         off += len(data)
     api = daemon.wait_ready()
     key = 'dupes:show.failcont.' + tag if fleet else tag + '-key'
-    daemon.append(api, 'Primary', build_multi_nzb(members), True, key, 100)
+    daemon.append(api, 'Primary', build_multi_nzb(members, password=primary_password), True, key, 100)
+    if backup == 'rar5m3other':
+        api.editqueue('GroupSetParameter', 0, 'DupeInner=movie-mkv.00000000000000aa',
+                      [g['NZBID'] for g in api.listgroups() if g['NZBName'] == 'Primary'])
     _ds_append(api, 'Backup', build_multi_nzb(donor_members, password=password), key, 90,
                paused=False, params=[{'Name': k, 'Value': v} for k, v in labels])
     if fleet:
@@ -4425,8 +4507,11 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
     used_direct = _grep_log(t, 'Using directly unpacked files')
     # an extraction that started over (persistent session falling back) or stopped at a volume
     # read as it was written
+    # (a persistent session refusing a method it does not handle, AES members, falls back before
+    # it wrote anything: no restart)
     restarts = (_grep_log(t, 'cannot continue from its rebuilt copy') +
-                len(re.findall(r'Unrar: progressive direct unpack \((?!volume count)', _log_text(t))))
+                len(re.findall(r'Unrar: progressive direct unpack \((?!volume count)(?![^\n]*UnsupportedMethod)',
+                               _log_text(t))))
     reads = _live_reads(t)
     as_written = reads[0] if reads else 0.0
     # the dying volume, read as it was written, went on from its rebuilt copy
@@ -4440,19 +4525,45 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
     # cut (the one straddling it; the one holding the bytes the first check of
     # its video compares with the primary's, which under AES also gives the
     # IV block)
-    header_articles = len(donor_vols) * (2 if backup == 'aes' else 1)
-    if backup == 'twin':
+    header_articles = len(donor_vols) * (2 if backup in ('aes', 'aesalt') else 1)
+    if backup in ('twin', 'aestwin'):
         # one for one: only the articles past the frontier, one straddling it
         header_articles = 0
     b_budget = int(donor_total * (1 - die)) + (header_articles + 2) * donor_seg
-    b_before = _failcont_before(ids, tag + 'B/', cut, seg) if backup == 'twin' else 0
+    if backup in ('rar5m3', 'rar5m3aes'):
+        # a restart lands at a block start before the frontier: the plan fetches from the
+        # estimate less a search region (zipfast SEED_SEARCH, 2 MiB) and a block
+        b_budget += 3_000_000
+    elif backup == 'lzma2':
+        # the chunk framing is walked from the folder's start (every chunk header before
+        # the frontier: each article before it is read once for them), then the folder
+        # from the restart chunk to its end; never twice, never extracted from its start
+        b_budget = donor_total
+    b_before = _failcont_before(ids, tag + 'B/', cut, seg) if backup in ('twin', 'aestwin') else 0
     # Known residual: before TwinCheck labels an alt (another container), the whole-file pass
     # may sample one of its volumes of about a damaged volume's size; a sample batch it cancels
     # drops the articles in flight, which the borrow then fetches again (two at most here).
-    b_again_ok = 0 if backup == 'twin' else 2
-    if backup == 'compressed':
+    # A restarted (compressed) alt is read by its decoder only: never twice.
+    b_again_ok = 0 if backup in ('twin', 'aestwin', 'rar5m3', 'rar5m3aes', 'lzma2') else 2
+    if backup == 'aesalt':
+        # OPEN ITEM: an encrypted download's dead volumes are not rebuilt from an alt (their
+        # headers and data would have to be encrypted again under its own key, which
+        # deadvolume refuses), so the release completes from the alt, whole; nothing of the
+        # primary is fetched twice
+        ok = integ and winner == 'Backup' and a_again == 0
+    elif backup in ('compressed', 'norestart'):
         ok = (integ and winner == 'Backup' and failed_over == 1 and
               _grep_log(t, 'cannot continue the extraction of Primary') >= 1)
+    elif backup == 'rar5m3other':
+        # refused before any restart: nothing of it lent, no restart tried or refused
+        # (TwinCheck labelled it other: checked, so a wrong setup fails instead of passing)
+        kind = _params(daemon.wait_history(api, 'Backup', timeout=10)).get('DupeKind')
+        lent = (_grep_log(t, 'from duplicate Backup') + _grep_log(t, 'from a duplicate; direct unpack reads it')
+                + _grep_log(t, 'Wrote dead volume'))
+        ok = (integ and winner == 'Backup' and failed_over == 1 and lent == 0 and kind == 'other'
+              and _grep_log(t, 'Cannot restart the compressed video') == 0
+              and _grep_log(t, 'Restarted the') == 0
+              and _grep_log(t, 'cannot continue the extraction of Primary') >= 1)
     elif backup == 'other':
         # the backup's own (other) video, whole: nothing of it was lent into the primary's
         integ = _verify_output(t, donor_movie, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
@@ -4543,6 +4654,34 @@ def scenario_failcont_compressed(daemon, t):
     return _failcont(daemon, t, 'failcont_compressed', 'compressed', 0.50)
 
 
+def scenario_failcont_aestwin(daemon, t):
+    return _failcont(daemon, t, 'failcont_aestwin', 'aestwin', 0.50, primary='aes')
+
+
+def scenario_failcont_aesalt(daemon, t):
+    return _failcont(daemon, t, 'failcont_aesalt', 'aesalt', 0.50, primary='aes')
+
+
+def scenario_failcont_rar5m3(daemon, t):
+    return _failcont(daemon, t, 'failcont_rar5m3', 'rar5m3', 0.50)
+
+
+def scenario_failcont_rar5m3aes(daemon, t):
+    return _failcont(daemon, t, 'failcont_rar5m3aes', 'rar5m3aes', 0.50)
+
+
+def scenario_failcont_rar5m3other(daemon, t):
+    return _failcont(daemon, t, 'failcont_rar5m3other', 'rar5m3other', 0.50)
+
+
+def scenario_failcont_lzma2(daemon, t):
+    return _failcont(daemon, t, 'failcont_lzma2', 'lzma2', 0.50)
+
+
+def scenario_failcont_norestart(daemon, t):
+    return _failcont(daemon, t, 'failcont_norestart', 'norestart', 0.50)
+
+
 def scenario_failcont_twinlabel(daemon, t):
     return _failcont(daemon, t, 'failcont_twinlabel', 'twin', 0.50, twin_label='DupeKind')
 
@@ -4551,18 +4690,25 @@ def scenario_failcont_othervideo(daemon, t):
     return _failcont(daemon, t, 'failcont_othervideo', 'other', 0.50)
 
 
-def _weakswitch(daemon, t, name, twin):
+def _weakswitch(daemon, t, name, twin, alt='store'):
     """Dune on 6790 (fleet-weak-primary item 2): the fleet's primary misses a
     third of the articles of every volume, and a copy held in its fleet holds
     the same video whole (equal DupeInnerCrc; ``twin``: the same files). Before,
     the primary downloaded on, borrowing hole by hole (2.6 times the bytes it
-    recovered, hours on 6790). Now, once enough of its own articles are tried,
-    an alt takes over while little of the primary came. A twin is left to the
-    article fallback (one for one): the switch never fires for it, and nothing
-    is fetched twice. The movie is byte-identical either way."""
+    recovered, hours on 6790). Once enough of its own articles are tried while
+    little of it came, the alt takes over at the primary's frontier: the
+    primary is cut there (none of its data articles left is fetched), its
+    extraction carries on, and the alt lends every byte past the frontier
+    (failover-continue), so nothing the primary downloaded is fetched again
+    and the bytes fetched stay about the payload's size. ``alt``: ``store``
+    (another stored RAR set), ``aes`` (a RAR5 AES store set, password in its
+    nzb) or ``m3`` (RAR5 -m3, restarted near the frontier by zipfast). A twin
+    is left to the article fallback (one for one): the switch never fires for
+    it, and nothing is fetched twice. The movie is byte-identical either way."""
     if not generators.HAVE_RAR:
         return (name, None, 'SKIP: rar not installed')
-    tag = 'ws' + ('t' if twin else 'a')
+    tag = 'ws' + ('t' if twin else {'store': 'a', 'aes': 'e', 'm3': 'm'}[alt])
+    password = 'ws-pw 4' if alt == 'aes' and not twin else None
     seg = 50_000
     # over twinfields::MIN_KEY_SIZE (50 MiB): smaller videos' inner keys link nothing
     movie = _payload(55_000_000, 25210)
@@ -4575,8 +4721,10 @@ def _weakswitch(daemon, t, name, twin):
         rel = '%sA/%s' % (tag, vname)
         t.write_file(os.path.join('data', rel), data)
         parts = (len(data) + seg - 1) // seg
-        # a third of every volume's articles is gone, never its first (headers)
-        dead = {p for p in range(2, parts + 1) if p % 3 == 0}
+        # a third of every volume's articles is gone, never its first (headers); before an
+        # alt, a fifth, two articles in a row (one alt article's span) per ten
+        dead = ({p for p in range(2, parts + 1) if p % 3 == 0} if twin else
+                {p for p in range(2, parts + 1) if p % 10 in (3, 4)})
         members.append((rel, vname, len(data), seg, dead))
     par = generators.par2_index(list(zip(names, vols)))
     if twin:
@@ -4590,11 +4738,30 @@ def _weakswitch(daemon, t, name, twin):
         donor_vols = list(zip(names, vols))
         donor_seg = seg
         labels = [('DupeKind', 'twin'), ('DupeCopyKind', 'twin')]
-    else:
-        alt = generators.rar3_store_volumes_valid('movie.mkv', movie, 7_000_000)
-        donor_vols = [('Other.part%02d.rar' % (i + 1), d) for i, d in enumerate(alt)]
+    elif alt == 'store':
+        alt_vols = generators.rar3_store_volumes_valid('movie.mkv', movie, 7_000_000)
+        donor_vols = [('Other.part%02d.rar' % (i + 1), d) for i, d in enumerate(alt_vols)]
         donor_seg = 100_000
         labels = [('DupeCopyKind', 'borrowable'), ('DupeVideo', 'same'), ('DupeKind', 'alt')]
+    else:
+        with tempfile.TemporaryDirectory(prefix='ws-') as workdir:
+            if alt == 'aes':
+                alt_vols = generators.rar5_store_volumes_hp('movie.mkv', movie, 7_000_000, password, workdir)
+            else:
+                with open(os.path.join(workdir, 'movie.mkv'), 'wb') as f:
+                    f.write(movie)
+                import subprocess as _sp
+                _sp.run([generators.RAR_PATH, 'a', '-idq', '-m3', '-ma5', '-v7000000b', 'out.rar', 'movie.mkv'],
+                        cwd=workdir, check=True, capture_output=True)
+                outs = sorted((n for n in os.listdir(workdir) if n.startswith('out')),
+                              key=lambda n: int(''.join(c for c in n if c.isdigit()) or 0))
+                alt_vols = [open(os.path.join(workdir, n), 'rb').read() for n in outs]
+        donor_vols = [('Other.part%02d.rar' % (i + 1), d) for i, d in enumerate(alt_vols)]
+        donor_seg = 100_000
+        # as a fleet labels them: an AES store set it can decrypt, a compressed one it
+        # cannot borrow from by range
+        labels = ([('DupeCopyKind', 'borrowable-encrypted'), ('DupeLocked', 'yes')] if alt == 'aes'
+                  else [('DupeCopyKind', 'unborrowable')]) + [('DupeVideo', 'same'), ('DupeKind', 'alt')]
     labels += [('DupeAlive', '100'), ('DupeInnerCrc', inner)]
     donor_members = []
     for vname, data in donor_vols:
@@ -4608,7 +4775,7 @@ def _weakswitch(daemon, t, name, twin):
     key = 'dupes:show.weakswitch.' + tag
     _ds_append(api, 'Primary', build_multi_nzb(members), key, 100, paused=True,
                params=[{'Name': 'DupeInnerCrc', 'Value': inner}, {'Name': 'DupeCopyKind', 'Value': 'borrowable'}])
-    _ds_append(api, 'Backup', build_multi_nzb(donor_members), key, 90,
+    _ds_append(api, 'Backup', build_multi_nzb(donor_members, password=password), key, 90,
                paused=False, params=[{'Name': k, 'Value': v} for k, v in labels])
     if _params(_wait_held(api, 'Backup')).get('DupeHeld') != 'yes':
         return (name, False, 'the backup was not held by its fleet')
@@ -4631,18 +4798,30 @@ def _weakswitch(daemon, t, name, twin):
     a_bytes, a_count, a_again, _ = _failcont_bytes(ids, tag + 'A/')
     b_bytes, b_count, b_again, _ = _failcont_bytes(ids, tag + 'B/')
     switched = _grep_log(t, 'Failing over Primary to alt Backup: weak')
+    continued = _grep_log(t, 'Continuing Primary at its frontier from alt Backup')
+    restarted = _grep_log(t, 'Restarted the RAR5 decoder of duplicate Backup')
     integ = _verify_output(t, movie, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
+    fetched = a_bytes + b_bytes
     if twin:
         # the primary stays and extracts; its lost articles come from the twin one
         # for one (article fallback, or every later one once it leads): nothing twice
         ok = integ and winner == 'Primary' and switched == 0 and a_again == 0 and b_again == 0
     else:
-        # the alt took over early: less than half of the primary was fetched
-        ok = integ and winner == 'Backup' and switched == 1 and a_bytes < total // 2
+        # the alt took over at the frontier while little of the primary came: the
+        # primary's extraction carried on, nothing of it was fetched again, the alt
+        # was never downloaded whole, and the bytes fetched stay about the payload's
+        # (the holes before the frontier are borrowed hole by hole: whole alt articles)
+        # (a compressed alt is restarted at the first hole: before the frontier its
+        # holes are filled from the same decode, so it is read about whole, but never
+        # twice and the primary's extraction is kept)
+        cheaper = fetched < a_bytes + total if alt != 'm3' else fetched <= total * 13 // 10
+        ok = (integ and winner == 'Primary' and continued == 1 and switched == 0 and a_bytes < total // 2
+              and a_again == 0 and b_again <= 2 and cheaper and (restarted == 1 if alt == 'm3' else True))
     return (name, ok,
-            'winner=%s switched=%d secs=%.1f primary_served=%d/%d B (%d articles, %d again) '
-            'backup_served=%d B (%d articles, %d again) extracted_ok=%s'
-            % (winner, switched, elapsed, a_bytes, total, a_count, a_again, b_bytes, b_count, b_again, integ))
+            'winner=%s continued=%d switched=%d restarted=%d secs=%.1f fetched=%d B for a %d B set (%.2fx) '
+            'primary_served=%d/%d B (%d articles, %d again) backup_served=%d B (%d articles, %d again) extracted_ok=%s'
+            % (winner, continued, switched, restarted, elapsed, fetched, total, fetched / float(total), a_bytes,
+               total, a_count, a_again, b_bytes, b_count, b_again, integ))
 
 
 def scenario_weakswitchalt(daemon, t):
@@ -4651,6 +4830,14 @@ def scenario_weakswitchalt(daemon, t):
 
 def scenario_weakswitchtwin(daemon, t):
     return _weakswitch(daemon, t, 'weakswitchtwin', True)
+
+
+def scenario_weakswitchaes(daemon, t):
+    return _weakswitch(daemon, t, 'weakswitchaes', False, alt='aes')
+
+
+def scenario_weakswitchm3(daemon, t):
+    return _weakswitch(daemon, t, 'weakswitchm3', False, alt='m3')
 
 
 def scenario_streamtimeoutwrites(daemon, t):
@@ -7269,6 +7456,26 @@ def scenario_live7zlzma2(daemon, t):
         names = sorted(n for n in os.listdir(workdir) if n.startswith('out.7z.'))
         volumes = [('Movie' + n[len('out'):], open(os.path.join(workdir, n), 'rb').read()) for n in names]
     return _live_archive(daemon, t, 'live7zlzma2', 'RelL7L', 'l7lA', volumes, [('movie.mkv', movie)])
+
+
+def scenario_live7zlzma2threads(daemon, t):
+    """A 7z LZMA2 set written in many independent blocks (7-Zip -mmt with a 1 MiB block
+    size: a dictionary reset every block) decoded live with FeedThreads=4: the blocks whose
+    data arrived are decoded on worker threads (zipfast FeedOptions::threads) and the movie
+    comes out byte-identical, extracted while it downloads and never again."""
+    if not generators.HAVE_7Z:
+        return ('live7zlzma2threads', None, 'SKIP: 7z not installed')
+    rnd = _payload(12_000_000, 7121)
+    movie = b''.join(rnd[i:i + 4096] + bytes(4096) for i in range(0, len(rnd), 4096))
+    with tempfile.TemporaryDirectory(prefix='l7zt-') as workdir:
+        with open(os.path.join(workdir, 'movie.mkv'), 'wb') as f:
+            f.write(movie)
+        subprocess.run([generators.SEVENZIP_PATH, 'a', '-bd', '-m0=LZMA2:d=1m:c=1m', '-mx5', '-mmt=4', '-v4m',
+                        'out.7z', 'movie.mkv'], cwd=workdir, check=True, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
+        names = sorted(n for n in os.listdir(workdir) if n.startswith('out.7z.'))
+        volumes = [('Movie' + n[len('out'):], open(os.path.join(workdir, n), 'rb').read()) for n in names]
+    return _live_archive(daemon, t, 'live7zlzma2threads', 'RelL7T', 'l7tA', volumes, [('movie.mkv', movie)])
 
 
 def scenario_livezipsplit(daemon, t):
@@ -14783,6 +14990,7 @@ SCENARIOS = {
     'jointwosets': scenario_jointwosets,
     'live7zsplit': scenario_live7zsplit,
     'live7zlzma2': scenario_live7zlzma2,
+    'live7zlzma2threads': scenario_live7zlzma2threads,
     'livezipsplit': scenario_livezipsplit,
     'livezipz01': scenario_livezipz01,
     'livesplitjoin': scenario_livesplitjoin,
@@ -14937,11 +15145,20 @@ SCENARIOS = {
     'failcont_aes50': scenario_failcont_aes50,
     'failcont_aes90': scenario_failcont_aes90,
     'failcont_compressed': scenario_failcont_compressed,
+    'failcont_aestwin': scenario_failcont_aestwin,
+    'failcont_aesalt': scenario_failcont_aesalt,
+    'failcont_rar5m3': scenario_failcont_rar5m3,
+    'failcont_rar5m3other': scenario_failcont_rar5m3other,
+    'failcont_rar5m3aes': scenario_failcont_rar5m3aes,
+    'failcont_lzma2': scenario_failcont_lzma2,
+    'failcont_norestart': scenario_failcont_norestart,
     'failcont_othervideo': scenario_failcont_othervideo,
     'failcont_twinlabel': scenario_failcont_twinlabel,
     'failcont_fleettwin': scenario_failcont_fleettwin,
     'failcont_fleetalt': scenario_failcont_fleetalt,
     'weakswitchalt': scenario_weakswitchalt,
+    'weakswitchaes': scenario_weakswitchaes,
+    'weakswitchm3': scenario_weakswitchm3,
     'weakswitchtwin': scenario_weakswitchtwin,
     'streamtimeoutwrites': scenario_streamtimeoutwrites,
     'failcont_fleetaes': scenario_failcont_fleetaes,
@@ -15268,6 +15485,7 @@ SCENARIO_OPTIONS = {
     'directunpacksimple': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1'],
     'live7zsplit': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1', 'UnpackCleanupDisk=yes', 'DownloadRate=8000'],
     'live7zlzma2': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1', 'UnpackCleanupDisk=yes', 'DownloadRate=8000'],
+    'live7zlzma2threads': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1', 'UnpackCleanupDisk=yes', 'DownloadRate=8000', 'FeedThreads=4'],
     'livezipsplit': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1', 'UnpackCleanupDisk=yes', 'DownloadRate=8000'],
     'livezipz01': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1', 'UnpackCleanupDisk=yes', 'DownloadRate=8000'],
     'livesplitjoin': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1', 'UnpackCleanupDisk=yes', 'DownloadRate=8000'],
@@ -15398,11 +15616,20 @@ SCENARIO_OPTIONS = {
     'failcont_aes50': PROD_OPTIONS + ['DownloadRate=4000'],
     'failcont_aes90': PROD_OPTIONS + ['DownloadRate=4000'],
     'failcont_compressed': PROD_OPTIONS + ['DownloadRate=4000'],
+    'failcont_aestwin': PROD_OPTIONS + ['DownloadRate=4000'],
+    'failcont_aesalt': PROD_OPTIONS + ['DownloadRate=4000'],
+    'failcont_rar5m3': PROD_OPTIONS + ['DownloadRate=4000'],
+    'failcont_rar5m3other': PROD_OPTIONS + ['DownloadRate=4000'],
+    'failcont_rar5m3aes': PROD_OPTIONS + ['DownloadRate=4000'],
+    'failcont_lzma2': PROD_OPTIONS + ['DownloadRate=4000'],
+    'failcont_norestart': PROD_OPTIONS + ['DownloadRate=4000'],
     'failcont_othervideo': PROD_OPTIONS + ['DownloadRate=4000'],
     'failcont_twinlabel': PROD_OPTIONS + ['DownloadRate=4000'],
     'failcont_fleettwin': PROD_OPTIONS + ['DownloadRate=4000'],
     'failcont_fleetalt': PROD_OPTIONS + ['DownloadRate=4000'],
     'weakswitchalt': PROD_OPTIONS + ['DownloadRate=4000'],
+    'weakswitchaes': PROD_OPTIONS + ['DownloadRate=4000'],
+    'weakswitchm3': PROD_OPTIONS + ['DownloadRate=4000'],
     'weakswitchtwin': PROD_OPTIONS + ['DownloadRate=4000'],
     'streamtimeoutwrites': ['DupeArticleFallback=stream', 'ParCheck=auto', 'Server1.Connections=2',
                             'DupeStreamTimeout=10'],
@@ -15463,7 +15690,7 @@ def _promote_fallback(options, mode):
 FALLBACK_MODE_BOUND = {'livegate', 'streamrestartcredit', 'wholefilerestart', 'wholefilestale'}
 # scenarios that read nserv's request log (nserv.log)
 CAPTURE_REQUESTS = {'repost', 'wholefileproofcost', 'dropnzbdir', 'fleetstaysqueued', 'fleetprimaryfirst'} | {
-    'failcont_twin25', 'failcont_twin50', 'failcont_twin90', 'failcont_alt25', 'failcont_alt50', 'failcont_altlive', 'failcont_alt90', 'failcont_aes25', 'failcont_aes50', 'failcont_aes90', 'failcont_compressed', 'failcont_othervideo', 'failcont_twinlabel', 'failcont_fleettwin', 'failcont_fleetalt', 'failcont_fleetaes', 'weakswitchalt', 'weakswitchtwin'}
+    'failcont_twin25', 'failcont_twin50', 'failcont_twin90', 'failcont_alt25', 'failcont_alt50', 'failcont_altlive', 'failcont_alt90', 'failcont_aes25', 'failcont_aes50', 'failcont_aes90', 'failcont_compressed', 'failcont_othervideo', 'failcont_twinlabel', 'failcont_fleettwin', 'failcont_fleetalt', 'failcont_fleetaes', 'failcont_aestwin', 'failcont_aesalt', 'failcont_rar5m3', 'failcont_rar5m3aes', 'failcont_rar5m3other', 'failcont_lzma2', 'failcont_norestart', 'weakswitchalt', 'weakswitchtwin', 'weakswitchaes', 'weakswitchm3'}
 # extra nserv arguments per scenario (-w: response latency in ms)
 SCENARIO_NSERV_ARGS = {'streamtimeoutwrites': ['-w', '800'], 'fleetslowprobe': ['-x', '2000'], 'fleetprobespeed': ['-w', '300'], 'fleetprobebusy': ['-w', '300'], 'fleetprobehealthfail': ['-w', '800'], 'finaldeletemidway': ['-w', '300'], 'finaldeleterestart': ['-w', '300'], 'restartmidway': ['-w', '300'], 'xpacklatency': ['-w', '1000'], 'deadpickprobe': ['-w', '500'], 'deadpickafterreload': ['-w', '500'],
                        'deadpickpartial': ['-w', '100'], 'deadpickstray': ['-w', '500'], 'forcefailover': ['-w', '500'], 'copybackup': ['-w', '500'], 'copyoffailed': ['-w', '500'], 'deaddownloadstray2': ['-w', '300'], 'deaddownloadrestart': ['-w', '300'], 'deadbackupsonly': ['-w', '500'], 'backuporder': ['-w', '500'], 'deaddownloadlate': ['-w', '300'], 'deadpickservers': ['-w', '200'],

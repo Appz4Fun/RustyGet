@@ -1775,6 +1775,10 @@ pub(crate) fn unpause_pars_for_damage_host(
             continue;
         }
         if f.paused {
+            // Held by live PAR past its plan: fetched only when the planned volumes fall short.
+            if crate::parchecker::streaming_session_holds_volume(nzb.id, f.id) {
+                continue;
+            }
             paused.push((f.ptr, blocks, f.filename.clone()));
         } else {
             have += i64::from(blocks);

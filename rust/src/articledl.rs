@@ -4130,8 +4130,8 @@ impl NzbgetRsArticleDownloader {
                     return AD_FAILED;
                 }
                 Err(nntp_rs::Error::Unavailable) if crate::nntprs_pool::missing_on_usable(shared, &recs) => {
-                    // every server switched on said 430; the switched-off ones were
-                    // never asked (as before), so the article is not found here
+                    // every server switched on said 430 or 451; the switched-off ones
+                    // were never asked (as before), so the article is not found here
                     host.log(
                         MK_DETAIL,
                         &join_c_slices(&[b"Article ", &self.info_name, b" @ all servers failed"]),
@@ -4256,9 +4256,19 @@ impl NzbgetRsArticleDownloader {
             );
             let status = match (&a.outcome, a.fail) {
                 (Seen::Have, _) => AD_FINISHED,
-                (Seen::Missing, _) => {
-                    w.last_430 = true;
-                    let reply = a.reply.as_deref().unwrap_or("430 No Such Article");
+                (Seen::Missing | Seen::Removed, _) => {
+                    // a 451 is not found here too (as the per-server download took
+                    // it) but no 430: it leaves the last-430 mark alone. nntp-rs
+                    // v0.4.4 still passes over the server's backbone after it, so
+                    // the backbone line below stays true (OPEN ITEM G21 at nntp-rs)
+                    let removed = a.outcome == Seen::Removed;
+                    if !removed {
+                        w.last_430 = true;
+                    }
+                    let reply = a
+                        .reply
+                        .as_deref()
+                        .unwrap_or(if removed { "451 Article removed" } else { "430 No Such Article" });
                     host.log(
                         MK_DETAIL,
                         &join_c_slices(&[
@@ -4286,23 +4296,6 @@ impl NzbgetRsArticleDownloader {
                             ]),
                         );
                     }
-                    AD_NOT_FOUND
-                }
-                (Seen::Removed, _) => {
-                    // a 451: not found here, as the per-server download took it,
-                    // but no 430 (no backbone-wide miss, not the last-430 mark)
-                    let reply = a.reply.as_deref().unwrap_or("451 Article removed");
-                    host.log(
-                        MK_DETAIL,
-                        &join_c_slices(&[
-                            b"Article ",
-                            &self.info_name,
-                            b" @ ",
-                            &conn_name,
-                            b" failed, could not fetch article: ",
-                            reply.as_bytes(),
-                        ]),
-                    );
                     AD_NOT_FOUND
                 }
                 (Seen::Unreachable(text), _) => {

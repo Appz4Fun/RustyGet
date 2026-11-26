@@ -553,13 +553,14 @@ pub fn missing_everywhere(shared: &Shared, recs: &[Rec]) -> bool {
 }
 
 /// Whether every server that is switched on and has connections answered 430
-/// for the article (itself, or through its backbone), and no attempt failed
-/// any other way. nntp-rs ends such a walk with `Unavailable` when a server
+/// or 451 for the article (itself, or through its backbone), and no attempt
+/// failed any other way: not found for this fetch, as the per-server download
+/// took a 451. nntp-rs ends such a walk with `Unavailable` when a server
 /// is switched off (it might have the article); RustyGet never asked a
 /// switched-off server, so for it the article is not found.
 #[cfg(unix)]
 pub fn missing_on_usable(shared: &Shared, recs: &[Rec]) -> bool {
-    if recs.is_empty() || recs.iter().any(|r| r.outcome != Seen::Missing) {
+    if recs.is_empty() || recs.iter().any(|r| !matches!(r.outcome, Seen::Missing | Seen::Removed)) {
         return false;
     }
     let pool = crate::net::active_server_pool();
@@ -1220,6 +1221,12 @@ mod tests {
         // every usable server, but not everywhere (3 was never asked)
         assert!(missing_on_usable(&sh, &both));
         assert!(!missing_everywhere(&sh, &both));
+        // a 451 is not found for this fetch, but no 430 proof
+        let removed = [rec(0, Seen::Missing), rec(2, Seen::Removed)];
+        assert!(missing_on_usable(&sh, &removed));
+        let sh_on = shared_of(vec![srv(1, true, 2, 7), srv(3, true, 2, 0)]);
+        assert!(missing_everywhere(&sh_on, &[rec(0, Seen::Missing), rec(1, Seen::Missing)]));
+        assert!(!missing_everywhere(&sh_on, &[rec(0, Seen::Missing), rec(1, Seen::Removed)]));
         // server 2 not asked: open
         assert!(!missing_on_usable(&sh, &[rec(0, Seen::Missing)]));
         // any other kind of answer leaves it open

@@ -1128,7 +1128,12 @@ impl ArticleFetcher {
         // as the per-server path did: a skip list naming no server makes
         // nntp-rs go to the network (the body still lands in the shared cache
         // for later borrows). OPEN ITEM: a follower signal from nntp-rs.
-        let skip_servers = if wait.is_some() { vec![usize::MAX] } else { Vec::new() };
+        // A body already cached is taken from the cache (no flight to follow).
+        let skip_servers = if wait.is_some() && shared.pool.cached(&id).is_none() {
+            vec![usize::MAX]
+        } else {
+            Vec::new()
+        };
         let attempts = crate::nntprs_pool::AttemptLog::default();
         let opts = nntp_rs::FetchOptions {
             skip_servers,
@@ -1206,8 +1211,9 @@ impl ArticleFetcher {
                 }
             }
             Err(nntp_rs::Error::Unavailable) if crate::nntprs_pool::missing_on_usable(shared, &recs) => {
-                // every server switched on said 430; switched-off ones were never asked
-                result.not_found_430 = true;
+                // every server switched on said 430 (or 451); switched-off ones were
+                // never asked. Only an all-430 answer is 430 proof.
+                result.not_found_430 = recs.iter().all(|r| r.outcome == crate::nntprs_pool::Seen::Missing);
             }
             Err(nntp_rs::Error::Timeout(_)) => {
                 result.transient = true;

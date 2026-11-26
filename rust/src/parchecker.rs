@@ -231,6 +231,10 @@ struct ActiveStreamingSession {
     /// Slices decode-ahead rebuilt (file, offset, length) while their file was still being
     /// written: re-verified once the file completes, see [`Self::hand_over_rebuilt`].
     rebuilt_recheck: Mutex<Vec<(FileId, u64, u64)>>,
+    /// par2 files with a slice decode-ahead rebuilt: verified now, but the download counts
+    /// their lost articles, so the repair as the download ends still takes them and
+    /// certifies them (see [`streaming_session_download_end_targets`]).
+    rebuilt_files: Mutex<HashSet<FileId>>,
     // Drop last, after the session, queue and all owned metadata. Grows with
     // the syndrome slots as damage appears (see `grow_for_damage`).
     budget: Mutex<SessionBudgetLease>,
@@ -753,6 +757,7 @@ fn build_streaming_session_with(
         held_backfill: Mutex::new((Vec::new(), 0)),
         completed_sources: Mutex::new(HashSet::new()),
         rebuilt_recheck: Mutex::new(Vec::new()),
+        rebuilt_files: Mutex::new(HashSet::new()),
     }))
 }
 
@@ -2685,6 +2690,10 @@ impl ActiveStreamingSession {
                 }
             }
         }
+        self.rebuilt_files
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(rebuilt.iter().map(|slice| slice.file_id));
         if !recheck.is_empty() {
             self.rebuilt_recheck
                 .lock()
@@ -4533,10 +4542,19 @@ pub(crate) fn streaming_session_download_end_targets(nzb_id: i32) -> Option<Vec<
     if ensure_current_generation(nzb_id, &entry).is_err() {
         return None;
     }
+    // Slices decode-ahead rebuilt are taken before the status is read: their files are
+    // verified already, but they lost articles, so they are certified here (a repair with
+    // nothing left to rebuild) instead of by a batch par-check.
+    entry.hand_over_rebuilt();
+    let rebuilt = entry
+        .rebuilt_files
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     let status = entry.session.status();
     // Folds still queued do not matter: the repair applies them before its solve.
     if !status.early_cutover_possible
-        || status.damaged == 0
+        || (status.damaged == 0 && rebuilt.is_empty())
         || status.unarrived + status.partially_arrived > 0
     {
         return None;
@@ -4545,10 +4563,11 @@ pub(crate) fn streaming_session_download_end_targets(nzb_id: i32) -> Option<Vec<
         .target_names
         .iter()
         .filter(|(id, _)| {
-            !matches!(
-                entry.session.volume_status(id),
-                Ok(VolumeStatus::CompleteAndVerified)
-            )
+            rebuilt.contains(id)
+                || !matches!(
+                    entry.session.volume_status(id),
+                    Ok(VolumeStatus::CompleteAndVerified)
+                )
         })
         .map(|(_, name)| par_rs::filenames::os_str_bytes(name.as_os_str()).to_vec())
         .collect();

@@ -589,6 +589,12 @@ fn decode_ahead_rebuilds_a_lost_slice_before_the_download_ends() {
     assert_eq!(status.verified, status.total);
     assert_eq!(std::fs::read(&path).unwrap(), f.data, "written into the target");
     assert_eq!(entry.metrics.rebuilt_ahead_slices.load(Ordering::Relaxed), 1);
+    // Verified, but it lost an article: the repair as the download ends still takes the
+    // file (nothing left to rebuild) and certifies it, so no batch par-check runs.
+    assert_eq!(
+        streaming_session_download_end_targets(f.nzb_id),
+        Some(vec![b"part01.rar".to_vec()])
+    );
     // The file is still being written: its rebuilt slice waits for a second look.
     assert_eq!(entry.rebuilt_pending(), 1);
     let id = file_id(f.nzb_id);

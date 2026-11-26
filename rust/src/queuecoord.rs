@@ -808,7 +808,7 @@ fn note_kept_for_borrowing(nzb_id: i32) -> bool {
 
 /// True while download `nzb_id` is kept to borrow its lost parts (see
 /// [`note_kept_for_borrowing`]).
-fn was_kept_for_borrowing(nzb_id: i32) -> bool {
+pub(crate) fn was_kept_for_borrowing(nzb_id: i32) -> bool {
     KEPT_FOR_BORROWING
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -1995,8 +1995,9 @@ fn video_set_file_ids(host: &crate::queuesubsys_host::QueueSubsysHost, nzb_ptr: 
 
 /// Picks the video set among `(id, name, size)` files (par2 left out): the stem with the largest
 /// total size, so a sample or subs file larger than one volume cannot win over a set of many
-/// volumes. When no stem groups several files (obfuscated names, one file per stem), every file
-/// is taken: a cut that missed the video would leave the primary fetching it, never failing over.
+/// volumes. When no stem groups several files (obfuscated names, one file per stem), or the set
+/// holds under half the data, every file is taken: a cut that missed the video would leave the
+/// primary fetching it, never failing over (extras are then cut too, and come from nowhere).
 fn video_set_pick<'a>(files: impl Iterator<Item = (i32, &'a [u8], i64)>) -> Vec<i32> {
     let files: Vec<(i32, Vec<u8>, i64)> =
         files.map(|(id, name, size)| (id, set_stem(name), size)).collect();
@@ -2006,13 +2007,16 @@ fn video_set_pick<'a>(files: impl Iterator<Item = (i32, &'a [u8], i64)>) -> Vec<
         t.0 += *size;
         t.1 += 1;
     }
-    let Some((stem, (_, count))) = totals
+    let all: i64 = files.iter().map(|f| f.2).sum();
+    let Some((stem, (size, count))) = totals
         .iter()
         .max_by(|a, b| a.1 .0.cmp(&b.1 .0).then_with(|| b.0.cmp(a.0)))
     else {
         return Vec::new();
     };
-    if *count < 2 && files.len() > 1 {
+    // (nor when the set holds under half the data: obfuscated video volumes beside a small
+    // named set)
+    if (*count < 2 && files.len() > 1) || size.saturating_mul(2) < all {
         return files.iter().map(|f| f.0).collect();
     }
     let stem = stem.to_vec();
@@ -7633,6 +7637,11 @@ mod tests {
         // obfuscated names group nothing: every file is cut
         assert_eq!(pick(&[(1, b"a8f3e1", 100), (2, b"77c0d2", 100), (3, b"0e19aa", 90)]), vec![1, 2, 3]);
         assert_eq!(pick(&[(4, b"movie.mkv", 900)]), vec![4]);
+        // obfuscated video volumes beside a small named subs set: every file
+        assert_eq!(
+            pick(&[(1, b"a8f3e1", 100), (2, b"77c0d2", 100), (3, b"0e19aa", 100), (5, b"subs.part1.rar", 60), (6, b"subs.part2.rar", 60)]),
+            vec![1, 2, 3, 5, 6]
+        );
         let dune = WeakSwitchFacts {
             held_in_fleet: true,
             tried: 73477,

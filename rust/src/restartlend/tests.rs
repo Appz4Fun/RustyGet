@@ -343,6 +343,8 @@ fn transient_failures_stand_only_over_time() {
     for _ in 0..10 {
         assert!(!transient_gave_up_at(id, &key, t0));
     }
+    assert!(transient_waiting_at(id, &key, t0 + TRANSIENT_GAP / 2));
+    assert!(!transient_waiting_at(id, &key, t0 + TRANSIENT_GAP));
     assert!(!transient_gave_up_at(id, &key, t0 + TRANSIENT_SPAN / 2));
     assert!(transient_gave_up_at(id, &key, t0 + TRANSIENT_SPAN));
     forget(id);

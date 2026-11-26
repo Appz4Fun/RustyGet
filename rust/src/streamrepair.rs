@@ -10293,12 +10293,23 @@ impl CrossPackRepairSession {
         self.dead_fills.iter().any(|d| !d.done)
     }
 
-    /// True when repair set `repair_set_idx`'s lost video bytes form one run (gaps under
-    /// [`ONE_TAIL_GAP`] joined): the tail of a volume that died part way, the frontier. A
-    /// restart from there reads what a dead tail would; scattered holes are left to donors
-    /// that lend by range.
-    fn holes_form_one_run(&self, repair_set_idx: usize) -> bool {
-        holes_form_one_run(&self.repair_sets[repair_set_idx].inner_holes)
+    /// True when the download is dying at its frontier: the queue keeps it to borrow its lost
+    /// parts (its health fell, `queuecoord::was_kept_for_borrowing`) and repair set
+    /// `repair_set_idx`'s lost video bytes form one run (gaps under [`ONE_TAIL_GAP`] joined)
+    /// that reaches the end of what arrived of it, the tail of a volume that died part way. A
+    /// restart from there reads what a dead tail would. A lone hole in a healthy download, or
+    /// one with data after it, is left to donors that lend by range and to par2.
+    fn dying_at_frontier(&self, repair_set_idx: usize) -> bool {
+        let set = &self.repair_sets[repair_set_idx];
+        let Some(map) = &set.map else {
+            return false;
+        };
+        let arrived_end = map.runs().iter().map(|r| r.inner_offset + r.size).max().unwrap_or(0);
+        let hole_end = set.inner_holes.iter().map(|h| h.offset + h.size).max().unwrap_or(0);
+        self.dead_nzb_id > 0
+            && crate::queuecoord::was_kept_for_borrowing(self.dead_nzb_id)
+            && holes_form_one_run(&set.inner_holes)
+            && hole_end >= arrived_end
     }
 
     /// Records a donor's identity check against repair set `repair_set_idx`: a confirmed one is
@@ -10551,6 +10562,11 @@ impl CrossPackRepairSession {
                         let compressed_layer = set_compressed[set_index]
                             || (donor_set.format == MemberFormat::SevenZip
                                 && set_skips[set_index].as_ref().is_some_and(is_coded_7z_skip));
+                        // a restart whose reads failed a moment ago waits before it is tried
+                        // again, and says nothing of the backup meanwhile
+                        let waiting = self.dead_nzb_id > 0
+                            && crate::restartlend::transient_waiting(self.dead_nzb_id, &restart_key);
+                        restart_retry[set_index] |= waiting;
                         if !allow_decompress
                             && set_maps[set_index].is_none()
                             && compressed_layer
@@ -10563,9 +10579,10 @@ impl CrossPackRepairSession {
                             // (or a primary cut at its frontier for its alt: everything past
                             // the cut is a dead tail, holes before it come from the same decode)
                             && (self.has_pending_dead_fills()
-                                || self.holes_form_one_run(repair_set_idx)
+                                || self.dying_at_frontier(repair_set_idx)
                                 || crate::frontiercut::is_cut(self.dead_nzb_id))
                             && crate::restartlend::earlier(self.dead_nzb_id, &restart_key).is_none()
+                            && !waiting
                             && !env_cell.borrow_mut().is_stopped()
                         {
                             // a pass yielding for a newly dead volume waits for the restart to

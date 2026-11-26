@@ -164,12 +164,12 @@ pub fn transient(why: &str) -> bool {
     why.contains("could not be read") || why.contains("hole") || why.contains("asked for nothing")
 }
 
-/// Transient refusals tried so far per (download, backup set): how many, and when the first.
-fn transient_tries(
-) -> std::sync::MutexGuard<'static, std::collections::HashMap<(i32, Vec<u8>), (u32, std::time::Instant)>> {
-    static TRIES: std::sync::OnceLock<
-        Mutex<std::collections::HashMap<(i32, Vec<u8>), (u32, std::time::Instant)>>,
-    > = std::sync::OnceLock::new();
+/// Transient refusals tried so far per (download, backup set): how many, when the first and
+/// when the last.
+type TransientTries = std::collections::HashMap<(i32, Vec<u8>), (u32, std::time::Instant, std::time::Instant)>;
+
+fn transient_tries() -> std::sync::MutexGuard<'static, TransientTries> {
+    static TRIES: std::sync::OnceLock<Mutex<TransientTries>> = std::sync::OnceLock::new();
     TRIES.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -190,9 +190,26 @@ pub fn transient_gave_up(nzb_id: i32, key: &[u8]) -> bool {
 
 fn transient_gave_up_at(nzb_id: i32, key: &[u8], now: std::time::Instant) -> bool {
     let mut tries = transient_tries();
-    let n = tries.entry((nzb_id, key.to_vec())).or_insert((0, now));
+    let n = tries.entry((nzb_id, key.to_vec())).or_insert((0, now, now));
     n.0 += 1;
+    n.2 = now;
     n.0 >= TRANSIENT_TRIES && now.saturating_duration_since(n.1) >= TRANSIENT_SPAN
+}
+
+/// The least time between two tries of a restart whose reads failed: passes that come back to
+/// back (a cut primary fails its own articles by design) do not decode it again each time.
+pub const TRANSIENT_GAP: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// True while backup set `key` of download `nzb_id` failed on a read less than
+/// [`TRANSIENT_GAP`] ago: it is not tried again yet.
+pub fn transient_waiting(nzb_id: i32, key: &[u8]) -> bool {
+    transient_waiting_at(nzb_id, key, std::time::Instant::now())
+}
+
+fn transient_waiting_at(nzb_id: i32, key: &[u8], now: std::time::Instant) -> bool {
+    transient_tries()
+        .get(&(nzb_id, key.to_vec()))
+        .is_some_and(|n| now.saturating_duration_since(n.2) < TRANSIENT_GAP)
 }
 
 /// Forgets the restarts of download `nzb_id` (their scratch files go with the last holder).

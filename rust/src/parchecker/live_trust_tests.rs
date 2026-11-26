@@ -761,3 +761,21 @@ fn a_forged_file_description_is_an_unusable_par_set() {
     assert!(active_streaming_session(nzb_id).is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A rebuilt slice that cannot be re-verified at its file's completion (its target is gone)
+/// is not left trusted: the whole-file check is put back for the repair at download end.
+#[test]
+fn a_rebuilt_slice_that_cannot_be_rechecked_puts_the_full_check_back() {
+    let f = fixture(0x7a75_0012, 16, 2, 2);
+    let path = f.dir.join("part01.rar");
+    let mut disk = f.data.clone();
+    disk[4 * SLICE..5 * SLICE].fill(0);
+    std::fs::write(&path, &disk).unwrap();
+    assert!(feed_with_loss(&f, 4).is_some());
+    assert_eq!(streaming_session_trusts_slices(f.nzb_id), Some(true));
+    std::fs::remove_file(&path).unwrap();
+    let entry = active_streaming_session(f.nzb_id).unwrap();
+    let id = file_id(f.nzb_id);
+    assert!(with_live_entry(f.nzb_id, &entry, |e| e.recheck_rebuilt(f.nzb_id, id)).is_err());
+    assert_eq!(streaming_session_trusts_slices(f.nzb_id), Some(false));
+}

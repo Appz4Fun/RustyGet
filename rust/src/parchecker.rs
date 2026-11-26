@@ -708,9 +708,11 @@ fn build_streaming_session_with(
     // slices are ready, every later fold goes straight into the solution, and the damaged
     // slices are rebuilt, checked and written to their targets within the call that verifies
     // the last other slice, not at the repair as the download ends. They are handed to live
-    // extraction at once (`hand_over_rebuilt`). Its scratch (one slot copy per damaged slice,
-    // and the rebuilt bytes until they are taken) fits the second syndrome copy the session
-    // reservation holds (`parlive::resources`). Only when the targets hold the
+    // extraction at once (`hand_over_rebuilt`). Its scratch is transient: while it switches
+    // the slots to the solution and back, par-rs holds up to about two extra copies of the
+    // damaged slices' slots, and the rebuilt bytes until they are taken (each operation).
+    // That is the same order as the scratch of the repair it replaces, and bounded by the
+    // slot cap (the session reservation holds a second syndrome copy, `parlive::resources`). Only when the targets hold the
     // bytes verified (as for trusted slices): with SkipWrite there is nothing to write into.
     session.set_decode_ahead(trust);
     Ok(Arc::new(ActiveStreamingSession {
@@ -2726,12 +2728,20 @@ impl ActiveStreamingSession {
         if ranges.is_empty() {
             return Ok(());
         }
-        self.apply_target_paths()?;
         let mut diverged = 0usize;
-        for (offset, len) in &ranges {
-            let outcome = self.session.on_range_replaced(&id, *offset, *len, None)?;
-            self.unpause(outcome.unpause.as_ref());
-            diverged += outcome.unreconcilable().count();
+        let checked = self.apply_target_paths().and_then(|()| {
+            for (offset, len) in &ranges {
+                let outcome = self.session.on_range_replaced(&id, *offset, *len, None)?;
+                self.unpause(outcome.unpause.as_ref());
+                diverged += outcome.unreconcilable().count();
+            }
+            Ok(())
+        });
+        if let Err(error) = checked {
+            // Not re-verified (par-rs: fall back as for an unreconcilable slice): the
+            // whole-file check decides at repair end.
+            self.distrust(nzb_id, &format!("a slice rebuilt ahead could not be re-verified ({error})"));
+            return Err(error);
         }
         self.metrics
             .rebuilt_rechecked

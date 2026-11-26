@@ -29,6 +29,61 @@ pub fn find_subslice_ci(haystack: &[u8], needle: &[u8]) -> bool {
 
 pub const ARTICLE_UNDEFINED: i32 = 0;
 pub const ARTICLE_RUNNING: i32 = 1;
+
+/// Downloads whose first volume's headers were written, waiting to start direct unpack, with
+/// when to try (`liveorder::now_ms`; see `drain_live_heads`).
+static PENDING_HEADS: std::sync::Mutex<Vec<(i32, u64)>> = std::sync::Mutex::new(Vec::new());
+/// How long a download that could not start direct unpack from its headers waits to try again.
+const LIVE_HEAD_RETRY_MS: u64 = 500;
+/// How often running articles are checked for ones far slower than the rest.
+const STRAGGLER_CHECK_MS: u64 = 250;
+static NEXT_STRAGGLER_CHECK_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A download's live extraction order (`liveorder`) and its lowest unfinished volume.
+struct LiveOrder {
+    ranks: std::sync::Arc<crate::liveorder::Ranks>,
+    lowest: Option<usize>,
+}
+
+impl LiveOrder {
+    /// The rank of the file named `filename` when it is a volume within the window.
+    fn window_rank(&self, filename: &[u8]) -> Option<usize> {
+        let rank = self.ranks.of(filename)?;
+        self.lowest
+            .filter(|&l| crate::liveorder::in_window(rank, l))
+            .map(|_| rank)
+    }
+}
+
+/// The live extraction order of download `nzb_id` (`nzb_ptr`), from `cache` or looked up (once
+/// per download): the files still queued give the lowest unfinished volume.
+fn cached_live_order<'c>(
+    cache: &'c mut Vec<(i32, Option<LiveOrder>)>,
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb_ptr: NzbRef,
+    nzb_id: i32,
+) -> Option<&'c LiveOrder> {
+    if !crate::liveorder::any() {
+        return None;
+    }
+    let at = match cache.iter().position(|(id, _)| *id == nzb_id) {
+        Some(at) => at,
+        None => {
+            let order = crate::liveorder::ranks(nzb_id).map(|ranks| {
+                let lowest = (0..host.nzb_file_len(nzb_ptr))
+                    .filter_map(|j| {
+                        let f = host.file_snap(host.nzb_file_at(nzb_ptr, j));
+                        (!f.deleted).then(|| ranks.of(&f.filename)).flatten()
+                    })
+                    .min();
+                LiveOrder { ranks, lowest }
+            });
+            cache.push((nzb_id, order));
+            cache.len() - 1
+        }
+    };
+    cache[at].1.as_ref()
+}
 pub const ARTICLE_FINISHED: i32 = 2;
 pub const ARTICLE_FAILED: i32 = 3;
 
@@ -2144,6 +2199,8 @@ impl NzbgetRsQueueCoordinator {
             crate::parchecker::streaming_session_retry_completion_tick();
             self.drain_live_par_completed_files(host);
             Self::drain_live_par_articles(host);
+            self.drain_live_heads(host);
+            self.restart_live_stragglers(host);
 
             if !downloads_checked {
                 host.with_locked_queue(|_| {
@@ -2798,11 +2855,15 @@ impl NzbgetRsQueueCoordinator {
     )> {
         let mut checked_files: Vec<FileRef> = Vec::new();
         let cur_date = opts.cur_time;
+        // Downloads extracted live, by id: their volumes' extraction order and the lowest
+        // unfinished volume (see `liveorder`), looked up once per call.
+        let mut orders: Vec<(i32, Option<LiveOrder>)> = Vec::new();
 
         loop {
             let mut best_file: Option<(
                 crate::queuesubsys_host::NzbSnap,
                 crate::queuesubsys_host::FileSnap,
+                Option<usize>,
             )> = None;
             let mut prop_wait_file: Option<(
                 crate::queuesubsys_host::NzbSnap,
@@ -2817,7 +2878,7 @@ impl NzbgetRsQueueCoordinator {
 
                 let nzb_higher = match &best_file {
                     None => true,
-                    Some((best_nzb, _)) => {
+                    Some((best_nzb, _, _)) => {
                         if nzb.has_extra_priority == best_nzb.has_extra_priority {
                             nzb.priority > best_nzb.priority
                         } else {
@@ -2834,6 +2895,7 @@ impl NzbgetRsQueueCoordinator {
                     && ((!opts.pause_download && !opts.quota_reached) || nzb.force_priority)
                 {
                     let propagation_delay = opts.propagation_delay;
+                    let order = cached_live_order(&mut orders, host, nzb_ptr, nzb.id);
                     for j in 0..flen {
                         let fp = host.nzb_file_at(nzb_ptr, j);
                         if checked_files.contains(&fp) {
@@ -2845,16 +2907,22 @@ impl NzbgetRsQueueCoordinator {
                         }
                         let prop_wait = is_propagation_wait(f.time, propagation_delay, cur_date);
                         if !prop_wait {
+                            // A volume of a set extracted live, within the window: taken in
+                            // extraction order before the download's other files.
+                            let rank = order.as_ref().and_then(|o| o.window_rank(&f.filename));
                             let higher = match &best_file {
                                 None => true,
-                                Some((best_nzb, bf)) => {
+                                Some((best_nzb, bf, best_rank)) => {
                                     (f.extra_priority == bf.extra_priority
                                         && nzb.priority > best_nzb.priority)
                                         || (f.extra_priority && !bf.extra_priority)
+                                        || (f.extra_priority == bf.extra_priority
+                                            && best_nzb.ptr == nzb.ptr
+                                            && rank.is_some_and(|r| best_rank.is_none_or(|b| r < b)))
                                 }
                             };
                             if higher {
-                                best_file = Some((nzb.clone(), f));
+                                best_file = Some((nzb.clone(), f, rank));
                             }
                         } else if prop_wait_file
                             .as_ref()
@@ -2866,7 +2934,7 @@ impl NzbgetRsQueueCoordinator {
                 }
             }
 
-            let Some((mut nzb, mut file)) = best_file else {
+            let Some((mut nzb, mut file, _)) = best_file else {
                 if let Some((pw_nzb, pw_file)) = prop_wait_file {
                     let prev_logged = self
                         .propagation_wait_logged_id
@@ -2911,6 +2979,13 @@ impl NzbgetRsQueueCoordinator {
                 }
             }
 
+            // Headers a live extraction waits for come before anything else.
+            if let Some((f1, a1)) = self.get_next_urgent_article(host, opts, &nzb) {
+                self.propagation_wait_logged_id
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
+                return Some((f1, a1));
+            }
+
             // `file` was read before the direct-rename pass, which may have
             // loaded this file's articles meanwhile: decide on a fresh read.
             file = self.ensure_articles_loaded(host, opts, &nzb, file.ptr);
@@ -2939,6 +3014,208 @@ impl NzbgetRsQueueCoordinator {
         }
 
         None
+    }
+
+    /// An article a live extraction waits for before it can go on (see `liveorder::urge`): the
+    /// one holding a header byte it asked for, or the next one of a volume it needs whole.
+    fn get_next_urgent_article(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        opts: &crate::queuesubsys_host::GlobalOptsSnap,
+        nzb: &crate::queuesubsys_host::NzbSnap,
+    ) -> Option<(
+        crate::queuesubsys_host::FileSnap,
+        crate::queuesubsys_host::ArticleSnap,
+    )> {
+        use crate::liveorder::Urgent;
+        let urgent = crate::liveorder::urgent(nzb.id);
+        if urgent.is_empty() {
+            return None;
+        }
+        let flen = host.nzb_file_len(nzb.ptr);
+        for u in urgent {
+            let found = (0..flen).map(|i| host.nzb_file_at(nzb.ptr, i)).find(|&fp| {
+                let f = host.file_snap(fp);
+                !f.deleted && !f.paused && f.filename.eq_ignore_ascii_case(u.name())
+            });
+            let Some(fp) = found else {
+                // Finished (or not in the queue): nothing to hand out.
+                crate::liveorder::done_urgent(nzb.id, &u);
+                continue;
+            };
+            let f = self.ensure_articles_loaded(host, opts, nzb, fp);
+            let n = f.articles_len;
+            if n == 0 {
+                continue;
+            }
+            let candidates: Vec<usize> = match &u {
+                Urgent::Whole { .. } => match host.file_first_undefined_article(fp) {
+                    Some((_, art)) => return Some((f, art)),
+                    None => Vec::new(),
+                },
+                Urgent::At { offset, .. } => {
+                    let known: Vec<Option<(u64, u64)>> = (0..n)
+                        .map(|i| {
+                            let a = host.article_at(fp, i);
+                            (a.segment_offset >= 0 && a.segment_size > 0)
+                                .then(|| (a.segment_offset as u64, a.segment_size as u64))
+                        })
+                        .collect();
+                    let total = if f.decoded_file_size > 0 {
+                        f.decoded_file_size
+                    } else {
+                        f.size
+                    }
+                    .max(0) as u64;
+                    let idx = crate::liveorder::article_for(*offset, &known, n, total);
+                    let placed = known[idx].is_some_and(|(o, s)| o <= *offset && *offset < o + s);
+                    if placed {
+                        vec![idx]
+                    } else {
+                        // Placed by estimate: its neighbours too.
+                        let mut c = vec![idx, (idx + 1).min(n - 1), idx.saturating_sub(1)];
+                        c.dedup();
+                        c
+                    }
+                }
+            };
+            for i in candidates {
+                let a = host.article_at(fp, i);
+                if a.status == crate::queuesubsys_host::AI_UNDEFINED {
+                    return Some((f, a));
+                }
+            }
+            // Handed out already: asked again if the extraction still waits once it is written.
+            crate::liveorder::done_urgent(nzb.id, &u);
+        }
+        None
+    }
+
+    /// Starts direct unpack for downloads in which the headers of a set's first volume are now
+    /// written (`livewrite::take_new_heads`), on the same terms as when a volume completes:
+    /// the set is then read while it downloads, from before its first volume is complete.
+    /// One that cannot start yet (direct rename still running, another unpack busy) is tried
+    /// again a little later; its completed volumes start it as before anyway.
+    fn drain_live_heads(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
+        let now = crate::liveorder::now_ms();
+        let due: Vec<i32> = {
+            let mut pending = PENDING_HEADS.lock().unwrap_or_else(|e| e.into_inner());
+            for id in crate::livewrite::take_new_heads() {
+                if !pending.iter().any(|(p, _)| *p == id) {
+                    pending.push((id, 0));
+                }
+            }
+            if pending.iter().all(|(_, at)| *at > now) {
+                return;
+            }
+            let (due, later): (Vec<_>, Vec<_>) = pending.drain(..).partition(|(_, at)| *at <= now);
+            *pending = later;
+            due.into_iter().map(|(id, _)| id).collect()
+        };
+        let mut again = Vec::new();
+        host.with_locked_queue(|dq_ptr| {
+            for id in due {
+                let nzb_ptr = host.queue_find_by_id(dq_ptr, id);
+                if nzb_ptr.is_none() {
+                    continue;
+                }
+                let nzb = host.nzb_snap(nzb_ptr, false);
+                if nzb.direct_unpack_status != DirectUnpackStatus::None || nzb.is_download_completed {
+                    // Running (it picks the volume up itself), done, or the download is over.
+                    continue;
+                }
+                if nzb.direct_rename_status != DirectRenameStatus::Running {
+                    host.prepost_queue_changed(
+                        dq_ptr,
+                        crate::queuesubsys_host::ASPECT_LIVE_HEAD,
+                        nzb_ptr,
+                        FileRef::NONE,
+                    );
+                    if host.nzb_snap(nzb_ptr, false).direct_unpack_status != DirectUnpackStatus::None {
+                        continue;
+                    }
+                }
+                again.push((id, now + LIVE_HEAD_RETRY_MS));
+            }
+        });
+        if !again.is_empty() {
+            let mut pending = PENDING_HEADS.lock().unwrap_or_else(|e| e.into_inner());
+            for (id, at) in again {
+                if !pending.iter().any(|(p, _)| *p == id) {
+                    pending.push((id, at));
+                }
+            }
+        }
+    }
+
+    /// Asks again for articles a live extraction will wait for that run far longer than the
+    /// others (see `liveorder`): the slow request is dropped and the article handed out anew,
+    /// which on another connection usually comes in a second.
+    fn restart_live_stragglers(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
+        if !crate::liveorder::any() {
+            return;
+        }
+        let now = crate::liveorder::now_ms();
+        if now < NEXT_STRAGGLER_CHECK_MS.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        NEXT_STRAGGLER_CHECK_MS.store(
+            now + STRAGGLER_CHECK_MS,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        let Some(median) = crate::liveorder::median_ms() else {
+            return;
+        };
+        let after = crate::liveorder::hedge_threshold(median);
+        let slow: Vec<_> = self
+            .active_downloads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|ad| {
+                ad.status() == crate::queuesubsys_host::AD_RUNNING
+                    && !ad.stopped.load(std::sync::atomic::Ordering::SeqCst)
+                    && ad
+                        .running_since_ms()
+                        .is_some_and(|t| now.saturating_sub(t) >= after)
+            })
+            .cloned()
+            .collect();
+        if slow.is_empty() {
+            return;
+        }
+        host.with_locked_queue(|_| {
+            let mut orders: Vec<(i32, Option<LiveOrder>)> = Vec::new();
+            for ad in slow {
+                let f = host.file_snap(ad.file_ptr);
+                if f.deleted {
+                    continue;
+                }
+                let nzb = host.nzb_snap(f.nzb_ptr, false);
+                let Some(order) = cached_live_order(&mut orders, host, f.nzb_ptr, nzb.id) else {
+                    continue;
+                };
+                if order.window_rank(&f.filename).is_none() {
+                    continue;
+                }
+                if !crate::liveorder::note_restart(nzb.id, ad.article_ptr) {
+                    continue;
+                }
+                let ran = now.saturating_sub(ad.running_since_ms().unwrap_or(now));
+                let mut msg = b"Asking again for ".to_vec();
+                msg.extend_from_slice(ad.info_name());
+                msg.extend_from_slice(
+                    format!(
+                        ": running {:.1} s where articles take {:.1} s, and the live extraction will wait for it",
+                        ran as f64 / 1000.0,
+                        median as f64 / 1000.0
+                    )
+                    .as_bytes(),
+                );
+                host.nzb_print_message(f.nzb_ptr, crate::queuesubsys_host::MK_DETAIL, &msg);
+                ad.stop();
+            }
+        });
     }
 
     fn get_next_first_article(
@@ -3611,6 +3888,12 @@ impl NzbgetRsQueueCoordinator {
             .map(|metrics| metrics.sample());
         host.log(crate::queuesubsys_host::MK_DEBUG, b"Article downloaded");
         let ad = host.ad_snap(ad_ptr);
+        // How long articles take, for telling a slow one (see `restart_live_stragglers`).
+        if ad.status == crate::queuesubsys_host::AD_FINISHED {
+            if let Some(since) = self.find_ad(ad_ptr).and_then(|a| a.running_since_ms()) {
+                crate::liveorder::note_duration(crate::liveorder::now_ms().saturating_sub(since));
+            }
+        }
         let file_ptr = ad.file_ptr;
         let mut complete_file_parts = false;
 

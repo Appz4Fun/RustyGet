@@ -38,7 +38,7 @@ fn a_set_is_every_volume_from_one_without_a_gap() {
         set.volumes,
         names(&["a.7z.001", "a.7z.002", "a.7z.003", "A.7Z.004"])
     );
-    assert_eq!(set.last(), b"A.7Z.004");
+    assert_eq!(set.volumes.last().unwrap().as_slice(), b"A.7Z.004");
     // a gap: not a set this download carries whole
     assert!(live_set(b"a.7z.001", &names(&["a.7z.001", "a.7z.003"])).is_none());
     // one volume is no split
@@ -635,5 +635,178 @@ fn volumes_being_written_are_fed_article_by_article() {
         "nothing was read as written"
     );
     assert!(feed.handed.iter().all(|v| !v.is_waited()), "a reader still waits after the end");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A download feed whose volumes are all being written, as the real one hands them out: a
+/// volume is read as it is written once its first article is (`growing`), and the byte offsets
+/// the extraction waits for are recorded (`urge`).
+struct UrgedFeed {
+    disk: DiskFeed,
+    nzb_id: i32,
+    urged: Arc<std::sync::Mutex<Vec<(PathBuf, u64)>>>,
+    handed: Vec<Arc<crate::livewrite::LiveVolume>>,
+}
+
+impl VolumeFeed for UrgedFeed {
+    fn volume(&mut self, path: &Path) -> VolumeView {
+        self.disk.volume(path)
+    }
+    fn download_finished(&self) -> bool {
+        self.disk.download_finished()
+    }
+    fn set_became_final(&self) -> bool {
+        self.disk.set_became_final()
+    }
+    fn growing(&mut self, path: &Path) -> Option<Arc<crate::livewrite::LiveVolume>> {
+        if path.is_file() {
+            return None;
+        }
+        let live = crate::livewrite::lookup(self.nzb_id, crate::fsops::path_to_bytes(path))?;
+        if live.written_end(0).is_none() {
+            live.want(0);
+            return None;
+        }
+        self.handed.push(live.clone());
+        Some(live)
+    }
+    fn urge(&mut self, path: &Path, offset: u64) {
+        self.urged.lock().unwrap().push((path.to_path_buf(), offset));
+    }
+}
+
+#[test]
+fn a_set_is_mapped_from_its_first_and_last_volume_while_they_are_written() {
+    use std::os::unix::fs::FileExt;
+    let dir = scratch("urged");
+    let dl = dir.join("dl");
+    let movie = payload(1_300_000, 23);
+    let zip = stored_zip(&[("movie.mkv", &movie)]);
+    let pieces: Vec<(String, Vec<u8>)> = zip
+        .chunks(200_000)
+        .enumerate()
+        .map(|(i, c)| (format!("Movie.zip.{:03}", i + 1), c.to_vec()))
+        .collect();
+    let names: Vec<Vec<u8>> = pieces.iter().map(|(n, _)| n.as_bytes().to_vec()).collect();
+    let set = live_set(b"Movie.zip.001", &names).unwrap();
+    let n = pieces.len();
+    let nzb_id = -7_330_002;
+    // Every volume's output exists at its length; nothing is on disk.
+    let outs: Vec<(PathBuf, PathBuf, std::fs::File)> = pieces
+        .iter()
+        .enumerate()
+        .map(|(k, (name, data))| {
+            let out = dl.join(format!("{k}.out.tmp"));
+            let f = std::fs::File::create(&out).unwrap();
+            f.set_len(data.len() as u64).unwrap();
+            let target = dl.join(name);
+            crate::livewrite::register(
+                nzb_id,
+                k as i32,
+                crate::fsops::path_to_bytes(&target),
+                crate::fsops::path_to_bytes(&out),
+                data.len() as u64,
+                true,
+            );
+            (out, target, f)
+        })
+        .collect();
+    const ART: usize = 10_000;
+    let write_article = |k: usize, at: usize| {
+        let data = &pieces[k].1;
+        let s = at / ART * ART;
+        let e = (s + ART).min(data.len());
+        outs[k].2.write_all_at(&data[s..e], s as u64).unwrap();
+        crate::livewrite::written(nzb_id, k as i32, s as u64, (e - s) as u64);
+    };
+    // Only the first volume's first article is there when the extraction starts.
+    write_article(0, 0);
+    let urged = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mapped = Arc::new(AtomicBool::new(false));
+    let finished = Arc::new(AtomicBool::new(false));
+    let (fin, wurged, wmapped) = (finished.clone(), urged.clone(), mapped.clone());
+    let last = dl.join(&pieces[n - 1].0);
+    let (rpieces, routs, rdl, rwrite) = (&pieces, &outs, &dl, &write_article);
+    let writer = std::thread::scope(|scope| {
+        let handle = scope.spawn(move || {
+            let (pieces, outs, dl, write_article) = (rpieces, routs, rdl, rwrite);
+            // Serve what the extraction asks for until it has mapped the set.
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let mut served_last = Vec::new();
+            while !wmapped.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+                let asked: Vec<(PathBuf, u64)> = std::mem::take(&mut *wurged.lock().unwrap());
+                for (path, offset) in asked {
+                    if let Some(k) = pieces.iter().position(|(name, _)| dl.join(name) == path) {
+                        write_article(k, offset as usize);
+                        if path == last {
+                            served_last.push(offset);
+                        }
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            let mapped_early = wmapped.load(Ordering::Acquire);
+            // Then everything, in order.
+            for k in 0..n {
+                for at in (0..pieces[k].1.len()).step_by(ART) {
+                    write_article(k, at);
+                }
+            }
+            for (out, target, _) in outs.iter() {
+                std::fs::rename(out, target).unwrap();
+            }
+            crate::livewrite::forget(nzb_id);
+            fin.store(true, Ordering::Release);
+            (mapped_early, served_last)
+        });
+        let mut feed = UrgedFeed {
+            disk: DiskFeed {
+                finished,
+                damaged: Vec::new(),
+            },
+            nzb_id,
+            urged: urged.clone(),
+            handed: Vec::new(),
+        };
+        let dest = dir.join("out");
+        let mut lines = Vec::new();
+        let req = Request {
+            dir: &dl,
+            set: &set,
+            password: "",
+        };
+        let outcome = extract(
+            &req,
+            &mut feed,
+            &mut || Some((dest.clone(), None)),
+            &mut |_, m| {
+                if m.starts_with("Unrar: Extracting from") {
+                    mapped.store(true, Ordering::Release);
+                }
+                lines.push(m.to_string())
+            },
+            &mut || false,
+            &|_| {},
+        );
+        let (mapped_early, served_last) = handle.join().unwrap();
+        assert_eq!(
+            outcome,
+            Outcome::Done {
+                files: 1,
+                dirs: 0,
+                bytes: movie.len() as u64
+            },
+            "{lines:?}"
+        );
+        assert!(mapped_early, "mapped only once the volumes were complete: {lines:?}");
+        assert!(
+            served_last.iter().any(|&o| o as usize >= pieces[n - 1].1.len() - ART),
+            "the directory at the end of the last volume was not asked for: {served_last:?}"
+        );
+        assert!(feed.handed.iter().map(|v| v.read_live()).sum::<u64>() > 0);
+        feed.handed.len()
+    });
+    assert!(writer >= 2, "the first and the last volume are read as written");
+    assert_eq!(std::fs::read(dir.join("out/movie.mkv")).unwrap(), movie);
     let _ = std::fs::remove_dir_all(&dir);
 }

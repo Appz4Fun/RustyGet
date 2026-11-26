@@ -114,6 +114,9 @@ pub(crate) const ASPECT_URL_DELETED: i32 = 9;
 pub(crate) const ASPECT_URL_COMPLETED: i32 = 10;
 pub(crate) const ASPECT_URL_FAILED: i32 = 11;
 pub(crate) const ASPECT_URL_RETURNED: i32 = 12;
+/// Not a DownloadQueue aspect: told only to the pre/post processor, when the headers of a set's
+/// first volume are written (direct unpack can start before the volume is complete).
+pub(crate) const ASPECT_LIVE_HEAD: i32 = 100;
 
 // DownloadQueue::EEditAction (eaFileMoveOffset = 1)
 pub(crate) const EA_FILE_MOVE_OFFSET: i32 = 1;

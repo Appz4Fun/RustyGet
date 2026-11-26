@@ -47,6 +47,8 @@ struct State {
     forgotten: bool,
     /// Bumped by every write, so a reader hands over only what changed (see `sync`).
     generation: u64,
+    /// Its first bytes (offset 0, the headers) are written.
+    head: bool,
 }
 
 impl LiveVolume {
@@ -129,17 +131,23 @@ impl LiveVolume {
         count_read(n, ReadKind::Live);
     }
 
-    fn written(&self, range: Range<u64>) -> Option<Waker> {
+    /// Records a write; also says whether it was the first one holding offset 0 of a first
+    /// volume (see [`take_new_heads`]).
+    fn written(&self, range: Range<u64>) -> (Option<Waker>, bool) {
         let mut st = lock(&self.state);
         insert(&mut st.written, range);
         st.generation += 1;
-        match st.waiting.take() {
+        let new_head = !st.head && run_holding(&st.written, 0).is_some();
+        st.head |= new_head;
+        let first_volume = new_head && is_first_volume(&st.final_path);
+        let waker = match st.waiting.take() {
             Some((offset, waker)) if run_holding(&st.written, offset).is_some() => waker,
             other => {
                 st.waiting = other;
                 None
             }
-        }
+        };
+        (waker, first_volume)
     }
 
     fn forget(&self) -> Option<Waker> {
@@ -244,6 +252,16 @@ pub fn register(
             if st.final_path != final_path {
                 // Renamed while downloading (direct rename, deobfuscation).
                 st.final_path = final_path.to_vec();
+                if is_first_volume(final_path) {
+                    if st.head {
+                        // Known as a set's first volume only now: its headers are there.
+                        drop(st);
+                        note_head(nzb_id);
+                    } else {
+                        drop(st);
+                        v.want(0);
+                    }
+                }
             }
             return;
         }
@@ -254,7 +272,7 @@ pub fn register(
             w.wake();
         }
     }
-    list.push(Arc::new(LiveVolume {
+    let v = Arc::new(LiveVolume {
         nzb_id,
         file_id,
         out_path: crate::fsops::path(out_path).to_path_buf(),
@@ -264,7 +282,79 @@ pub fn register(
             ..State::default()
         }),
         read_live: AtomicU64::new(0),
-    }));
+    });
+    // A set's first volume: the article cache writes its first article out at once (instead of
+    // holding it until the volume is done), so direct unpack can start from its headers while
+    // the rest downloads (see `take_new_heads`).
+    if is_first_volume(final_path) {
+        v.want(0);
+    }
+    list.push(v);
+}
+
+/// Whether `path` names the first volume of an archive set direct unpack extracts (a RAR set's
+/// first volume, or the first volume of a set `crate::livefeed` reads).
+fn is_first_volume(path: &[u8]) -> bool {
+    let name = match path
+        .iter()
+        .rposition(|&b| b == b'/' || b == crate::paths::PATH_SEPARATOR)
+    {
+        Some(i) => &path[i + 1..],
+        None => path,
+    };
+    crate::unpack::direct_unpack_is_main_archive(name)
+}
+
+/// Downloads with a first volume whose headers were written since [`take_new_heads`] last ran.
+static NEW_HEADS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+
+fn note_head(nzb_id: i32) {
+    let mut heads = lock(&NEW_HEADS);
+    if !heads.contains(&nzb_id) {
+        heads.push(nzb_id);
+    }
+}
+
+/// Downloads in which the headers of a set's first volume were written since the last call:
+/// direct unpack can start there, before the volume finishes.
+pub fn take_new_heads() -> Vec<i32> {
+    std::mem::take(&mut *lock(&NEW_HEADS))
+}
+
+/// The complete paths of the first volumes download `nzb_id` is writing whose headers are
+/// written: direct unpack extracts them while they download.
+pub fn heads(nzb_id: i32) -> Vec<Vec<u8>> {
+    let map = lock(&VOLUMES);
+    let Some(list) = map.get(&nzb_id) else {
+        return Vec::new();
+    };
+    list.iter()
+        .filter_map(|v| {
+            let st = lock(&v.state);
+            (st.head && !st.forgotten && is_first_volume(&st.final_path)).then(|| st.final_path.clone())
+        })
+        .collect()
+}
+
+/// The file holding the headers of the volume that will be `final_path`, while it is still
+/// being written (its first bytes are): readers of a volume's headers (its signature, its
+/// members' names and times) read them there before the volume is complete. `None` when no
+/// download writes it, or two do.
+pub fn head_path(final_path: &Path) -> Option<PathBuf> {
+    #[cfg(unix)]
+    let key = {
+        use std::os::unix::ffi::OsStrExt;
+        final_path.as_os_str().as_bytes().to_vec()
+    };
+    #[cfg(not(unix))]
+    let key = final_path.to_string_lossy().as_bytes().to_vec();
+    let map = lock(&VOLUMES);
+    let mut found = map.values().flatten().filter(|v| {
+        let st = lock(&v.state);
+        st.final_path == key && st.head && !st.forgotten
+    });
+    let first = found.next()?.out_path.clone();
+    found.next().is_none().then_some(first)
 }
 
 /// The writer wrote bytes `offset..offset + len` of file `file_id` into its direct-write
@@ -285,8 +375,12 @@ pub fn written(nzb_id: i32, file_id: i32, offset: u64, len: u64) {
     if offset >= end {
         return;
     }
-    if let Some(w) = v.written(offset..end) {
+    let (waker, first_head) = v.written(offset..end);
+    if let Some(w) = waker {
         w.wake();
+    }
+    if first_head {
+        note_head(nzb_id);
     }
     let (m, cv) = &WRITES;
     *lock(m) += 1;
@@ -306,6 +400,7 @@ pub fn lookup(nzb_id: i32, final_path: &[u8]) -> Option<Arc<LiveVolume>> {
 /// Download `nzb_id` writes no volume any more (it finished, moved or was deleted): readers
 /// parked on its volumes are woken to find them finished or gone.
 pub fn forget(nzb_id: i32) {
+    crate::liveorder::clear(nzb_id);
     let gone = lock(&VOLUMES).remove(&nzb_id).unwrap_or_default();
     for v in gone {
         debug_assert_eq!(v.nzb_id, nzb_id);
@@ -452,8 +547,8 @@ mod tests {
     #[test]
     fn a_reader_that_stops_waiting_releases_the_cache() {
         let id = -7_310_003;
-        register(id, 4, b"/d/d.rar", b"/d/4.out.tmp", 1000, true);
-        let v = lookup(id, b"/d/d.rar").unwrap();
+        register(id, 4, b"/d/d.r00", b"/d/4.out.tmp", 1000, true);
+        let v = lookup(id, b"/d/d.r00").unwrap();
         assert!(!wanted(id, 4));
         v.want(100);
         assert!(wanted(id, 4) && v.is_waited());
@@ -464,5 +559,37 @@ mod tests {
         written(id, 4, 0, 200);
         assert!(!wanted(id, 4), "the write it waited for releases it");
         forget(id);
+    }
+
+    #[test]
+    fn a_first_volume_whose_headers_are_written_starts_direct_unpack() {
+        let id = -7_310_004;
+        // A first volume is wanted from the start: the cache writes its first article out.
+        register(id, 1, b"/d/Rel.part01.rar", b"/d/1.out.tmp", 1000, true);
+        register(id, 2, b"/d/Rel.part02.rar", b"/d/2.out.tmp", 1000, true);
+        assert!(wanted(id, 1) && !wanted(id, 2));
+        assert!(heads(id).is_empty());
+        assert!(head_path(Path::new("/d/Rel.part01.rar")).is_none());
+        written(id, 2, 0, 100);
+        written(id, 1, 100, 100);
+        assert!(!take_new_heads().contains(&id), "not the first volume's offset 0");
+        written(id, 1, 0, 100);
+        assert!(!wanted(id, 1));
+        assert!(take_new_heads().contains(&id));
+        assert!(!take_new_heads().contains(&id), "once");
+        written(id, 1, 0, 300);
+        assert!(!take_new_heads().contains(&id));
+        assert_eq!(heads(id), vec![b"/d/Rel.part01.rar".to_vec()]);
+        assert_eq!(head_path(Path::new("/d/Rel.part01.rar")), Some(PathBuf::from("/d/1.out.tmp")));
+        // Named a first volume only by a later rename: noted then.
+        register(id, 3, b"/d/abc123", b"/d/3.out.tmp", 1000, true);
+        written(id, 3, 0, 100);
+        assert!(!take_new_heads().contains(&id));
+        register(id, 3, b"/d/Other.7z.001", b"/d/3.out.tmp", 1000, false);
+        assert!(take_new_heads().contains(&id));
+        assert_eq!(heads(id).len(), 2);
+        forget(id);
+        assert!(heads(id).is_empty());
+        assert!(head_path(Path::new("/d/Rel.part01.rar")).is_none());
     }
 }

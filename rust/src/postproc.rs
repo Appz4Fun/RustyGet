@@ -2521,6 +2521,23 @@ struct DirectUnpackHoldState {
     offered: std::collections::HashMap<Vec<u8>, crate::deadvolume::VirtualVolume>,
 }
 
+/// The names of a RAR set's volumes in order, from its first volume `first` (`count` of them at
+/// most, at least the first): the order direct unpack reads them in.
+fn rar_volume_names(first: &[u8], count: u64) -> Vec<Vec<u8>> {
+    let mut names = vec![first.to_vec()];
+    let mut cur = crate::fsops::path(first).to_path_buf();
+    while (names.len() as u64) < count.max(1) {
+        match zipfast::volume::next_volume(&cur) {
+            Some(next) if next != cur => {
+                names.push(next.as_os_str().as_encoded_bytes().to_vec());
+                cur = next;
+            }
+            _ => break,
+        }
+    }
+    names
+}
+
 /// What direct unpack's extraction session sees of a download in progress: a volume is ready
 /// once it is complete on disk, a damaged one comes with its lost ranges as holes, one that has
 /// not arrived parks the session until it does.
@@ -2646,6 +2663,18 @@ impl crate::progressive_unpack::VolumeFeed for DirectUnpackFeed {
             return None;
         }
         Some(live)
+    }
+
+    fn urge(&mut self, path: &std::path::Path, offset: u64) {
+        if let Some(name) = path.file_name() {
+            crate::liveorder::urge(self.nzb_id, name.as_encoded_bytes(), offset);
+        }
+    }
+
+    fn urge_whole(&mut self, path: &std::path::Path) {
+        if let Some(name) = path.file_name() {
+            crate::liveorder::urge_whole(self.nzb_id, name.as_encoded_bytes());
+        }
     }
 
     fn wait_repaired(&mut self, is_cancelled: &mut dyn FnMut() -> bool) -> bool {
@@ -4638,6 +4667,33 @@ impl NzbgetRsDirectUnpack {
         }
     }
 
+    /// Queues the first volumes whose headers the download has written (see
+    /// `livewrite::heads`): their sets are extracted from there while they download, before
+    /// the first volume is complete.
+    fn take_heads(&self, dest_dir: &[u8], started: &[Vec<u8>]) {
+        let heads = crate::livewrite::heads(self.nzb_id);
+        if heads.is_empty() {
+            return;
+        }
+        let mut v = self.lock_vol();
+        for full in heads {
+            let Some(name) = full
+                .strip_prefix(dest_dir)
+                .and_then(|rest| rest.strip_prefix(&[crate::paths::PATH_SEPARATOR][..]))
+            else {
+                continue;
+            };
+            if name.is_empty()
+                || !crate::unpack::direct_unpack_is_main_archive(name)
+                || started.iter().any(|a| a.eq_ignore_ascii_case(name))
+                || v.archives.iter().any(|a| a.eq_ignore_ascii_case(name))
+            {
+                continue;
+            }
+            v.archives.push_back(name.to_vec());
+        }
+    }
+
     pub(crate) fn file_downloaded(&self, host: &QueueSubsysHost, fi_ptr: FileRef) {
         let fs = host.file_snap(fi_ptr);
         let nzb_ptr = fs.nzb_ptr;
@@ -5009,37 +5065,22 @@ impl NzbgetRsDirectUnpack {
         archive_name: &[u8],
         local: &mut DirectUnpackRunLocal,
     ) {
-        use crate::livefeed::{Outcome, SetKind};
+        use crate::livefeed::Outcome;
         local.all_ok_received = false;
         let names = host.with_locked_queue(|dq_ptr| {
             let Some(nzb) = self.find_nzb(host, dq_ptr) else {
                 return Vec::new();
             };
             let mut names: Vec<Vec<u8>> = Vec::new();
-            let mut queued = Vec::new();
             for i in 0..host.nzb_file_len(nzb.ptr) {
                 let f = host.file_snap(host.nzb_file_at(nzb.ptr, i));
                 if !f.deleted {
                     names.push(cstr::until_nul(&f.filename).to_vec());
-                    queued.push(f);
                 }
             }
             for i in 0..host.nzb_completed_files_len(nzb.ptr) {
                 let f = host.nzb_completed_file_at(nzb.ptr, i);
                 names.push(cstr::until_nul(&f.filename).to_vec());
-            }
-            if let Some(set) = crate::livefeed::live_set(archive_name, &names) {
-                if set.kind != SetKind::Split {
-                    for f in queued.iter().filter(|f| !f.extra_priority) {
-                        if cstr::until_nul(&f.filename).eq_ignore_ascii_case(set.last()) {
-                            host.file_set_int(
-                                f.ptr,
-                                crate::queuesubsys_host::FILE_INT_EXTRA_PRIORITY,
-                                1,
-                            );
-                        }
-                    }
-                }
             }
             names
         });
@@ -5048,6 +5089,10 @@ impl NzbgetRsDirectUnpack {
             local.unpack_ok = true;
             return;
         };
+        // The download takes the set's volumes in extraction order; the headers the map needs
+        // first (the start of the first volume, the directory at the end of the last) are
+        // asked for by offset while it waits for them (`livefeed::try_map`).
+        crate::liveorder::set_order(self.nzb_id, &set.volumes);
 
         let _unpack_guard = UNPACK_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         if self.is_stopped(host) {
@@ -5220,6 +5265,11 @@ impl NzbgetRsDirectUnpack {
             nzb_id: self.nzb_id,
             expected_volumes: local.expected_volumes,
         });
+        // The download takes the set's volumes in extraction order.
+        crate::liveorder::set_order(
+            self.nzb_id,
+            &rar_volume_names(archive_name, local.expected_volumes),
+        );
         let reads = crate::livewrite::read_counts();
         let res = crate::unpack::extract_archive_with_feed(
             crate::fsops::path(&full_archive_path),
@@ -5372,6 +5422,7 @@ impl NzbgetRsDirectUnpack {
 
         let mut started: Vec<Vec<u8>> = Vec::new();
         while !self.is_stopped(host) {
+            self.take_heads(&local.dest_dir, &started);
             let next_archive = self.lock_vol().archives.pop_front();
             if let Some(archive) = next_archive {
                 // A main volume extracted past its damage is queued again when its repair
@@ -5420,6 +5471,8 @@ impl NzbgetRsDirectUnpack {
 
         self.set_unpacking(false);
         self.set_waiting(false);
+        // Nothing is extracted live any more: the download goes on in its own order.
+        crate::liveorder::clear(self.nzb_id);
 
         let cancelled = self.cancelled.load(Ordering::Acquire);
         let interrupted = !cancelled && self.is_stopped_or_terminated(host);

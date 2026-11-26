@@ -3121,6 +3121,9 @@ pub struct NzbgetRsArticleDownloader {
     info_name: Vec<u8>,
     status: AtomicI32,
     last_update_time: AtomicI64,
+    /// When the current request started (`liveorder::now_ms`, 0: none yet): a request far
+    /// slower than the others is asked again for a live extraction (see `liveorder`).
+    running_since_ms: std::sync::atomic::AtomicU64,
     conn_state: Mutex<(usize, Vec<u8>)>,
     worker: Mutex<DlWorker>,
 }
@@ -3148,6 +3151,7 @@ impl NzbgetRsArticleDownloader {
             info_name,
             status: AtomicI32::new(AD_UNDEFINED),
             last_update_time: AtomicI64::new(now_sec()),
+            running_since_ms: std::sync::atomic::AtomicU64::new(0),
             conn_state: Mutex::new((initial_conn, Vec::new())),
             worker: Mutex::new(DlWorker {
                 decoder: Decoder::new(
@@ -3183,6 +3187,16 @@ impl NzbgetRsArticleDownloader {
 
     pub(crate) fn last_update_time(&self) -> i64 {
         self.last_update_time.load(Ordering::SeqCst)
+    }
+
+    /// When the request running now started (`liveorder::now_ms`); `None` before the first.
+    pub(crate) fn running_since_ms(&self) -> Option<u64> {
+        Some(self.running_since_ms.load(Ordering::SeqCst)).filter(|&ms| ms > 0)
+    }
+
+    /// The text this download logs itself under (`nzb/file [part/count]`).
+    pub(crate) fn info_name(&self) -> &[u8] {
+        &self.info_name
     }
 
     pub(crate) fn stop(&self) {
@@ -3338,6 +3352,10 @@ impl NzbgetRsArticleDownloader {
     fn set_status(&self, st: i32, touch_now: bool) {
         if touch_now {
             self.last_update_time.store(now_sec(), Ordering::SeqCst);
+        }
+        if st == AD_RUNNING && touch_now {
+            self.running_since_ms
+                .store(crate::liveorder::now_ms().max(1), Ordering::SeqCst);
         }
         self.status.store(st, Ordering::SeqCst);
     }

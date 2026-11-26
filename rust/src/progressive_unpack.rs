@@ -116,6 +116,12 @@ pub trait VolumeFeed: Send + 'static {
     fn growing(&mut self, _path: &Path) -> Option<Arc<crate::livewrite::LiveVolume>> {
         None
     }
+    /// The extraction waits for byte `offset` of volume `path`, which is not written yet (a
+    /// header it reads before anything else): the download hands out the article holding it
+    /// next (see [`crate::liveorder`]). A feed that does not download ignores this.
+    fn urge(&mut self, _path: &Path, _offset: u64) {}
+    /// As [`VolumeFeed::urge`], for the whole volume (its headers could not be placed).
+    fn urge_whole(&mut self, _path: &Path) {}
 }
 
 /// Volume bytes at the start and end that may hold archive headers, for a volume whose headers
@@ -1269,12 +1275,19 @@ struct MemberMeta {
 struct MetaCache {
     volume: PathBuf,
     members: std::collections::HashMap<Vec<u8>, std::collections::VecDeque<MemberMeta>>,
+    /// Read from a volume still being written: a member whose header was not written then is
+    /// looked for again.
+    live: bool,
 }
 
 impl MetaCache {
     fn lookup(&mut self, volume: &Path, password: &str, name: &[u8]) -> MemberMeta {
-        if self.volume != volume {
+        let missing = |m: &std::collections::HashMap<Vec<u8>, std::collections::VecDeque<MemberMeta>>| {
+            m.get(name).is_none_or(|q| q.is_empty())
+        };
+        if self.volume != volume || (self.live && missing(&self.members)) {
             self.volume = volume.to_path_buf();
+            self.live = !volume.is_file();
             self.members = volume_metadata(volume, password);
         }
         // zipfast's decoded RAR 1.5-4.x names have slashes where the stored name (the one
@@ -1296,6 +1309,15 @@ impl MetaCache {
     }
 }
 
+/// Where the headers of volume `volume` are read: the volume, or the output the download is
+/// writing it into while it is not complete yet (see `crate::livewrite::head_path`).
+pub(crate) fn header_source(volume: &Path) -> PathBuf {
+    if volume.is_file() {
+        return volume.to_path_buf();
+    }
+    crate::livewrite::head_path(volume).unwrap_or_else(|| volume.to_path_buf())
+}
+
 /// The headers of members that start in `volume` (not continuations), in order, for the
 /// metadata zipfast restores only on the outputs it publishes itself.
 fn volume_metadata(
@@ -1306,6 +1328,9 @@ fn volume_metadata(
     let mut out: std::collections::HashMap<Vec<u8>, std::collections::VecDeque<MemberMeta>> =
         std::collections::HashMap::new();
     let pw = (!password.is_empty()).then_some(password);
+    // A volume still being written is read from the download's output, as far as it is
+    // written: the walk ends at the first header not there yet.
+    let volume = &header_source(volume);
     if let Ok(mut vol) = Volume::open_with_password(volume, pw) {
         for _ in 0..1_000_000 {
             match vol.next_block() {

@@ -7,8 +7,10 @@
 //!
 //! - A byte-split 7z set (`name.7z.001`, ...), a byte-split ZIP (`name.zip.001`, ...) and an
 //!   Info-ZIP split set (`name.z01`, ..., `name.zip`) are mapped (`zipfast::map::MapBuilder`)
-//!   once the bytes holding their headers are on disk: the first volume and the last one, whose
-//!   download is moved up for that. Volumes not downloaded yet stand in with the first volume's
+//!   once the bytes holding their headers are written: the start of the first volume and the
+//!   directory at the end of the last one, both read while the download writes them (the
+//!   articles holding the directory are asked for first, `crate::liveorder`). Volumes not
+//!   downloaded yet stand in with the first volume's
 //!   length (7-Zip and `split` cut every volume but the last to one size); each is checked when
 //!   it arrives.
 //! - Every member then gets a feed decoder writing straight into its output file. The decoders
@@ -24,6 +26,7 @@
 use std::fs::File;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
@@ -42,6 +45,10 @@ use crate::progressive_unpack::{VolumeFeed, VolumeView};
 const IDLE: Duration = Duration::from_millis(25);
 /// How often a map that could not be built yet is tried again without any volume arriving.
 const MAP_RETRY: Duration = Duration::from_secs(2);
+/// How often it is tried again while articles are written into the set's volumes.
+const MAP_RETRY_LIVE: Duration = Duration::from_millis(50);
+/// How long the headers are fetched by offset before the last volume is asked for whole.
+const HEADER_BY_OFFSET: Duration = Duration::from_secs(8);
 /// Members of one stored (Copy) 7z folder fed live at most. A compressed folder is fed live only
 /// when it holds one member: every member's decoder would decode the folder again from its
 /// start and hold a dictionary of its own.
@@ -65,13 +72,6 @@ pub enum SetKind {
 pub struct LiveSet {
     pub kind: SetKind,
     pub volumes: Vec<Vec<u8>>,
-}
-
-impl LiveSet {
-    /// The volume holding the set's directory (7z header, ZIP central directory).
-    pub fn last(&self) -> &[u8] {
-        self.volumes.last().map_or(&[][..], Vec::as_slice)
-    }
 }
 
 /// What a name says: the set kind, the lower-case name in front of the volume number, and the
@@ -323,16 +323,7 @@ impl<'f> Volumes<'f> {
     fn read_growing(&mut self, i: usize, offset: u64, buf: &mut [u8]) -> Option<PackedRead> {
         if self.live[i].is_none() {
             let want = self.expect[i]?;
-            let live = self.feed.growing(&self.paths[i])?;
-            if live.size() != want {
-                return None;
-            }
-            let f = File::open(live.out_path()).ok()?;
-            if f.metadata().ok()?.len() != want {
-                return None;
-            }
-            self.written.set_file(i as u32, f);
-            self.live[i] = Some((live, 0));
+            self.attach_live(i, Some(want))?;
         }
         let (live, synced) = self.live[i].as_mut()?;
         live.sync(&mut self.written, i as u32, synced);
@@ -343,6 +334,29 @@ impl<'f> Volumes<'f> {
             PackedRead::Hole { .. } => {}
         }
         Some(read)
+    }
+
+    /// Volume `i`, not on disk yet, read from the output the download is writing (once its
+    /// headers are written, see `VolumeFeed::growing`), when it has length `want` (if given).
+    fn attach_live(
+        &mut self,
+        i: usize,
+        want: Option<u64>,
+    ) -> Option<Arc<crate::livewrite::LiveVolume>> {
+        if let Some((live, _)) = &self.live[i] {
+            return Some(live.clone());
+        }
+        let live = self.feed.growing(&self.paths[i])?;
+        if want.is_some_and(|w| w != live.size()) {
+            return None;
+        }
+        let f = File::open(live.out_path()).ok()?;
+        if f.metadata().ok()?.len() != live.size() {
+            return None;
+        }
+        self.written.set_file(i as u32, f);
+        self.live[i] = Some((live.clone(), 0));
+        Some(live)
     }
 
     fn view(&mut self, i: usize) -> View {
@@ -506,6 +520,25 @@ struct MapVolume {
     file: Option<File>,
     holes: Vec<(u64, u64)>,
     info: SourceInfo,
+    /// A volume still being written: only the bytes written so far are read (`file` is its
+    /// output), the others are not there yet.
+    live: Option<Arc<crate::livewrite::LiveVolume>>,
+    /// Offsets the walk asked for that were not there yet (see [`try_map`]).
+    misses: Arc<Mutex<Vec<u64>>>,
+}
+
+impl MapVolume {
+    fn not_yet(&self, offset: u64) -> ProgressiveResult<RangeRead> {
+        if let Some(live) = &self.live {
+            // The article cache writes this volume's articles out for it.
+            live.want(offset);
+        }
+        let mut misses = self.misses.lock().unwrap_or_else(|e| e.into_inner());
+        if misses.len() < 64 {
+            misses.push(offset);
+        }
+        Ok(RangeRead::NotYet)
+    }
 }
 
 impl RangeSource for MapVolume {
@@ -522,8 +555,22 @@ impl RangeSource for MapVolume {
         _cx: &mut Context<'_>,
     ) -> ProgressiveResult<RangeRead> {
         let Some(file) = self.file.as_ref() else {
-            return Ok(RangeRead::NotYet);
+            return self.not_yet(offset);
         };
+        if let Some(live) = &self.live {
+            let Some(end) = live.written_end(offset) else {
+                return self.not_yet(offset);
+            };
+            let n = buf
+                .len()
+                .min(end.min(self.info.extent).saturating_sub(offset) as usize);
+            return match read_at(file, &mut buf[..n], offset) {
+                Ok(k) if k > 0 => Ok(RangeRead::Filled { count: k }),
+                _ => Err(zipfast::progressive::ProgressiveFailure::new(
+                    zipfast::progressive::FailureKind::Truncated,
+                )),
+            };
+        }
         if let Some(&(s, l)) = self
             .holes
             .iter()
@@ -569,6 +616,8 @@ impl VolumeSource for MapVolumes {
                 file: v.file.as_ref().and_then(|f| f.try_clone().ok()),
                 holes: v.holes.clone(),
                 info: v.info,
+                live: v.live.clone(),
+                misses: v.misses.clone(),
             })),
             None => VolumeAnswer::Wait,
         })
@@ -595,6 +644,9 @@ enum NoMap {
 
 /// One attempt at mapping the set from what is on disk. Volumes not there yet stand in with
 /// the first volume's length, except the last (it carries the directory and its own length).
+/// A volume still being written is read as far as it is written: neither the first volume (its
+/// start header) nor the last (the directory) has to be complete. Header bytes the walk waits
+/// for are asked of the download first (`VolumeFeed::urge`).
 fn try_map(
     vols: &mut Volumes<'_>,
     set: &LiveSet,
@@ -603,9 +655,17 @@ fn try_map(
     let n = set.volumes.len();
     let mut lens: Vec<Option<u64>> = vec![None; n];
     let mut volumes: Vec<Option<MapVolume>> = Vec::with_capacity(n);
+    let misses: Vec<Arc<Mutex<Vec<u64>>>> = (0..n).map(|_| Arc::default()).collect();
     let first_len = match vols.view(0) {
         View::Ready { len, .. } => len,
-        View::NotYet => return Err(NoMap::Later),
+        View::NotYet => match vols.attach_live(0, None) {
+            Some(live) => live.size(),
+            None => {
+                let first = vols.paths[0].clone();
+                vols.feed.urge(&first, 0);
+                return Err(NoMap::Later);
+            }
+        },
         View::Missing => return Err(NoMap::Declined("its first volume is missing".into())),
     };
     for i in 0..n {
@@ -625,27 +685,60 @@ fn try_map(
                     },
                     file: Some(file),
                     holes,
+                    live: None,
+                    misses: misses[i].clone(),
                 })
             }
             View::Missing => return Err(NoMap::Declined(format!("volume {} is missing", i + 1))),
-            View::NotYet if i + 1 < n => {
-                lens[i] = Some(first_len);
-                Some(MapVolume {
-                    file: None,
-                    holes: Vec::new(),
-                    info: SourceInfo {
-                        id: SourceId(u128::MAX - i as u128),
-                        generation: 0,
-                        extent: first_len,
-                        length: SourceLength::Final(first_len),
-                    },
-                })
+            View::NotYet => {
+                // Every volume but the last has the first one's length.
+                let want = (i + 1 < n).then_some(first_len);
+                let written = vols.attach_live(i, want).and_then(|live| {
+                    let file = File::open(live.out_path()).ok()?;
+                    Some((live, file))
+                });
+                match written {
+                    Some((live, file)) => {
+                        let len = live.size();
+                        lens[i] = Some(len);
+                        Some(MapVolume {
+                            info: SourceInfo {
+                                id: source_id(&file, i as u128),
+                                generation: 0,
+                                extent: len,
+                                length: SourceLength::Final(len),
+                            },
+                            file: Some(file),
+                            holes: Vec::new(),
+                            live: Some(live),
+                            misses: misses[i].clone(),
+                        })
+                    }
+                    None if i + 1 < n => {
+                        lens[i] = Some(first_len);
+                        Some(MapVolume {
+                            file: None,
+                            holes: Vec::new(),
+                            info: SourceInfo {
+                                id: SourceId(u128::MAX - i as u128),
+                                generation: 0,
+                                extent: first_len,
+                                length: SourceLength::Final(first_len),
+                            },
+                            live: None,
+                            misses: misses[i].clone(),
+                        })
+                    }
+                    None => None,
+                }
             }
-            View::NotYet => None,
         };
         volumes.push(vol);
     }
     if volumes.last().is_some_and(Option::is_none) {
+        // The last volume is not being written yet: its first article starts it.
+        let last = vols.paths[n - 1].clone();
+        vols.feed.urge(&last, 0);
         return Err(NoMap::Later);
     }
     let first_name = std::ffi::OsString::from(crate::fsops::path(&set.volumes[0]).as_os_str());
@@ -654,15 +747,27 @@ fn try_map(
         Box::new(MapVolumes { volumes }),
         MapOptions::new(first_name).password(pw),
     );
-    match builder.poll_map(&mut Context::from_waker(Waker::noop())) {
-        Poll::Pending => Err(NoMap::Later),
-        Poll::Ready(Ok(map)) if map.complete => Ok((map, lens)),
-        Poll::Ready(Ok(_)) => Err(NoMap::Later),
-        Poll::Ready(Err(MapError::HeaderHole { .. } | MapError::MissingDirectory { .. })) => {
-            Err(NoMap::Later)
-        }
-        Poll::Ready(Err(e)) => Err(NoMap::Declined(e.to_string())),
+    let polled = builder.poll_map(&mut Context::from_waker(Waker::noop()));
+    drop(builder);
+    match polled {
+        Poll::Ready(Ok(map)) if map.complete => return Ok((map, lens)),
+        Poll::Pending
+        | Poll::Ready(Ok(_))
+        | Poll::Ready(Err(MapError::HeaderHole { .. } | MapError::MissingDirectory { .. })) => {}
+        Poll::Ready(Err(e)) => return Err(NoMap::Declined(e.to_string())),
     }
+    // Not yet: the download hands out what the walk waited for first.
+    for (i, m) in misses.iter().enumerate() {
+        let offsets = std::mem::take(&mut *m.lock().unwrap_or_else(|e| e.into_inner()));
+        if offsets.is_empty() {
+            continue;
+        }
+        let path = vols.paths[i].clone();
+        for offset in offsets {
+            vols.feed.urge(&path, offset);
+        }
+    }
+    Err(NoMap::Later)
 }
 
 // ---- Output ----
@@ -769,6 +874,11 @@ pub fn extract(
     // Map the set as soon as its headers are on disk.
     let mut last_ready = usize::MAX;
     let mut last_try = Instant::now() - MAP_RETRY;
+    let mut last_writes = crate::livewrite::write_count();
+    // Since when the first volume is read as it is written, and whether the last volume was
+    // asked for whole because its directory could not be fetched by offset.
+    let mut live_since: Option<Instant> = None;
+    let mut asked_whole = false;
     let (map, lens) = loop {
         if is_cancelled() {
             return Outcome::Declined("Aborted".into());
@@ -776,8 +886,12 @@ pub fn extract(
         let ready = (0..req.set.volumes.len())
             .filter(|&i| matches!(vols.view(i), View::Ready { .. }))
             .count();
-        if ready != last_ready || last_try.elapsed() >= MAP_RETRY {
+        let writes = crate::livewrite::write_count();
+        // A volume being written may hold the headers now: tried again as articles land.
+        let written = writes != last_writes && last_try.elapsed() >= MAP_RETRY_LIVE;
+        if ready != last_ready || written || last_try.elapsed() >= MAP_RETRY {
             last_ready = ready;
+            last_writes = writes;
             last_try = Instant::now();
             match try_map(&mut vols, req.set, req.password) {
                 Ok(found) => break found,
@@ -785,7 +899,16 @@ pub fn extract(
                 Err(NoMap::Later) if vols.feed.set_became_final() => {
                     return Outcome::Declined("its headers are not readable".into());
                 }
-                Err(NoMap::Later) => {}
+                Err(NoMap::Later) => {
+                    if vols.live[0].is_some() {
+                        let since = *live_since.get_or_insert_with(Instant::now);
+                        if !asked_whole && since.elapsed() >= HEADER_BY_OFFSET {
+                            asked_whole = true;
+                            let last = vols.paths[req.set.volumes.len() - 1].clone();
+                            vols.feed.urge_whole(&last);
+                        }
+                    }
+                }
             }
         }
         waiting.idle();

@@ -546,7 +546,8 @@ fn volumes_being_written_are_fed_article_by_article() {
     use std::os::unix::fs::FileExt;
     let dir = scratch("written");
     let dl = dir.join("dl");
-    let movie = payload(1_400_000, 21);
+    // The last piece holds the whole 64 KiB the central directory is searched in.
+    let movie = payload(1_300_000, 21);
     let zip = stored_zip(&[("movie.mkv", &movie)]);
     let pieces: Vec<(String, Vec<u8>)> = zip
         .chunks(200_000)

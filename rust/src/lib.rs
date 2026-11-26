@@ -135,6 +135,8 @@ pub mod streamrepair;
 #[cfg(unix)]
 pub(crate) mod streamrepair_coord;
 pub mod xmlrpc_format;
+#[cfg(all(test, unix))]
+mod reload_ownership_tests;
 
 pub mod deadpostings;
 pub mod dupeintake;

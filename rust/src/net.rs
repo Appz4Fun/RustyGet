@@ -6,7 +6,7 @@ use crate::options::OptStr;
 use std::cell::{RefCell, UnsafeCell};
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -2407,6 +2407,11 @@ const POOL_HOLD_SECONDS: i32 = 5;
 
 pub struct RsNewsServer {
     pub id: i32,
+    /// Unique for the life of the process, never reused: a server of one pool
+    /// generation is never mistaken for a server of another (which may sit at
+    /// the address a freed one had) when an exclusion list made before a
+    /// config reload is used after it.
+    pub uid: u64,
     pub state_id: AtomicI32,
     pub active: AtomicBool,
     pub name: CString,
@@ -2462,8 +2467,10 @@ impl RsNewsServer {
         } else {
             bytes_to_cstring(name)
         };
+        static NEXT_UID: AtomicU64 = AtomicU64::new(1);
         Self {
             id,
+            uid: NEXT_UID.fetch_add(1, Ordering::Relaxed),
             state_id: AtomicI32::new(0),
             active: AtomicBool::new(active),
             name: name_cs,
@@ -2527,6 +2534,10 @@ pub struct PooledNntpConn {
     pub check: AtomicBool,
     /// Checked out as a light connection (`crate::light_pool`).
     pub light: AtomicBool,
+    /// The pool generation that handed the connection out, held while it is
+    /// checked out (see [`NzbgetRsServerPool`]): a config reload retires that
+    /// generation, and it is freed only once its last connection is back.
+    lease: Mutex<Option<Arc<NzbgetRsServerPool>>>,
 }
 
 impl PooledNntpConn {
@@ -2562,6 +2573,7 @@ impl PooledNntpConn {
             free_time: AtomicI64::new(0),
             check: AtomicBool::new(false),
             light: AtomicBool::new(false),
+            lease: Mutex::new(None),
         }
     }
 
@@ -2860,6 +2872,37 @@ struct LightInputs {
     bandwidth_bound: bool,
 }
 
+/// One generation of the news server pool: the servers of one configuration
+/// and their connections.
+///
+/// Ownership (one model for every user of a news server connection):
+/// - The daemon holds the current generation (`daemon::SERVER_POOL`); the
+///   active pointer ([`active_server_pool`]) is weak, so it never keeps an old
+///   generation alive by itself.
+/// - Every checked-out connection holds a strong lease on the generation that
+///   handed it out (`PooledNntpConn::lease`), taken under the pool lock at
+///   checkout and dropped when the connection comes back. A fetch, live stream
+///   repair, borrow wave, probe, live PAR fetch or a held fleet connection
+///   therefore keeps its connection, its server and the whole generation
+///   alive however long it runs.
+/// - A config reload retires the current generation ([`release_server_pool`]):
+///   it hands out no more connections, closes its idle ones, and is freed when
+///   the last lease ends. The reloaded daemon builds a new generation beside
+///   it; new work only ever gets connections of the active one.
+/// - A connection is returned with `free_connection` on any generation: the
+///   pointer is matched by identity against the generations still alive, so
+///   it reaches the one that owns it even when the caller only knows the
+///   active pool.
+///
+/// While a retired generation still has connections out, the provider sees
+/// them beside the new generation's (at most the connections in flight at the
+/// reload; usually a few seconds, as each fetch takes a fresh connection from
+/// the active pool). A provider that refuses the extra ones is handled like
+/// any "too many connections" answer.
+///
+/// Any other connection backend (the coming nntp-rs pool) must follow the
+/// same rule: its pool belongs to a generation, and a fetch holds an `Arc` of
+/// the generation it fetches on.
 pub struct NzbgetRsServerPool {
     servers: std::sync::RwLock<Vec<Arc<RsNewsServer>>>,
     inner: Mutex<ServerPoolInner>,
@@ -2875,6 +2918,23 @@ pub struct NzbgetRsServerPool {
     light_checked_ms: AtomicI64,
     /// `LightConnections` to use instead of the option's (tests); -1 = the option.
     light_cap_override: AtomicI32,
+    /// This generation, for the leases of its checked-out connections. Unset
+    /// for a pool not made by [`NzbgetRsServerPool::new_shared`] (tests that
+    /// own the pool outright), whose connections then hold no lease.
+    self_ref: std::sync::OnceLock<std::sync::Weak<NzbgetRsServerPool>>,
+    /// Retired by a config reload: no more checkouts; freed with its last lease.
+    /// Changed only under the pool lock.
+    retired: AtomicBool,
+}
+
+/// Generations retired by a config reload whose connections may still be out.
+static RETIRED_POOLS: Mutex<Vec<std::sync::Weak<NzbgetRsServerPool>>> = Mutex::new(Vec::new());
+
+/// Retired generations still alive (some connection of theirs is checked out).
+pub(crate) fn retired_pools_alive() -> usize {
+    let mut g = RETIRED_POOLS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    g.retain(|w| w.strong_count() > 0);
+    g.len()
 }
 
 /// Who asks [`NzbgetRsServerPool`] for a connection.
@@ -2942,7 +3002,33 @@ impl NzbgetRsServerPool {
             download_starved_at_ms: AtomicI64::new(0),
             light_checked_ms: AtomicI64::new(0),
             light_cap_override: AtomicI32::new(-1),
+            self_ref: std::sync::OnceLock::new(),
+            retired: AtomicBool::new(false),
         }
+    }
+
+    /// A pool whose checked-out connections lease it (see the type's docs).
+    pub fn new_shared(conn_host: ConnHost) -> Arc<Self> {
+        let arc = Arc::new(Self::new(conn_host));
+        let _ = arc.self_ref.set(Arc::downgrade(&arc));
+        arc
+    }
+
+    /// Whether a config reload retired this generation.
+    pub fn is_retired(&self) -> bool {
+        self.retired.load(Ordering::SeqCst)
+    }
+
+    /// Gives `conn`, just checked out under the pool lock, its lease on this
+    /// generation.
+    fn lease_out(&self, conn: &PooledNntpConn) {
+        let lease = self.self_ref.get().and_then(std::sync::Weak::upgrade);
+        let old = std::mem::replace(
+            &mut *conn.lease.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+            lease,
+        );
+        // a free connection holds none; one left over would only be dropped here
+        drop(old);
     }
 
     /// Uses `cap` instead of the `LightConnections` option (tests), and
@@ -3112,6 +3198,9 @@ impl NzbgetRsServerPool {
         let Ok(mut g) = self.inner.lock() else {
             return LightPick::NoReserve;
         };
+        if self.retired.load(Ordering::SeqCst) {
+            return LightPick::NoReserve;
+        }
         let inner = &mut *g;
         let mut any_reserve = false;
         let mut picks: Vec<usize> = Vec::new();
@@ -3160,6 +3249,7 @@ impl NzbgetRsServerPool {
             c.in_use.store(true, Ordering::SeqCst);
             // SAFETY: free until now, and taken under the pool lock
             unsafe { c.begin_light() };
+            self.lease_out(c);
             c.server.norm_level.load(Ordering::SeqCst)
         };
         if let Some(slot) = inner.levels.get_mut(nl as usize) {
@@ -3413,6 +3503,9 @@ impl NzbgetRsServerPool {
         let Ok(mut g) = self.inner.lock() else {
             return ptr::null_mut();
         };
+        if self.retired.load(Ordering::SeqCst) {
+            return ptr::null_mut();
+        }
         let srv_count = g.sorted_servers.len();
         let conn_count = g.connections.len();
         if srv_count == 0 || conn_count == 0 {
@@ -3535,6 +3628,7 @@ impl NzbgetRsServerPool {
             if for_check && !c.check.swap(true, Ordering::SeqCst) {
                 c.server.check_in_use.fetch_add(1, Ordering::SeqCst);
             }
+            self.lease_out(c);
             (&mut **c) as *mut PooledNntpConn
         } else {
             ptr::null_mut()
@@ -3549,11 +3643,14 @@ impl NzbgetRsServerPool {
         self.get_connection(nl, Some(&srv), &[])
     }
 
-    /// Return a connection handed out by `get_connection*` to the pool.
+    /// Return a connection handed out by `get_connection*` to the pool
+    /// generation that handed it out: this one, or another still alive (a
+    /// connection checked out before a config reload, returned through the
+    /// pool active after it).
     ///
-    /// The pointer is only used as an identity: it is looked up among the
-    /// pool's own connections, so a null or foreign pointer is ignored instead
-    /// of dereferenced.
+    /// The pointer is only used as an identity: it is looked up among each
+    /// generation's own connections, so a null or foreign pointer is ignored
+    /// instead of dereferenced.
     pub fn free_connection(&self, conn_ptr: *mut PooledNntpConn, used: bool) {
         if conn_ptr.is_null() {
             return;
@@ -3561,17 +3658,30 @@ impl NzbgetRsServerPool {
         if used {
             crate::log::log_active_bytes(3, b"Freeing used connection");
         }
-        let Ok(mut g) = self.inner.lock() else {
-            return;
-        };
+        match self.free_own_connection(conn_ptr, used) {
+            // the caller holds this generation (`&self`), so the lease is never
+            // its last reference here
+            Some(lease) => drop(lease),
+            None => free_in_other_generation(Some(self), conn_ptr, used),
+        }
+    }
+
+    /// Returns `conn_ptr` if it is one of this generation's connections, and
+    /// hands back its lease for the caller to drop outside the pool lock.
+    /// `None`: not a connection of this generation.
+    fn free_own_connection(
+        &self,
+        conn_ptr: *mut PooledNntpConn,
+        used: bool,
+    ) -> Option<Option<Arc<NzbgetRsServerPool>>> {
+        // a poisoned lock still frees: a connection never returned would keep
+        // its generation alive for good
+        let mut g = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let inner = &mut *g;
-        let Some(c) = inner
+        let c = inner
             .connections
             .iter()
-            .find(|c| ptr::eq(&***c, conn_ptr.cast_const()))
-        else {
-            return;
-        };
+            .find(|c| ptr::eq(&***c, conn_ptr.cast_const()))?;
         if c.check.swap(false, Ordering::SeqCst) {
             // paired with the increment in get_check_connection
             c.server.check_in_use.fetch_sub(1, Ordering::SeqCst);
@@ -3580,6 +3690,17 @@ impl NzbgetRsServerPool {
             // SAFETY: the caller held the connection until this call
             unsafe { c.end_light() };
         }
+        if self.retired.load(Ordering::SeqCst) && c.is_connected() {
+            // nothing will use it again: don't hold a server slot until the
+            // generation's last connection is back
+            // SAFETY: the caller held the connection until this call
+            unsafe { c.disconnect() };
+        }
+        let lease = c
+            .lease
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
         c.in_use.store(false, Ordering::SeqCst);
         if used {
             c.free_time.store(now_unix_sec(), Ordering::SeqCst);
@@ -3590,6 +3711,21 @@ impl NzbgetRsServerPool {
                 *slot += 1;
             }
         }
+        drop(g);
+        Some(lease)
+    }
+
+    /// Retires this generation (a config reload replaced it): no more
+    /// checkouts, idle connections closed now, the ones still out closed as
+    /// they come back. Returns how many are still out.
+    fn retire(&self) -> usize {
+        // a poisoned lock still retires: a generation never retired would hand
+        // out connections of an old configuration
+        let mut g = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.retired.store(true, Ordering::SeqCst);
+        // an idle connection has no lease and nobody holds its pointer
+        g.connections.retain(|c| c.in_use.load(Ordering::SeqCst));
+        g.connections.len()
     }
 
     pub fn close_unused_connections(&self) {
@@ -3669,6 +3805,12 @@ impl NzbgetRsServerPool {
                 .filter(|c| c.in_use.load(Ordering::SeqCst))
                 .count()
         })
+    }
+
+    /// Connections the pool has, checked out or not (tests).
+    #[cfg(test)]
+    fn connection_count(&self) -> usize {
+        self.inner.lock().map_or(0, |g| g.connections.len())
     }
 
     pub fn primary_connections(&self) -> i32 {
@@ -3837,7 +3979,7 @@ impl NzbgetRsServerPool {
 
 /// Creates a server pool and makes it the active one.
 pub(crate) fn install_server_pool() -> Arc<NzbgetRsServerPool> {
-    let arc = Arc::new(NzbgetRsServerPool::new(crate::ffi::tls_host()));
+    let arc = NzbgetRsServerPool::new_shared(crate::ffi::tls_host());
     // A new pool (start-up or a config reload) may hold servers that have
     // articles the old one lacked.
     crate::articlefetcher::forget_missing_everywhere();
@@ -3850,12 +3992,21 @@ pub(crate) fn install_server_pool() -> Arc<NzbgetRsServerPool> {
     arc
 }
 
-/// Drops `pool`, first clearing the active pool if it is this one.
+/// Drops the daemon's hold on `pool`, first clearing the active pool if it is
+/// this one. The generation is retired: connections still checked out (a
+/// live stream repair, a probe, a held fleet connection) keep it alive and
+/// finish on it; it is freed when the last one comes back.
 pub(crate) fn release_server_pool(pool: Arc<NzbgetRsServerPool>) {
     if let Some(lg) = crate::log::active_log() {
         lg.unregister_debuggable(4);
     }
     let wk = Arc::downgrade(&pool);
+    // findable as retired before it stops being the active one, so a
+    // connection returned in between always reaches it
+    RETIRED_POOLS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(wk.clone());
     if let Ok(mut g) = ACTIVE_SERVER_POOL.write() {
         if g.as_ref()
             .is_some_and(|cur| std::sync::Weak::ptr_eq(cur, &wk))
@@ -3863,7 +4014,78 @@ pub(crate) fn release_server_pool(pool: Arc<NzbgetRsServerPool>) {
             *g = None;
         }
     }
+    let out = pool.retire();
+    if out > 0 {
+        let msg = format!(
+            "News server connections still in use when the server pool was replaced: {out}; they finish on the old pool (the server briefly sees them beside the new pool's)"
+        );
+        crate::log::log_active_bytes(crate::log::MK_DETAIL, msg.as_bytes());
+    }
     drop(pool);
+    // a generation freed meanwhile leaves no entry behind
+    retired_pools_alive();
+}
+
+impl Drop for NzbgetRsServerPool {
+    fn drop(&mut self) {
+        let left = self.inner.get_mut().map_or(0, |g| g.connections.len());
+        if *self.retired.get_mut() && left > 0 {
+            let msg = format!(
+                "Old server pool freed after its last {left} connection(s) came back"
+            );
+            crate::log::log_active_bytes(crate::log::MK_DETAIL, msg.as_bytes());
+        }
+    }
+}
+
+/// Returns a checked-out connection to the generation that handed it out,
+/// whether or not a pool is active right now (between the two halves of a
+/// config reload there is none). Use this rather than freeing through
+/// [`active_server_pool`] only when there is one: a connection skipped that way
+/// stays checked out and keeps its generation alive for good.
+pub(crate) fn return_connection(conn_ptr: *mut PooledNntpConn, used: bool) {
+    if conn_ptr.is_null() {
+        return;
+    }
+    match active_server_pool() {
+        Some(pool) => pool.free_connection(conn_ptr, used),
+        None => {
+            if used {
+                crate::log::log_active_bytes(3, b"Freeing used connection");
+            }
+            free_in_other_generation(None, conn_ptr, used);
+        }
+    }
+}
+
+/// Returns `conn_ptr` to whichever other live generation owns it: the active
+/// one or a retired one. A pointer no generation knows is ignored.
+fn free_in_other_generation(
+    skip: Option<&NzbgetRsServerPool>,
+    conn_ptr: *mut PooledNntpConn,
+    used: bool,
+) {
+    let mut candidates: Vec<Arc<NzbgetRsServerPool>> = Vec::new();
+    if let Some(active) = active_server_pool() {
+        candidates.push(active);
+    }
+    {
+        let mut g = RETIRED_POOLS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        g.retain(|w| w.strong_count() > 0);
+        candidates.extend(g.iter().filter_map(std::sync::Weak::upgrade));
+    }
+    for pool in &candidates {
+        if skip.is_some_and(|s| ptr::eq(&**pool, s)) {
+            continue;
+        }
+        if let Some(lease) = pool.free_own_connection(conn_ptr, used) {
+            drop(lease);
+            break;
+        }
+    }
+    // the last lease of a retired generation may have been the one above:
+    // the generation is freed here, outside any of its methods
+    drop(candidates);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4469,6 +4691,85 @@ mod tests {
         // these tests are about the main pool alone
         pool.set_light_cap(0);
         (pool, srv)
+    }
+
+    fn shared_test_pool(connections: i32, light_cap: i32) -> (Arc<NzbgetRsServerPool>, Arc<RsNewsServer>) {
+        let pool = NzbgetRsServerPool::new_shared(crate::ffi::tls_host());
+        let srv = Arc::new(RsNewsServer::new(
+            1, true, b"s1", b"127.0.0.1", 1, 0, b"", b"", false, false, b"", connections, 0, 0, 0,
+            false, 0,
+        ));
+        pool.add_server(Arc::clone(&srv));
+        pool.init_connections();
+        pool.set_light_cap(light_cap);
+        (pool, srv)
+    }
+
+    /// 6790 crash of 2026-11-26 02:40:45 CST: a config reload freed the pool
+    /// while a live stream repair still fetched on one of its connections.
+    /// Every kind of checkout (download, check, probe, light) now leases its
+    /// generation: retiring it keeps every connection, its server and the pool
+    /// alive; it hands out nothing more; each connection can be returned
+    /// through the next generation; the old one is freed with the last.
+    #[test]
+    fn checked_out_connections_keep_a_retired_generation_alive() {
+        let (old, srv) = shared_test_pool(8, 2);
+        let dl = old.get_connection(0, None, &[]);
+        let check = old.get_check_connection(&srv);
+        let probe = old.get_probe_connection(&srv);
+        let light = old.get_light_connection(&srv);
+        let held = [dl, check, probe, light];
+        assert!(held.iter().all(|c| !c.is_null()));
+        let srv_uid = srv.uid;
+        drop(srv);
+        let weak = Arc::downgrade(&old);
+        // what the reload does: the daemon lets go of the generation
+        release_server_pool(old);
+        let gen = weak.upgrade().expect("the checkouts keep the old generation");
+        assert!(gen.is_retired());
+        assert!(gen.get_connection(0, None, &[]).is_null(), "a retired pool hands out nothing");
+        assert!(gen.get_light_connection(&gen.servers_snapshot()[0]).is_null());
+        // idle connections are closed at once; the four held ones stay
+        assert_eq!(gen.connections_in_use(), 4);
+        assert_eq!(gen.connection_count(), 4);
+        drop(gen);
+        // the connections and their server are still there for their users
+        for &c in &held {
+            let c = unsafe { &*c };
+            c.note_io(true);
+            assert_eq!(c.server.uid, srv_uid);
+            assert!(c.in_use.load(Ordering::SeqCst));
+        }
+        // the next generation: each old connection returned through it
+        let (new, _) = shared_test_pool(8, 2);
+        assert_ne!(new.servers_snapshot()[0].uid, srv_uid, "a server of another generation");
+        for (i, &c) in held.iter().enumerate() {
+            assert!(weak.upgrade().is_some(), "freed before connection {i} came back");
+            new.free_connection(c, true);
+        }
+        // (another test returning a connection may hold the old generation for
+        // a moment while it looks it up)
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while weak.upgrade().is_some() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(weak.upgrade().is_none(), "the last connection back frees the old generation");
+        // the new generation is untouched by the old one's returns
+        assert_eq!(new.connections_in_use(), 0);
+        let c = new.get_connection(0, None, &[]);
+        assert!(!c.is_null());
+        new.free_connection(c, true);
+        assert_eq!(new.connections_in_use(), 0);
+    }
+
+    /// A pool owned outright (not shared) leases nothing, as before.
+    #[test]
+    fn an_unshared_pool_leases_nothing() {
+        let (pool, _srv) = check_test_pool(2);
+        let c = pool.get_connection(0, None, &[]);
+        assert!(!c.is_null());
+        assert!(unsafe { &*c }.lease.lock().unwrap().is_none());
+        pool.free_connection(c, true);
     }
 
     fn light_test_pool(connections: i32, cap: i32) -> (NzbgetRsServerPool, Arc<RsNewsServer>) {

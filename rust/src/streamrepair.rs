@@ -8730,6 +8730,9 @@ pub trait CrossPackDonorEnv {
     /// watchdog counts them as progress, so a long borrow that is writing is
     /// never stopped for "nothing recovered" (DupeStreamTimeout).
     fn note_patched(&mut self, _bytes: i64) {}
+    /// A pass that wrote but is not credited: what [`Self::note_patched`] kept
+    /// for its credit is dropped, so it never shrinks a later pass's credit.
+    fn drop_uncredited(&mut self) {}
     fn sync_target_holes(&mut self, _target_holes: &[Vec<NzbgetRsByteRange>]) {}
     fn emit_message_bytes(&mut self, kind: TargetMessageKind, text: &[u8]);
     fn emit_extractor_log(&mut self, kind: i32, msg: &str) {
@@ -10582,6 +10585,9 @@ impl CrossPackRepairSession {
                     }
                 }
                 self.repair_sets[repair_set_idx].inner_holes = left_over;
+                if !(credit_recovery && written > 0) {
+                    env_cell.borrow_mut().drop_uncredited();
+                }
                 if credit_recovery && written > 0 {
                     let recovered_parts = donor_sources.take_served_parts();
                     let filled = holes_closed(&holes_before, &self.target_holes);

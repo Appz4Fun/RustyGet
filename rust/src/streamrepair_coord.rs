@@ -2079,6 +2079,10 @@ impl NzbgetRsStreamRepairCtrl {
                     }
                 }
 
+                fn drop_uncredited(&mut self) {
+                    self.ctrl.patched_uncredited.store(0, Ordering::SeqCst);
+                }
+
                 fn sync_target_holes(&mut self, target_holes: &[Vec<NzbgetRsByteRange>]) {
                     for (t, holes) in self.targets.iter_mut().zip(target_holes.iter()) {
                         t.holes = holes.clone();

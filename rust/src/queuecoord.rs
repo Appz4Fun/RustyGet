@@ -2019,10 +2019,17 @@ impl NzbgetRsQueueCoordinator {
                 if let Some((file, art)) = next_pair {
                     if can_proceed && (!opts.download_held || file.extra_priority) {
                         let nzb = host.nzb_snap(file.nzb_ptr, false);
-                        let conn_ptr = host.server_pool_get_connection(
-                            nzb.has_desired_server,
-                            nzb.desired_server_id,
-                        );
+                        // a download whose dead-pick probe still waits for a connection leaves
+                        // the next free one to the probe (see
+                        // `dupeprobe::probe_waiting_for_connection`)
+                        let conn_ptr = if crate::dupeprobe::probe_waiting_for_connection(nzb.id) {
+                            0
+                        } else {
+                            host.server_pool_get_connection(
+                                nzb.has_desired_server,
+                                nzb.desired_server_id,
+                            )
+                        };
                         if conn_ptr != 0 {
                             downloads_checked = true;
                             article_downloads_running = true;

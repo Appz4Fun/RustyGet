@@ -663,15 +663,15 @@ fn cannot_continue_reason(
         "live borrowing is off (it needs DupeArticleFallback=live, DirectUnpack and no RawArticle)".into()
     } else if crate::postproc::dead_volume_donor_cannot_lend(nzb.id, &backup.queued_filename) {
         "its video failed the check against the download's, or it holds the video compressed".into()
-    } else if kind(backup.ptr) == DonorKind::Unborrowable {
-        "it holds the video compressed (or encrypted with no password), which live repair cannot lend from".into()
-    } else if kind(nzb.ptr) == DonorKind::Unborrowable {
-        "the download's own archive cannot be borrowed into".into()
     } else if host
         .nzb_get_param(backup.ptr, b"DupeKind")
         .is_some_and(|k| k.trim_ascii() == b"other")
     {
         "TwinCheck found another video in it".into()
+    } else if kind(backup.ptr) == DonorKind::Unborrowable {
+        "it holds the video compressed (or encrypted with no password), which live repair cannot lend from".into()
+    } else if kind(nzb.ptr) == DonorKind::Unborrowable {
+        "the download's own archive cannot be borrowed into".into()
     } else if host
         .nzb_get_param(backup.ptr, b"DupeKind")
         .is_some_and(|k| k.trim_ascii().starts_with(b"twin:"))
@@ -757,8 +757,9 @@ fn backup_continues_extraction(
 /// a twin TwinCheck proved (`DupeKind=twin`), the same video in another container, another
 /// container whose video is not verified yet (`container`; see
 /// `donorkind::unknown_kind_is_labelled_alt`), or a compressed copy the fleet intake found the
-/// same video (`DupeCopyKind=unborrowable`, `DupeVideo=same`: restarted by `restartlend`). Not proof of the same video: each borrow checks
-/// the video before it lends.
+/// same video (`DupeCopyKind=unborrowable`, `DupeVideo=same`: restarted by `restartlend`)
+/// unless TwinCheck labelled it another video (`DupeKind=other`). Not proof of the same video:
+/// each borrow checks the video before it lends.
 pub(crate) fn backup_may_lend_while_extracting(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     backup_ptr: NzbRef,

@@ -9941,6 +9941,8 @@ pub struct CrossPackRepairSession {
     /// compared the donor's video against bytes the download holds and found it the same (see
     /// [`Self::set_donor_known_same`]).
     donor_known_same: bool,
+    /// See [`Self::set_donor_restartable`].
+    donor_restartable: bool,
     /// The payload size the earlier confirmation was made for.
     donor_known_size: Option<i64>,
     /// A check of the video of the donor of the last [`Self::process_donor`] call differed.
@@ -10195,6 +10197,7 @@ impl CrossPackRepairSession {
             materialize_dead: dead_context.materialize,
             donor_identity: None,
             donor_known_same: false,
+            donor_restartable: true,
             donor_known_size: None,
             donor_differed: false,
             video_confirmed: false,
@@ -10233,6 +10236,13 @@ impl CrossPackRepairSession {
     /// compare (failover-continue: the dead tail is borrowed to the end instead of the release
     /// being downloaded and extracted again from its first byte). A probe that compares in full
     /// and differs still refuses the donor.
+    /// Whether the next [`Self::process_donor`] call may restart the donor's compressed video
+    /// near the frontier (`restartlend`): not for a copy TwinCheck labelled another video
+    /// (`DupeKind=other`). On by default.
+    pub fn set_donor_restartable(&mut self, restartable: bool) {
+        self.donor_restartable = restartable;
+    }
+
     pub fn set_donor_known_same(&mut self, known: Option<i64>) {
         self.donor_known_same = known.is_some();
         self.donor_known_size = known;
@@ -10619,6 +10629,7 @@ impl CrossPackRepairSession {
                             && (self.has_pending_dead_fills()
                                 || self.dying_at_frontier(repair_set_idx)
                                 || crate::frontiercut::is_cut(self.dead_nzb_id))
+                            && self.donor_restartable
                             && crate::restartlend::earlier(self.dead_nzb_id, &restart_key).is_none()
                             && !waiting
                             && !env_cell.borrow_mut().is_stopped()

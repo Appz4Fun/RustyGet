@@ -4327,7 +4327,9 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
     - ``compressed``: the same movie compressed (rar -m3), labelled
       ``unborrowable`` by a fleet: it cannot lend live, so the primary fails
       over to it as before, with the reason logged;
-    - ``rar5m3``: the same movie compressed (rar -m3, RAR5), labelled ``alt``:
+    - ``rar5m3``: the same movie compressed (rar -m3, RAR5), labelled
+      ``DupeVideo=same`` by the fleet intake with no DupeKind (TwinCheck
+      without par2 leaves none):
       zipfast restarts its decoder near the frontier with the primary's own
       output as the window (``open_at`` + ``complete_rar5``, held plaintext),
       so it lends only what lies past the frontier and a search region;
@@ -4548,6 +4550,7 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
                 + _grep_log(t, 'Wrote dead volume'))
         ok = (integ and winner == 'Backup' and failed_over == 1 and lent == 0
               and _grep_log(t, 'Cannot restart the compressed video') == 0
+              and _grep_log(t, 'Restarted the') == 0
               and _grep_log(t, 'cannot continue the extraction of Primary') >= 1)
     elif backup == 'other':
         # the backup's own (other) video, whole: nothing of it was lent into the primary's

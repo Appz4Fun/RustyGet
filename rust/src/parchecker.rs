@@ -24,6 +24,8 @@ use std::sync::{Arc, LazyLock, Mutex};
 mod live_capture_tests;
 #[cfg(test)]
 mod live_lifecycle_tests;
+#[cfg(test)]
+mod live_trust_tests;
 mod live_metrics;
 pub(crate) mod live_namespace;
 #[cfg(test)]
@@ -198,6 +200,19 @@ struct ActiveStreamingSession {
     queue_bindings: Mutex<HashMap<i32, FileId>>,
     /// 16k hashes several par2 files share: a first article never binds by one of them.
     shared_hash16k: HashSet<[u8; 16]>,
+    /// The whole-file read at repair end was put back (`set_trust_verified_slices(false)`):
+    /// a write into a target could not be vouched for. See [`ActiveStreamingSession::distrust`].
+    trust_revoked: AtomicBool,
+    /// Recovery volumes being written, by queue file id: their bytes as written, so the
+    /// completed volume is absorbed from RAM (`on_recovery_volume_bytes`), not read back.
+    recovery_tees: Mutex<HashMap<i32, RecoveryTee>>,
+    /// Bytes reached a target file since staged slices were last completed: par-rs may now
+    /// finish a slice a RAM-only article completed whose committed part was not readable yet
+    /// (`complete_staged_slices`, M6f: reads only those committed gaps).
+    staged_due: AtomicBool,
+    /// Bytes held in RAM for recovery slots that wait for a back-fill (file, offset, run),
+    /// and their total; see [`ActiveStreamingSession::backfill_held`].
+    held_backfill: Mutex<(Vec<(FileId, u64, Vec<u8>)>, u64)>,
     // Drop last, after the session, queue and all owned metadata. Grows with
     // the syndrome slots as damage appears (see `grow_for_damage`).
     budget: Mutex<SessionBudgetLease>,
@@ -334,6 +349,9 @@ struct DeferredArticles {
     /// Queue files whose first article matched no par2 file: not part of the set.
     not_in_set: HashSet<i32>,
 }
+
+/// At most this many bytes wait for the back-fill thread ([`ActiveStreamingSession::backfill_held`]).
+pub(crate) const HELD_BACKFILL_LIMIT: u64 = 64 << 20;
 
 /// At most this many captured-article marks and stashed articles per session.
 const LIVE_MARK_LIMIT: usize = 65536;
@@ -575,6 +593,11 @@ fn build_streaming_session_with(
         }
         None => StreamingParSession::new(set, base_dir, options)?,
     };
+    // Every byte live PAR verifies is the byte written to its target (see
+    // `ActiveStreamingSession::distrust` for the writes that turn this off), so a target whose
+    // every slice verified needs no whole-file read at repair end.
+    let trust = live_trust_allowed();
+    session.set_trust_verified_slices(trust);
     Ok(Arc::new(ActiveStreamingSession {
         session,
         generation: SessionGeneration(generation),
@@ -603,6 +626,10 @@ fn build_streaming_session_with(
         admission_progress: AtomicU64::new(0),
         queue_bindings: Mutex::new(HashMap::new()),
         shared_hash16k,
+        trust_revoked: AtomicBool::new(!trust),
+        recovery_tees: Mutex::new(HashMap::new()),
+        staged_due: AtomicBool::new(false),
+        held_backfill: Mutex::new((Vec::new(), 0)),
     }))
 }
 
@@ -733,6 +760,11 @@ impl ActiveStreamingSession {
     /// completion replay. Copies only, no I/O: the cache thread calls it after its write.
     /// This is the one place a cache write meets live PAR.
     fn articles_written(&self, id: FileId, in_file: bool, items: &[(u64, &[u8])]) -> usize {
+        self.backfill_held(&id, items);
+        // Committed gaps of staged slices may be readable now: the next drain finishes them.
+        if !items.is_empty() {
+            self.staged_due.store(true, Ordering::Release);
+        }
         let in_file = in_file && self.has_written_file(&id);
         let mut ready: Vec<(u64, u64, u32)> = Vec::new();
         {
@@ -831,6 +863,92 @@ impl ActiveStreamingSession {
             }
         }
         handed
+    }
+
+    /// Recovery slots added after slices were verified (growth past the plan, or a volume
+    /// beyond the preallocated exponents) wait for a back-fill of those slices. Bytes still
+    /// held in RAM (a cache flush, completion assembly) are kept for it here, joined into
+    /// contiguous runs (articles are usually smaller than a slice), and the back-fill thread
+    /// folds them (`backfill_from_bytes`: whole IFSC-verified slices only) before it reads
+    /// disk ([`Self::apply_held_backfill`]). Copies only: the callers hold the cache flush
+    /// lock, and par-rs's fold waits on a repair's exclusive payload gate, so it never runs
+    /// here. Nothing is copied unless a back-fill is pending; at most `HELD_BACKFILL_LIMIT`
+    /// bytes wait. Returns the bytes kept.
+    fn backfill_held(&self, id: &FileId, items: &[(u64, &[u8])]) -> u64 {
+        if items.is_empty() || !self.session.needs_backfill() || self.session.is_cancelled() {
+            // Nothing waits for held bytes any more: release what an earlier flush kept.
+            if !items.is_empty() {
+                let mut held = self.held_backfill.lock().unwrap_or_else(|e| e.into_inner());
+                if held.1 > 0 && !self.session.needs_backfill() {
+                    *held = (Vec::new(), 0);
+                }
+            }
+            return 0;
+        }
+        let mut sorted: Vec<(u64, &[u8])> = items
+            .iter()
+            .copied()
+            .filter(|(_, bytes)| !bytes.is_empty())
+            .collect();
+        sorted.sort_unstable_by_key(|&(offset, _)| offset);
+        // A run shorter than a slice (or the whole file) holds no whole slice.
+        let floor = self
+            .session
+            .slice_size()
+            .min(self.file_lengths.get(id).copied().unwrap_or(0))
+            .max(1);
+        // Run boundaries first (indices into `sorted`), so only runs that hold a whole slice
+        // and fit the room left are copied.
+        let mut spans: Vec<(usize, usize, u64)> = Vec::new(); // first, end (exclusive), bytes
+        for (i, &(offset, bytes)) in sorted.iter().enumerate() {
+            match spans.last_mut() {
+                Some((first, end, len)) if sorted[*first].0 + *len == offset => {
+                    *end = i + 1;
+                    *len += bytes.len() as u64;
+                }
+                _ => spans.push((i, i + 1, bytes.len() as u64)),
+            }
+        }
+        let mut held = self.held_backfill.lock().unwrap_or_else(|e| e.into_inner());
+        let mut kept = 0u64;
+        for (first, end, len) in spans {
+            if len < floor || held.1 + len > HELD_BACKFILL_LIMIT {
+                continue;
+            }
+            let mut run = Vec::with_capacity(len as usize);
+            for &(_, bytes) in &sorted[first..end] {
+                run.extend_from_slice(bytes);
+            }
+            held.1 += len;
+            kept += len;
+            held.0.push((*id, sorted[first].0, run));
+        }
+        kept
+    }
+
+    /// Folds the bytes [`Self::backfill_held`] kept into the slots that wait for them, on the
+    /// back-fill thread, before it reads anything from disk. Returns the slices filled.
+    fn apply_held_backfill(&self) -> usize {
+        let runs = {
+            let mut held = self.held_backfill.lock().unwrap_or_else(|e| e.into_inner());
+            held.1 = 0;
+            std::mem::take(&mut held.0)
+        };
+        if !self.session.needs_backfill() {
+            return 0;
+        }
+        let mut done = 0usize;
+        for (id, start, run) in runs {
+            if let Ok(n) = self.session.backfill_from_bytes(&id, start, &run) {
+                done += n;
+            }
+        }
+        if done > 0 {
+            self.metrics
+                .ram_backfilled_slices
+                .fetch_add(done as u64, Ordering::Relaxed);
+        }
+        done
     }
 
     /// An article of a queue file not matched to a par2 file yet. The file's first article
@@ -1012,6 +1130,7 @@ impl ActiveStreamingSession {
     /// File `id` completed: its completion replay covers what waits, and par-rs reads it at
     /// `path` from now on.
     fn file_completed(&self, id: FileId, path: &Path) {
+        self.staged_due.store(true, Ordering::Release);
         let mut sources = self.committed.lock().unwrap_or_else(|e| e.into_inner());
         sources.awaiting.remove(&id);
         sources.paths.insert(id, (path.to_path_buf(), false));
@@ -1747,13 +1866,19 @@ fn drain_live_articles_locked(
         loop {
             ensure_current_generation(nzb_id, entry)?;
             let Some(article) = take_live_article(entry) else {
+                if entry.staged_due.swap(false, Ordering::AcqRel) {
+                    entry.complete_staged_slices(nzb_id)?;
+                }
                 return Ok(count);
             };
             let mut result = entry.timed(nzb_id, || article.fold());
             // Staging that a loan of free ParBuffer enlarges enough takes the article after
             // all: not a refusal. A shortfall no loan covers parks the article's slices,
             // read back whole from its file once complete; without a known file it is
-            // refused and reported.
+            // refused and reported. Since par-rs M6f a RAM-only article that completes a
+            // slice partly committed on disk is no longer refused ("RAM-only slice
+            // coverage"): par-rs reads only the committed gap, or keeps the RAM bytes staged
+            // until `complete_staged_slices`. Only a full partial-slice staging cap parks.
             if matches!(&result, Err(error) if entry.lend_memory(error)) {
                 result = entry.timed(nzb_id, || article.fold());
             }
@@ -1931,6 +2056,299 @@ impl Drop for LiveTee {
     }
 }
 
+/// Whether live PAR may take its verified slices as proof that a target is whole
+/// (`set_trust_verified_slices`). Not when nothing is written (SkipWrite) or the files hold
+/// raw articles (RawArticle): the bytes verified are then not the bytes on disk.
+fn live_trust_allowed() -> bool {
+    crate::options::active_options().is_none_or(|o| {
+        let sc = o.scalars();
+        sc.skip_write == 0 && sc.raw_article == 0
+    })
+}
+
+impl ActiveStreamingSession {
+    /// par-rs `complete_staged_slices` (M6f): finishes slices whose coverage is complete but
+    /// whose committed part was not readable when a RAM-only article completed them, reading
+    /// only those committed gaps. Damage it finds asks for recovery as any article would.
+    ///
+    /// Only a cancellation is an error: any other failure (a gap not readable yet) keeps the
+    /// RAM bytes staged in par-rs and is retried after the next flush.
+    fn complete_staged_slices(&self, nzb_id: i32) -> Result<(), RepairError> {
+        match self.timed(nzb_id, || self.session.complete_staged_slices()) {
+            Ok(outcome) => {
+                self.unpause(outcome.unpause.as_ref());
+                Ok(())
+            }
+            Err(RepairError::Cancelled) => Err(RepairError::Cancelled),
+            Err(_) => Ok(()),
+        }
+    }
+
+    /// Puts the whole-file read back for this session's remaining repairs: something wrote
+    /// into a target that live PAR cannot vouch for (bytes on disk that may differ from the
+    /// bytes it verified, and that it was not told about with `on_range_replaced`). Once per
+    /// session; logged with the reason.
+    fn distrust(&self, nzb_id: i32, reason: &str) {
+        if self.trust_revoked.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.session.set_trust_verified_slices(false);
+        let message = format!(
+            "Live PAR (job {nzb_id}): whole-file check kept at repair end: {reason}"
+        );
+        crate::log::log_active_bytes(crate::queuesubsys_host::MK_DETAIL, message.as_bytes());
+    }
+}
+
+/// See [`ActiveStreamingSession::distrust`]. No-op without a live session.
+pub(crate) fn streaming_session_distrust(nzb_id: i32, reason: &str) {
+    if let Some(entry) = active_streaming_session(nzb_id) {
+        entry.distrust(nzb_id, reason);
+    }
+}
+
+/// Whether live PAR of `nzb_id` still takes verified slices as proof (tests and the log).
+#[cfg(test)]
+pub(crate) fn streaming_session_trusts_slices(nzb_id: i32) -> Option<bool> {
+    active_streaming_session(nzb_id).map(|entry| !entry.trust_revoked.load(Ordering::Acquire))
+}
+
+/// The bytes of a recovery volume as they are written, charged to the session's snapshot
+/// byte limit (ParBuffer) for the whole volume. Void (kept only as a mark) when there was no
+/// room or anything went wrong: the volume is then read back as before.
+struct RecoveryTee {
+    size: u64,
+    charged: u64,
+    bytes: Vec<u8>,
+    written: std::collections::BTreeMap<u64, u64>,
+    covered: u64,
+    void: bool,
+}
+
+impl ActiveStreamingSession {
+    fn release_recovery_tee(&self, tee: RecoveryTee) {
+        if tee.charged > 0 {
+            self.articles.lock().unwrap_or_else(|e| e.into_inner()).bytes -= tee.charged;
+        }
+    }
+
+    fn recovery_bytes_written(&self, file_id: i32, size: u64, items: &[(u64, &[u8])]) {
+        let mut tees = self.recovery_tees.lock().unwrap_or_else(|e| e.into_inner());
+        if !tees.contains_key(&file_id) {
+            // Charge the whole volume up front, as a snapshot would be; a loan of free
+            // ParBuffer covers a shortfall (charged to the snapshot limit, so lent as for one).
+            let teed: u64 = tees.values().map(|tee| tee.charged).sum();
+            let charged = (|| {
+                let alloc = usize::try_from(size).ok().filter(|&n| n > 0)?;
+                let mut queue = self.articles.lock().unwrap_or_else(|e| e.into_inner());
+                let mut next = queue.bytes.checked_add(size)?;
+                let mut limit = self.article_byte_limit.load(Ordering::Acquire);
+                if next > limit {
+                    drop(queue);
+                    self.lend_memory(&RepairError::StreamingMemoryLimit {
+                        context: "live article snapshots",
+                        required_bytes: next,
+                        limit_bytes: limit,
+                    });
+                    queue = self.articles.lock().unwrap_or_else(|e| e.into_inner());
+                    next = queue.bytes.checked_add(size)?;
+                    limit = self.article_byte_limit.load(Ordering::Acquire);
+                }
+                // All tees together at most half the limit, so recovery volumes never starve
+                // the source articles' snapshots (each of those is a read-back saved too).
+                if next > limit || teed.saturating_add(size) > limit / 2 {
+                    return None;
+                }
+                queue.bytes = next;
+                Some(alloc)
+            })();
+            let tee = match charged {
+                Some(alloc) => RecoveryTee {
+                    size,
+                    charged: size,
+                    bytes: vec![0u8; alloc],
+                    written: std::collections::BTreeMap::new(),
+                    covered: 0,
+                    void: false,
+                },
+                None => RecoveryTee {
+                    size,
+                    charged: 0,
+                    bytes: Vec::new(),
+                    written: std::collections::BTreeMap::new(),
+                    covered: 0,
+                    void: true,
+                },
+            };
+            tees.insert(file_id, tee);
+        }
+        let Some(tee) = tees.get_mut(&file_id) else {
+            return;
+        };
+        if tee.void {
+            return;
+        }
+        for &(offset, data) in items {
+            let len = data.len() as u64;
+            let end = offset.checked_add(len);
+            if tee.size != size || end.is_none_or(|end| end > tee.size) {
+                tee.void = true;
+                break;
+            }
+            // The same article again is fine; any other overlap would make `covered` lie.
+            match tee.written.get(&offset) {
+                Some(&known) if known == len => {}
+                Some(_) => {
+                    tee.void = true;
+                    break;
+                }
+                None => {
+                    let before = tee
+                        .written
+                        .range(..offset)
+                        .next_back()
+                        .is_some_and(|(&o, &l)| o + l > offset);
+                    let after = tee
+                        .written
+                        .range(offset..)
+                        .next()
+                        .is_some_and(|(&o, _)| o < offset + len);
+                    if before || after {
+                        tee.void = true;
+                        break;
+                    }
+                    tee.written.insert(offset, len);
+                    tee.covered += len;
+                }
+            }
+            tee.bytes[offset as usize..(offset + len) as usize].copy_from_slice(data);
+        }
+        if tee.void {
+            if let Some(tee) = tees.remove(&file_id) {
+                let charged = tee.charged;
+                tees.insert(
+                    file_id,
+                    RecoveryTee {
+                        size: tee.size,
+                        charged: 0,
+                        bytes: Vec::new(),
+                        written: std::collections::BTreeMap::new(),
+                        covered: 0,
+                        void: true,
+                    },
+                );
+                drop(tees);
+                if charged > 0 {
+                    self.articles.lock().unwrap_or_else(|e| e.into_inner()).bytes -= charged;
+                }
+            }
+        }
+    }
+
+    /// The whole written volume `file_id` (`len` bytes on disk), when every byte of it went
+    /// through the tee with no overlap. Takes the tee either way.
+    fn take_recovery_bytes(&self, file_id: i32, len: u64) -> Option<RecoveryTee> {
+        let tee = self
+            .recovery_tees
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&file_id)?;
+        if tee.void || tee.size != len || tee.covered != len || tee.bytes.len() as u64 != len {
+            self.release_recovery_tee(tee);
+            return None;
+        }
+        Some(tee)
+    }
+}
+
+/// The article writer wrote `items` (offset, decoded bytes) of recovery volume `file_id`
+/// (`size` bytes in all) of job `nzb_id`: keep them for the volume's absorption at its
+/// completion. No I/O; called after the write succeeded, before the bytes are freed.
+pub(crate) fn streaming_session_recovery_bytes_written(
+    nzb_id: i32,
+    file_id: i32,
+    size: u64,
+    items: &[(u64, &[u8])],
+) {
+    let Some(entry) = active_streaming_session(nzb_id) else {
+        return;
+    };
+    if entry.session.is_cancelled() || items.is_empty() {
+        return;
+    }
+    entry.recovery_bytes_written(file_id, size, items);
+}
+
+/// A write of recovery volume `file_id` failed or bypassed the tee: read it back instead.
+pub(crate) fn streaming_session_recovery_void(nzb_id: i32, file_id: i32) {
+    let Some(entry) = active_streaming_session(nzb_id) else {
+        return;
+    };
+    let mut tees = entry.recovery_tees.lock().unwrap_or_else(|e| e.into_inner());
+    let size = tees.get(&file_id).map_or(0, |tee| tee.size);
+    let old = tees.insert(
+        file_id,
+        RecoveryTee {
+            size,
+            charged: 0,
+            bytes: Vec::new(),
+            written: std::collections::BTreeMap::new(),
+            covered: 0,
+            void: true,
+        },
+    );
+    drop(tees);
+    if let Some(old) = old {
+        entry.release_recovery_tee(old);
+    }
+}
+
+/// Whether job `nzb_id`'s live session has recovery slots waiting for a back-fill.
+pub(crate) fn streaming_session_needs_backfill(nzb_id: i32) -> bool {
+    active_streaming_session(nzb_id)
+        .is_some_and(|entry| !entry.session.is_cancelled() && entry.session.needs_backfill())
+}
+
+/// Bytes of queue file `identity` RustyGet holds in RAM right after writing them: kept for
+/// recovery slots added after their slices verified, so the back-fill need not read them
+/// from disk (see `backfill_held`). Returns the bytes kept.
+pub(crate) fn streaming_session_backfill_held(
+    nzb_id: i32,
+    identity: (Option<i32>, &[u8], &[u8]),
+    items: &[(u64, &[u8])],
+) -> u64 {
+    let Some(entry) = active_streaming_session(nzb_id) else {
+        return 0;
+    };
+    if entry.session.is_cancelled() {
+        return 0;
+    }
+    let Ok(id) = live_source_id(&entry, identity.0, identity.1, identity.2) else {
+        return 0;
+    };
+    entry.backfill_held(&id, items)
+}
+
+/// Drops recovery volume `file_id`'s tee and its charge (a lost, deleted or failed volume).
+pub(crate) fn streaming_session_recovery_forget(nzb_id: i32, file_id: i32) {
+    let Some(entry) = active_streaming_session(nzb_id) else {
+        return;
+    };
+    let old = entry
+        .recovery_tees
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&file_id);
+    if let Some(old) = old {
+        entry.release_recovery_tee(old);
+    }
+}
+
+/// Whether job `nzb_id` has a live session that would take recovery volume bytes.
+pub(crate) fn streaming_session_wants_recovery_bytes(nzb_id: i32) -> bool {
+    active_streaming_session(nzb_id).is_some_and(|entry| !entry.session.is_cancelled())
+}
+
 /// Jobs with queued work, copied under the registry lock without doing repair work.
 pub(crate) fn streaming_session_pending_article_jobs() -> Vec<i32> {
     let entries: Vec<_> = STREAMING_SESSIONS
@@ -1967,7 +2385,8 @@ pub(crate) fn streaming_session_pending_article_jobs() -> Vec<i32> {
                 .is_empty();
             let backfill = entry.backfill_due();
             let poll = live_poll_due(id);
-            (queued || warning || unpause || backfill || poll).then_some(id)
+            let staged = entry.staged_due.load(Ordering::Acquire);
+            (queued || warning || unpause || backfill || poll || staged).then_some(id)
         })
         .collect()
 }
@@ -2252,8 +2671,13 @@ pub(crate) fn streaming_session_process_completed_file_with_start(
             // every packet is checked by MD5 and the reader resyncs past holes,
             // so only the damaged blocks are lost. Dropping the whole volume made
             // the selector fetch the next, larger one for blocks already here.
-            streaming_session_on_recovery_volume_arrived(nzb_id, &file.path, file.queued_id)
-                .ok_or(RepairError::Cancelled)??;
+            streaming_session_on_recovery_volume_completed(
+                nzb_id,
+                &file.path,
+                file.queued_id,
+                file.successful,
+            )
+            .ok_or(RepairError::Cancelled)??;
             return Ok(false);
         }
         let Some(entry) = active_streaming_session(nzb_id) else {
@@ -2352,6 +2776,12 @@ pub(crate) fn streaming_session_process_completed_file_with_start(
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push_back(item);
+    } else if result.is_err() && item.file.par_file {
+        // Not retried: a recovery volume's kept bytes would hold their charge until the
+        // session ends.
+        if let Some(id) = item.file.queued_id.and_then(|id| i32::try_from(id).ok()) {
+            streaming_session_recovery_forget(nzb_id, id);
+        }
     }
     Some(result)
 }
@@ -3145,6 +3575,10 @@ pub fn streaming_session_on_article_failed_permanently(
 /// A recovery volume that was in flight failed outright and left nothing on
 /// disk: stop counting its blocks as coming and fetch a replacement.
 pub(crate) fn streaming_session_on_recovery_volume_lost(nzb_id: i32, queued_id: u64) {
+    // Its kept bytes (if any) are of no use now: give their charge back.
+    if let Ok(file_id) = i32::try_from(queued_id) {
+        streaming_session_recovery_forget(nzb_id, file_id);
+    }
     let _ = with_live_session(nzb_id, |entry| {
         entry
             .queued_blocks
@@ -3154,6 +3588,63 @@ pub(crate) fn streaming_session_on_recovery_volume_lost(nzb_id: i32, queued_id: 
         entry.unpause(entry.session.on_recovery_volume_lost(queued_id).as_ref());
         Ok(())
     });
+}
+
+/// A recovery volume of the queue completed at `path`: absorbed from the bytes the article
+/// writer wrote (`on_recovery_volume_bytes`, no read-back) when every byte of it went through
+/// the recovery tee and the file on disk has their length; otherwise read back from `path`
+/// as before (`on_recovery_volume_arrived`). `path` stays the volume's location for a later
+/// slot-cap raise either way.
+pub(crate) fn streaming_session_on_recovery_volume_completed(
+    nzb_id: i32,
+    path: &Path,
+    queued_id: Option<u64>,
+    successful: bool,
+) -> Option<Result<usize, RepairError>> {
+    let entry = active_streaming_session(nzb_id)?;
+    let file_id = queued_id.and_then(|id| i32::try_from(id).ok());
+    let len = std::fs::metadata(path).ok().filter(|m| m.is_file()).map(|m| m.len());
+    let tee = match (file_id, len) {
+        (Some(id), Some(len)) if successful => entry.take_recovery_bytes(id, len),
+        (Some(id), _) => {
+            streaming_session_recovery_void(nzb_id, id);
+            entry.take_recovery_bytes(id, 0)
+        }
+        _ => None,
+    };
+    let Some(tee) = tee else {
+        return streaming_session_on_recovery_volume_arrived(nzb_id, path, queued_id);
+    };
+    let result = with_live_session(nzb_id, |entry| {
+        entry.grow_for_damage();
+        if let Some(id) = queued_id {
+            entry
+                .queued_blocks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&id);
+        }
+        let count = entry
+            .session
+            .on_recovery_volume_bytes(path, &tee.bytes, queued_id)?;
+        entry.metrics.recovery_volumes_from_ram.fetch_add(1, Ordering::Relaxed);
+        entry
+            .metrics
+            .recovery_bytes_from_ram
+            .fetch_add(tee.bytes.len() as u64, Ordering::Relaxed);
+        entry.grow_for_damage();
+        entry.unpause(entry.session.request_unpause().as_ref());
+        if let Some(id) = queued_id {
+            entry
+                .pending_unpause_ids
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|&x| x != id);
+        }
+        Ok(count)
+    });
+    entry.release_recovery_tee(tee);
+    result.inspect(|_| streaming_session_kick_backfill(nzb_id))
 }
 
 /// Registers a newly downloaded `.vol*.par2` recovery volume with the active [`StreamingParSession`].
@@ -3238,6 +3729,8 @@ pub(crate) fn streaming_session_kick_backfill(nzb_id: i32) {
             // Charged directly, not through `timed`, whose repair-stat delta could pick up a
             // foreground repair running at the same time.
             let started = std::time::Instant::now();
+            // Bytes a flush or a completion held in RAM go first: never read back.
+            worker.apply_held_backfill();
             let reread = worker.session.io_stats().backfill_bytes_read;
             let backfilled = worker.session.backfill_pending().is_ok();
             let reread = worker.session.io_stats().backfill_bytes_read.saturating_sub(reread);
@@ -3891,6 +4384,9 @@ impl TargetWriteLease {
         // The final queue callback can precede its deferred RAM fold. Consume the
         // admitted snapshots here before ordinary postprocessing may take over.
         drain_live_articles_locked(nzb_id, &entry)?;
+        // Before the live path gives up on a slice: one a RAM-only article completed while
+        // its committed part was not on disk yet is finished now (only those gaps are read).
+        entry.complete_staged_slices(nzb_id)?;
         let par_ids: Vec<_> = ids.iter().map(|(_, id)| *id).collect();
         targets_current()?;
         let (report, hashes) = entry.record(entry.timed(nzb_id, || {

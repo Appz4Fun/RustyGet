@@ -2680,7 +2680,10 @@ impl NzbgetRsStreamRepairCtrl {
                 .filter_map(|(s, e)| Some((u64::try_from(s).ok()?, u64::try_from(e).ok()?)))
                 .collect();
             let Some(head_len) = number.checked_sub(1).and_then(|index| {
-                crate::deadvolume::restore_head_from_tail(&path(&t.filename), &holes, index as usize)
+                // Guarded: live PAR re-checks the rewritten head (or stops), never trusts
+                // slices it verified before this write.
+                crate::deadvolume::restore_head_guarded(&path(&t.filename), &holes, index as usize)
+                    .map(|(head, _)| head)
             }) else {
                 continue;
             };
@@ -2743,7 +2746,7 @@ impl NzbgetRsStreamRepairCtrl {
                 .collect();
             siblings.sort();
             for (_, sibling) in siblings.into_iter().take(4) {
-                if crate::deadvolume::restore_tail_from_sibling(
+                if crate::deadvolume::restore_tail_from_sibling_guarded(
                     &path(&t.filename),
                     &holes,
                     &path(sibling),

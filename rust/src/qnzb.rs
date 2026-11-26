@@ -2603,22 +2603,27 @@ fn calc_critical_health(s: &NzbScalars, allow_estimation: bool) -> i32 {
     )
 }
 
-/// NzbInfo::IsDownloadCompleted over the file list.
-fn is_download_completed(p: *const NzbScalars, ignore_paused_pars: bool) -> bool {
+/// NzbInfo::IsDownloadCompleted over the file list, ignoring paused par files and strictly,
+/// from one read of the list. (Strict implies the other, so it is only checked then.)
+fn download_completed(p: *const NzbScalars) -> (bool, bool) {
     use crate::qfile::field;
     let active = unsafe { (*p).activeDownloads };
     if active != 0 {
-        return false;
+        return (false, false);
     }
     let files = files_of(p);
-    crate::downloadinfo::is_download_completed_with(active, ignore_paused_pars, files.len(), |i| {
-        let f = files[i];
-        (
-            file_get(f, field::PAUSED) != 0,
-            file_get(f, field::PAR_FILE) != 0,
-            file_get(f, field::DELETED) != 0,
-        )
-    })
+    let check = |ignore_paused_pars| {
+        crate::downloadinfo::is_download_completed_with(active, ignore_paused_pars, files.len(), |i| {
+            let f = files[i];
+            (
+                file_get(f, field::PAUSED) != 0,
+                file_get(f, field::PAR_FILE) != 0,
+                file_get(f, field::DELETED) != 0,
+            )
+        })
+    };
+    let lax = check(true);
+    (lax, lax && check(false))
 }
 
 /// Health check option value `hcDupe`.
@@ -2662,6 +2667,7 @@ pub(crate) fn nzb_snapshot(
     let health = calc_health(s);
     let critical_est = calc_critical_health(s, true);
     let critical_exact = calc_critical_health(s, false);
+    let completed = download_completed(p);
     let health_check_dupe = crate::options::active_options()
         .is_some_and(|o| o.scalars().health_check == HEALTH_CHECK_DUPE);
     let is_dupe_success = crate::downloadinfo::is_dupe_success(
@@ -2754,8 +2760,8 @@ pub(crate) fn nzb_snapshot(
         health,
         critical_health_opt: critical_est,
         critical_health_exact: critical_exact,
-        is_download_completed: is_download_completed(p, true),
-        is_download_completed_strict: is_download_completed(p, false),
+        is_download_completed: completed.0,
+        is_download_completed_strict: completed.1,
         skip_disk_write: s.skipDiskWrite,
         waiting_par: s.waitingPar,
         loading_par: s.loadingPar,

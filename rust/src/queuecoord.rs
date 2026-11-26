@@ -3128,6 +3128,9 @@ impl NzbgetRsQueueCoordinator {
         // Downloads extracted live, by id: their volumes' extraction order and the lowest
         // unfinished volume (see `liveorder`), looked up once per call.
         let mut orders: Vec<(i32, Option<LiveOrder>)> = Vec::new();
+        // The queue's copies by duplicate key, read once per call when first needed (see
+        // `has_active_dupe`).
+        let mut copies_by_key: Option<CopiesByKey> = None;
 
         loop {
             let mut best_file: Option<(
@@ -3161,7 +3164,7 @@ impl NzbgetRsQueueCoordinator {
 
                 if nzb_higher
                     && !nzb_paused
-                    && !self.has_active_dupe(host, dq_ptr, &nzb)
+                    && !self.has_active_dupe(host, dq_ptr, &nzb, &mut copies_by_key)
                     && ((!opts.pause_download && !opts.quota_reached) || nzb.force_priority)
                 {
                     let propagation_delay = opts.propagation_delay;
@@ -5657,11 +5660,16 @@ impl NzbgetRsQueueCoordinator {
         false
     }
 
+    /// Whether another queued copy of `nzb`'s duplicate key downloads or is processed, so this
+    /// one waits. `copies` is the queue grouped by key, read on first need and kept for the
+    /// rest of the caller's pass: read per candidate, a queue of a thousand items with a
+    /// hundred fleets' primaries cost a hundred whole-queue reads every few milliseconds (6790).
     fn has_active_dupe(
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
         dq_ptr: usize,
         nzb: &crate::queuesubsys_host::NzbSnap,
+        copies: &mut Option<CopiesByKey>,
     ) -> bool {
         if nzb.dupe_key.is_empty() {
             return false;
@@ -5673,14 +5681,28 @@ impl NzbgetRsQueueCoordinator {
             return false;
         }
         let self_completed_empty = host.nzb_completed_files(nzb.ptr).is_empty();
-        let qlen = host.queue_len(dq_ptr);
-        for i in 0..qlen {
-            let qp = host.queue_at(dq_ptr, i);
-            if qp.is_none() || qp == nzb.ptr {
+        let copies = copies.get_or_insert_with(|| {
+            let mut by_key = CopiesByKey::new();
+            for i in 0..host.queue_len(dq_ptr) {
+                let qp = host.queue_at(dq_ptr, i);
+                if qp.is_none() {
+                    continue;
+                }
+                let queued = host.nzb_snap(qp, false);
+                if !queued.dupe_key.is_empty() {
+                    by_key.entry(queued.dupe_key.to_ascii_lowercase()).or_default().push(queued);
+                }
+            }
+            by_key
+        });
+        let Some(same_key) = copies.get(&nzb.dupe_key.to_ascii_lowercase()) else {
+            return false;
+        };
+        for queued in same_key {
+            if queued.ptr == nzb.ptr {
                 continue;
             }
-            let queued = host.nzb_snap(qp, false);
-            if !queued.dupe_key.is_empty() && queued.dupe_key.eq_ignore_ascii_case(&nzb.dupe_key) {
+            {
                 if repair_lets_other_copies_download(
                     queued.has_post_info,
                     queued.post_stage,
@@ -7679,6 +7701,9 @@ fn downloaded_ranges(
     merged.shrink_to_fit();
     merged
 }
+
+/// Queued copies grouped by lowercased duplicate key (see `has_active_dupe`).
+type CopiesByKey = std::collections::HashMap<Vec<u8>, Vec<crate::queuesubsys_host::NzbSnap>>;
 
 #[cfg(test)]
 mod tests {

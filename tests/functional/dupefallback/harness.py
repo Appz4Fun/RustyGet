@@ -14991,8 +14991,9 @@ def scenario_fleetbigqueue(daemon, t):
     coordinator's per-second fleet refresh read the whole queue once per fleet and once more
     per primary, held the queue lock nearly all the time and spun at 100% CPU, so a finished
     job waited in PP_QUEUED and the API took minutes to answer. Now: building the queue goes
-    quickly, the queue-coord thread stays under 20% of a core over 15 s (Linux, from /proc),
-    listgroups answers within 5 s, and an ordinary rar download added afterwards is unpacked
+    quickly, the queue-coord thread stays under 20% of a core over 15 s with the primaries
+    paused and under 50% (a debug build) while the 150 primaries download (Linux, from
+    /proc), listgroups answers within 5 s, and an ordinary rar download added afterwards is unpacked
     and in history as SUCCESS within 90 s."""
     api = daemon.wait_ready()
     start = time.time()
@@ -15007,15 +15008,32 @@ def scenario_fleetbigqueue(daemon, t):
     built = time.time() - start
     groups = api.listgroups()
     held = sum(1 for g in groups if _params(g).get('DupeHeld') == 'yes')
-    time.sleep(3)  # a few refreshes on the full queue
     pid = daemon.process.pid
-    cpu0, t0 = _thread_cpu_seconds(pid, 'queue-coord'), time.time()
-    time.sleep(15)
-    cpu1, t1 = _thread_cpu_seconds(pid, 'queue-coord'), time.time()
-    cpu = None if cpu0 is None or cpu1 is None else (cpu1 - cpu0) / (t1 - t0)
-    lg_start = time.time()
-    api.listgroups()
-    lg = time.time() - lg_start
+
+    def queue_coord_cpu(secs):
+        cpu0, t0 = _thread_cpu_seconds(pid, 'queue-coord'), time.time()
+        time.sleep(secs)
+        cpu1, t1 = _thread_cpu_seconds(pid, 'queue-coord'), time.time()
+        return None if cpu0 is None or cpu1 is None else (cpu1 - cpu0) / (t1 - t0)
+
+    def listgroups_secs():
+        lg_start = time.time()
+        api.listgroups()
+        return time.time() - lg_start
+
+    time.sleep(3)  # a few refreshes on the full queue
+    cpu = queue_coord_cpu(15)
+    lg = listgroups_secs()
+    # The 150 primaries download (the news server holds their articles, so the connections
+    # stay busy and the coordinator looks for the next article every few milliseconds, as on
+    # 6790), then are paused again; ArticleTimeout=20 frees the connections.
+    primaries = [g['NZBID'] for g in groups if g['NZBName'].endswith('-G0')]
+    api.editqueue('GroupResume', 0, '', primaries)
+    time.sleep(5)
+    cpu_dl = queue_coord_cpu(15)
+    lg_dl = listgroups_secs()
+    api.editqueue('GroupPause', 0, '', primaries)
+    time.sleep(25)
     # an ordinary download behind them goes through post-processing (unpack) at once
     members = _rarrenamer_members(t, 'bqP', ['testfile3'])
     added = time.time()
@@ -15026,10 +15044,12 @@ def scenario_fleetbigqueue(daemon, t):
     except RuntimeError:
         plain, plain_s = 'not in history', time.time() - added
     files = _main_basenames(t)
+    pct = lambda c: 'n/a' if c is None else '%.1f%%' % (c * 100)
     ok = (len(groups) == BIGQ_FLEETS * BIGQ_COPIES and held >= BIGQ_FLEETS * (BIGQ_COPIES - 1) and
-          (cpu is None or cpu < 0.20) and lg < 5 and plain.startswith('SUCCESS') and 'testfile3.dat' in files)
-    return ('fleetbigqueue', ok, 'groups=%d held=%d built=%.1fs queue-coord cpu=%s listgroups=%.2fs plain=%s after %.1fs' % (
-        len(groups), held, built, 'n/a' if cpu is None else '%.1f%%' % (cpu * 100), lg, plain, plain_s))
+          len(primaries) == BIGQ_FLEETS and (cpu is None or cpu < 0.20) and (cpu_dl is None or cpu_dl < 0.50) and
+          lg < 5 and lg_dl < 5 and plain.startswith('SUCCESS') and 'testfile3.dat' in files)
+    return ('fleetbigqueue', ok, 'groups=%d held=%d built=%.1fs queue-coord cpu idle=%s downloading=%s listgroups=%.2fs/%.2fs plain=%s after %.1fs' % (
+        len(groups), held, built, pct(cpu), pct(cpu_dl), lg, lg_dl, plain, plain_s))
 
 
 def scenario_dupausedunpack(daemon, t):
@@ -15826,7 +15846,7 @@ SCENARIO_OPTIONS = {
     'livestraggler': WRITER_FED_OPTIONS + ['DownloadRate=3000', 'Server1.Connections=8'],
     'directunpacktwoarchives': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1'],
     'directunpackparfailure': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1'],
-    'fleetbigqueue': ['Unpack=yes', 'DirectUnpack=no', 'ParCheck=auto', 'KeepHistory=1'],
+    'fleetbigqueue': ['Unpack=yes', 'DirectUnpack=no', 'ParCheck=auto', 'KeepHistory=1', 'ArticleTimeout=20'],
     'dupausedunpack': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1', 'ArticleTimeout=120'],
     'parfailurenodirectunpack': ['Unpack=yes', 'DirectUnpack=no', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1'],
     'parfailuredirectunpackfailed': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1'],
@@ -16052,7 +16072,7 @@ SCENARIO_REWRITE_PROXY = {'notfound451': (b'430 ', b'451 '),
                           'pathtraversalarticle': (b'name=aaaaaaaa.bin', b'name=../../ab.bin'), 'rejectnextserver': (b'=ypart begin=', b'=ypart begxn=')}
 
 # scenarios with a DelayingNntpProxy in front of Server1: [(message-id marker, delay in s)]
-SCENARIO_DELAY_PROXY = {'dupausedunpack': [(b'dpuA/testfile3.part03', 200.0)], 'livestraggler': LIVE_STRAGGLERS, 'lightburst': [(b'lbLoad', 0.25)], 'clientthreads': [(b'ctA/', 3.0)], 'xdecomp_slow': [(b'xdzB/', 0.7)], 'damagedfilestate': [(b'?6=500000:', 20.0, True)], 'articledecoyparrestart': [(b'?9=4000000:', 15.0, True), (b'?10=4500000:', 15.0, True)], 'directrenamesubdir': [(b'drA/obf', 0.4)], 'directrenamesubdirjoin': [(b'drA/obf', 0.4)], 'slowprobe': [(b'STAT ', 5.0), (b'spA/', 0.2)],
+SCENARIO_DELAY_PROXY = {'fleetbigqueue': [(b'-0-', 600.0)], 'dupausedunpack': [(b'dpuA/testfile3.part03', 200.0)], 'livestraggler': LIVE_STRAGGLERS, 'lightburst': [(b'lbLoad', 0.25)], 'clientthreads': [(b'ctA/', 3.0)], 'xdecomp_slow': [(b'xdzB/', 0.7)], 'damagedfilestate': [(b'?6=500000:', 20.0, True)], 'articledecoyparrestart': [(b'?9=4000000:', 15.0, True), (b'?10=4500000:', 15.0, True)], 'directrenamesubdir': [(b'drA/obf', 0.4)], 'directrenamesubdirjoin': [(b'drA/obf', 0.4)], 'slowprobe': [(b'STAT ', 5.0), (b'spA/', 0.2)],
                         'directunpackkeep': [(b'rel.part03', 2.0)],
                         'directunpackkeepnointer': [(b'rel.part03', 2.0)],
                         'truncatedstate': [(b'tsA/', 0.5)],

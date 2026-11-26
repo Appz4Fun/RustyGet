@@ -6548,7 +6548,7 @@ impl NzbgetRsQueueCoordinator {
             ),
             backup_kind,
             projected,
-            crate::postproc::dead_volume_borrow_underway(nzb.id),
+            borrow_underway_or_video_confirmed(host, nzb.id, backup_nzb.ptr, backup_nzb.id),
             nzb.direct_unpack_status == DirectUnpackStatus::Running,
             backup_may_lend_while_extracting(host, backup_nzb.ptr),
             backup_cannot_lend(host, nzb, &backup_nzb),

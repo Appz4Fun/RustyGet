@@ -82,6 +82,11 @@ pub struct ParCheckerOptions {
 
 pub trait ParCheckerHooks {
     fn read_options(&self) -> ParCheckerOptions;
+    /// Blocks the download knows are damaged (articles that failed for good, less those a
+    /// duplicate lent back): the batch verify folds that many plus 2 syndromes as it reads.
+    fn known_damaged_blocks(&self) -> u32 {
+        0
+    }
     fn is_stopped(&self) -> bool {
         false
     }
@@ -736,6 +741,7 @@ impl NzbgetRsParChecker {
                 opts.par_ignore_ext,
             );
             *self.cancel_token.lock().unwrap_or_else(|e| e.into_inner()) = Some(r.cancel_token());
+            r.set_known_damage(hooks.known_damaged_blocks());
 
             let par_fn = self.par_filename();
             let ev = CheckerEvents {
@@ -743,6 +749,12 @@ impl NzbgetRsParChecker {
                 hooks,
             };
             res = r.preprocess(crate::fsops::path(&par_fn), Some(&ev));
+            if let Some(error) = r.load_error.as_deref().filter(|_| res != ParResult::Success) {
+                hooks.print_message(
+                    MK_WARNING,
+                    &[b"Par2 set of ", info_name.as_slice(), b" refused: ", error.as_bytes()].concat(),
+                );
+            }
             self.block_size.store(r.block_size(), Ordering::Release);
             self.source_file_count
                 .store(r.source_files().len(), Ordering::Release);
@@ -877,6 +889,9 @@ impl NzbgetRsParChecker {
             hooks,
         };
         let res = repairer.process(do_repair, &ev);
+        if let Some(line) = repairer.fold_report_line() {
+            hooks.print_message(MK_DETAIL, line.as_bytes());
+        }
         if !do_repair {
             let files = repairer.source_files();
             let quick = files.iter().filter(|file| file.quick_verified).count();

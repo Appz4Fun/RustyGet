@@ -5002,6 +5002,19 @@ fn log_batch_repair(repairer: &Par2Repairer, base_dir: &Path, ok: bool) {
     }
 }
 
+/// At most this many syndromes are folded during a batch verify.
+pub(crate) const FOLD_DURING_VERIFY_CAP: usize = 64;
+
+/// `k` for folding during verify: the damage the download knows of plus 2, 0 without any.
+pub(crate) fn fold_during_verify_k(known_damaged: u32) -> usize {
+    if known_damaged == 0 {
+        return 0;
+    }
+    (known_damaged as usize)
+        .saturating_add(2)
+        .min(FOLD_DURING_VERIFY_CAP)
+}
+
 /// Stateful post-download repairer backing `ParChecker.cpp`.
 pub struct RustParRepairer {
     pub repairer: Par2Repairer,
@@ -5013,6 +5026,10 @@ pub struct RustParRepairer {
     pub par_ignore_ext: Vec<u8>,
     pub has_verified: bool,
     pub split_candidates: Vec<PathBuf>,
+    /// Why the par2 set could not be loaded (`preprocess`), for the job's log: a damaged
+    /// or hostile set (for example a file description of an implausible length, which par-rs
+    /// refuses with an InvalidData error instead of allocating for it).
+    pub load_error: Option<String>,
     pub leftovers: Vec<PathBuf>,
 }
 
@@ -5049,15 +5066,40 @@ impl RustParRepairer {
             par_ignore_ext,
             has_verified: false,
             split_candidates: Vec::new(),
+            load_error: None,
             leftovers: Vec::new(),
         }
+    }
+
+    /// Blocks the download already knows are damaged (articles that failed for good): the
+    /// verify folds the surviving data into `known + 2` recovery syndromes as it reads it
+    /// (par-rs `set_fold_during_verify`), so a repair of up to that many blocks reads no
+    /// surviving data again. Nothing known damaged: no folding (it costs `k` times the data
+    /// in GF work). At most [`FOLD_DURING_VERIFY_CAP`]; par-rs also caps it by memory.
+    pub fn set_known_damage(&mut self, known_damaged: u32) {
+        self.repairer
+            .set_fold_during_verify(fold_during_verify_k(known_damaged));
+    }
+
+    /// One line on what folding during verify did (`fold_report`), or `None` without it.
+    pub fn fold_report_line(&self) -> Option<String> {
+        let report = self.repairer.fold_report()?;
+        Some(format!(
+            "PAR fold during verify: {} of {} exponent(s) tracked, {} block(s) folded, {} cancelled; {:?}",
+            report.tracked,
+            report.requested,
+            report.folded_blocks,
+            report.cancelled_slices,
+            report.outcome,
+        ))
     }
 
     pub fn preprocess(&mut self, par_filename: &Path, events: Option<&dyn ParRepairEvents>) -> ParResult {
         if !par_filename.is_file() {
             return ParResult::InsufficientCriticalData;
         }
-        if self.repairer.load_par2_set(par_filename).is_err() {
+        if let Err(error) = self.repairer.load_par2_set(par_filename) {
+            self.load_error = Some(error.to_string());
             return ParResult::InsufficientCriticalData;
         }
         if let Some(events) = events {
@@ -5089,7 +5131,10 @@ impl RustParRepairer {
         }
         match self.repairer.finalize() {
             Ok(()) => ParResult::Success,
-            Err(_) => ParResult::InsufficientCriticalData,
+            Err(error) => {
+                self.load_error = Some(error.to_string());
+                ParResult::InsufficientCriticalData
+            }
         }
     }
 
@@ -6469,6 +6514,108 @@ mod tests {
         let (backfill, slots) = single_volume_backfill_case(0x6a0f_0041, false);
         assert_eq!(slots, 2);
         assert!(backfill > 0);
+    }
+
+    /// A hostile par2 index: one forged FileDesc claims a file of 4 TiB in 4-byte slices
+    /// (2^40 slices, none with checksums). par-rs (#133) refuses it with an InvalidData
+    /// error instead of allocating tens of GB at finalize. The batch repairer reports the
+    /// set as unusable (no repair, no panic) and keeps the reason for the job's log; a live
+    /// session refuses it at start. A plausible set built the same way still loads.
+    #[test]
+    fn forged_file_description_is_refused_without_allocating_for_it() {
+        use par_rs::packet::{
+            compute_set_id, encode_file_desc_body, encode_main_body, encode_packet, TYPE_FILEDESC,
+            TYPE_MAIN,
+        };
+        let build = |len: u64| {
+            let id = FileId([7; 16]);
+            let main = encode_main_body(4, &[id], &[]);
+            let set = compute_set_id(&main);
+            let mut out = encode_packet(&set, &TYPE_MAIN, &main);
+            out.extend(encode_packet(
+                &set,
+                &TYPE_FILEDESC,
+                &encode_file_desc_body(&id, &[1; 16], &[2; 16], len, b"big.bin"),
+            ));
+            out
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "rustyget-parchecker-forged-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let forged = dir.join("forged.par2");
+        std::fs::write(&forged, build(4 << 40)).unwrap();
+        let mut r = RustParRepairer::new(dir.clone(), 1, 64, false, false, Vec::new());
+        assert_eq!(
+            r.preprocess(&forged, Some(&NoopParEvents)),
+            ParResult::InsufficientCriticalData
+        );
+        let error = r.load_error.clone().expect("the reason is kept for the log");
+        assert!(error.contains("implausible file lengths"), "{error}");
+        // Live PAR refuses it at start as well.
+        assert!(
+            streaming_session_start_bounded(0x6a0f_0050, &forged, &dir, 500 << 20).is_err()
+        );
+        assert!(active_streaming_session(0x6a0f_0050).is_none());
+        crate::parlive::forget_download_writes(0x6a0f_0050);
+        // 32768 slices without checksums is still a set.
+        let plausible = dir.join("ok.par2");
+        std::fs::write(&plausible, build(4 * 32768)).unwrap();
+        let mut r = RustParRepairer::new(dir.clone(), 1, 64, false, false, Vec::new());
+        assert_eq!(r.preprocess(&plausible, Some(&NoopParEvents)), ParResult::Success);
+        assert!(r.load_error.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The batch repair of a download that knows of 2 damaged blocks folds 4 syndromes while
+    /// it verifies (par-rs fold-during-verify), and the repair rebuilds from them: no
+    /// surviving byte is read a second time. Nothing known damaged: no folding.
+    #[test]
+    fn batch_verify_folds_for_the_known_damage() {
+        use par_rs::create::{build_set, SetOptions, VolumeScheme};
+
+        assert_eq!(fold_during_verify_k(0), 0);
+        assert_eq!(fold_during_verify_k(3), 5);
+        assert_eq!(fold_during_verify_k(1000), FOLD_DURING_VERIFY_CAP);
+        let dir = std::env::temp_dir().join(format!(
+            "rustyget-parchecker-fold-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f0 = make_deterministic_bytes(32 * 4096, 450);
+        let built = build_set(
+            "fold",
+            &[("part01.rar", &f0)],
+            &SetOptions {
+                slice_size: 4096,
+                recovery_blocks: 6,
+                first_exponent: 0,
+                volumes: VolumeScheme::Single,
+                creator: "rustyget-test".to_string(),
+                unicode_names: false,
+                kernel: Kernel::detect(),
+            },
+        )
+        .unwrap();
+        built.write_to(&dir, "fold").unwrap();
+        let mut disk = f0.clone();
+        disk[5 * 4096 + 7] ^= 0xff;
+        disk[20 * 4096 + 9] ^= 0xff;
+        std::fs::write(dir.join("part01.rar"), &disk).unwrap();
+        let mut r = RustParRepairer::new(dir.clone(), 1, 64, false, false, Vec::new());
+        r.set_known_damage(2);
+        assert_eq!(r.preprocess(&dir.join("fold.par2"), Some(&NoopParEvents)), ParResult::Success);
+        assert_eq!(r.process(false, &NoopParEvents), ParResult::RepairPossible);
+        assert_eq!(r.process(true, &NoopParEvents), ParResult::Success);
+        assert_eq!(std::fs::read(dir.join("part01.rar")).unwrap(), f0);
+        let report = r.repairer.fold_report().expect("the verify folded");
+        assert_eq!(report.requested, 4);
+        assert_eq!(report.outcome, par_rs::repairer::FoldOutcome::Used);
+        assert!(r.fold_report_line().unwrap().contains("Used"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

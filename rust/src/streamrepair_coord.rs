@@ -460,6 +460,10 @@ impl HostOptions {
 
 #[derive(Default)]
 struct RunCounters {
+    /// The pack merge/split generation when this run read its target and donors (under the
+    /// queue lock): a match found by the run is recorded only while it is unchanged
+    /// (`postproc::note_dead_volume_donor_confirmed_at`).
+    confirmation_generation: u64,
     has_par_files: bool,
     target_password: Vec<u8>,
     recovered_articles: i32,
@@ -1020,6 +1024,9 @@ impl NzbgetRsStreamRepairCtrl {
         Vec<DonorSource>,
         Vec<Vec<u8>>,
     )> {
+        // Merge and split bump it under the queue lock, held here: one after this read
+        // changes the files this run reads (Codex 4707781630, review of 1b66a7f5).
+        counters.confirmation_generation = crate::postproc::dead_volume_confirmation_generation();
         let target = self.inspect_target(q, dq_ptr, set_init_label)?;
         let nzb_ptr = target.nzb_ptr;
         let own_nzb_ptr = nzb_ptr;
@@ -2244,9 +2251,10 @@ impl NzbgetRsStreamRepairCtrl {
             *self.fetch_stats.lock().unwrap_or_else(|e| e.into_inner()) =
                 DonorFetchStats::default();
             let donor_started = std::time::Instant::now();
-            // A merge or split from here on changes the files this check compares: its match
-            // is then not recorded (see `postproc::note_dead_volume_donor_confirmed_at`).
-            let confirmation_generation = crate::postproc::dead_volume_confirmation_generation();
+            // A merge or split since this run read its target and donors changed the files this
+            // check compares: its match is then not recorded
+            // (see `postproc::note_dead_volume_donor_confirmed_at`).
+            let confirmation_generation = counters.confirmation_generation;
             // A match of an earlier run of this download (its video bytes against the
             // download's own) carries over to the dead volumes that have none of the download's
             // bytes left around them, unless a label says the copy holds another video.

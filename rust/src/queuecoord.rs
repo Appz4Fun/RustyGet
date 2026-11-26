@@ -528,7 +528,11 @@ fn borrow_underway_or_video_confirmed(
 
 /// [`borrow_underway_or_video_confirmed`] with the backup's labels already read:
 /// `backup_other_video` is `streamrepair_coord::other_video_label` of them.
-fn borrow_underway_or_confirmed_unless_other(nzb_id: i32, backup_id: i32, backup_other_video: bool) -> bool {
+fn borrow_underway_or_confirmed_unless_other(
+    nzb_id: i32,
+    backup_id: i32,
+    backup_other_video: bool,
+) -> bool {
     crate::postproc::dead_volume_borrow_underway(nzb_id)
         || (!backup_other_video
             && crate::postproc::dead_volume_donor_confirmed(nzb_id, backup_id).is_some())

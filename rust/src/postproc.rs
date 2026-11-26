@@ -2898,7 +2898,9 @@ fn dead_volume_donor_confirmations(
 }
 
 /// Bumped by every pack merge or split ([`forget_dead_volume_confirmations_of`]), under the
-/// confirmations lock and, at its callers, the queue lock.
+/// confirmations lock and, at its callers, the queue lock. One counter for all downloads, on
+/// purpose: merge and split come only from user edits, and a run of another download that
+/// loses its match to one simply records it on its next run.
 static DEAD_VOLUME_CONFIRMATION_GENERATION: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 

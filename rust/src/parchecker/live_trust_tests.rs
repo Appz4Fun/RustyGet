@@ -822,3 +822,90 @@ fn a_file_rebuilt_ahead_is_certified_once_by_the_end_repair() {
     assert_eq!(streaming_session_download_end_targets(f.nzb_id), None);
     assert_eq!(std::fs::read(&path).unwrap(), f.data);
 }
+
+/// Feeds the set with slices `lost` failed for good (recovery first), repairs and publishes the
+/// target through the end-repair path, and returns the session's I/O (par-rs `io_stats`).
+fn repair_with_loss(f: &Fixture, lost: &[usize], decode_ahead: bool) -> LiveIoStats {
+    let entry = active_streaming_session(f.nzb_id).unwrap();
+    entry.session.set_decode_ahead(decode_ahead);
+    // The index itself was read when the session started; nothing after it may be read.
+    let index_read = entry.session.io_stats().recovery_bytes_read;
+    let path = f.dir.join("part01.rar");
+    let mut disk = f.data.clone();
+    for &s in lost {
+        let end = ((s + 1) * SLICE).min(disk.len());
+        disk[s * SLICE..end].fill(0);
+    }
+    std::fs::write(&path, &disk).unwrap();
+    let (name, volume) = &f.volumes[0];
+    let vpath = f.dir.join(name);
+    std::fs::write(&vpath, volume).unwrap();
+    streaming_session_recovery_bytes_written(f.nzb_id, 77, volume.len() as u64, &[(0, volume)]);
+    streaming_session_on_recovery_volume_completed(f.nzb_id, &vpath, Some(77), true)
+        .unwrap()
+        .unwrap();
+    let id = file_id(f.nzb_id);
+    for (i, chunk) in f.data.chunks(SLICE).enumerate() {
+        let offset = (i * SLICE) as u64;
+        if lost.contains(&i) {
+            streaming_session_on_article_failed_permanently(f.nzb_id, &id, offset, chunk.len() as u64)
+                .unwrap()
+                .unwrap();
+        } else {
+            entry
+                .session
+                .on_article_finished_memory_only(&id, offset, chunk, par_rs::crc::crc32(chunk))
+                .unwrap();
+        }
+    }
+    with_live_entry(f.nzb_id, &entry, |e| e.recheck_rebuilt(f.nzb_id, id)).unwrap();
+    assert_eq!(
+        streaming_session_download_end_targets(f.nzb_id),
+        Some(vec![b"part01.rar".to_vec()])
+    );
+    let request = streaming_session_prepare_repair(
+        f.nzb_id,
+        vec![crate::parlive::WriterTarget {
+            file_id: 42,
+            path: path.clone(),
+        }],
+        crate::parlive::reserve_control(f.nzb_id, 4096, 500 << 20).unwrap(),
+    )
+    .unwrap();
+    let (report, released) = request
+        .acquire()
+        .unwrap()
+        .repair_and_publish(|verified| verified.len(), || ())
+        .unwrap();
+    assert_eq!(released, 1, "certified");
+    let rebuilt = entry.metrics.rebuilt_ahead_slices.load(Ordering::Relaxed) as usize;
+    assert_eq!(report.repaired_slices.len() + rebuilt, lost.len());
+    assert_eq!(rebuilt > 0, decode_ahead);
+    assert_eq!(std::fs::read(&path).unwrap(), f.data, "byte-exact");
+    let mut io = entry.session.io_stats();
+    io.recovery_bytes_read -= index_read;
+    io
+}
+
+/// Zero re-reads (par-rs #143): with every article from RAM, the recovery volume from its
+/// written bytes, trusted slices and the slots planned up front, a live repair reads nothing
+/// back: no source byte, no back-fill, and no rebuilt slice re-read for the refold or the
+/// whole-file check (`target_verification_bytes_read`, which counts the refold read-back
+/// since #143). Both ways: rebuilt by the repair call, and rebuilt ahead by decode-ahead.
+#[test]
+fn a_live_repair_reads_nothing_back() {
+    for (n, decode_ahead) in [(0x7a75_0014, false), (0x7a75_0015, true)] {
+        let f = fixture(n, 16, 3, 3);
+        let io = repair_with_loss(&f, &[2, 9, 14], decode_ahead);
+        assert_eq!(
+            (
+                io.source_bytes_read,
+                io.backfill_bytes_read,
+                io.recovery_bytes_read,
+                io.target_verification_bytes_read,
+            ),
+            (0, 0, 0, 0),
+            "decode_ahead={decode_ahead}: {io:?}"
+        );
+    }
+}

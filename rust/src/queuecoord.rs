@@ -55,6 +55,41 @@ impl LiveOrder {
     }
 }
 
+/// The volumes, in extraction order, of the set whose first volume's headers download `nzb_id`
+/// has written (`livewrite::heads`), from the names of its files: what direct unpack registers
+/// once it starts (`liveorder::set_order`).
+fn live_set_order(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb_ptr: NzbRef,
+    nzb_id: i32,
+) -> Option<Vec<Vec<u8>>> {
+    let heads = crate::livewrite::heads(nzb_id);
+    let first_path = heads.first()?;
+    let first = match first_path
+        .iter()
+        .rposition(|&b| b == b'/' || b == crate::paths::PATH_SEPARATOR)
+    {
+        Some(i) => &first_path[i + 1..],
+        None => first_path.as_slice(),
+    };
+    let mut names: Vec<Vec<u8>> = (0..host.nzb_file_len(nzb_ptr))
+        .map(|i| host.file_snap(host.nzb_file_at(nzb_ptr, i)))
+        .filter(|f| !f.deleted)
+        .map(|f| crate::cstr::until_nul(&f.filename).to_vec())
+        .collect();
+    names.extend((0..host.nzb_completed_files_len(nzb_ptr)).map(|i| {
+        crate::cstr::until_nul(&host.nzb_completed_file_at(nzb_ptr, i).filename).to_vec()
+    }));
+    if crate::livefeed::is_live_first(first) {
+        return crate::livefeed::live_set(first, &names).map(|set| set.volumes);
+    }
+    let rars = names
+        .iter()
+        .filter(|n| crate::filetypes::is_rar_file(n))
+        .count() as u64;
+    Some(crate::postproc::rar_volume_names(first, rars))
+}
+
 /// The live extraction order of download `nzb_id` (`nzb_ptr`), from `cache` or looked up (once
 /// per download): the files still queued give the lowest unfinished volume.
 fn cached_live_order<'c>(
@@ -3127,6 +3162,13 @@ impl NzbgetRsQueueCoordinator {
                 if nzb.direct_unpack_status != DirectUnpackStatus::None || nzb.is_download_completed {
                     // Running (it picks the volume up itself), done, or the download is over.
                     continue;
+                }
+                // The set's extraction order from now on, also while direct rename runs: what
+                // follows its first-article pass already goes in that order.
+                if host.opts().direct_unpack && crate::liveorder::ranks(id).is_none() {
+                    if let Some(order) = live_set_order(host, nzb_ptr, id) {
+                        crate::liveorder::set_order(id, &order);
+                    }
                 }
                 if nzb.direct_rename_status != DirectRenameStatus::Running {
                     host.prepost_queue_changed(

@@ -2523,7 +2523,7 @@ struct DirectUnpackHoldState {
 
 /// The names of a RAR set's volumes in order, from its first volume `first` (`count` of them at
 /// most, at least the first): the order direct unpack reads them in.
-fn rar_volume_names(first: &[u8], count: u64) -> Vec<Vec<u8>> {
+pub(crate) fn rar_volume_names(first: &[u8], count: u64) -> Vec<Vec<u8>> {
     let mut names = vec![first.to_vec()];
     let mut cur = crate::fsops::path(first).to_path_buf();
     while (names.len() as u64) < count.max(1) {

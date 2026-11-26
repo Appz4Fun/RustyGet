@@ -5101,8 +5101,9 @@ impl NzbgetRsDirectUnpack {
             &|waiting| self.set_waiting(waiting),
         );
         drop(cell);
-        let summary = crate::livewrite::read_summary(reads, crate::livewrite::read_counts());
-        self.add_message(host, MK_INFO, summary.as_bytes(), local);
+        if let Some(summary) = crate::livewrite::read_summary(reads, crate::livewrite::read_counts()) {
+            self.add_message(host, MK_DETAIL, summary.as_bytes(), local);
+        }
 
         match outcome {
             Outcome::Done { files, bytes, .. } => {
@@ -5249,8 +5250,9 @@ impl NzbgetRsDirectUnpack {
             }
         }
 
-        let summary = crate::livewrite::read_summary(reads, crate::livewrite::read_counts());
-        self.add_message(host, MK_INFO, summary.as_bytes(), local);
+        if let Some(summary) = crate::livewrite::read_summary(reads, crate::livewrite::read_counts()) {
+            self.add_message(host, MK_DETAIL, summary.as_bytes(), local);
+        }
 
         self.set_unpacking(false);
         self.exec_thread_key.store(0, Ordering::Release);

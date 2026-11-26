@@ -850,6 +850,7 @@ fn flushed_ranges(
     let good = if all == flushed_size { written } else { written - 1 };
     items[..good]
         .iter()
+        .filter(|item| item.segment_content.len() as i64 == i64::from(item.segment_size))
         .filter_map(|item| {
             Some((
                 u64::try_from(item.segment_offset).ok()?,
@@ -1764,6 +1765,7 @@ impl RsArticleWriter {
 
             if direct_write_opt && !is_dupe_fallback {
                 let out_fn_ref = &self.output_filename;
+                let created = std::cell::Cell::new(false);
                 let ok = host.with_output_guard(true, || {
                     let mut cints = [0i32; 4];
                     let mut cstrs = [std::ptr::null::<c_char>(); 3];
@@ -1793,6 +1795,7 @@ impl RsArticleWriter {
                                 }
                                 return false;
                             }
+                            created.set(true);
                         }
                         host.op45(
                             6,
@@ -1825,6 +1828,7 @@ impl RsArticleWriter {
                             &final_path,
                             cstr::until_nul(&self.output_filename),
                             size,
+                            created.get(),
                         );
                     }
                 }
@@ -4239,6 +4243,31 @@ impl NzbgetRsArticleDownloader {
 mod tests {
     use super::*;
     use std::os::unix::ffi::OsStrExt;
+
+    #[test]
+    fn only_whole_flushed_articles_are_reported_to_live_extraction() {
+        let a = vec![1u8; 100];
+        let short = vec![2u8; 40];
+        let item = |offset: i64, size: i32, content: &'static [u8]| ArticleWriterFlushItem {
+            segment_offset: offset,
+            segment_size: size,
+            segment_content: content,
+            result_filename: None,
+        };
+        let a: &'static [u8] = Box::leak(a.into_boxed_slice());
+        let short: &'static [u8] = Box::leak(short.into_boxed_slice());
+        let items = vec![item(0, 100, a), item(100, 100, short), item(200, 100, a), item(300, 100, a)];
+        // All four flushed, the second without its bytes: it is not reported.
+        assert_eq!(
+            super::flushed_ranges(&items, 4, 340),
+            vec![(0, 100), (200, 100)],
+            "a flush short of the sizes drops the last item counted"
+        );
+        assert_eq!(super::flushed_ranges(&items, 4, 400), vec![(0, 100), (200, 100), (300, 100)]);
+        // A write that failed at the third item: the first two counted, nothing after.
+        assert_eq!(super::flushed_ranges(&items, 3, 250), vec![(0, 100)]);
+        assert_eq!(super::flushed_ranges(&items, 0, 0), Vec::<(u64, u64)>::new());
+    }
 
     #[test]
     fn a_par2_file_flush_is_never_handed_to_live_par() {

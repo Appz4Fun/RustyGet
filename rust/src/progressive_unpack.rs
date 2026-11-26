@@ -3035,7 +3035,7 @@ struct WrittenSource {
     path: PathBuf,
     live: Arc<crate::livewrite::LiveVolume>,
     files: zipfast::map::VolumeFiles,
-    synced: Vec<std::ops::Range<u64>>,
+    synced: u64,
     feed: Arc<Mutex<Box<dyn VolumeFeed>>>,
     pending: PendingWait,
     info: SourceInfo,
@@ -3078,7 +3078,7 @@ impl WrittenSource {
             path: path.to_path_buf(),
             live,
             files,
-            synced: Vec::new(),
+            synced: 0,
             feed,
             pending,
             info: SourceInfo {
@@ -3124,6 +3124,7 @@ impl WrittenSource {
         if !holes.is_empty() || replaced {
             (self.on_finished)(&self.path, &holes, replaced);
         }
+        self.live.stop_waiting();
         self.done = Some(Box::new(v));
         Ok(())
     }
@@ -3142,8 +3143,16 @@ impl WrittenSource {
         }
         // No file of the set: never declared.
         (self.on_finished)(&self.path, &[], true);
+        self.live.stop_waiting();
         self.done = Some(Box::new(source));
         Ok(())
+    }
+}
+
+impl Drop for WrittenSource {
+    fn drop(&mut self) {
+        // A session cancelled or ended while parked here waits no more.
+        self.live.stop_waiting();
     }
 }
 
@@ -3180,14 +3189,15 @@ impl RangeSource for WrittenSource {
             self.live.sync(&mut self.files, 0, &mut self.synced);
             match self.files.read_packed(0, offset, &mut buf[..n]) {
                 PackedRead::Data(count) => {
-                    crate::livewrite::count_read(count as u64, crate::livewrite::ReadKind::Live);
+                    self.live.count_live(count as u64);
                     return Ok(RangeRead::Filled { count });
                 }
-                // VolumeFiles answers a failed read of written bytes as a hole: damaged, not late.
-                PackedRead::Hole { .. } => {
+                // A written article that cannot be read back (VolumeFiles answers a hole): the
+                // finished volume answers for it, or it fails the read below.
+                PackedRead::Hole { .. } if self.done.is_none() && !self.path.is_file() => {
                     return Err(input(std::io::Error::other("cannot read a written article back")))
                 }
-                PackedRead::NotYet { .. } => {}
+                PackedRead::Hole { .. } | PackedRead::NotYet { .. } => {}
             }
             if let Some(v) = self.done.as_mut() {
                 // Never reported (lost, or repaired since): the finished volume's answer.
@@ -3226,6 +3236,7 @@ impl RangeSource for WrittenSource {
                     // is lost, as in a damaged volume (read past; the set fails as damaged
                     // unless something repairs it).
                     (self.on_finished)(&self.path, &[], true);
+                    self.live.stop_waiting();
                     let next = self.live.next_written(offset).unwrap_or(self.info.extent);
                     let len = next.min(offset + n.max(1) as u64) - offset;
                     return Ok(RangeRead::Hole { len });

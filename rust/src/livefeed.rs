@@ -292,7 +292,7 @@ struct Volumes<'f> {
     wrong: Option<String>,
     /// Volumes read while the download writes them, article by article (see
     /// `crate::livewrite`): the writer's volume and the ranges handed to `written` so far.
-    live: Vec<Option<(std::sync::Arc<crate::livewrite::LiveVolume>, Vec<Range<u64>>)>>,
+    live: Vec<Option<(std::sync::Arc<crate::livewrite::LiveVolume>, u64)>>,
     /// zipfast's writer-fed source over those volumes' outputs, by volume index.
     written: zipfast::map::VolumeFiles,
 }
@@ -332,13 +332,13 @@ impl<'f> Volumes<'f> {
                 return None;
             }
             self.written.set_file(i as u32, f);
-            self.live[i] = Some((live, Vec::new()));
+            self.live[i] = Some((live, 0));
         }
         let (live, synced) = self.live[i].as_mut()?;
         live.sync(&mut self.written, i as u32, synced);
         let read = self.written.read_packed(i as u32, offset, buf);
         match read {
-            PackedRead::Data(n) => crate::livewrite::count_read(n as u64, crate::livewrite::ReadKind::Live),
+            PackedRead::Data(n) => live.count_live(n as u64),
             PackedRead::NotYet { .. } => live.want(offset),
             PackedRead::Hole { .. } => {}
         }
@@ -403,6 +403,15 @@ impl<'f> Volumes<'f> {
     }
 }
 
+impl Drop for Volumes<'_> {
+    fn drop(&mut self) {
+        // The extraction ended: it waits for no volume's writes any more.
+        for (live, _) in self.live.iter().flatten() {
+            live.stop_waiting();
+        }
+    }
+}
+
 impl PackedSource for Volumes<'_> {
     fn read_packed(&mut self, volume: u32, offset: u64, buf: &mut [u8]) -> PackedRead {
         let i = volume as usize;
@@ -417,7 +426,13 @@ impl PackedSource for Volumes<'_> {
             }
         }
         let (len, holes) = match self.view(i) {
-            View::Ready { len, holes } => (len, holes),
+            View::Ready { len, holes } => {
+                // Finished: read from the volume now, not waiting for its writes.
+                if let Some((live, _)) = self.live[i].as_ref() {
+                    live.stop_waiting();
+                }
+                (len, holes)
+            }
             View::NotYet => {
                 return self
                     .read_growing(i, offset, buf)

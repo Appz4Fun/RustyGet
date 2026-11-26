@@ -6533,6 +6533,15 @@ struct WrittenFeed {
     holes: Vec<(PathBuf, Vec<(u64, u64)>)>,
     repair: Vec<(PathBuf, Vec<u8>)>,
     repaired: bool,
+    /// Every volume handed out as being written.
+    handed: Arc<Mutex<Vec<Arc<crate::livewrite::LiveVolume>>>>,
+}
+
+impl WrittenFeed {
+    /// Bytes read from the volumes as they were written (this feed's only).
+    fn read_live(handed: &Mutex<Vec<Arc<crate::livewrite::LiveVolume>>>) -> u64 {
+        handed.lock().unwrap().iter().map(|v| v.read_live()).sum()
+    }
 }
 
 impl VolumeFeed for WrittenFeed {
@@ -6553,7 +6562,9 @@ impl VolumeFeed for WrittenFeed {
         if path.is_file() {
             return None;
         }
-        crate::livewrite::lookup(self.nzb_id, crate::fsops::path_to_bytes(path))
+        let live = crate::livewrite::lookup(self.nzb_id, crate::fsops::path_to_bytes(path))?;
+        self.handed.lock().unwrap().push(live.clone());
+        Some(live)
     }
     fn wait_repaired(&mut self, _is_cancelled: &mut dyn FnMut() -> bool) -> bool {
         for (p, bytes) in &self.repair {
@@ -6594,6 +6605,7 @@ fn write_like_a_download(
                 crate::fsops::path_to_bytes(&fin),
                 crate::fsops::path_to_bytes(&out),
                 v.len() as u64,
+                true,
             );
             let count = v.len().div_ceil(article);
             let half = count / 2;
@@ -6634,6 +6646,7 @@ fn written_set(t: &TestDir, nzb_id: i32, lose: bool) -> WrittenSet {
         holes: Vec::new(),
         repair: Vec::new(),
         repaired: false,
+        handed: Arc::new(Mutex::new(Vec::new())),
     };
     if let Some((v, lo, ll)) = lost {
         let p = t.dl().join(volume_name(v, n));
@@ -6652,20 +6665,19 @@ fn written_set(t: &TestDir, nzb_id: i32, lose: bool) -> WrittenSet {
 fn volumes_being_written_are_read_article_by_article() {
     let t = TestDir::new("written");
     let (data, first, feed, writer) = written_set(&t, -7_320_001, false);
-    let before = crate::livewrite::read_counts();
+    let handed = feed.handed.clone();
     let (r, log) = run(&first, &t.out(), Box::new(feed));
     writer.join().unwrap();
     expect_ok(r, &log);
     assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
-    let after = crate::livewrite::read_counts();
-    assert!(after.0 > before.0, "nothing was read as written: {before:?} {after:?}");
+    assert!(WrittenFeed::read_live(&handed) > 0, "nothing was read as written");
 }
 
 #[test]
 fn volumes_being_written_are_read_article_by_article_on_the_copy_path() {
     let t = TestDir::new("written-copy");
     let (data, first, feed, writer) = written_set(&t, -7_320_002, false);
-    let before = crate::livewrite::read_counts();
+    let handed = feed.handed.clone();
     let mut log = Vec::new();
     let mut outputs = Vec::new();
     let out = t.out();
@@ -6686,8 +6698,7 @@ fn volumes_being_written_are_read_article_by_article_on_the_copy_path() {
     writer.join().unwrap();
     expect_ok(r, &log);
     assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
-    let after = crate::livewrite::read_counts();
-    assert!(after.0 > before.0, "nothing was read as written: {before:?} {after:?}");
+    assert!(WrittenFeed::read_live(&handed) > 0, "nothing was read as written");
 }
 
 #[test]
@@ -6699,4 +6710,61 @@ fn a_lost_article_in_a_volume_being_written_is_a_hole_patched_after_the_repair()
     expect_ok(r, &log);
     assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
     assert!(log.iter().any(|l| l.contains("extracted past damage")), "{log:?}");
+}
+
+#[test]
+fn a_volume_the_download_never_finished_is_lost_as_damage() {
+    let t = TestDir::new("written-gone");
+    let data = pattern(600_000);
+    let chunk = 100_000;
+    let vols = rar5_volumes("movie.mkv", &data, chunk);
+    let n = vols.len();
+    let first = t.dl().join(volume_name(0, n));
+    std::fs::write(&first, &vols[0]).unwrap();
+    std::fs::write(t.dl().join(volume_name(1, n)), &vols[1]).unwrap();
+    let nzb_id = -7_320_004;
+    let done = Arc::new(AtomicBool::new(false));
+    let feed = WrittenFeed {
+        nzb_id,
+        done: done.clone(),
+        holes: Vec::new(),
+        repair: Vec::new(),
+        repaired: false,
+        handed: Arc::new(Mutex::new(Vec::new())),
+    };
+    let handed = feed.handed.clone();
+    // Volume 3 is written halfway, then the download ends without it.
+    let dl = t.dl();
+    let v = vols[2].clone();
+    let writer = std::thread::spawn(move || {
+        use std::os::unix::fs::FileExt;
+        let out = dl.join("2.out.tmp");
+        let f = std::fs::File::create(&out).unwrap();
+        f.set_len(v.len() as u64).unwrap();
+        crate::livewrite::register(
+            nzb_id,
+            2,
+            crate::fsops::path_to_bytes(&dl.join(volume_name(2, n))),
+            crate::fsops::path_to_bytes(&out),
+            v.len() as u64,
+            true,
+        );
+        let half = v.len() / 2;
+        f.write_all_at(&v[..half], 0).unwrap();
+        crate::livewrite::written(nzb_id, 2, 0, half as u64);
+        std::thread::sleep(Duration::from_millis(300));
+        crate::livewrite::forget(nzb_id);
+        done.store(true, Ordering::Release);
+    });
+    let (r, log) = run(&first, &t.out(), Box::new(feed));
+    writer.join().unwrap();
+    match r {
+        Err(Error::Failed(f)) => assert!(f.is_damage(), "{f:?} {log:?}"),
+        other => panic!("expected a damage failure, got ok={}", other.is_ok()),
+    }
+    assert!(WrittenFeed::read_live(&handed) > 0, "nothing was read as written");
+    assert!(
+        handed.lock().unwrap().iter().all(|v| !v.is_waited()),
+        "a reader still waits after the end"
+    );
 }

@@ -31,6 +31,7 @@ pub struct LiveVolume {
     /// The volume's decoded length (its yEnc `size`), which the output was created with.
     size: u64,
     state: Mutex<State>,
+    read_live: AtomicU64,
 }
 
 #[derive(Debug, Default)]
@@ -44,6 +45,8 @@ struct State {
     waiting: Option<(u64, Option<Waker>)>,
     /// The download dropped this volume (finished, moved or deleted): nothing more comes.
     forgotten: bool,
+    /// Bumped by every write, so a reader hands over only what changed (see `sync`).
+    generation: u64,
 }
 
 impl LiveVolume {
@@ -90,30 +93,46 @@ impl LiveVolume {
         }
     }
 
-    /// Gives zipfast's writer-fed source every range written since the last call: `synced`
-    /// counts the ranges already handed over (the written ranges only ever grow or merge, so
-    /// a changed count, or a grown range, is new).
-    pub fn sync(
-        &self,
-        files: &mut zipfast::map::VolumeFiles,
-        volume: u32,
-        synced: &mut Vec<Range<u64>>,
-    ) {
+    /// Gives zipfast's writer-fed source the written ranges when anything was written since
+    /// the last call (`synced` is the write generation handed over; marking a range again is
+    /// harmless).
+    pub fn sync(&self, files: &mut zipfast::map::VolumeFiles, volume: u32, synced: &mut u64) {
         let st = lock(&self.state);
-        if st.written == *synced {
+        if st.generation == *synced {
             return;
         }
         for r in &st.written {
-            if !synced.iter().any(|s| s.start <= r.start && r.end <= s.end) {
-                files.mark_written(volume, r.clone());
-            }
+            files.mark_written(volume, r.clone());
         }
-        synced.clone_from(&st.written);
+        *synced = st.generation;
+    }
+
+    /// The reader no longer waits for this volume's writes (it reads the finished volume, gave
+    /// up, or is gone): the article cache stops writing this file out early for it.
+    pub fn stop_waiting(&self) {
+        lock(&self.state).waiting = None;
+    }
+
+    /// Whether a reader waits for a write into this volume.
+    pub fn is_waited(&self) -> bool {
+        lock(&self.state).waiting.is_some()
+    }
+
+    /// Packed bytes extractions read from this volume as it was written.
+    pub fn read_live(&self) -> u64 {
+        self.read_live.load(Ordering::Relaxed)
+    }
+
+    /// Counts `n` bytes an extraction read from this volume as it was written.
+    pub fn count_live(&self, n: u64) {
+        self.read_live.fetch_add(n, Ordering::Relaxed);
+        count_read(n, ReadKind::Live);
     }
 
     fn written(&self, range: Range<u64>) -> Option<Waker> {
         let mut st = lock(&self.state);
         insert(&mut st.written, range);
+        st.generation += 1;
         match st.waiting.take() {
             Some((offset, waker)) if run_holding(&st.written, offset).is_some() => waker,
             other => {
@@ -187,26 +206,40 @@ pub fn read_counts() -> (u64, u64, u64) {
 }
 
 /// The summary of what an extraction read, from [`read_counts`] at its start and end.
-pub fn read_summary(before: (u64, u64, u64), after: (u64, u64, u64)) -> String {
+/// `None` when nothing was read as written or read back (no volume was being written).
+/// Process-wide: an extraction running beside another counts its bytes too.
+pub fn read_summary(before: (u64, u64, u64), after: (u64, u64, u64)) -> Option<String> {
+    if after.0 == before.0 && after.1 == before.1 {
+        return None;
+    }
     let mb = |a: u64, b: u64| b.saturating_sub(a) as f64 / 1_048_576.0;
-    format!(
+    Some(format!(
         "Live extraction read {:.1} MB as written, {:.1} MB read back after their volume finished, {:.1} MB from volumes finished before",
         mb(before.0, after.0),
         mb(before.1, after.1),
         mb(before.2, after.2)
-    )
+    ))
 }
 
 /// The writer opened (or created at `size` bytes) `out_path`, the direct-write output of file
 /// `file_id` of download `nzb_id`, whose complete volume will be `final_path`.
-pub fn register(nzb_id: i32, file_id: i32, final_path: &[u8], out_path: &[u8], size: u64) {
+/// `created`: the output was (re)created just now, zero-filled: nothing written into an
+/// earlier one counts.
+pub fn register(
+    nzb_id: i32,
+    file_id: i32,
+    final_path: &[u8],
+    out_path: &[u8],
+    size: u64,
+    created: bool,
+) {
     if size == 0 || out_path.is_empty() {
         return;
     }
     let mut map = lock(&VOLUMES);
     let list = map.entry(nzb_id).or_default();
     if let Some(v) = list.iter().find(|v| v.file_id == file_id) {
-        if v.size == size && v.out_path.as_path() == crate::fsops::path(out_path) {
+        if !created && v.size == size && v.out_path.as_path() == crate::fsops::path(out_path) {
             let mut st = lock(&v.state);
             if st.final_path != final_path {
                 // Renamed while downloading (direct rename, deobfuscation).
@@ -230,6 +263,7 @@ pub fn register(nzb_id: i32, file_id: i32, final_path: &[u8], out_path: &[u8], s
             final_path: final_path.to_vec(),
             ..State::default()
         }),
+        read_live: AtomicU64::new(0),
     }));
 }
 
@@ -347,7 +381,7 @@ mod tests {
             }
         }
         let id = -7_310_001;
-        register(id, 1, b"/d/a.part01.rar", b"/d/1.out.tmp", 1000);
+        register(id, 1, b"/d/a.part01.rar", b"/d/1.out.tmp", 1000, true);
         let v = lookup(id, b"/d/a.part01.rar").unwrap();
         assert_eq!(v.size(), 1000);
         let count = Arc::new(Count(AtomicUsize::new(0)));
@@ -363,14 +397,14 @@ mod tests {
         written(id, 1, 900, 500);
         assert_eq!(v.written_end(950), Some(1000));
         let mut files = zipfast::map::VolumeFiles::new();
-        let mut synced = Vec::new();
+        let mut synced = 0;
         v.sync(&mut files, 0, &mut synced);
         assert_eq!(files.written(0), vec![0..150, 200..300, 900..1000]);
         written(id, 1, 150, 50);
         v.sync(&mut files, 0, &mut synced);
         assert_eq!(files.written(0), vec![0..300, 900..1000]);
         // A rename moves the lookup to the new name.
-        register(id, 1, b"/d/b.part01.rar", b"/d/1.out.tmp", 1000);
+        register(id, 1, b"/d/b.part01.rar", b"/d/1.out.tmp", 1000, false);
         assert!(lookup(id, b"/d/a.part01.rar").is_none());
         assert!(lookup(id, b"/d/b.part01.rar").is_some());
         assert!(v.wait_for(500, &waker));
@@ -378,5 +412,39 @@ mod tests {
         assert_eq!(count.0.load(Ordering::SeqCst), 2);
         assert!(lookup(id, b"/d/b.part01.rar").is_none());
         assert!(!v.wait_for(500, &waker));
+    }
+
+    #[test]
+    fn a_recreated_output_forgets_what_was_written_into_the_old_one() {
+        let id = -7_310_002;
+        register(id, 1, b"/d/c.rar", b"/d/1.out.tmp", 1000, true);
+        written(id, 1, 0, 500);
+        let old = lookup(id, b"/d/c.rar").unwrap();
+        assert_eq!(old.written_end(0), Some(500));
+        // The same output opened again keeps its writes; created again, it does not.
+        register(id, 1, b"/d/c.rar", b"/d/1.out.tmp", 1000, false);
+        assert_eq!(lookup(id, b"/d/c.rar").unwrap().written_end(0), Some(500));
+        register(id, 1, b"/d/c.rar", b"/d/1.out.tmp", 1000, true);
+        let new = lookup(id, b"/d/c.rar").unwrap();
+        assert_eq!(new.written_end(0), None);
+        assert!(!old.wait_for(600, &Waker::noop().clone()), "the old one is dropped");
+        forget(id);
+    }
+
+    #[test]
+    fn a_reader_that_stops_waiting_releases_the_cache() {
+        let id = -7_310_003;
+        register(id, 4, b"/d/d.rar", b"/d/4.out.tmp", 1000, true);
+        let v = lookup(id, b"/d/d.rar").unwrap();
+        assert!(!wanted(id, 4));
+        v.want(100);
+        assert!(wanted(id, 4) && v.is_waited());
+        v.stop_waiting();
+        assert!(!wanted(id, 4));
+        assert!(v.wait_for(100, &Waker::noop().clone()));
+        assert!(wanted(id, 4));
+        written(id, 4, 0, 200);
+        assert!(!wanted(id, 4), "the write it waited for releases it");
+        forget(id);
     }
 }

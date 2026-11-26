@@ -521,6 +521,7 @@ fn a_member_named_like_the_temp_folder_is_left_to_post_processing() {
 struct WrittenDiskFeed {
     disk: DiskFeed,
     nzb_id: i32,
+    handed: Vec<Arc<crate::livewrite::LiveVolume>>,
 }
 
 impl VolumeFeed for WrittenDiskFeed {
@@ -537,7 +538,9 @@ impl VolumeFeed for WrittenDiskFeed {
         if path.is_file() {
             return None;
         }
-        crate::livewrite::lookup(self.nzb_id, crate::fsops::path_to_bytes(path))
+        let live = crate::livewrite::lookup(self.nzb_id, crate::fsops::path_to_bytes(path))?;
+        self.handed.push(live.clone());
+        Some(live)
     }
 }
 
@@ -577,6 +580,7 @@ fn volumes_being_written_are_fed_article_by_article() {
                 crate::fsops::path_to_bytes(&target),
                 crate::fsops::path_to_bytes(&out),
                 data.len() as u64,
+                true,
             );
             // Articles in reverse.
             let starts: Vec<usize> = (0..data.len()).step_by(10_000).rev().collect();
@@ -598,6 +602,7 @@ fn volumes_being_written_are_fed_article_by_article() {
             damaged: Vec::new(),
         },
         nzb_id,
+        handed: Vec::new(),
     };
     let dest = dir.join("out");
     let mut lines = Vec::new();
@@ -606,7 +611,6 @@ fn volumes_being_written_are_fed_article_by_article() {
         set: &set,
         password: "",
     };
-    let before = crate::livewrite::read_counts();
     let outcome = extract(
         &req,
         &mut feed,
@@ -616,7 +620,6 @@ fn volumes_being_written_are_fed_article_by_article() {
         &|_| {},
     );
     writer.join().unwrap();
-    let after = crate::livewrite::read_counts();
     assert_eq!(
         outcome,
         Outcome::Done {
@@ -627,6 +630,10 @@ fn volumes_being_written_are_fed_article_by_article() {
         "{lines:?}"
     );
     assert_eq!(std::fs::read(dir.join("out/movie.mkv")).unwrap(), movie);
-    assert!(after.0 > before.0, "nothing was read as written: {before:?} {after:?}");
+    assert!(
+        feed.handed.iter().map(|v| v.read_live()).sum::<u64>() > 0,
+        "nothing was read as written"
+    );
+    assert!(feed.handed.iter().all(|v| !v.is_waited()), "a reader still waits after the end");
     let _ = std::fs::remove_dir_all(&dir);
 }

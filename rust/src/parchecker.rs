@@ -504,6 +504,53 @@ pub(crate) fn live_recovery_plan(
     plan
 }
 
+/// At most this many syndrome slots are planned up front: every arriving slice is folded into
+/// each slot, so the slots cost memory bandwidth as well as memory.
+const PLANNED_SLOT_CAP: usize = 16;
+
+/// Slots that may be planned up front for slices of `slice_size` in a pool of `pool` bytes:
+/// at most a quarter of the pool (two slices per slot) and [`PLANNED_SLOT_CAP`].
+pub(crate) fn planned_slot_room(pool: u64, slice_size: u64) -> usize {
+    let per_slot = slice_size.max(1).saturating_mul(2);
+    usize::try_from((pool / 4) / per_slot)
+        .unwrap_or(usize::MAX)
+        .min(PLANNED_SLOT_CAP)
+}
+
+/// The pool use an up-front plan may reach: three quarters of it, so another job's live PAR
+/// can still start and damage can still grow the slots.
+fn planned_pool_limit(pool: u64) -> u64 {
+    pool - pool / 4
+}
+
+/// Adds the exponents of the queue's recovery volumes to `plan`, whole volumes, fewest blocks
+/// first (the order live PAR fetches them in), while they fit `room` slots besides the
+/// recovery packets already loaded. RustyGet fetches whole volumes, so every exponent of a
+/// fetched volume arrives; with all of them planned, no slot is added after the first slice
+/// verified, and nothing is back-filled from disk.
+pub(crate) fn extend_plan_with_queued_volumes(
+    plan: &mut par_rs::recovery_plan::RecoveryArticlePlan,
+    hint: &LivePlanHint,
+    loaded: &HashSet<u32>,
+    room: usize,
+) {
+    let mut volumes: Vec<&LiveQueuedVolume> = hint.volumes.iter().filter(|v| v.count > 0).collect();
+    volumes.sort_by_key(|v| (v.count, v.first_exponent, v.id));
+    let mut planned: HashSet<u32> = plan.exponents.iter().copied().collect();
+    for volume in volumes {
+        let exponents: Vec<u32> = (volume.first_exponent..volume.first_exponent.saturating_add(volume.count))
+            .filter(|e| *e <= 65534 && !loaded.contains(e) && !planned.contains(e))
+            .collect();
+        if planned.len() + exponents.len() > room {
+            break;
+        }
+        planned.extend(exponents);
+    }
+    let mut exponents: Vec<u32> = planned.into_iter().collect();
+    exponents.sort_unstable();
+    plan.exponents = exponents;
+}
+
 /// Creates the engine sized by a recovery plan (`StreamingParSession::with_recovery_plan`):
 /// syndrome slots for the loaded and planned exponents, no more, and the lease shrunk to
 /// match; `grow_for_damage` adds slots when damage outgrows the plan.
@@ -518,16 +565,32 @@ fn build_planned_streaming_session(
     let main = set.main.as_ref().ok_or(RepairError::NoMainPacket)?;
     let slice_size = main.slice_size.max(1);
     let loaded: HashSet<u32> = set.recovery.keys().copied().collect();
-    let plan = live_recovery_plan(hint, slice_size, &loaded);
+    let mut plan = live_recovery_plan(hint, slice_size, &loaded);
+    // Damage seen later than the start would add slots after slices verified, and those
+    // slots are back-filled by reading the verified slices from disk again. So slots go up
+    // front to every recovery block the queue holds (the `.volXX+YY.par2` names), as far as
+    // memory allows: a slot is one slice of syndrome and one of repair output.
+    let pool = lease_pool_bytes(&budget);
+    let room = planned_slot_room(pool, slice_size).saturating_sub(loaded.len());
+    extend_plan_with_queued_volumes(&mut plan, hint, &loaded, room);
     let slots = (loaded.len() + plan.exponents.len()).max(1) as u64;
-    let syndrome_ram = slots
-        .saturating_mul(slice_size)
-        .min(options.max_syndrome_bytes)
-        .max(slice_size);
-    // The reservation paid two slices (syndrome and output) for every slot the options
-    // allowed; give back what the plan does not use, so growth pays for itself.
-    let unused = options.max_syndrome_bytes.saturating_sub(syndrome_ram);
-    budget.shrink_by(unused.saturating_mul(2));
+    let wanted = slots.saturating_mul(slice_size).max(slice_size);
+    let syndrome_ram = if wanted > options.max_syndrome_bytes {
+        // More than the options allowed: the lease grows by two slices per extra slot.
+        let extra = (wanted - options.max_syndrome_bytes) / slice_size;
+        let granted =
+            budget.grow_by_units(slice_size.saturating_mul(2), extra, planned_pool_limit(pool));
+        options
+            .max_syndrome_bytes
+            .saturating_add(granted.saturating_mul(slice_size))
+            .max(slice_size)
+    } else {
+        // The reservation paid two slices (syndrome and output) for every slot the options
+        // allowed; give back what the plan does not use, so growth pays for itself.
+        let unused = options.max_syndrome_bytes.saturating_sub(wanted);
+        budget.shrink_by(unused.saturating_mul(2));
+        wanted
+    };
     build_streaming_session_with(
         set,
         base_dir,
@@ -787,6 +850,32 @@ impl ActiveStreamingSession {
             /// Not captured yet: keep a copy for its capture (charged).
             Stash,
         }
+        // A write that ran before the capture is the article's last time in RAM: keeping its
+        // bytes is what spares par-rs reading it back. Lend free ParBuffer for what does not
+        // fit (as a capture does on its own shortfall) before deciding; the first byte limit
+        // is only about two slices, far below what many files arriving at once need.
+        {
+            let queue = self.articles.lock().unwrap_or_else(|e| e.into_inner());
+            let limit = self.article_byte_limit.load(Ordering::Acquire);
+            let need: u64 = items
+                .iter()
+                .filter(|&&(offset, bytes)| {
+                    !bytes.is_empty()
+                        && (ready.iter().any(|&(o, _, _)| o == offset)
+                            || !queue.captured.contains(&(id, offset)))
+                })
+                .map(|&(_, bytes)| bytes.len() as u64)
+                .sum();
+            let required = queue.bytes.saturating_add(need);
+            drop(queue);
+            if need > 0 && required > limit {
+                self.lend_memory(&RepairError::StreamingMemoryLimit {
+                    context: "live article snapshots",
+                    required_bytes: required,
+                    limit_bytes: limit,
+                });
+            }
+        }
         // Decide and charge under the lock; copy with no lock held (captures take this lock
         // under the daemon queue lock); insert under it again.
         let mut plans: Vec<(usize, Plan)> = Vec::new();
@@ -816,6 +905,8 @@ impl ActiveStreamingSession {
                     queue.bytes += size;
                     stashed += 1;
                     plans.push((index, Plan::Stash));
+                } else if !captured {
+                    self.metrics.stash_refusals.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
@@ -1701,7 +1792,30 @@ pub(crate) fn streaming_session_defer_committed_article(
                 limit_bytes: limit,
             });
         }
-        let Some(bytes) = snapshot() else {
+        // Not in the cache: maybe written before the session started, and kept then.
+        let mut presession = false;
+        let snapshot = match snapshot() {
+            Some(bytes) => {
+                // The cache holds the article: any copy kept of an earlier write is stale.
+                if let Some(queue_id) = identity.0 {
+                    presession_drop(nzb_id, queue_id, &[offset]);
+                }
+                Some(bytes)
+            }
+            None => identity.0.and_then(|queue_id| {
+                let bytes = presession_take(nzb_id, queue_id, offset, size)?;
+                presession = true;
+                Some(bytes)
+            }),
+        };
+        if presession {
+            entry.metrics.cache_misses.fetch_add(1, Ordering::Relaxed);
+            entry
+                .metrics
+                .presession_articles
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        let Some(bytes) = snapshot else {
             entry.metrics.cache_misses.fetch_add(1, Ordering::Relaxed);
             // Not in the cache any more: the article reached its file. par-rs reads it
             // there once its slice is complete.
@@ -1736,9 +1850,10 @@ pub(crate) fn streaming_session_defer_committed_article(
         queue.bytes = next.unwrap();
         // Bytes kept aside for it (a write that ran first) are not needed any more; else
         // its coming cache write has nothing to hand over.
+        // (Kept from before the session: written already, no write is to come.)
         if let Some(old) = queue.stash.remove(&(id, offset)) {
             queue.bytes -= old.len() as u64;
-        } else if queue.captured.len() < LIVE_MARK_LIMIT {
+        } else if !presession && queue.captured.len() < LIVE_MARK_LIMIT {
             queue.captured.insert((id, offset));
         }
         queue.pending.push_back(DeferredArticle {
@@ -1747,12 +1862,14 @@ pub(crate) fn streaming_session_defer_committed_article(
             crc32,
             size,
             bytes: Some(bytes),
-            committed: false,
+            committed: presession && entry.has_written_file(&id),
         });
-        entry
-            .metrics
-            .captured_articles
-            .fetch_add(1, Ordering::Relaxed);
+        if !presession {
+            entry
+                .metrics
+                .captured_articles
+                .fetch_add(1, Ordering::Relaxed);
+        }
         entry
             .metrics
             .captured_bytes
@@ -1952,6 +2069,10 @@ pub(crate) fn streaming_session_articles_written(
     in_file: bool,
     items: &[(u64, &[u8])],
 ) -> usize {
+    if let Some(queue_id) = identity.0 {
+        let offsets: Vec<u64> = items.iter().map(|&(offset, _)| offset).collect();
+        presession_drop(nzb_id, queue_id, &offsets);
+    }
     let Some(entry) = active_streaming_session(nzb_id) else {
         return 0;
     };
@@ -1962,6 +2083,176 @@ pub(crate) fn streaming_session_articles_written(
         return 0;
     };
     entry.articles_written(id, in_file, items)
+}
+
+/// Bytes RustyGet wrote for a job before its live session could take them: articles written
+/// before the session started (the par2 index has to arrive and be parsed first), and
+/// recovery volume articles written before the volume's size was known. Kept, within
+/// [`PRESESSION_LIMIT`] for all jobs, for the capture (data files, `presession_take`) or the
+/// recovery volume's tee (`presession_take_file`), so par-rs never reads them back. Every item
+/// is a copy of bytes already written successfully. Dropped after [`PRESESSION_TTL`] (a job
+/// whose session never starts), when taken, and with the job's session or the job.
+#[derive(Default)]
+struct PresessionKept {
+    jobs: HashMap<i32, PresessionJob>,
+    bytes: u64,
+}
+
+struct PresessionJob {
+    since: std::time::Instant,
+    /// By queue file id and offset.
+    articles: HashMap<(i32, u64), Vec<u8>>,
+}
+
+pub(crate) const PRESESSION_LIMIT: u64 = 64 << 20;
+const PRESESSION_TTL: std::time::Duration = std::time::Duration::from_secs(120);
+
+static PRESESSION: LazyLock<Mutex<PresessionKept>> =
+    LazyLock::new(|| Mutex::new(PresessionKept::default()));
+
+/// Whether a job's written bytes are worth keeping for a live session not running (or not
+/// sized) yet: live PAR is on and the job has par2 files.
+pub(crate) fn presession_wanted(par_size: i64) -> bool {
+    par_size > 0 && crate::options::live_par_repair()
+}
+
+/// Keeps copies of `items` (offset, bytes written) of queue file `file_id` of job `nzb_id`
+/// (see [`PresessionKept`]). No I/O; returns the bytes kept.
+pub(crate) fn presession_keep(nzb_id: i32, file_id: i32, items: &[(u64, &[u8])]) -> u64 {
+    let now = std::time::Instant::now();
+    let mut kept = PRESESSION.lock().unwrap_or_else(|e| e.into_inner());
+    let mut freed = 0u64;
+    kept.jobs.retain(|_, job| {
+        let keep = now.duration_since(job.since) < PRESESSION_TTL;
+        if !keep {
+            freed += job.articles.values().map(|b| b.len() as u64).sum::<u64>();
+        }
+        keep
+    });
+    kept.bytes -= freed;
+    let mut added = 0u64;
+    for &(offset, bytes) in items {
+        let size = bytes.len() as u64;
+        // A copy of an earlier write of this article is stale now: never hand it over.
+        let stale = kept
+            .jobs
+            .get_mut(&nzb_id)
+            .and_then(|job| job.articles.remove(&(file_id, offset)));
+        kept.bytes -= stale.map_or(0, |b| b.len() as u64);
+        if size == 0 || kept.bytes.saturating_add(size) > PRESESSION_LIMIT {
+            continue;
+        }
+        let job = kept.jobs.entry(nzb_id).or_insert_with(|| PresessionJob {
+            since: now,
+            articles: HashMap::new(),
+        });
+        job.since = now;
+        job.articles.insert((file_id, offset), bytes.to_vec());
+        kept.bytes += size;
+        added += size;
+    }
+    kept.jobs.retain(|_, job| !job.articles.is_empty());
+    added
+}
+
+/// Drops kept copies of articles of queue file `file_id` written again at `offsets` (the
+/// later write is what is on disk now).
+pub(crate) fn presession_drop(nzb_id: i32, file_id: i32, offsets: &[u64]) {
+    let mut kept = PRESESSION.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(job) = kept.jobs.get_mut(&nzb_id) else {
+        return;
+    };
+    let freed: u64 = offsets
+        .iter()
+        .filter_map(|offset| job.articles.remove(&(file_id, *offset)))
+        .map(|b| b.len() as u64)
+        .sum();
+    if job.articles.is_empty() {
+        kept.jobs.remove(&nzb_id);
+    }
+    kept.bytes -= freed;
+}
+
+/// The kept bytes of the article of queue file `file_id` at `offset` of `size` bytes.
+fn presession_take(nzb_id: i32, file_id: i32, offset: u64, size: u64) -> Option<Vec<u8>> {
+    let mut kept = PRESESSION.lock().unwrap_or_else(|e| e.into_inner());
+    let job = kept.jobs.get_mut(&nzb_id)?;
+    if job.since.elapsed() >= PRESESSION_TTL {
+        let freed: u64 = job.articles.values().map(|b| b.len() as u64).sum();
+        kept.jobs.remove(&nzb_id);
+        kept.bytes -= freed;
+        return None;
+    }
+    let bytes = job.articles.remove(&(file_id, offset))?;
+    let empty = job.articles.is_empty();
+    if empty {
+        kept.jobs.remove(&nzb_id);
+    }
+    kept.bytes -= bytes.len() as u64;
+    (bytes.len() as u64 == size).then_some(bytes)
+}
+
+/// Every kept article of queue file `file_id`, taken.
+fn presession_take_file(nzb_id: i32, file_id: i32) -> Vec<(u64, Vec<u8>)> {
+    let mut kept = PRESESSION.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(job) = kept.jobs.get_mut(&nzb_id) else {
+        return Vec::new();
+    };
+    if job.since.elapsed() >= PRESESSION_TTL {
+        let freed: u64 = job.articles.values().map(|b| b.len() as u64).sum();
+        kept.jobs.remove(&nzb_id);
+        kept.bytes -= freed;
+        return Vec::new();
+    }
+    let keys: Vec<(i32, u64)> = job
+        .articles
+        .keys()
+        .filter(|(file, _)| *file == file_id)
+        .copied()
+        .collect();
+    let taken: Vec<(u64, Vec<u8>)> = keys
+        .into_iter()
+        .filter_map(|key| job.articles.remove(&key).map(|bytes| (key.1, bytes)))
+        .collect();
+    if job.articles.is_empty() {
+        kept.jobs.remove(&nzb_id);
+    }
+    kept.bytes -= taken.iter().map(|(_, b)| b.len() as u64).sum::<u64>();
+    taken
+}
+
+/// A whole recovery volume of `len` bytes from the kept articles of queue file `file_id`,
+/// when they cover it exactly (no tee took them: a single-article volume, or one whose every
+/// article was written before its size was known). Takes them either way.
+fn presession_volume(nzb_id: i32, file_id: i32, len: u64) -> Option<Vec<u8>> {
+    let mut items = presession_take_file(nzb_id, file_id);
+    items.sort_unstable_by_key(|(offset, _)| *offset);
+    let mut bytes = Vec::with_capacity(usize::try_from(len).ok()?);
+    for (offset, data) in items {
+        if offset != bytes.len() as u64 {
+            return None;
+        }
+        bytes.extend_from_slice(&data);
+    }
+    (bytes.len() as u64 == len && len > 0).then_some(bytes)
+}
+
+/// Drops what is kept for job `nzb_id` (its session ended, or the job left the queue).
+pub(crate) fn presession_forget(nzb_id: i32) {
+    let mut kept = PRESESSION.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(job) = kept.jobs.remove(&nzb_id) {
+        kept.bytes -= job.articles.values().map(|b| b.len() as u64).sum::<u64>();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn presession_bytes_for_test(nzb_id: i32) -> u64 {
+    PRESESSION
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .jobs
+        .get(&nzb_id)
+        .map_or(0, |job| job.articles.values().map(|b| b.len() as u64).sum())
 }
 
 /// Room for an article of `size` bytes written straight to disk (no cache buffer): its
@@ -2145,11 +2436,13 @@ impl ActiveStreamingSession {
                 let mut queue = self.articles.lock().unwrap_or_else(|e| e.into_inner());
                 let mut next = queue.bytes.checked_add(size)?;
                 let mut limit = self.article_byte_limit.load(Ordering::Acquire);
-                if next > limit {
+                // Room for the volume, and for the tees' half of the limit below.
+                let required = next.max(teed.saturating_add(size).saturating_mul(2));
+                if required > limit {
                     drop(queue);
                     self.lend_memory(&RepairError::StreamingMemoryLimit {
                         context: "live article snapshots",
-                        required_bytes: next,
+                        required_bytes: required,
                         limit_bytes: limit,
                     });
                     queue = self.articles.lock().unwrap_or_else(|e| e.into_inner());
@@ -2277,6 +2570,12 @@ pub(crate) fn streaming_session_recovery_bytes_written(
     };
     if entry.session.is_cancelled() || items.is_empty() {
         return;
+    }
+    // Articles written before the session started or the volume's size was known.
+    let early = presession_take_file(nzb_id, file_id);
+    if !early.is_empty() {
+        let early: Vec<(u64, &[u8])> = early.iter().map(|(o, b)| (*o, b.as_slice())).collect();
+        entry.recovery_bytes_written(file_id, size, &early);
     }
     entry.recovery_bytes_written(file_id, size, items);
 }
@@ -3296,6 +3595,7 @@ pub fn streaming_session_on_range_replaced_by_name(
 /// Cancels the current generation permanently; in-flight owners retain their reservation.
 #[track_caller]
 pub fn streaming_session_cancel(nzb_id: i32) {
+    presession_forget(nzb_id);
     if let Some(entry) = active_streaming_session(nzb_id) {
         let at = std::panic::Location::caller();
         entry.note_stop(nzb_id, &format!("cancelled from {}:{}", at.file(), at.line()));
@@ -3464,9 +3764,12 @@ fn reconcile_live_file(
             let slice = offset / slice_size;
             let slice_end = ((slice + 1) * slice_size).min(length);
             let chunk_end = slice_end.min(end);
+            // Verified already, or damaged (an article of it failed for good, or it failed
+            // its check): reading its good bytes again changes nothing (a later write into
+            // it calls `on_range_replaced`, which takes it out of Damaged).
             if matches!(
                 entry.session.slice_state(&file_id, slice as usize)?,
-                SliceState::VerifiedGood
+                SliceState::VerifiedGood | SliceState::Damaged
             ) {
                 offset = chunk_end;
                 continue;
@@ -3607,9 +3910,19 @@ pub(crate) fn streaming_session_on_recovery_volume_completed(
     let file_id = queued_id.and_then(|id| i32::try_from(id).ok());
     let len = std::fs::metadata(path).ok().filter(|m| m.is_file()).map(|m| m.len());
     let tee = match (file_id, len) {
-        (Some(id), Some(len)) if successful => entry.take_recovery_bytes(id, len),
+        (Some(id), Some(len)) if successful => entry.take_recovery_bytes(id, len).or_else(|| {
+            presession_volume(nzb_id, id, len).map(|bytes| RecoveryTee {
+                size: len,
+                charged: 0,
+                bytes,
+                written: std::collections::BTreeMap::new(),
+                covered: len,
+                void: false,
+            })
+        }),
         (Some(id), _) => {
             streaming_session_recovery_void(nzb_id, id);
+            let _ = presession_take_file(nzb_id, id);
             entry.take_recovery_bytes(id, 0)
         }
         _ => None,
@@ -4484,6 +4797,7 @@ pub fn streaming_session_has_session(nzb_id: i32) -> bool {
 /// Drops the [`StreamingParSession`] for `nzb_id`.
 #[track_caller]
 pub fn streaming_session_forget(nzb_id: i32) {
+    presession_forget(nzb_id);
     LIVE_POLLS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -4767,6 +5081,28 @@ fn log_batch_repair(repairer: &Par2Repairer, base_dir: &Path, ok: bool) {
     }
 }
 
+/// At most this many syndromes are folded during a batch verify.
+pub(crate) const FOLD_DURING_VERIFY_CAP: usize = 64;
+
+/// Blocks of `block_size` that `lost_bytes` of failed articles touch at the least, plus one
+/// for an article that straddles a block boundary; 0 when nothing is lost.
+pub(crate) fn known_damaged_blocks(lost_bytes: u64, block_size: u64) -> u32 {
+    if lost_bytes == 0 || block_size == 0 {
+        return 0;
+    }
+    u32::try_from(lost_bytes.div_ceil(block_size).saturating_add(1)).unwrap_or(u32::MAX)
+}
+
+/// `k` for folding during verify: the damage the download knows of plus 2, 0 without any.
+pub(crate) fn fold_during_verify_k(known_damaged: u32) -> usize {
+    if known_damaged == 0 {
+        return 0;
+    }
+    (known_damaged as usize)
+        .saturating_add(2)
+        .min(FOLD_DURING_VERIFY_CAP)
+}
+
 /// Stateful post-download repairer backing `ParChecker.cpp`.
 pub struct RustParRepairer {
     pub repairer: Par2Repairer,
@@ -4778,6 +5114,10 @@ pub struct RustParRepairer {
     pub par_ignore_ext: Vec<u8>,
     pub has_verified: bool,
     pub split_candidates: Vec<PathBuf>,
+    /// Why the par2 set could not be loaded (`preprocess`), for the job's log: a damaged
+    /// or hostile set (for example a file description of an implausible length, which par-rs
+    /// refuses with an InvalidData error instead of allocating for it).
+    pub load_error: Option<String>,
     pub leftovers: Vec<PathBuf>,
 }
 
@@ -4814,15 +5154,40 @@ impl RustParRepairer {
             par_ignore_ext,
             has_verified: false,
             split_candidates: Vec::new(),
+            load_error: None,
             leftovers: Vec::new(),
         }
+    }
+
+    /// Blocks the download already knows are damaged (articles that failed for good): the
+    /// verify folds the surviving data into `known + 2` recovery syndromes as it reads it
+    /// (par-rs `set_fold_during_verify`), so a repair of up to that many blocks reads no
+    /// surviving data again. Nothing known damaged: no folding (it costs `k` times the data
+    /// in GF work). At most [`FOLD_DURING_VERIFY_CAP`]; par-rs also caps it by memory.
+    pub fn set_known_damage(&mut self, known_damaged: u32) {
+        self.repairer
+            .set_fold_during_verify(fold_during_verify_k(known_damaged));
+    }
+
+    /// One line on what folding during verify did (`fold_report`), or `None` without it.
+    pub fn fold_report_line(&self) -> Option<String> {
+        let report = self.repairer.fold_report()?;
+        Some(format!(
+            "PAR fold during verify: {} of {} exponent(s) tracked, {} block(s) folded, {} cancelled; {:?}",
+            report.tracked,
+            report.requested,
+            report.folded_blocks,
+            report.cancelled_slices,
+            report.outcome,
+        ))
     }
 
     pub fn preprocess(&mut self, par_filename: &Path, events: Option<&dyn ParRepairEvents>) -> ParResult {
         if !par_filename.is_file() {
             return ParResult::InsufficientCriticalData;
         }
-        if self.repairer.load_par2_set(par_filename).is_err() {
+        if let Err(error) = self.repairer.load_par2_set(par_filename) {
+            self.load_error = Some(error.to_string());
             return ParResult::InsufficientCriticalData;
         }
         if let Some(events) = events {
@@ -4854,7 +5219,10 @@ impl RustParRepairer {
         }
         match self.repairer.finalize() {
             Ok(()) => ParResult::Success,
-            Err(_) => ParResult::InsufficientCriticalData,
+            Err(error) => {
+                self.load_error = Some(error.to_string());
+                ParResult::InsufficientCriticalData
+            }
         }
     }
 
@@ -6115,6 +6483,268 @@ mod tests {
         let _ = streaming_session_take_par_secs(nzb_id);
         streaming_session_cancel(nzb_id);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A set of 40 source slices with one recovery volume of 12 blocks: damage appears only
+    /// after most slices verified (the plan at the start saw no failure). With the volume's
+    /// exponents planned up front (from its `.vol00+12.par2` name), the volume's blocks fold
+    /// into slots that already hold every verified slice: nothing is back-filled from disk.
+    /// Without the volume in the hint (the control), the same damage adds slots after the
+    /// slices verified and they are back-filled by reading the file.
+    fn single_volume_backfill_case(nzb_id: i32, with_volume: bool) -> (u64, usize) {
+        use par_rs::create::{build_set, SetOptions, VolumeScheme};
+
+        let dir = std::env::temp_dir().join(format!(
+            "rustyget-parchecker-vol40-{}-{nzb_id}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f0 = make_deterministic_bytes(40 * 4096, 440);
+        let built = build_set(
+            "vol40",
+            &[("part01.rar", &f0)],
+            &SetOptions {
+                slice_size: 4096,
+                recovery_blocks: 12,
+                first_exponent: 0,
+                volumes: VolumeScheme::Single,
+                creator: "rustyget-test".to_string(),
+                unicode_names: false,
+                kernel: Kernel::detect(),
+            },
+        )
+        .unwrap();
+        let index_path = dir.join("vol40.par2");
+        std::fs::write(&index_path, &built.index).unwrap();
+        let (vname, vbytes) = &built.volumes[0];
+        let (first_exponent, count) = volume_range(vname.as_bytes()).unwrap();
+        assert_eq!((first_exponent, count), (0, 12));
+        let damaged = [33usize, 35, 36, 38, 39];
+        let mut disk = f0.clone();
+        for s in damaged {
+            disk[s * 4096..(s + 1) * 4096].fill(0);
+        }
+        std::fs::write(dir.join("part01.rar"), &disk).unwrap();
+        let hint = LivePlanHint {
+            volumes: if with_volume {
+                vec![LiveQueuedVolume {
+                    id: 9,
+                    first_exponent,
+                    count,
+                    size: vbytes.len() as u64,
+                    articles: 4,
+                    paused: true,
+                }]
+            } else {
+                Vec::new()
+            },
+            ..LivePlanHint::default()
+        };
+        let pool = Arc::new(crate::parlive::BudgetPool::with_size(500 << 20));
+        let limits = crate::parlive::resources(4096, 500 << 20).unwrap();
+        let budget = pool.acquire(limits.reservation_bytes, 500 << 20).unwrap();
+        let writers = download_writes(nzb_id, &dir).unwrap();
+        let set = load_par2_set(&index_path).unwrap();
+        let entry =
+            build_planned_streaming_session(&set, &dir, limits.options, budget, writers, &hint)
+                .unwrap();
+        install_streaming_session(nzb_id, Arc::clone(&entry)).unwrap();
+        let slots = entry.session.status().syndrome_slots;
+        assert!(streaming_session_register_queued_volume(nzb_id, 9, 12, true));
+        let id0 = entry.session.file_id_by_name(b"part01.rar").unwrap();
+        entry.note_written(id0, &dir.join("part01.rar"));
+        entry.apply_target_paths().unwrap();
+        for s in 0..40usize {
+            let off = (s * 4096) as u64;
+            let outcome = if damaged.contains(&s) {
+                streaming_session_on_article_failed_permanently(nzb_id, &id0, off, 4096)
+                    .unwrap()
+                    .unwrap()
+                    .1
+            } else {
+                let chunk = &f0[s * 4096..(s + 1) * 4096];
+                entry
+                    .session
+                    .on_article_finished(&id0, off, 4096, par_rs::crc::crc32(chunk), Some(chunk))
+                    .unwrap()
+                    .unpause
+            };
+            entry.unpause(outcome.as_ref());
+        }
+        let path = dir.join(vname);
+        std::fs::write(&path, vbytes).unwrap();
+        streaming_session_on_recovery_volume_arrived(nzb_id, &path, Some(9))
+            .unwrap()
+            .unwrap();
+        while entry.session.needs_backfill() {
+            entry.session.backfill_pending().unwrap();
+        }
+        let report = streaming_session_repair_available_targets_now(nzb_id, &[id0])
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.repaired_slices.len(), damaged.len());
+        assert_eq!(std::fs::read(dir.join("part01.rar")).unwrap(), f0);
+        let backfill = entry.session.io_stats().backfill_bytes_read;
+        streaming_session_cancel(nzb_id);
+        drop(entry);
+        crate::parlive::forget_download_writes(nzb_id);
+        let _ = std::fs::remove_dir_all(&dir);
+        (backfill, slots)
+    }
+
+    #[test]
+    fn live_40_slice_single_volume_recovery_is_planned_whole_and_never_backfilled() {
+        let (backfill, slots) = single_volume_backfill_case(0x6a0f_0040, true);
+        assert_eq!(slots, 12, "every exponent of the queued volume has a slot up front");
+        assert_eq!(backfill, 0, "no verified slice is read again");
+        // The control: the same damage without the volume in the plan back-fills from disk.
+        let (backfill, slots) = single_volume_backfill_case(0x6a0f_0041, false);
+        assert_eq!(slots, 2);
+        assert!(backfill > 0);
+    }
+
+    /// A hostile par2 index: one forged FileDesc claims a file of 4 TiB in 4-byte slices
+    /// (2^40 slices, none with checksums). par-rs (#133) refuses it with an InvalidData
+    /// error instead of allocating tens of GB at finalize. The batch repairer reports the
+    /// set as unusable (no repair, no panic) and keeps the reason for the job's log; a live
+    /// session refuses it at start. A plausible set built the same way still loads.
+    #[test]
+    fn forged_file_description_is_refused_without_allocating_for_it() {
+        use par_rs::packet::{
+            compute_set_id, encode_file_desc_body, encode_main_body, encode_packet, TYPE_FILEDESC,
+            TYPE_MAIN,
+        };
+        let build = |len: u64| {
+            let id = FileId([7; 16]);
+            let main = encode_main_body(4, &[id], &[]);
+            let set = compute_set_id(&main);
+            let mut out = encode_packet(&set, &TYPE_MAIN, &main);
+            out.extend(encode_packet(
+                &set,
+                &TYPE_FILEDESC,
+                &encode_file_desc_body(&id, &[1; 16], &[2; 16], len, b"big.bin"),
+            ));
+            out
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "rustyget-parchecker-forged-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let forged = dir.join("forged.par2");
+        std::fs::write(&forged, build(4 << 40)).unwrap();
+        let mut r = RustParRepairer::new(dir.clone(), 1, 64, false, false, Vec::new());
+        assert_eq!(
+            r.preprocess(&forged, Some(&NoopParEvents)),
+            ParResult::InsufficientCriticalData
+        );
+        let error = r.load_error.clone().expect("the reason is kept for the log");
+        assert!(error.contains("implausible file lengths"), "{error}");
+        // Live PAR refuses it at start as well.
+        assert!(
+            streaming_session_start_bounded(0x6a0f_0050, &forged, &dir, 500 << 20).is_err()
+        );
+        assert!(active_streaming_session(0x6a0f_0050).is_none());
+        crate::parlive::forget_download_writes(0x6a0f_0050);
+        // 32768 slices without checksums is still a set.
+        let plausible = dir.join("ok.par2");
+        std::fs::write(&plausible, build(4 * 32768)).unwrap();
+        let mut r = RustParRepairer::new(dir.clone(), 1, 64, false, false, Vec::new());
+        assert_eq!(r.preprocess(&plausible, Some(&NoopParEvents)), ParResult::Success);
+        assert!(r.load_error.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The batch repair of a download that knows of 2 damaged blocks folds 4 syndromes while
+    /// it verifies (par-rs fold-during-verify), and the repair rebuilds from them: no
+    /// surviving byte is read a second time. Nothing known damaged: no folding.
+    #[test]
+    fn batch_verify_folds_for_the_known_damage() {
+        use par_rs::create::{build_set, SetOptions, VolumeScheme};
+
+        assert_eq!(known_damaged_blocks(0, 4096), 0);
+        assert_eq!(known_damaged_blocks(5000, 4096), 3);
+        assert_eq!(fold_during_verify_k(0), 0);
+        assert_eq!(fold_during_verify_k(3), 5);
+        assert_eq!(fold_during_verify_k(1000), FOLD_DURING_VERIFY_CAP);
+        let dir = std::env::temp_dir().join(format!(
+            "rustyget-parchecker-fold-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f0 = make_deterministic_bytes(32 * 4096, 450);
+        let built = build_set(
+            "fold",
+            &[("part01.rar", &f0)],
+            &SetOptions {
+                slice_size: 4096,
+                recovery_blocks: 6,
+                first_exponent: 0,
+                volumes: VolumeScheme::Single,
+                creator: "rustyget-test".to_string(),
+                unicode_names: false,
+                kernel: Kernel::detect(),
+            },
+        )
+        .unwrap();
+        built.write_to(&dir, "fold").unwrap();
+        let mut disk = f0.clone();
+        disk[5 * 4096 + 7] ^= 0xff;
+        disk[20 * 4096 + 9] ^= 0xff;
+        std::fs::write(dir.join("part01.rar"), &disk).unwrap();
+        let mut r = RustParRepairer::new(dir.clone(), 1, 64, false, false, Vec::new());
+        r.set_known_damage(2);
+        assert_eq!(r.preprocess(&dir.join("fold.par2"), Some(&NoopParEvents)), ParResult::Success);
+        assert_eq!(r.process(false, &NoopParEvents), ParResult::RepairPossible);
+        assert_eq!(r.process(true, &NoopParEvents), ParResult::Success);
+        assert_eq!(std::fs::read(dir.join("part01.rar")).unwrap(), f0);
+        let report = r.repairer.fold_report().expect("the verify folded");
+        assert_eq!(report.requested, 4);
+        assert_eq!(report.outcome, par_rs::repairer::FoldOutcome::Used);
+        assert!(r.fold_report_line().unwrap().contains("Used"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn queued_volumes_extend_the_plan_whole_while_they_fit() {
+        let volume = |id, first_exponent, count| LiveQueuedVolume {
+            id,
+            first_exponent,
+            count,
+            size: 1,
+            articles: 1,
+            paused: true,
+        };
+        // The PTV set: vol00+01, vol01+02, vol03+04, vol07+08, vol15+16, vol31+10.
+        let hint = LivePlanHint {
+            volumes: vec![
+                volume(1, 0, 1),
+                volume(2, 1, 2),
+                volume(3, 3, 4),
+                volume(4, 7, 8),
+                volume(5, 15, 16),
+                volume(6, 31, 10),
+            ],
+            ..LivePlanHint::default()
+        };
+        let mut plan = live_recovery_plan(&hint, 1000, &HashSet::new());
+        extend_plan_with_queued_volumes(&mut plan, &hint, &HashSet::new(), 41);
+        assert_eq!(plan.exponents, (0..41).collect::<Vec<u32>>());
+        // Room for 20: whole volumes, fewest blocks first (1 + 2 + 4 + 8), never part of one.
+        let mut plan = live_recovery_plan(&hint, 1000, &HashSet::new());
+        extend_plan_with_queued_volumes(&mut plan, &hint, &HashSet::new(), 20);
+        assert_eq!(plan.exponents, (0..15).collect::<Vec<u32>>());
+        // A loaded exponent needs no slot of its own in the plan.
+        let loaded: HashSet<u32> = [0].into_iter().collect();
+        let mut plan = live_recovery_plan(&hint, 1000, &loaded);
+        extend_plan_with_queued_volumes(&mut plan, &hint, &loaded, 41);
+        assert_eq!(plan.exponents, (1..41).collect::<Vec<u32>>());
+        // Room is a quarter of the pool, two slices per slot, at most 16.
+        assert_eq!(planned_slot_room(4096 << 20, 5 << 20), 16);
+        assert_eq!(planned_slot_room(200 << 20, 5 << 20), 5);
     }
 
     fn grow_live_slots_case(

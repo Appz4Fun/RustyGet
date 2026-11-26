@@ -722,25 +722,33 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
                     // Identity for live PAR's flush report, decided once here: copied only
                     // when a session runs now (one starting mid-flush catches up from the
                     // completion replay).
-                    let live = live_flush_reports(
-                        f.par_file,
-                        crate::parchecker::streaming_session_has_session(nzb.id),
-                    )
-                    .then(|| (nzb.id, f.id, f.filename.clone(), f.hash16k.clone()));
+                    let session = crate::parchecker::streaming_session_has_session(nzb.id);
+                    let live = live_flush_reports(f.par_file, session)
+                        .then(|| (nzb.id, f.id, f.filename.clone(), f.hash16k.clone()));
                     // A recovery volume's written bytes are kept for its absorption at
                     // completion (`on_recovery_volume_bytes`), never read back.
                     let recovery = (f.par_file
                         && f.decoded_file_size > 0
                         && crate::parchecker::streaming_session_wants_recovery_bytes(nzb.id))
                     .then(|| (nzb.id, f.id, f.decoded_file_size as u64));
-                    return Some((fp, info_name, write_context, live, recovery, (nzb.id, f.id)));
+                    // Written before live PAR can take them (no session yet, or a recovery
+                    // volume of unknown size): kept for it (`presession_keep`).
+                    let early = (live.is_none()
+                        && recovery.is_none()
+                        && (!session || f.par_file)
+                        && memory_monitor_tier() != PRESSURE_CRITICAL
+                        && crate::parchecker::presession_wanted(nzb.par_size))
+                    .then(|| (nzb.id, f.id, f.par_file, f.filename.clone(), f.hash16k.clone()));
+                    return Some((fp, info_name, write_context, live, recovery, early, (nzb.id, f.id)));
                 }
             }
         }
         None
     });
 
-    let Some((file_ptr, info_name, write_context, live, recovery, (nzb_id, file_id))) = selected else {
+    let Some((file_ptr, info_name, write_context, live, recovery, early, (nzb_id, file_id))) =
+        selected
+    else {
         CACHE_FILE_INFO.store(0, Ordering::SeqCst);
         cache_unlock_flush();
         crate::log::log_active_bytes(MK_DEBUG, b"Checking cache... nothing to flush");
@@ -787,7 +795,7 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
     // Items counted without being written (live PAR certified their target): not reported to
     // live extraction as written; the finished file is read for them.
     let dropped = std::cell::RefCell::new(Vec::new());
-    let hand_off = (live.is_some() || recovery.is_some()) && !skip_disk_write;
+    let hand_off = (live.is_some() || recovery.is_some() || early.is_some()) && !skip_disk_write;
     let (flushed_articles, flushed_size) = flush_cache_then_hand_off(
         &items,
         hand_off,
@@ -815,6 +823,20 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
         },
         |idx| qh.file_cache_discard_article_segment(file_ptr, metas[idx].0),
         |written_items, complete| {
+            if let Some((nzb_id, file_id, par_file, name, hash16k)) = early.as_ref() {
+                // A session that started since the file was chosen takes them as a write
+                // that ran before its capture (its catch-up may have captured them already).
+                if !par_file && crate::parchecker::streaming_session_has_session(*nzb_id) {
+                    crate::parchecker::streaming_session_articles_written(
+                        *nzb_id,
+                        (Some(*file_id), name, hash16k),
+                        direct_write,
+                        written_items,
+                    );
+                } else {
+                    crate::parchecker::presession_keep(*nzb_id, *file_id, written_items);
+                }
+            }
             if let Some((nzb_id, file_id, name, hash16k)) = live.as_ref() {
                 crate::parchecker::streaming_session_articles_written(
                     *nzb_id,
@@ -1548,6 +1570,9 @@ struct RsArticleWriter {
     /// The same for an article of a recovery volume (job, queue file, volume size, bytes):
     /// the completed volume is absorbed from RAM (`on_recovery_volume_bytes`).
     recovery_tee: Option<(i32, i32, u64, Vec<u8>)>,
+    /// The same for an article live PAR cannot take yet (job, queue file, bytes): no
+    /// session yet, or a recovery volume of unknown size (`presession_keep`).
+    presession_tee: Option<(i32, i32, Vec<u8>)>,
     /// The file being completed, for live PAR (`complete_file_parts`).
     proc_live: Option<ProcLive>,
 }
@@ -1607,6 +1632,7 @@ impl Default for RsArticleWriter {
             post_nzb_dest_dir: Vec::new(),
             live_tee: None,
             recovery_tee: None,
+            presession_tee: None,
             proc_live: None,
         }
     }
@@ -1749,6 +1775,7 @@ impl RsArticleWriter {
         self.drop_cached();
         self.live_tee = None;
         self.recovery_tee = None;
+        self.presession_tee = None;
         self.write_context = write_context;
         if self.write_context.is_none() {
             return false;
@@ -1940,6 +1967,16 @@ impl RsArticleWriter {
                     nzb.id,
                     u64::try_from(self.article_size).unwrap_or(0),
                 );
+                if self.live_tee.is_none()
+                    && !crate::parchecker::streaming_session_has_session(nzb.id)
+                    && crate::parchecker::presession_wanted(nzb.par_size)
+                {
+                    self.presession_tee = Some((
+                        nzb.id,
+                        fsnap.id,
+                        Vec::with_capacity(usize::try_from(self.article_size).unwrap_or(0)),
+                    ));
+                }
             } else if !raw_article
                 && self.format == Format::Yenc
                 && !is_dupe_fallback
@@ -1951,6 +1988,20 @@ impl RsArticleWriter {
                     nzb.id,
                     fsnap.id,
                     fsnap.decoded_file_size as u64,
+                    Vec::with_capacity(usize::try_from(self.article_size).unwrap_or(0)),
+                ));
+            } else if !raw_article
+                && self.format == Format::Yenc
+                && !is_dupe_fallback
+                && fsnap.par_file
+                && memory_monitor_tier() != PRESSURE_CRITICAL
+                && crate::parchecker::presession_wanted(nzb.par_size)
+            {
+                // A recovery volume article before the session or the volume's size: kept
+                // until the volume's tee takes it.
+                self.presession_tee = Some((
+                    nzb.id,
+                    fsnap.id,
                     Vec::with_capacity(usize::try_from(self.article_size).unwrap_or(0)),
                 ));
             }
@@ -2061,6 +2112,14 @@ impl RsArticleWriter {
                 self.recovery_tee = None;
             }
         }
+        if let Some((_, _, bytes)) = self.presession_tee.as_mut() {
+            let room = usize::try_from(self.article_size).unwrap_or(0);
+            if ok && !raw_article && bytes.len() + buf.len() <= room {
+                bytes.extend_from_slice(buf);
+            } else {
+                self.presession_tee = None;
+            }
+        }
         ok
     }
 
@@ -2110,7 +2169,12 @@ impl RsArticleWriter {
 
         let live_tee = self.live_tee.take();
         let recovery_tee = self.recovery_tee.take();
+        let presession_tee = self.presession_tee.take();
         if !success || raw_article {
+            // A partial direct write may have changed the file: a kept copy is stale.
+            if let Ok(offset) = u64::try_from(self.article_offset) {
+                crate::parchecker::presession_drop(nzb.id, fsnap.id, &[offset]);
+            }
             self.drop_cached();
             return;
         }
@@ -2126,6 +2190,18 @@ impl RsArticleWriter {
                     &[(offset, &bytes)],
                 ),
                 Err(_) => crate::parchecker::streaming_session_recovery_void(nzb_id, file_id),
+            }
+        }
+        if !has_cached && !skip_disk_write {
+            if let Ok(offset) = u64::try_from(self.article_offset) {
+                match presession_tee {
+                    // Written whole: kept for the session's capture or the volume's tee.
+                    Some((nzb_id, file_id, bytes)) => {
+                        crate::parchecker::presession_keep(nzb_id, file_id, &[(offset, &bytes)]);
+                    }
+                    // Written again without a copy kept: an older kept copy is stale.
+                    None => crate::parchecker::presession_drop(nzb.id, fsnap.id, &[offset]),
+                }
             }
         }
         if let Some(tee) = live_tee.filter(|_| !has_cached && !skip_disk_write) {

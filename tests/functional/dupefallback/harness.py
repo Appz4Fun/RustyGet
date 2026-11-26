@@ -12510,9 +12510,9 @@ def scenario_pardamagerepairable(daemon, t):
     return ('pardamagerepairable', ok, 'primary=%s failover_logs=%d' % (hp['Status'], over))
 
 
-def _livepar_release(t, tag, seed, missing, recovery, size=2_000_000, block=524288):
+def _livepar_release(t, tag, seed, missing, recovery, size=2_000_000, block=524288, volumes=1):
     """8 data files of <size> (50 KB articles) with a par2 set of <block> blocks and
-    <recovery> recovery blocks in one volume; <missing> maps a data file number to the
+    <recovery> recovery blocks in <volumes> volumes; <missing> maps a data file number to the
     part numbers it loses. Returns the NZB members and the payloads by name."""
     import subprocess as _sp
     work = t.path('data', tag)
@@ -12523,7 +12523,7 @@ def _livepar_release(t, tag, seed, missing, recovery, size=2_000_000, block=5242
         payloads[name] = _payload(size, seed + i)
         t.write_file(os.path.join('data', tag, name), payloads[name])
         names.append(name)
-    _sp.run(['par2', 'create', '-q', '-q', '-s%d' % block, '-c%d' % recovery, '-n1', '-a', 'rel',
+    _sp.run(['par2', 'create', '-q', '-q', '-s%d' % block, '-c%d' % recovery, '-n%d' % volumes, '-a', 'rel',
              'rel.par2'] + names, cwd=work, check=True, capture_output=True)
     members = []
     for name in sorted(n for n in os.listdir(work) if n.endswith('.par2')):
@@ -12559,13 +12559,21 @@ def _livepar_io(t, timeout=30):
                 io.update({'verify_mb': float(verify), 'ram_backfilled': int(ram_backfill),
                            'ram_volumes': int(ram_volumes), 'ram_volume_mb': float(ram_volume_mb),
                            'trust': trust})
+            kept = re.findall(r'(\d+) not kept at write \(no room\), (\d+) taken from bytes kept '
+                              r'before the session', t.read_file('nzbget.log').decode(errors='replace'))
+            if kept:
+                io.update({'not_kept': int(kept[-1][0]), 'presession': int(kept[-1][1])})
+            stashed = re.findall(r'(\d+) taken from bytes kept at write',
+                                 t.read_file('nzbget.log').decode(errors='replace'))
+            if stashed:
+                io['stashed'] = int(stashed[-1])
             return io
         time.sleep(0.5)
     return {}
 
 
-def _livepar_run(daemon, t, tag, seed, missing, recovery):
-    members, payloads = _livepar_release(t, tag, seed, missing, recovery)
+def _livepar_run(daemon, t, tag, seed, missing, recovery, volumes=1):
+    members, payloads = _livepar_release(t, tag, seed, missing, recovery, volumes=volumes)
     api = daemon.wait_ready()
     daemon.append(api, 'Live', build_multi_nzb(members), False, tag + '-key', 100)
     h = daemon.wait_history(api, 'Live', timeout=300)
@@ -12686,18 +12694,45 @@ def scenario_livepartrustedtemp(daemon, t):
 
 
 def scenario_livepargrow(daemon, t):
-    """Damage grows past the initial recovery plan (planned for the 0 failures seen when
-    the index arrived, plus margin: 2 slots; 4 blocks get damaged later): the slots
-    grow with the damage (set_max_syndrome_slots), the late slots are back-filled, and
-    the live repair still finishes the job as the download ends, with no batch
-    par-repair."""
-    h, intact, io = _livepar_run(daemon, t, 'lpg', 12500, {4: {35}, 5: {20}, 6: {30}, 7: {30}}, 6)
+    """Damage grows past the initial recovery plan: the queue's one recovery volume holds 80
+    blocks, more than the 64 slots planned up front at most, so only the slots for the 0
+    failures seen when the index arrived plus margin (2) are planned; 4 blocks get damaged
+    later. The slots grow with the damage (set_max_syndrome_slots), the late slots are
+    back-filled, and the live repair still finishes the job as the download ends, with no
+    batch par-repair."""
+    h, intact, io = _livepar_run(daemon, t, 'lpg', 12500, {4: {35}, 5: {20}, 6: {30}, 7: {30}}, 80)
     live = _grep_log(t, 'as the download ended')
     batch = _grep_log(t, 'PAR repair timings for')
     grew = _grep_log(t, 'repair memory grew to')
     ok = h['Status'].startswith('SUCCESS') and intact and live >= 1 and batch == 0 and grew >= 1
     return ('livepargrow', ok, 'status=%s intact=%s live_repairs=%d batch_repairs=%d grew=%d io=%s'
             % (h['Status'], intact, live, batch, grew, io))
+
+
+def scenario_liveparzeroreads(daemon, t):
+    """An article that came over the wire is never read twice: a plain download with damage
+    (three damaged blocks in three files, the recovery blocks in four volumes, the article
+    cache on). Live PAR takes every byte from RAM: the captures, bytes kept when a flush
+    wrote an article first (lending free ParBuffer instead of dropping them), bytes written
+    before the session started, recovery volumes from their written bytes, and slots for every
+    queued recovery block planned up front (no back-fill). So par-rs reads no source byte
+    (source_bytes_read 0, no article read from its file), back-fills nothing, reads no
+    recovery volume back and checks no target again; the live repair finishes the job as the
+    download ends, byte-exact. The harness's captures win the race with the cache flush, so
+    the flush-first and pre-session paths are pinned by the parchecker unit tests
+    (live_flush_before_capture_lends_for_the_kept_bytes,
+    live_bytes_written_before_the_session_are_kept_for_it) and liveparnocache. Before: main
+    read flushed articles back (6790: 601 MB of a
+    3.3 GB set), back-filled growth slots (1550 MB) and read recovery volumes back (75 MB)."""
+    h, intact, io = _livepar_run(daemon, t, 'lzr', 12550, {1: {6}, 4: {17}, 6: {29}}, 8, volumes=4)
+    live = _grep_log(t, 'as the download ended')
+    batch = _grep_log(t, 'PAR repair timings for')
+    ok = (h['Status'].startswith('SUCCESS') and intact and live >= 1 and batch == 0 and bool(io)
+          and io['source_mb'] == 0.0 and io['read_by_parrs'] == 0 and io['backfill_mb'] == 0.0
+          and io['recovery_mb'] == 0.0 and io.get('verify_mb', 99) == 0.0
+          and io.get('not_kept', 99) == 0)
+    return ('liveparzeroreads', ok, 'status=%s intact=%s live_repairs=%d batch_repairs=%d io=%s'
+            % (h['Status'], intact, live, batch, io))
 
 
 def scenario_parinplace(daemon, t):
@@ -15221,6 +15256,7 @@ SCENARIOS = {
     'liveparobfuscated': scenario_liveparobfuscated,
     'liveparplanned': scenario_liveparplanned,
     'livepargrow': scenario_livepargrow,
+    'liveparzeroreads': scenario_liveparzeroreads,
     'livepartrusted': scenario_livepartrusted,
     'livepartrustedtemp': scenario_livepartrustedtemp,
     'parinplace': scenario_parinplace,
@@ -15681,6 +15717,7 @@ SCENARIO_OPTIONS = {
                           'ParRename=yes', 'DirectRename=no'],
     'liveparplanned': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
     'livepargrow': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
+    'liveparzeroreads': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
     'livepartrusted': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
     'livepartrustedtemp': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=0', 'DirectWrite=no'],
     'parinplace': ['ParCheck=auto', 'LiveParRepair=no'],

@@ -1213,6 +1213,39 @@ pub fn rar5_head_from_tail(tail: &[u8], file_size: u64, index: usize) -> Option<
     rar5::head_from_tail(tail, file_size, index)
 }
 
+/// [`restore_tail_from_sibling`] through the live-PAR write guard of the download folder
+/// holding `path`, as [`restore_head_guarded`]: refused while a live repair owns the volume,
+/// and a live session reading it re-checks the rewritten range from disk (otherwise the
+/// file's identity changes and live PAR stops). True when written.
+pub fn restore_tail_from_sibling_guarded(path: &[u8], holes: &[(u64, u64)], sibling: &[u8]) -> bool {
+    let os = crate::fsops::path(path);
+    let file = std::path::Path::new(&os);
+    let Some(parent) = file.parent() else {
+        return false;
+    };
+    let Ok(context) = crate::parlive::donor_write_context(parent, file) else {
+        return false;
+    };
+    let live = context.watched_by_live_par();
+    let written = context
+        .perform_io(|| {
+            if restore_tail_from_sibling(path, holes, sibling) {
+                Ok(())
+            } else {
+                Err(std::io::ErrorKind::NotFound.into())
+            }
+        })
+        .is_ok();
+    if written {
+        let start = holes.iter().map(|&(s, _)| s).min().unwrap_or(0);
+        let end = holes.iter().map(|&(_, e)| e).max().unwrap_or(start);
+        if !(live && context.range_replaced(start, end - start)) {
+            context.invalidate_identity();
+        }
+    }
+    written
+}
+
 /// Writes the first bytes of RAR5 volume `path`, number `index` (from 0), back from its own
 /// quick-open record (see [`rar5_head_from_tail`]) when its first lost range in `holes`
 /// (`start`, `end`, sorted) starts the file and what arrived behind the last one (at most

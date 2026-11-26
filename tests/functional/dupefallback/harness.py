@@ -11664,9 +11664,21 @@ def _livepar_io(t, timeout=30):
         found = pattern.findall(t.read_file('nzbget.log').decode(errors='replace'))
         if found:
             source, backfill, recovery, misses, read_by_parrs, awaited = found[-1]
-            return {'source_mb': float(source), 'backfill_mb': float(backfill),
-                    'recovery_mb': float(recovery), 'misses': int(misses),
-                    'read_by_parrs': int(read_by_parrs), 'awaited': int(awaited)}
+            io = {'source_mb': float(source), 'backfill_mb': float(backfill),
+                  'recovery_mb': float(recovery), 'misses': int(misses),
+                  'read_by_parrs': int(read_by_parrs), 'awaited': int(awaited)}
+            # Bytes read again at download end (the whole-file check; 0 with trusted slices),
+            # slices back-filled from RAM, recovery volumes absorbed from RAM.
+            extra = re.findall(
+                r'target_verification_bytes_read ([\d.]+) MB, .*?ram_backfilled_slices (\d+), '
+                r'recovery volumes from RAM (\d+) \(([\d.]+) MB\), trusted slice checks (\w+)',
+                t.read_file('nzbget.log').decode(errors='replace'))
+            if extra:
+                verify, ram_backfill, ram_volumes, ram_volume_mb, trust = extra[-1]
+                io.update({'verify_mb': float(verify), 'ram_backfilled': int(ram_backfill),
+                           'ram_volumes': int(ram_volumes), 'ram_volume_mb': float(ram_volume_mb),
+                           'trust': trust})
+            return io
         time.sleep(0.5)
     return {}
 
@@ -11758,6 +11770,24 @@ def scenario_liveparplanned(daemon, t):
     ok = (h['Status'].startswith('SUCCESS') and intact and live >= 1 and batch == 0
           and bool(io) and io['backfill_mb'] == 0.0)
     return ('liveparplanned', ok, 'status=%s intact=%s live_repairs=%d batch_repairs=%d io=%s'
+            % (h['Status'], intact, live, batch, io))
+
+
+def scenario_livepartrusted(daemon, t):
+    """Never read a byte twice at download end: two damaged blocks, the recovery volume
+    fetched for them and the live repair as the download ends. Every slice live PAR
+    verified is the byte written, so the end-of-repair check takes the verified slices
+    as proof (par-rs set_trust_verified_slices) instead of re-reading every target
+    (target_verification_bytes_read 0 MB; main read the whole 16 MB again), and the
+    recovery volume is absorbed from the bytes written (on_recovery_volume_bytes:
+    recovery_bytes_read 0 MB). The output is still byte-exact."""
+    h, intact, io = _livepar_run(daemon, t, 'ltr', 12530, {1: {5}, 5: {22}}, 3)
+    live = _grep_log(t, 'as the download ended')
+    batch = _grep_log(t, 'PAR repair timings for')
+    ok = (h['Status'].startswith('SUCCESS') and intact and live >= 1 and batch == 0
+          and io.get('trust') == 'on' and io.get('verify_mb', 99) == 0.0
+          and io.get('recovery_mb', 99) == 0.0 and io.get('ram_volumes', 0) >= 1)
+    return ('livepartrusted', ok, 'status=%s intact=%s live_repairs=%d batch_repairs=%d io=%s'
             % (h['Status'], intact, live, batch, io))
 
 
@@ -14288,6 +14318,7 @@ SCENARIOS = {
     'liveparobfuscated': scenario_liveparobfuscated,
     'liveparplanned': scenario_liveparplanned,
     'livepargrow': scenario_livepargrow,
+    'livepartrusted': scenario_livepartrusted,
     'parinplace': scenario_parinplace,
     'parlesscritical': scenario_parlesscritical,
     'parlesstwin': scenario_parlesstwin,
@@ -14712,6 +14743,7 @@ SCENARIO_OPTIONS = {
                           'ParRename=yes', 'DirectRename=no'],
     'liveparplanned': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
     'livepargrow': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
+    'livepartrusted': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
     'parinplace': ['ParCheck=auto', 'LiveParRepair=no'],
     'parlesscritical': ['HealthCheck=dupe', 'DupeArticleFallback=no'],
     'parlesstwin': ['HealthCheck=dupe', 'DupeArticleFallback=no'],

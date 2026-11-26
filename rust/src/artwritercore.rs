@@ -1183,6 +1183,11 @@ pub fn article_writer_flush_cache(
 
 /// Daemon cache commit with live repair ownership. Callbacks run after the permit drops.
 /// The public legacy wrapper above retains its historical commit/error behavior.
+///
+/// `not_written` names each item counted (and discarded) without being written: one whose
+/// target live PAR has certified already. Its bytes never reached the file, so they must not
+/// be reported to live PAR as written.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn article_writer_flush_cache_guarded(
     items: &[ArticleWriterFlushItem<'_>],
     direct_write: bool,
@@ -1191,6 +1196,7 @@ pub(crate) fn article_writer_flush_cache_guarded(
     context: &crate::parlive::SourceWriteContext,
     mut should_stop: impl FnMut() -> bool,
     mut discard: impl FnMut(usize),
+    mut not_written: impl FnMut(usize),
     mut log_error: impl FnMut(&[u8]),
 ) -> (i32, i64) {
     use std::io::{Seek, SeekFrom, Write};
@@ -1213,6 +1219,7 @@ pub(crate) fn article_writer_flush_cache_guarded(
                 // A sealed target already contains certified bytes. Drop stale cache data.
                 count += 1;
                 size += i64::from(item.segment_size);
+                not_written(index);
                 discard(index);
                 continue;
             }
@@ -2051,6 +2058,7 @@ mod tests {
         std::fs::write(&path, b"repaired").unwrap();
         lease.publish(&[(40, 0)], || ()).unwrap();
         let mut discarded = Vec::new();
+        let mut skipped = Vec::new();
         let items = [ArticleWriterFlushItem {
             segment_offset: 0,
             segment_size: 8,
@@ -2065,10 +2073,12 @@ mod tests {
             &context,
             || false,
             |idx| discarded.push(idx),
+            |idx| skipped.push(idx),
             |_| panic!("certified discard is expected"),
         );
         assert_eq!(result, (1, 8));
         assert_eq!(discarded, [0]);
+        assert_eq!(skipped, [0], "a certified drop is reported as not written");
         assert_eq!(std::fs::read(&path).unwrap(), b"repaired");
         assert!(gate.is_current_generation(generation));
         crate::parlive::forget_download_writes(-1900230);
@@ -2101,6 +2111,7 @@ mod tests {
             &context,
             || false,
             |_| assert_eq!(gate.status().active_writers, 0),
+            |_| panic!("a failed write is not a certified drop"),
             |_| {
                 assert_eq!(gate.status().active_writers, 0);
                 assert!(!gate.is_current_generation(generation));

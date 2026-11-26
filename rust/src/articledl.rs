@@ -722,14 +722,20 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
                         crate::parchecker::streaming_session_has_session(nzb.id),
                     )
                     .then(|| (nzb.id, f.id, f.filename.clone(), f.hash16k.clone()));
-                    return Some((fp, info_name, write_context, live));
+                    // A recovery volume's written bytes are kept for its absorption at
+                    // completion (`on_recovery_volume_bytes`), never read back.
+                    let recovery = (f.par_file
+                        && f.decoded_file_size > 0
+                        && crate::parchecker::streaming_session_wants_recovery_bytes(nzb.id))
+                    .then(|| (nzb.id, f.id, f.decoded_file_size as u64));
+                    return Some((fp, info_name, write_context, live, recovery));
                 }
             }
         }
         None
     });
 
-    let Some((file_ptr, info_name, write_context, live)) = selected else {
+    let Some((file_ptr, info_name, write_context, live, recovery)) = selected else {
         CACHE_FILE_INFO.store(0, Ordering::SeqCst);
         cache_unlock_flush();
         crate::log::log_active_bytes(MK_DEBUG, b"Checking cache... nothing to flush");
@@ -772,11 +778,11 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
         })
         .collect();
 
-    let hand_off = live.is_some() && !skip_disk_write;
+    let hand_off = (live.is_some() || recovery.is_some()) && !skip_disk_write;
     let (flushed_articles, flushed_size) = flush_cache_then_hand_off(
         &items,
         hand_off,
-        |discard| {
+        |discard, not_written| {
             article_writer_flush_cache_guarded(
                 &items,
                 direct_write,
@@ -785,6 +791,7 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
                 &write_context,
                 || qh.file_cache_is_deleted_unparked(file_ptr),
                 discard,
+                not_written,
                 |msg| {
                     if nzb_ptr.is_some() {
                         qh.nzb_print_message(nzb_ptr, MK_ERROR, msg);
@@ -795,7 +802,7 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
             )
         },
         |idx| qh.file_cache_discard_article_segment(file_ptr, metas[idx].0),
-        |written_items| {
+        |written_items, complete| {
             if let Some((nzb_id, file_id, name, hash16k)) = live.as_ref() {
                 crate::parchecker::streaming_session_articles_written(
                     *nzb_id,
@@ -803,6 +810,18 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
                     direct_write,
                     written_items,
                 );
+            }
+            if let Some((nzb_id, file_id, size)) = recovery {
+                if complete {
+                    crate::parchecker::streaming_session_recovery_bytes_written(
+                        nzb_id,
+                        file_id,
+                        size,
+                        written_items,
+                    );
+                } else {
+                    crate::parchecker::streaming_session_recovery_void(nzb_id, file_id);
+                }
             }
         },
     );
@@ -822,11 +841,13 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
 }
 
 /// The flushed items live PAR receives: those written, up to the first failed write, whose
-/// bytes are all present.
+/// bytes are all present, less those `not_written` (dropped because their target was
+/// certified: counted, never written).
 fn live_written_items<'a>(
     items: &[ArticleWriterFlushItem<'a>],
     flushed_articles: i32,
     flushed_size: i64,
+    not_written: &[usize],
 ) -> Vec<(u64, &'a [u8])> {
     let written = usize::try_from(flushed_articles).unwrap_or(0).min(items.len());
     if written == 0 {
@@ -839,14 +860,19 @@ fn live_written_items<'a>(
     let good = if all == flushed_size { written } else { written - 1 };
     items[..good]
         .iter()
+        .enumerate()
+        .filter(|(index, _)| !not_written.contains(index))
+        .map(|(_, item)| item)
         .filter(|item| item.segment_content.len() as i64 == i64::from(item.segment_size))
         .filter_map(|item| Some((u64::try_from(item.segment_offset).ok()?, item.segment_content)))
         .collect()
 }
 
 /// Commits a cache flush (`flush`, which calls the `discard` it is given for each item it
-/// is done with) and, when `hand_off`, gives live PAR the bytes just written (`live`), so
-/// par-rs never reads them back from the file.
+/// is done with, and `not_written` for each it counted without writing) and, when
+/// `hand_off`, gives live PAR the bytes just written (`live`), so par-rs never reads them
+/// back. `live`'s second argument says whether every item was written as it is (no failed
+/// write, none dropped, all bytes present): a recovery volume's kept bytes need that.
 ///
 /// `discard` frees an item's cache segment, the memory its `segment_content` points into.
 /// With a hand-off the discards wait until `live` has copied the written bytes: freeing
@@ -854,17 +880,22 @@ fn live_written_items<'a>(
 fn flush_cache_then_hand_off<'a>(
     items: &[ArticleWriterFlushItem<'a>],
     hand_off: bool,
-    flush: impl FnOnce(&mut dyn FnMut(usize)) -> (i32, i64),
+    flush: impl FnOnce(&mut dyn FnMut(usize), &mut dyn FnMut(usize)) -> (i32, i64),
     mut discard: impl FnMut(usize),
-    live: impl FnOnce(&[(u64, &'a [u8])]),
+    live: impl FnOnce(&[(u64, &'a [u8])], bool),
 ) -> (i32, i64) {
     if !hand_off {
-        return flush(&mut discard);
+        return flush(&mut discard, &mut |_| {});
     }
     let mut done: Vec<usize> = Vec::with_capacity(items.len());
-    let (flushed_articles, flushed_size) = flush(&mut |index| done.push(index));
+    let mut not_written: Vec<usize> = Vec::new();
+    let (flushed_articles, flushed_size) =
+        flush(&mut |index| done.push(index), &mut |index| not_written.push(index));
     if flushed_articles > 0 {
-        live(&live_written_items(items, flushed_articles, flushed_size));
+        let written = live_written_items(items, flushed_articles, flushed_size, &not_written);
+        let counted = usize::try_from(flushed_articles).unwrap_or(0).min(items.len());
+        let complete = not_written.is_empty() && written.len() == counted;
+        live(&written, complete);
     }
     for index in done {
         discard(index);
@@ -1455,6 +1486,22 @@ struct RsArticleWriter {
     /// Decoded bytes of an article written straight to disk, kept for live PAR's capture
     /// (charged to its ParBuffer cap) so par-rs never reads them back from the file.
     live_tee: Option<crate::parchecker::LiveTee>,
+    /// The same for an article of a recovery volume (job, queue file, volume size, bytes):
+    /// the completed volume is absorbed from RAM (`on_recovery_volume_bytes`).
+    recovery_tee: Option<(i32, i32, u64, Vec<u8>)>,
+    /// The file being completed, for live PAR (`complete_file_parts`).
+    proc_live: Option<ProcLive>,
+}
+
+/// What live PAR needs to know of a file whose parts are being completed.
+#[derive(Clone)]
+struct ProcLive {
+    nzb_id: i32,
+    file_id: i32,
+    par_file: bool,
+    decoded_size: u64,
+    filename: Vec<u8>,
+    hash16k: Vec<u8>,
 }
 
 // Safety: `cached_ptr` points to an `ArticleCache`-owned `malloc` buffer exclusively owned
@@ -1499,6 +1546,8 @@ impl Default for RsArticleWriter {
             post_orig_filename: Vec::new(),
             post_nzb_dest_dir: Vec::new(),
             live_tee: None,
+            recovery_tee: None,
+            proc_live: None,
         }
     }
 }
@@ -1639,6 +1688,7 @@ impl RsArticleWriter {
         self.out_file = None;
         self.drop_cached();
         self.live_tee = None;
+        self.recovery_tee = None;
         self.write_context = write_context;
         if self.write_context.is_none() {
             return false;
@@ -1809,6 +1859,19 @@ impl RsArticleWriter {
                     nzb.id,
                     u64::try_from(self.article_size).unwrap_or(0),
                 );
+            } else if !raw_article
+                && self.format == Format::Yenc
+                && !is_dupe_fallback
+                && fsnap.par_file
+                && fsnap.decoded_file_size > 0
+                && crate::parchecker::streaming_session_wants_recovery_bytes(nzb.id)
+            {
+                self.recovery_tee = Some((
+                    nzb.id,
+                    fsnap.id,
+                    fsnap.decoded_file_size as u64,
+                    Vec::with_capacity(usize::try_from(self.article_size).unwrap_or(0)),
+                ));
             }
             let direct_write = (direct_write_opt || force_direct_write)
                 && self.format == Format::Yenc
@@ -1909,6 +1972,14 @@ impl RsArticleWriter {
                 self.live_tee = None;
             }
         }
+        if let Some((nzb_id, file_id, _, bytes)) = self.recovery_tee.as_mut() {
+            if ok && !raw_article {
+                bytes.extend_from_slice(buf);
+            } else {
+                crate::parchecker::streaming_session_recovery_void(*nzb_id, *file_id);
+                self.recovery_tee = None;
+            }
+        }
         ok
     }
 
@@ -1955,9 +2026,24 @@ impl RsArticleWriter {
         );
 
         let live_tee = self.live_tee.take();
+        let recovery_tee = self.recovery_tee.take();
         if !success || raw_article {
             self.drop_cached();
             return;
+        }
+        if let Some((nzb_id, file_id, size, bytes)) =
+            recovery_tee.filter(|_| !has_cached && !skip_disk_write)
+        {
+            // Written whole (the file is closed above): the volume's absorption takes these.
+            match u64::try_from(self.article_offset) {
+                Ok(offset) => crate::parchecker::streaming_session_recovery_bytes_written(
+                    nzb_id,
+                    file_id,
+                    size,
+                    &[(offset, &bytes)],
+                ),
+                Err(_) => crate::parchecker::streaming_session_recovery_void(nzb_id, file_id),
+            }
         }
         if let Some(tee) = live_tee.filter(|_| !has_cached && !skip_disk_write) {
             // Written whole (the file is closed above): the capture takes these bytes.
@@ -2252,6 +2338,15 @@ impl RsArticleWriter {
             .collect();
 
         let outfile_cell = std::cell::RefCell::new(self.proc_outfile.take());
+        // Cached articles written here go to live PAR before their segments are freed: a
+        // recovery volume's into its tee, a source file's into recovery slots added after
+        // its slices verified (`backfill_from_bytes`).
+        let live = self
+            .proc_live
+            .clone()
+            .filter(|_| !self.proc_raw_article && !self.proc_skip_disk_write)
+            .filter(|live| crate::parchecker::streaming_session_wants_recovery_bytes(live.nzb_id));
+        let held = std::cell::RefCell::new(Vec::<(u64, Vec<u8>)>::new());
         let (crc, commit_err, failed_delta) = article_writer_process_articles(
             &items,
             total_articles,
@@ -2280,6 +2375,22 @@ impl RsArticleWriter {
                     .map_or(0, |f| f.write_bytes(buf))
             },
             |item_idx| {
+                if let (Some(live), Some(content)) = (live.as_ref(), items[item_idx].segment_content) {
+                    if let Ok(offset) = u64::try_from(items[item_idx].segment_offset) {
+                        if live.par_file && live.decoded_size > 0 {
+                            crate::parchecker::streaming_session_recovery_bytes_written(
+                                live.nzb_id,
+                                live.file_id,
+                                live.decoded_size,
+                                &[(offset, content)],
+                            );
+                        } else if !live.par_file
+                            && crate::parchecker::streaming_session_needs_backfill(live.nzb_id)
+                        {
+                            held.borrow_mut().push((offset, content.to_vec()));
+                        }
+                    }
+                }
                 let orig_idx = finished[item_idx].idx;
                 host.op45(
                     9,
@@ -2296,6 +2407,34 @@ impl RsArticleWriter {
         );
         self.proc_outfile = outfile_cell.into_inner();
         self.proc_crc = crc;
+        if let Some(live) = live.as_ref() {
+            if live.par_file && commit_err {
+                crate::parchecker::streaming_session_recovery_void(live.nzb_id, live.file_id);
+            }
+            if !live.par_file && !commit_err {
+                let held = held.into_inner();
+                if !held.is_empty() {
+                    let items: Vec<(u64, &[u8])> =
+                        held.iter().map(|(o, b)| (*o, b.as_slice())).collect();
+                    crate::parchecker::streaming_session_backfill_held(
+                        live.nzb_id,
+                        (Some(live.file_id), &live.filename, &live.hash16k),
+                        &items,
+                    );
+                }
+            }
+        }
+        // An article whose bytes could not be committed (a missing article temporary, whose
+        // range assembly leaves as zeros, or a failed staged copy) may have been verified by
+        // live PAR from RAM: its slices are no proof of what is on disk any more.
+        if commit_err || failed_delta > 0 {
+            if let Some(live) = self.proc_live.as_ref() {
+                crate::parchecker::streaming_session_distrust(
+                    live.nzb_id,
+                    "an article of a completed file could not be committed",
+                );
+            }
+        }
         if commit_err {
             self.commit_error = true;
         }
@@ -2386,21 +2525,32 @@ impl RsArticleWriter {
     fn complete_file_parts(&mut self, host: &DlHost<'_>) -> (bool, bool) {
         host.log(MK_DEBUG, b"Completing file parts");
         self.commit_error = false;
-        self.write_context = host.qh.with_locked_queue(|_| {
+        let (write_context, proc_live) = host.qh.with_locked_queue(|_| {
             let file = host.qh.file_snap(host.file_ptr);
             let nzb = host.qh.nzb_snap(file.nzb_ptr, false);
             // A parked download keeps its partly downloaded files: assemble them too.
             if (file.deleted || nzb.deleting) && !nzb.parking {
-                return None;
+                return (None, None);
             }
-            crate::parlive::source_write_context(
+            let live = ProcLive {
+                nzb_id: nzb.id,
+                file_id: file.id,
+                par_file: file.par_file,
+                decoded_size: u64::try_from(file.decoded_file_size).unwrap_or(0),
+                filename: file.filename.clone(),
+                hash16k: file.hash16k.clone(),
+            };
+            let context = crate::parlive::source_write_context(
                 nzb.id,
                 file.id,
                 crate::fsops::path(&nzb.dest_dir),
                 &file.filename,
             )
-            .ok()
+            .ok();
+            (context, Some(live))
         });
+        self.write_context = write_context;
+        self.proc_live = proc_live;
         if self.write_context.is_none() {
             return (false, false);
         }
@@ -4181,7 +4331,7 @@ mod tests {
         let result = super::flush_cache_then_hand_off(
             &items,
             true,
-            |discard| {
+            |discard, _not_written| {
                 // As `article_writer_flush_cache_guarded`: write, then discard, per item.
                 for i in 0..N {
                     discard(i);
@@ -4193,7 +4343,8 @@ mod tests {
                 freed.borrow_mut()[i] = true;
                 drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(raw[i], SIZE)) });
             },
-            |written| {
+            |written, complete| {
+                assert!(complete);
                 for &(offset, bytes) in written {
                     let i = offset as usize / SIZE;
                     assert!(!freed.borrow()[i], "live PAR read article {i} after its segment was freed");
@@ -4205,6 +4356,53 @@ mod tests {
         assert_eq!(result, (N as i32, (N * SIZE) as i64));
         assert_eq!(*handed.borrow(), (0..N).collect::<Vec<_>>());
         assert_eq!(*freed.borrow(), [true; N], "every written segment is freed");
+    }
+
+    /// Queue item 11: an article dropped because its target was certified is counted as
+    /// flushed but never written. Live PAR must not receive its stale cache bytes as written
+    /// (with trusted slices it would vouch for bytes that are not on disk).
+    #[test]
+    fn live_par_never_receives_a_certified_drop_as_written() {
+        let bufs: Vec<Vec<u8>> = (0..3).map(|i| vec![i as u8 + 1; 100]).collect();
+        let items: Vec<ArticleWriterFlushItem<'_>> = bufs
+            .iter()
+            .enumerate()
+            .map(|(i, b)| ArticleWriterFlushItem {
+                segment_offset: (i * 100) as i64,
+                segment_size: 100,
+                segment_content: b,
+                result_filename: None,
+            })
+            .collect();
+        let mut handed = Vec::new();
+        let mut whole = None;
+        let result = super::flush_cache_then_hand_off(
+            &items,
+            true,
+            |discard, not_written| {
+                // Item 1's target is certified: counted and discarded, not written.
+                for i in 0..3 {
+                    if i == 1 {
+                        not_written(i);
+                    }
+                    discard(i);
+                }
+                (3, 300)
+            },
+            |_| {},
+            |written, complete| {
+                handed.extend(written.iter().map(|w| w.0));
+                whole = Some(complete);
+            },
+        );
+        assert_eq!(result, (3, 300));
+        assert_eq!(handed, [0, 200], "the certified drop is not handed over");
+        assert_eq!(whole, Some(false), "a recovery tee must not count it either");
+        assert_eq!(
+            super::live_written_items(&items, 3, 300, &[1]).len(),
+            2,
+            "filtered by index"
+        );
     }
 
     #[test]
@@ -4221,10 +4419,10 @@ mod tests {
             })
             .collect();
         // Three counted, the third failed (its size not counted).
-        let written = super::live_written_items(&items, 3, 200);
+        let written = super::live_written_items(&items, 3, 200, &[]);
         assert_eq!(written.iter().map(|w| w.0).collect::<Vec<_>>(), [0, 100]);
-        assert!(super::live_written_items(&items, 0, 0).is_empty());
-        assert_eq!(super::live_written_items(&items, 3, 300).len(), 3);
+        assert!(super::live_written_items(&items, 0, 0, &[]).is_empty());
+        assert_eq!(super::live_written_items(&items, 3, 300, &[]).len(), 3);
     }
 
     #[test]

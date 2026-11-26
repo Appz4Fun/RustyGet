@@ -506,7 +506,7 @@ pub(crate) fn live_recovery_plan(
 
 /// At most this many syndrome slots are planned up front: every arriving slice is folded into
 /// each slot, so the slots cost memory bandwidth as well as memory.
-const PLANNED_SLOT_CAP: usize = 64;
+const PLANNED_SLOT_CAP: usize = 16;
 
 /// Slots that may be planned up front for slices of `slice_size` in a pool of `pool` bytes:
 /// at most a quarter of the pool (two slices per slot) and [`PLANNED_SLOT_CAP`].
@@ -1792,11 +1792,20 @@ pub(crate) fn streaming_session_defer_committed_article(
         }
         // Not in the cache: maybe written before the session started, and kept then.
         let mut presession = false;
-        let snapshot = snapshot().or_else(|| {
-            let bytes = presession_take(nzb_id, identity.0?, offset, size)?;
-            presession = true;
-            Some(bytes)
-        });
+        let snapshot = match snapshot() {
+            Some(bytes) => {
+                // The cache holds the article: any copy kept of an earlier write is stale.
+                if let Some(queue_id) = identity.0 {
+                    presession_drop(nzb_id, queue_id, &[offset]);
+                }
+                Some(bytes)
+            }
+            None => identity.0.and_then(|queue_id| {
+                let bytes = presession_take(nzb_id, queue_id, offset, size)?;
+                presession = true;
+                Some(bytes)
+            }),
+        };
         if presession {
             entry.metrics.cache_misses.fetch_add(1, Ordering::Relaxed);
             entry
@@ -2058,15 +2067,15 @@ pub(crate) fn streaming_session_articles_written(
     in_file: bool,
     items: &[(u64, &[u8])],
 ) -> usize {
+    if let Some(queue_id) = identity.0 {
+        let offsets: Vec<u64> = items.iter().map(|&(offset, _)| offset).collect();
+        presession_drop(nzb_id, queue_id, &offsets);
+    }
     let Some(entry) = active_streaming_session(nzb_id) else {
         return 0;
     };
     if entry.session.is_cancelled() || items.is_empty() {
         return 0;
-    }
-    if let Some(queue_id) = identity.0 {
-        let offsets: Vec<u64> = items.iter().map(|&(offset, _)| offset).collect();
-        presession_drop(nzb_id, queue_id, &offsets);
     }
     let Ok(id) = live_source_id(&entry, identity.0, identity.1, identity.2) else {
         return 0;
@@ -2135,6 +2144,7 @@ pub(crate) fn presession_keep(nzb_id: i32, file_id: i32, items: &[(u64, &[u8])])
             since: now,
             articles: HashMap::new(),
         });
+        job.since = now;
         job.articles.insert((file_id, offset), bytes.to_vec());
         kept.bytes += size;
         added += size;
@@ -2165,6 +2175,12 @@ pub(crate) fn presession_drop(nzb_id: i32, file_id: i32, offsets: &[u64]) {
 fn presession_take(nzb_id: i32, file_id: i32, offset: u64, size: u64) -> Option<Vec<u8>> {
     let mut kept = PRESESSION.lock().unwrap_or_else(|e| e.into_inner());
     let job = kept.jobs.get_mut(&nzb_id)?;
+    if job.since.elapsed() >= PRESESSION_TTL {
+        let freed: u64 = job.articles.values().map(|b| b.len() as u64).sum();
+        kept.jobs.remove(&nzb_id);
+        kept.bytes -= freed;
+        return None;
+    }
     let bytes = job.articles.remove(&(file_id, offset))?;
     let empty = job.articles.is_empty();
     if empty {
@@ -2180,6 +2196,12 @@ fn presession_take_file(nzb_id: i32, file_id: i32) -> Vec<(u64, Vec<u8>)> {
     let Some(job) = kept.jobs.get_mut(&nzb_id) else {
         return Vec::new();
     };
+    if job.since.elapsed() >= PRESESSION_TTL {
+        let freed: u64 = job.articles.values().map(|b| b.len() as u64).sum();
+        kept.jobs.remove(&nzb_id);
+        kept.bytes -= freed;
+        return Vec::new();
+    }
     let keys: Vec<(i32, u64)> = job
         .articles
         .keys()
@@ -2195,6 +2217,22 @@ fn presession_take_file(nzb_id: i32, file_id: i32) -> Vec<(u64, Vec<u8>)> {
     }
     kept.bytes -= taken.iter().map(|(_, b)| b.len() as u64).sum::<u64>();
     taken
+}
+
+/// A whole recovery volume of `len` bytes from the kept articles of queue file `file_id`,
+/// when they cover it exactly (no tee took them: a single-article volume, or one whose every
+/// article was written before its size was known). Takes them either way.
+fn presession_volume(nzb_id: i32, file_id: i32, len: u64) -> Option<Vec<u8>> {
+    let mut items = presession_take_file(nzb_id, file_id);
+    items.sort_unstable_by_key(|(offset, _)| *offset);
+    let mut bytes = Vec::with_capacity(usize::try_from(len).ok()?);
+    for (offset, data) in items {
+        if offset != bytes.len() as u64 {
+            return None;
+        }
+        bytes.extend_from_slice(&data);
+    }
+    (bytes.len() as u64 == len && len > 0).then_some(bytes)
 }
 
 /// Drops what is kept for job `nzb_id` (its session ended, or the job left the queue).
@@ -3870,9 +3908,19 @@ pub(crate) fn streaming_session_on_recovery_volume_completed(
     let file_id = queued_id.and_then(|id| i32::try_from(id).ok());
     let len = std::fs::metadata(path).ok().filter(|m| m.is_file()).map(|m| m.len());
     let tee = match (file_id, len) {
-        (Some(id), Some(len)) if successful => entry.take_recovery_bytes(id, len),
+        (Some(id), Some(len)) if successful => entry.take_recovery_bytes(id, len).or_else(|| {
+            presession_volume(nzb_id, id, len).map(|bytes| RecoveryTee {
+                size: len,
+                charged: 0,
+                bytes,
+                written: std::collections::BTreeMap::new(),
+                covered: len,
+                void: false,
+            })
+        }),
         (Some(id), _) => {
             streaming_session_recovery_void(nzb_id, id);
+            let _ = presession_take_file(nzb_id, id);
             entry.take_recovery_bytes(id, 0)
         }
         _ => None,
@@ -4747,6 +4795,7 @@ pub fn streaming_session_has_session(nzb_id: i32) -> bool {
 /// Drops the [`StreamingParSession`] for `nzb_id`.
 #[track_caller]
 pub fn streaming_session_forget(nzb_id: i32) {
+    presession_forget(nzb_id);
     LIVE_POLLS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -5032,6 +5081,15 @@ fn log_batch_repair(repairer: &Par2Repairer, base_dir: &Path, ok: bool) {
 
 /// At most this many syndromes are folded during a batch verify.
 pub(crate) const FOLD_DURING_VERIFY_CAP: usize = 64;
+
+/// Blocks of `block_size` that `lost_bytes` of failed articles touch at the least, plus one
+/// for an article that straddles a block boundary; 0 when nothing is lost.
+pub(crate) fn known_damaged_blocks(lost_bytes: u64, block_size: u64) -> u32 {
+    if lost_bytes == 0 || block_size == 0 {
+        return 0;
+    }
+    u32::try_from(lost_bytes.div_ceil(block_size).saturating_add(1)).unwrap_or(u32::MAX)
+}
 
 /// `k` for folding during verify: the damage the download knows of plus 2, 0 without any.
 pub(crate) fn fold_during_verify_k(known_damaged: u32) -> usize {
@@ -6425,9 +6483,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A set of 40 source slices with one recovery volume of 40 blocks: damage appears only
+    /// A set of 40 source slices with one recovery volume of 12 blocks: damage appears only
     /// after most slices verified (the plan at the start saw no failure). With the volume's
-    /// exponents planned up front (from its `.vol00+40.par2` name), the volume's blocks fold
+    /// exponents planned up front (from its `.vol00+12.par2` name), the volume's blocks fold
     /// into slots that already hold every verified slice: nothing is back-filled from disk.
     /// Without the volume in the hint (the control), the same damage adds slots after the
     /// slices verified and they are back-filled by reading the file.
@@ -6446,7 +6504,7 @@ mod tests {
             &[("part01.rar", &f0)],
             &SetOptions {
                 slice_size: 4096,
-                recovery_blocks: 40,
+                recovery_blocks: 12,
                 first_exponent: 0,
                 volumes: VolumeScheme::Single,
                 creator: "rustyget-test".to_string(),
@@ -6459,7 +6517,7 @@ mod tests {
         std::fs::write(&index_path, &built.index).unwrap();
         let (vname, vbytes) = &built.volumes[0];
         let (first_exponent, count) = volume_range(vname.as_bytes()).unwrap();
-        assert_eq!((first_exponent, count), (0, 40));
+        assert_eq!((first_exponent, count), (0, 12));
         let damaged = [33usize, 35, 36, 38, 39];
         let mut disk = f0.clone();
         for s in damaged {
@@ -6491,7 +6549,7 @@ mod tests {
                 .unwrap();
         install_streaming_session(nzb_id, Arc::clone(&entry)).unwrap();
         let slots = entry.session.status().syndrome_slots;
-        assert!(streaming_session_register_queued_volume(nzb_id, 9, 40, true));
+        assert!(streaming_session_register_queued_volume(nzb_id, 9, 12, true));
         let id0 = entry.session.file_id_by_name(b"part01.rar").unwrap();
         entry.note_written(id0, &dir.join("part01.rar"));
         entry.apply_target_paths().unwrap();
@@ -6534,9 +6592,9 @@ mod tests {
     }
 
     #[test]
-    fn live_single_volume_of_40_blocks_is_planned_whole_and_never_backfilled() {
+    fn live_40_slice_single_volume_recovery_is_planned_whole_and_never_backfilled() {
         let (backfill, slots) = single_volume_backfill_case(0x6a0f_0040, true);
-        assert_eq!(slots, 40, "every exponent of the queued volume has a slot up front");
+        assert_eq!(slots, 12, "every exponent of the queued volume has a slot up front");
         assert_eq!(backfill, 0, "no verified slice is read again");
         // The control: the same damage without the volume in the plan back-fills from disk.
         let (backfill, slots) = single_volume_backfill_case(0x6a0f_0041, false);
@@ -6604,6 +6662,8 @@ mod tests {
     fn batch_verify_folds_for_the_known_damage() {
         use par_rs::create::{build_set, SetOptions, VolumeScheme};
 
+        assert_eq!(known_damaged_blocks(0, 4096), 0);
+        assert_eq!(known_damaged_blocks(5000, 4096), 3);
         assert_eq!(fold_during_verify_k(0), 0);
         assert_eq!(fold_during_verify_k(3), 5);
         assert_eq!(fold_during_verify_k(1000), FOLD_DURING_VERIFY_CAP);
@@ -6669,7 +6729,7 @@ mod tests {
             ..LivePlanHint::default()
         };
         let mut plan = live_recovery_plan(&hint, 1000, &HashSet::new());
-        extend_plan_with_queued_volumes(&mut plan, &hint, &HashSet::new(), 64);
+        extend_plan_with_queued_volumes(&mut plan, &hint, &HashSet::new(), 41);
         assert_eq!(plan.exponents, (0..41).collect::<Vec<u32>>());
         // Room for 20: whole volumes, fewest blocks first (1 + 2 + 4 + 8), never part of one.
         let mut plan = live_recovery_plan(&hint, 1000, &HashSet::new());
@@ -6678,11 +6738,11 @@ mod tests {
         // A loaded exponent needs no slot of its own in the plan.
         let loaded: HashSet<u32> = [0].into_iter().collect();
         let mut plan = live_recovery_plan(&hint, 1000, &loaded);
-        extend_plan_with_queued_volumes(&mut plan, &hint, &loaded, 64);
+        extend_plan_with_queued_volumes(&mut plan, &hint, &loaded, 41);
         assert_eq!(plan.exponents, (1..41).collect::<Vec<u32>>());
-        // Room is a quarter of the pool, two slices per slot, at most 64.
-        assert_eq!(planned_slot_room(4096 << 20, 5 << 20), 64);
-        assert_eq!(planned_slot_room(400 << 20, 5 << 20), 10);
+        // Room is a quarter of the pool, two slices per slot, at most 16.
+        assert_eq!(planned_slot_room(4096 << 20, 5 << 20), 16);
+        assert_eq!(planned_slot_room(200 << 20, 5 << 20), 5);
     }
 
     fn grow_live_slots_case(

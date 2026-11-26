@@ -82,9 +82,10 @@ pub struct ParCheckerOptions {
 
 pub trait ParCheckerHooks {
     fn read_options(&self) -> ParCheckerOptions;
-    /// Blocks the download knows are damaged (articles that failed for good, less those a
-    /// duplicate lent back): the batch verify folds that many plus 2 syndromes as it reads.
-    fn known_damaged_blocks(&self) -> u32 {
+    /// Bytes of the par set's data files the download knows are lost (failed for good, less
+    /// what a duplicate lent back; recovery volumes not counted): the batch verify folds the
+    /// blocks they touch plus 2 syndromes as it reads.
+    fn known_damaged_bytes(&self) -> u64 {
         0
     }
     fn is_stopped(&self) -> bool {
@@ -741,7 +742,6 @@ impl NzbgetRsParChecker {
                 opts.par_ignore_ext,
             );
             *self.cancel_token.lock().unwrap_or_else(|e| e.into_inner()) = Some(r.cancel_token());
-            r.set_known_damage(hooks.known_damaged_blocks());
 
             let par_fn = self.par_filename();
             let ev = CheckerEvents {
@@ -749,6 +749,10 @@ impl NzbgetRsParChecker {
                 hooks,
             };
             res = r.preprocess(crate::fsops::path(&par_fn), Some(&ev));
+            r.set_known_damage(crate::parchecker::known_damaged_blocks(
+                hooks.known_damaged_bytes(),
+                r.block_size() as u64,
+            ));
             if let Some(error) = r.load_error.as_deref().filter(|_| res != ParResult::Success) {
                 hooks.print_message(
                     MK_WARNING,

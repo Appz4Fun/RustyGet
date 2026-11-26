@@ -1402,11 +1402,12 @@ impl crate::postproc::ParCheckerHooks for RepairParHooks<'_> {
         self.ctrl.is_stopped(self.q)
     }
 
-    fn known_damaged_blocks(&self) -> u32 {
+    fn known_damaged_bytes(&self) -> u64 {
         self.q.host.with_locked_queue(|_dq| {
             let ctrl = self.ctrl.snap(self.q);
             let ns = self.q.host.nzb_snap(ctrl.nzb_ptr, false);
-            u32::try_from(ns.failed_articles.saturating_sub(ns.dupe_recovered_articles)).unwrap_or(0)
+            let lost = ns.failed_size - ns.par_failed_size - ns.dupe_recovered_bytes;
+            u64::try_from(lost).unwrap_or(0)
         })
     }
 

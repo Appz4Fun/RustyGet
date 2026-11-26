@@ -731,6 +731,7 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
                     let early = (live.is_none()
                         && recovery.is_none()
                         && (!session || f.par_file)
+                        && memory_monitor_tier() != PRESSURE_CRITICAL
                         && crate::parchecker::presession_wanted(nzb.par_size))
                     .then(|| (nzb.id, f.id, f.par_file, f.filename.clone(), f.hash16k.clone()));
                     return Some((fp, info_name, write_context, live, recovery, early));
@@ -2085,6 +2086,10 @@ impl RsArticleWriter {
         let recovery_tee = self.recovery_tee.take();
         let presession_tee = self.presession_tee.take();
         if !success || raw_article {
+            // A partial direct write may have changed the file: a kept copy is stale.
+            if let Ok(offset) = u64::try_from(self.article_offset) {
+                crate::parchecker::presession_drop(nzb.id, fsnap.id, &[offset]);
+            }
             self.drop_cached();
             return;
         }

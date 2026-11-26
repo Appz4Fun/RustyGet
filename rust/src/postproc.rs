@@ -2993,6 +2993,8 @@ fn dead_volume_rebuilt(nzb_id: i32) -> bool {
 /// Forgets what was found of the donors of download `nzb_id` and whether the queue kept it for
 /// them: it left the queue, or came back to it from history to start over.
 pub(crate) fn forget_dead_volume_verdicts(nzb_id: i32) {
+    crate::restartlend::forget(nzb_id);
+    crate::frontiercut::forget(nzb_id);
     dead_volume_donor_identities().retain(|(id, _), _| *id != nzb_id);
     dead_volume_donor_confirmations().retain(|(id, _), _| *id != nzb_id);
     crate::queuecoord::forget_kept_for_borrowing(nzb_id);

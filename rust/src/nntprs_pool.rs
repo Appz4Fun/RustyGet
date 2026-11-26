@@ -338,8 +338,11 @@ pub enum FailKind {
     /// The body did not decode (CRC error, cut short, no yEnc data, ...).
     Decode(nntp_rs::decoder::Status),
     Timeout,
-    /// Login refused, or the connection limit.
+    /// The connection limit (a refused connection).
     Login,
+    /// Login refused (credentials rejected): the server is passed over,
+    /// never waited for (`authrejected`).
+    Auth,
     Other,
 }
 
@@ -355,6 +358,10 @@ pub struct Rec {
     pub wire_bytes: u64,
     /// The connection was opened for this attempt.
     pub fresh: bool,
+    /// The attempt had its connection (nntp-rs called `started` for it):
+    /// false for a connect, login or connection-limit failure, where the
+    /// per-connection download never connected.
+    pub connected: bool,
 }
 
 /// Collects a fetch's server attempts (nntp-rs calls the observer on its own
@@ -387,6 +394,7 @@ impl AttemptLog {
             on_miss,
             on_start,
             wait,
+            in_hand: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -404,6 +412,9 @@ struct LogObserver {
     on_miss: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
     on_start: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
     wait: Option<WaitMark>,
+    /// Per server, the attempts that have their connection (`started`) and
+    /// have not reported yet (more than one in a pipelined batch).
+    in_hand: std::sync::Mutex<Vec<usize>>,
 }
 
 #[cfg(unix)]
@@ -424,9 +435,8 @@ impl nntp_rs::Observer for LogObserver {
                 let kind = match e {
                     nntp_rs::Error::Decode(st) => FailKind::Decode(*st),
                     nntp_rs::Error::Timeout(_) => FailKind::Timeout,
-                    nntp_rs::Error::Auth { .. } | nntp_rs::Error::ConnectionLimit { .. } => {
-                        FailKind::Login
-                    }
+                    nntp_rs::Error::Auth { .. } => FailKind::Auth,
+                    nntp_rs::Error::ConnectionLimit { .. } => FailKind::Login,
                     _ => FailKind::Other,
                 };
                 (Seen::Failed(e.to_string()), Some(kind))
@@ -443,6 +453,13 @@ impl nntp_rs::Observer for LogObserver {
                 f();
             }
         }
+        let connected = self.in_hand.lock().is_ok_and(|mut h| match h.get_mut(a.server) {
+            Some(n) if *n > 0 => {
+                *n -= 1;
+                true
+            }
+            _ => false,
+        });
         if let Ok(mut g) = self.log.0.lock() {
             g.push(Rec {
                 server: a.server,
@@ -451,11 +468,18 @@ impl nntp_rs::Observer for LogObserver {
                 reply: a.reply.map(str::to_string),
                 wire_bytes: a.wire_bytes,
                 fresh: a.fresh,
+                connected,
             });
         }
     }
 
-    fn started(&self, _server: usize, _id: &str, _fresh: bool) {
+    fn started(&self, server: usize, _id: &str, _fresh: bool) {
+        if let Ok(mut h) = self.in_hand.lock() {
+            if h.len() <= server {
+                h.resize(server + 1, 0);
+            }
+            h[server] += 1;
+        }
         if let Some(w) = &self.wait {
             w.set_waiting(false);
         }
@@ -587,6 +611,26 @@ pub fn missing_on_usable(shared: &Shared, recs: &[Rec]) -> bool {
         recs.iter().any(|r| r.server == i)
             || misses.iter().any(|m| crate::nntp::backbone_miss_covers(m, s.group(), s.retention))
     })
+}
+
+/// Whether a fetch that failed with `unavailable` (nntp-rs found no server
+/// it could ask) or with the attempts `recs` never got a connection, and a
+/// required (not optional) server is among those it could not reach: the
+/// news server is down or blocked, which says nothing about the article.
+/// The per-connection download did not spend an article retry on a
+/// connection it could not establish; it waited for the blocked server
+/// (an optional one it passed over). Only a server switched on with
+/// connections counts.
+#[cfg(unix)]
+pub fn only_unreachable_required(shared: &Shared, recs: &[Rec], unavailable: bool) -> bool {
+    let required = |s: &RsNewsServer| s.active.load(Ordering::SeqCst) && s.max_connections > 0 && !s.optional;
+    if recs.is_empty() {
+        return unavailable && shared.servers.iter().any(|s| required(s));
+    }
+    // a refused login is the per-connection download's auth_rejected: that
+    // server is passed over as failed, never waited for
+    recs.iter().all(|r| !r.connected && matches!(r.outcome, Seen::Failed(_)) && r.fail != Some(FailKind::Auth))
+        && recs.iter().any(|r| shared.server(r.server).is_some_and(|s| required(s)))
 }
 
 /// Servers switched on with connections: the ones a fetch can ask.
@@ -987,7 +1031,7 @@ mod tests {
         let c = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0));
         let w = WaitMark::start(std::sync::Arc::clone(&c));
         let log = AttemptLog::default();
-        let obs = LogObserver { log: log.clone(), ids: vec![3, 4], on_miss: None, on_start: None, wait: Some(w.clone()) };
+        let obs = LogObserver { log: log.clone(), ids: vec![3, 4], on_miss: None, on_start: None, wait: Some(w.clone()), in_hand: std::sync::Mutex::new(Vec::new()) };
         obs.started(0, "<a@b>", true);
         assert_eq!(c.load(Ordering::SeqCst), 0, "a connection in hand is the server's time");
         obs.attempt(&nntp_rs::Attempt {
@@ -1216,7 +1260,7 @@ mod tests {
     }
 
     fn rec(server: usize, outcome: Seen) -> Rec {
-        Rec { server, outcome, fail: None, reply: None, wire_bytes: 0, fresh: false }
+        Rec { server, outcome, fail: None, reply: None, wire_bytes: 0, fresh: false, connected: true }
     }
 
     #[test]

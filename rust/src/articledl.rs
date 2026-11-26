@@ -4183,6 +4183,27 @@ impl NzbgetRsArticleDownloader {
                     );
                     return AD_FAILED;
                 }
+                Err(e)
+                    if e.is_retryable()
+                        && crate::nntprs_pool::only_unreachable_required(
+                            shared,
+                            &recs,
+                            matches!(e, nntp_rs::Error::Unavailable),
+                        ) =>
+                {
+                    // the required news server could not be connected to (down,
+                    // refusing, or blocked for RetryInterval after that): no
+                    // article retry is spent, as the per-connection download
+                    // spent none on a connection it could not establish and
+                    // waited for the blocked server; the loop's top still ends
+                    // the wait on a stop, a pause or a server change
+                    let mut waited = 0;
+                    while waited < 10 && !host.is_stopped() {
+                        sleep_ms(100);
+                        waited += 1;
+                    }
+                    continue;
+                }
                 Err(e) if e.is_retryable() && !matches!(e, nntp_rs::Error::Decode(_)) => {
                     transient_errors += 1;
                     if transient_errors >= job.retries.max(1) {
@@ -4372,7 +4393,7 @@ impl NzbgetRsArticleDownloader {
                         AD_FAILED
                     }
                 }
-                (Seen::Failed(text), Some(FailKind::Login)) => {
+                (Seen::Failed(text), Some(FailKind::Login | FailKind::Auth)) => {
                     host.log(
                         MK_DETAIL,
                         &join_c_slices(&[

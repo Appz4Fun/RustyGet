@@ -5600,9 +5600,12 @@ def scenario_xpackflaky(daemon, t):
 
 def scenario_xpackdeadserver(daemon, t):
     """Cross-packing while the preferred news server goes down for good at
-    the first duplicate request (see SCENARIO_FLAKY_PROXY): once it used up
-    its spaced attempts it gets a single attempt per article until it answers
-    again, so it delays the repair once, not for every article."""
+    the first duplicate request (see SCENARIO_FLAKY_PROXY): it delays the
+    repair once, not for every article. The shared connection pool blocks the
+    server for RetryInterval at the first refused connection (before it, each
+    article made one more attempt, so 10 or more were refused); either way it
+    must have been asked and turned away at least once, and the repair from
+    the backup server finishes within 15 s."""
     size, seg = 12_000_000, 300_000
     data = _payload(size, 4245)
     pp = _place_copy(t, 'xdA', data, 'movie.mkv')
@@ -5625,7 +5628,7 @@ def scenario_xpackdeadserver(daemon, t):
     seconds = end - start if start is not None and end is not None else None
     integ = _verify_output(t, data, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
     rejected = daemon.proxy.rejected if daemon.proxy else 0
-    return ('xpackdeadserver', integ and h['Status'].startswith('SUCCESS') and rejected >= 10 and
+    return ('xpackdeadserver', integ and h['Status'].startswith('SUCCESS') and rejected >= 1 and
             seconds is not None and seconds <= 15,
             'status=%s cross_pack_seconds=%s rejected_connects=%d integrity=%s'
             % (h['Status'], seconds, rejected, integ))

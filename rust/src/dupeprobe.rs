@@ -553,6 +553,10 @@ impl NzbgetRsDupeProbe {
             Ok(c) => c,
             Err(e) => {
                 result.unknown += pending(&self.found);
+                let mut line = b"Dupe probe on ".to_vec();
+                line.extend_from_slice(server_name);
+                line.extend_from_slice(format!(": no connection ({e})").as_bytes());
+                crate::log::log_active_bytes(crate::log::MK_DETAIL, &line);
                 // a server that could not be reached at all is left out of the
                 // verdict, but a light connection that could not connect proves
                 // nothing about it (as before); a wait that ran out neither
@@ -589,9 +593,13 @@ impl NzbgetRsDupeProbe {
         let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
         let answers = match co.stat_many(&refs, None) {
             Ok(a) => a,
-            Err(_) => {
+            Err(e) => {
                 co.mark_broken();
                 result.unknown += todo.len() as i32;
+                let mut line = b"Dupe probe on ".to_vec();
+                line.extend_from_slice(server_name);
+                line.extend_from_slice(format!(": the STAT exchange broke ({e})").as_bytes());
+                crate::log::log_active_bytes(crate::log::MK_DETAIL, &line);
                 // connected, but the exchange broke: reached, nothing proven
                 return (true, false);
             }

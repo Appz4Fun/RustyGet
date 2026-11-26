@@ -3051,8 +3051,8 @@ struct WrittenSource {
     on_finished: OnFinished,
     /// A persistent session: holes inside member data are answered past the buffer.
     long_holes: bool,
-    /// Bytes were handed to the session from this source.
-    served: bool,
+    /// Byte ranges handed to the session from what the download wrote, merged.
+    served: Vec<std::ops::Range<u64>>,
     /// `done` is a stand-in rebuilt from a duplicate: every byte is read from it.
     rebuilt: bool,
 }
@@ -3099,9 +3099,72 @@ impl WrittenSource {
             done: None,
             on_finished,
             long_holes,
-            served: false,
+            served: Vec::new(),
             rebuilt: false,
         })
+    }
+
+    /// Whether every byte served so far reads the same from `other` (the finished volume, or a
+    /// stand-in rebuilt from a duplicate).
+    fn served_matches(&mut self, other: &mut dyn RangeSource) -> bool {
+        use zipfast::map::{PackedRead, PackedSource};
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        let mut ours = vec![0u8; 1 << 20];
+        let mut theirs = vec![0u8; 1 << 20];
+        for r in self.served.clone() {
+            let mut at = r.start;
+            while at < r.end {
+                let want = ((r.end - at) as usize).min(ours.len());
+                let n = match self.files.read_packed(0, at, &mut ours[..want]) {
+                    PackedRead::Data(n) => n,
+                    _ => return false,
+                };
+                let mut got = 0;
+                while got < n {
+                    match other.read_at(at + got as u64, &mut theirs[got..n], &mut cx) {
+                        Ok(RangeRead::Filled { count }) if count > 0 => got += count,
+                        _ => return false,
+                    }
+                }
+                if ours[..n] != theirs[..n] {
+                    return false;
+                }
+                at += n as u64;
+            }
+        }
+        true
+    }
+
+    /// Drops the wait this source left for its own volume once it reads again (the driver
+    /// would report the session as waiting for a volume while it decodes).
+    fn clear_own_pending(&self) {
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        if pending
+            .as_ref()
+            .is_some_and(|(path, _, _, asked)| !*asked && *path == self.path)
+        {
+            *pending = None;
+        }
+    }
+
+    fn note_served(&mut self, offset: u64, count: usize) {
+        let r = offset..offset + count as u64;
+        match self.served.last_mut() {
+            Some(last) if last.end == r.start => last.end = r.end,
+            _ => {
+                self.served.push(r);
+                self.served.sort_by_key(|r| r.start);
+                let mut merged: Vec<std::ops::Range<u64>> = Vec::with_capacity(self.served.len());
+                for r in self.served.drain(..) {
+                    match merged.last_mut() {
+                        Some(m) if m.end >= r.start => m.end = m.end.max(r.end),
+                        _ => merged.push(r),
+                    }
+                }
+                self.served = merged;
+            }
+        }
     }
 
     fn identity(&self) -> (u64, u64) {
@@ -3125,6 +3188,14 @@ impl WrittenSource {
             .metadata()
             .map(|m| file_identity(&m) != self.identity())
             .unwrap_or(true);
+        // Finished as another file than the one written (a copy, or another file of the same
+        // name): only if what was read already reads the same from it.
+        if replaced && !self.served_matches(&mut v) {
+            return Err(ProgressiveFailure::new(FailureKind::Input {
+                operation: zipfast::progressive::InputOperation::Read,
+                cause: std::io::Error::other("the volume read as it was written finished as another file"),
+            }));
+        }
         v.expose_backing = self.expose_backing;
         v.count_as = Some(crate::livewrite::ReadKind::Back);
         if self.long_holes {
@@ -3140,16 +3211,18 @@ impl WrittenSource {
 
     /// The download died in this volume and its part was borrowed from a duplicate: read the
     /// rest from the rebuilt volume, which has the volume's layout and length.
-    /// Only before any byte was read from what the download wrote: the stand-in has its own
-    /// layout (rebuilt headers), so the two cannot be mixed in one read.
+    /// Only when every byte already read from what the download wrote reads the same from the
+    /// stand-in (a twin's bytes): a stand-in with its own layout (rebuilt headers, an alt) cannot
+    /// be mixed into one read. The session then fails and the extraction starts over on the
+    /// copy path, which reads the stand-in from its start (see `persistent::Run::stop`).
     fn finish_virtual(&mut self, v: crate::deadvolume::VirtualVolume) -> ProgressiveResult<()> {
-        let source = VirtualSource::open(&self.path, v).map_err(|cause| {
+        let mut source = VirtualSource::open(&self.path, v).map_err(|cause| {
             ProgressiveFailure::new(FailureKind::Input {
                 operation: zipfast::progressive::InputOperation::Open,
                 cause,
             })
         })?;
-        if self.served || source.info.length != self.info.length {
+        if source.info.length != self.info.length || !self.served_matches(&mut source) {
             return Err(ProgressiveFailure::new(FailureKind::Input {
                 operation: zipfast::progressive::InputOperation::Read,
                 cause: std::io::Error::other(
@@ -3211,7 +3284,8 @@ impl RangeSource for WrittenSource {
             self.live.sync(&mut self.files, 0, &mut self.synced);
             let unreadable = match self.files.read_packed(0, offset, &mut buf[..n]) {
                 PackedRead::Data(count) => {
-                    self.served = true;
+                    self.note_served(offset, count);
+                    self.clear_own_pending();
                     self.live.count_live(count as u64);
                     return Ok(RangeRead::Filled { count });
                 }
@@ -3225,11 +3299,7 @@ impl RangeSource for WrittenSource {
             };
             if let Some(v) = self.done.as_mut() {
                 // Never reported (lost, or repaired since): the finished volume's answer.
-                let read = v.read_at(offset, buf, cx);
-                if matches!(read, Ok(RangeRead::Filled { .. })) {
-                    self.served = true;
-                }
-                return read;
+                return v.read_at(offset, buf, cx);
             }
             let view = self.feed.lock().unwrap_or_else(|e| e.into_inner()).volume(&self.path);
             match view {
@@ -3252,7 +3322,7 @@ impl RangeSource for WrittenSource {
                 // A persistent session (its volumes declared NonFile) reads a stand-in whose
                 // borrow is not finished yet, as it does one handed over (`persistent::Provider`);
                 // the copy path waits for it.
-                VolumeView::Virtual(v) if v.holes.is_empty() || (!self.expose_backing && !self.served) => {
+                VolumeView::Virtual(v) if v.holes.is_empty() || (!self.expose_backing && self.served.is_empty()) => {
                     self.finish_virtual(v)?;
                     continue;
                 }

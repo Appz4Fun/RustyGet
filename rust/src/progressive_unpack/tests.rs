@@ -6800,7 +6800,7 @@ impl VolumeFeed for DyingFeed {
     }
 }
 
-fn dying_volume_run(tag: &str, nzb_id: i32, write_header: bool) -> (Result<zipfast::extract::Summary, Error>, Vec<String>, Vec<u8>, TestDir) {
+fn dying_volume_run(tag: &str, nzb_id: i32, write_header: bool, other_layout: bool) -> (Result<zipfast::extract::Summary, Error>, Vec<String>, Vec<u8>, TestDir) {
     let t = TestDir::new(tag);
     let data = pattern(400_000);
     let chunk = 100_000;
@@ -6831,8 +6831,13 @@ fn dying_volume_run(tag: &str, nzb_id: i32, write_header: bool) -> (Result<zipfa
     let tail = 500;
     let mid = t.dl().join("borrowed.bin");
     std::fs::write(&mid, &vols[2][head..vols[2].len() - tail]).unwrap();
+    let mut head_bytes = vols[2][..head].to_vec();
+    if other_layout {
+        // Rebuilt headers that differ from the volume's (an alt's stand-in).
+        head_bytes[600] ^= 0xff;
+    }
     let v = crate::deadvolume::VirtualVolume {
-        head: vols[2][..head].to_vec(),
+        head: head_bytes,
         data: mid,
         data_len: (vols[2].len() - head - tail) as u64,
         tail: vols[2][vols[2].len() - tail..].to_vec(),
@@ -6854,14 +6859,26 @@ fn dying_volume_run(tag: &str, nzb_id: i32, write_header: bool) -> (Result<zipfa
 
 #[test]
 fn a_volume_rebuilt_before_any_byte_was_read_is_read_from_the_stand_in() {
-    let (r, log, data, t) = dying_volume_run("written-rebuilt", -7_320_005, false);
+    let (r, log, data, t) = dying_volume_run("written-rebuilt", -7_320_005, false, false);
     expect_ok(r, &log);
     assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
 }
 
 #[test]
-fn a_volume_rebuilt_after_bytes_were_read_fails_instead_of_mixing_layouts() {
-    let (r, log, _, t) = dying_volume_run("written-rebuilt-late", -7_320_006, true);
-    assert!(r.is_err(), "{log:?}");
+fn a_twin_stand_in_takes_over_a_volume_after_bytes_were_read() {
+    let (r, log, data, t) = dying_volume_run("written-rebuilt-twin", -7_320_006, true, false);
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+}
+
+#[test]
+fn a_stand_in_with_another_layout_is_never_mixed_into_bytes_already_read() {
+    let (r, log, _, t) = dying_volume_run("written-rebuilt-alt", -7_320_007, true, true);
+    // This feed runs the copy path (no volume count), whose session stops at the stand-in; a
+    // persistent session stopping there falls back to it and starts over (`Run::stop`).
+    match r {
+        Err(Error::Failed(f)) => assert!(format!("{f:?}").contains("rebuilt from a duplicate"), "{f:?}"),
+        other => panic!("expected the session to stop, got ok={}: {log:?}", other.is_ok()),
+    }
     assert!(!t.out().join("movie.mkv").exists());
 }

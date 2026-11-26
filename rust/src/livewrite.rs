@@ -294,12 +294,13 @@ pub fn written(nzb_id: i32, file_id: i32, offset: u64, len: u64) {
 }
 
 /// The volume download `nzb_id` is writing that will be `final_path` once complete.
+/// `None` also when two files of the download are written under that name (copies with one
+/// name: which one ends up as it is not known yet).
 pub fn lookup(nzb_id: i32, final_path: &[u8]) -> Option<Arc<LiveVolume>> {
     let map = lock(&VOLUMES);
-    map.get(&nzb_id)?
-        .iter()
-        .find(|v| lock(&v.state).final_path == final_path)
-        .cloned()
+    let mut found = map.get(&nzb_id)?.iter().filter(|v| lock(&v.state).final_path == final_path);
+    let first = found.next()?.clone();
+    found.next().is_none().then_some(first)
 }
 
 /// Download `nzb_id` writes no volume any more (it finished, moved or was deleted): readers

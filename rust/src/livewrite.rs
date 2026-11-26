@@ -189,6 +189,20 @@ static VOLUMES: std::sync::LazyLock<Mutex<HashMap<i32, Vec<Arc<LiveVolume>>>>> =
 /// Bumped on every reported write, for live extractions that poll (see [`wait_any`]).
 static WRITES: (Mutex<u64>, Condvar) = (Mutex::new(0), Condvar::new());
 
+/// Writes (and forgets) reported per download, so an extraction can tell whether anything
+/// of its own download was written (see [`nzb_write_count`]).
+static NZB_WRITES: std::sync::LazyLock<Mutex<HashMap<i32, u64>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn bump_nzb(nzb_id: i32) {
+    *lock(&NZB_WRITES).entry(nzb_id).or_insert(0) += 1;
+}
+
+/// How many writes (and forgets) download `nzb_id` reported so far.
+pub fn nzb_write_count(nzb_id: i32) -> u64 {
+    lock(&NZB_WRITES).get(&nzb_id).copied().unwrap_or(0)
+}
+
 /// Where a live extraction read packed bytes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReadKind {
@@ -382,6 +396,7 @@ pub fn written(nzb_id: i32, file_id: i32, offset: u64, len: u64) {
     if first_head {
         note_head(nzb_id);
     }
+    bump_nzb(nzb_id);
     let (m, cv) = &WRITES;
     *lock(m) += 1;
     cv.notify_all();
@@ -408,6 +423,7 @@ pub fn forget(nzb_id: i32) {
             w.wake();
         }
     }
+    bump_nzb(nzb_id);
     let (m, cv) = &WRITES;
     *lock(m) += 1;
     cv.notify_all();

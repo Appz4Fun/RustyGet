@@ -2593,6 +2593,10 @@ struct DirectUnpackFeed {
 }
 
 impl crate::progressive_unpack::VolumeFeed for DirectUnpackFeed {
+    fn writes(&self) -> u64 {
+        crate::livewrite::nzb_write_count(self.nzb_id)
+    }
+
     fn volume(&mut self, path: &std::path::Path) -> crate::progressive_unpack::VolumeView {
         use crate::progressive_unpack::VolumeView;
         #[cfg(unix)]

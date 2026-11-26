@@ -1874,17 +1874,16 @@ impl NzbgetRsPrePostProcessor {
         stages
     }
 
-    /// Whether direct unpack of download `nzb_ptr` may start now.
+    /// Whether direct unpack of download `nzb_ptr` may start now: not while another copy of its
+    /// release (its duplicate key) extracts or went past the post gate (`dupe_post_gate`), so
+    /// only one copy extracts into the destination. (Under the one global unpack lock a second
+    /// copy's direct unpack never started while the first one's ran; it reached the post gate
+    /// instead, and still does.)
     ///
-    /// Not while another copy of its release (its duplicate key) extracts or went past the post
-    /// gate (`dupe_post_gate`): only one copy extracts into the destination. (Under the one
-    /// global unpack lock a second copy's direct unpack never started while the first one's ran;
-    /// it reached the post gate instead, and still does.)
-    ///
-    /// Nor past the session limit (`unpackslots::session_limit`). At the limit, the direct
-    /// unpack of a paused or held download waiting for a volume is stopped to make room (it is
-    /// unpacked after its download instead, as when its direct unpack fails); with none to
-    /// stop, the new download is unpacked after its download.
+    /// Direct unpack sessions waiting for volumes hold no slot but keep their decoder state
+    /// and open volumes; past `unpackslots::session_limit` sessions this is logged (once per
+    /// limit crossing) but the new one still starts: the download that downloads now goes
+    /// first, and stopping another session (a cancel) would delete its borrowed volumes.
     fn room_for_direct_unpack(
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
@@ -1894,42 +1893,25 @@ impl NzbgetRsPrePostProcessor {
         if dupe_post_gate_host(host, dq_ptr, &host.nzb_snap(nzb_ptr, false)).0 != GateVerdict::Pass {
             return false;
         }
+        static OVER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         let limit = crate::unpackslots::session_limit();
-        let opts = host.opts();
-        let mut sessions = 0;
-        let mut idle_paused: Option<crate::queuesubsys_host::NzbSnap> = None;
-        for qi in 0..host.queue_len(dq_ptr) {
-            let nzb_ptr = host.queue_at(dq_ptr, qi);
-            let nzb = host.nzb_snap(nzb_ptr, false);
-            if !nzb.has_unpack_thread {
-                continue;
-            }
-            sessions += 1;
-            if idle_paused.is_none()
-                && host.direct_unpack_is_active(nzb_ptr, true)
-                && !host.direct_unpack_is_active(nzb_ptr, false)
-                && crate::postproc::direct_unpack_class(host, &opts, nzb_ptr)
-                    == crate::unpackslots::Class::Paused
-            {
-                idle_paused = Some(nzb);
-            }
+        let sessions = (0..host.queue_len(dq_ptr))
+            .filter(|&qi| host.nzb_snap(host.queue_at(dq_ptr, qi), false).has_unpack_thread)
+            .count();
+        let over = sessions >= limit;
+        if over && !OVER.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            let mut msg = b"Starting the direct unpack of ".to_vec();
+            msg.extend_from_slice(crate::cstr::until_nul(&host.nzb_snap(nzb_ptr, false).name));
+            msg.extend_from_slice(
+                format!(
+                    " although {sessions} direct unpacks exist (UnpackSlots suggests at most {limit}); paused ones waiting for volumes keep their state"
+                )
+                .as_bytes(),
+            );
+            host.nzb_print_message(nzb_ptr, crate::queuesubsys_host::MK_WARNING, &msg);
+        } else if !over {
+            OVER.store(false, std::sync::atomic::Ordering::Release);
         }
-        if sessions < limit {
-            return true;
-        }
-        let Some(nzb) = idle_paused else {
-            return false;
-        };
-        let mut msg = b"Stopping the direct unpack of ".to_vec();
-        msg.extend_from_slice(crate::cstr::until_nul(&nzb.name));
-        msg.extend_from_slice(
-            format!(
-                ": it is paused while it waits for a volume and {sessions} direct unpacks exist (at most {limit}); it is unpacked after its download instead"
-            )
-            .as_bytes(),
-        );
-        host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
-        host.direct_unpack_stop(dq_ptr, nzb.ptr);
         true
     }
 

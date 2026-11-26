@@ -145,6 +145,8 @@ struct Waiting<'a> {
     waiting: bool,
     /// Article writes reported when the extraction last looked (see `crate::livewrite`).
     writes: u64,
+    /// The feed's own write count when it last looked (`VolumeFeed::writes`).
+    own: u64,
 }
 
 impl Waiting<'_> {
@@ -153,24 +155,28 @@ impl Waiting<'_> {
             on_wait,
             waiting: false,
             writes: crate::livewrite::write_count(),
+            own: 0,
         }
     }
 
     /// Waits for anything new: a volume, or an article written into a volume being read.
-    /// When something was written meanwhile, the caller is told it works again before its
-    /// next step decodes it (a direct unpack takes its unpack slot back then: it decodes only
-    /// while it holds one).
-    fn idle(&mut self) {
+    /// When something of the feed's own set was written meanwhile (`feed.writes()`), the
+    /// caller is told it works again before its next step decodes it (a direct unpack takes
+    /// its unpack slot back then: it decodes only while it holds one). Writes of other
+    /// downloads wake it to look, but do not take a slot.
+    fn idle(&mut self, feed: &dyn VolumeFeed) {
         if !self.waiting {
             self.waiting = true;
+            self.own = feed.writes();
             (self.on_wait)(true);
         }
         crate::livewrite::wait_any(self.writes, IDLE);
-        let now = crate::livewrite::write_count();
-        if now != self.writes {
+        self.writes = crate::livewrite::write_count();
+        let own = feed.writes();
+        if own != self.own {
+            self.own = own;
             self.busy();
         }
-        self.writes = now;
     }
     fn busy(&mut self) {
         if self.waiting {
@@ -918,7 +924,7 @@ pub fn extract(
                 }
             }
         }
-        waiting.idle();
+        waiting.idle(&*vols.feed);
     };
     waiting.busy();
     vols.expect = lens;
@@ -1174,7 +1180,7 @@ fn feed_members(
             log(1, &why);
             return fail(&members, &empties, why);
         } else {
-            waiting.idle();
+            waiting.idle(&*vols.feed);
         }
     }
     remove_temp_dir(&dest);
@@ -1384,7 +1390,7 @@ fn join_live(
             log(1, &why);
             return fail(why);
         } else {
-            waiting.idle();
+            waiting.idle(&*vols.feed);
         }
     }
     let size = piece_len.unwrap_or(0) * (n as u64 - 1) + last_len;

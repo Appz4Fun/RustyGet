@@ -85,9 +85,9 @@ pub fn capacity_for(option: i32, cores: usize) -> usize {
     }
 }
 
-/// Direct unpack sessions (threads, with their decoder state and open volumes) that may
-/// exist at once for `capacity` slots: twice the slots, at least four. Sessions waiting for
-/// volumes hold no slot, so there may be more of them than slots, but not without bound.
+/// Direct unpack sessions (threads, with their decoder state and open volumes) expected at
+/// once for `capacity` slots: twice the slots, at least four. Sessions waiting for volumes
+/// hold no slot, so there may be more of them than slots; more than this is logged.
 pub fn session_limit_for(capacity: usize) -> usize {
     (capacity * 2).max(4)
 }
@@ -208,7 +208,8 @@ impl Drop for WaiterGuard {
 /// Takes a slot for an extraction, waiting while none is free for it. `class` is asked
 /// before the first wait and again every quarter second while waiting (it may lock the queue:
 /// it is never called with the pool's lock held); a waiter goes up one class for every
-/// [`AGE_STEP`] it waited ([`aged`]). `stopped` is asked as often: true gives up (None).
+/// [`AGE_STEP`] it waited ([`aged`]) in this call (a direct unpack asks again after each
+/// volume wait, so its aging starts over; a finished job's unpack asks once). `stopped` is asked as often: true gives up (None).
 /// `on_wait(in_use, capacity)` is called once, when the first look found no slot.
 pub fn acquire(
     kind: Kind,

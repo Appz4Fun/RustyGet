@@ -105,6 +105,7 @@ pub mod twin;
 pub(crate) mod twinfields;
 pub mod unpack;
 pub(crate) mod unpacklimits;
+pub(crate) mod unpackslots;
 pub(crate) mod url;
 pub mod urlcoord;
 pub mod util;

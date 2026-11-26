@@ -50,7 +50,7 @@ fn log_debug(text: &[u8]) {
     crate::log::log_active_bytes(KIND_DEBUG, text);
 }
 
-/// The flags the C++ `Options` class passed to `nzbget_rs_options_new`:
+/// The flags the C++ `Options` class passed to `options::new_options`:
 /// 32 default diagnostics sink, 8 `HAVE_X509_CHECK_HOST`, and 1/2/4 for a
 /// build without curses, PAR checking or TLS.
 fn options_flags() -> c_int {

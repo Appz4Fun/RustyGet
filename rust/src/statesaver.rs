@@ -12,6 +12,12 @@
 //! replaces its content in place (latest content, first position: partial states, then
 //! progress, then queue, as they were saved). A delete goes to the back, behind the
 //! writes it follows. Readers call [`settle`] first, so they see the latest content.
+//!
+//! Across files there is no crash-time ordering beyond that: after a crash the disk
+//! can hold a newer `progress` next to an older `queue`, and a queue save whose write
+//! fails on this thread has already queued the delete of `progress` behind it. The
+//! loader never relied on more (a partial state could already be newer than `queue`,
+//! `files` is checked against the queued file count, `ids` is a floor written inline).
 
 use crate::diskstate_format::DiskLogLevel;
 use std::collections::VecDeque;
@@ -178,7 +184,16 @@ impl Saver {
                 }
                 st = self.wait(st);
             };
-            self.run_marked(st, job, &mut active_log);
+            // A panicking job must not kill the thread: later jobs and `drain` wait for it.
+            let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.run_marked(st, job, &mut active_log)
+            }));
+            if ran.is_err() {
+                active_log(
+                    DiskLogLevel::Error,
+                    b"Error saving diskstate: a save panicked",
+                );
+            }
         }
     }
 

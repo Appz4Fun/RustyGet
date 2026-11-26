@@ -2180,8 +2180,10 @@ pub fn cache_was_active(qdir: &[u8], sep: u8) -> bool {
 }
 
 /// Removes the message log `n<nzb_id>.log`.
+/// Deleted inline, not through statesaver: the log is appended and read directly.
 pub fn delete_nzb_log(qdir: &[u8], sep: u8, nzb_id: i32) {
-    remove_queue_file(qdir, sep, format!("n{nzb_id}.log").as_bytes());
+    let p = queue_file_path(qdir, sep, format!("n{nzb_id}.log").as_bytes());
+    let _ = std::fs::remove_file(crate::fsops::path(&p));
 }
 
 /// The highest nzb and file ids found in the `ids` file and the file names

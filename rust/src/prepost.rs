@@ -1874,11 +1874,26 @@ impl NzbgetRsPrePostProcessor {
         stages
     }
 
-    /// Whether another direct unpack session may start (`unpackslots::session_limit`). At the
-    /// limit, the direct unpack of a paused or held download waiting for a volume is stopped to
-    /// make room (it is unpacked after its download instead, as when its direct unpack fails);
-    /// with none to stop, the new download is unpacked after its download.
-    fn room_for_direct_unpack(&self, host: &crate::queuesubsys_host::QueueSubsysHost, dq_ptr: usize) -> bool {
+    /// Whether direct unpack of download `nzb_ptr` may start now.
+    ///
+    /// Not while another copy of its release (its duplicate key) extracts or went past the post
+    /// gate (`dupe_post_gate`): only one copy extracts into the destination. (Under the one
+    /// global unpack lock a second copy's direct unpack never started while the first one's ran;
+    /// it reached the post gate instead, and still does.)
+    ///
+    /// Nor past the session limit (`unpackslots::session_limit`). At the limit, the direct
+    /// unpack of a paused or held download waiting for a volume is stopped to make room (it is
+    /// unpacked after its download instead, as when its direct unpack fails); with none to
+    /// stop, the new download is unpacked after its download.
+    fn room_for_direct_unpack(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        dq_ptr: usize,
+        nzb_ptr: NzbRef,
+    ) -> bool {
+        if dupe_post_gate_host(host, dq_ptr, &host.nzb_snap(nzb_ptr, false)).0 != GateVerdict::Pass {
+            return false;
+        }
         let limit = crate::unpackslots::session_limit();
         let opts = host.opts();
         let mut sessions = 0;
@@ -2634,7 +2649,7 @@ impl NzbgetRsPrePostProcessor {
             .nzb_get_param(nzb_ptr, b"*Unpack:")
             .as_ref()
             .map_or(true, |v| v.eq_ignore_ascii_case(b"yes"));
-        if want_unpack && self.room_for_direct_unpack(host, dq_ptr) {
+        if want_unpack && self.room_for_direct_unpack(host, dq_ptr, nzb_ptr) {
             host.direct_unpack_start_job(nzb_ptr);
         }
     }
@@ -2739,7 +2754,7 @@ impl NzbgetRsPrePostProcessor {
                 let want_unpack = unpack_param
                     .as_ref()
                     .map_or(true, |v| v.eq_ignore_ascii_case(b"yes"));
-                if want_unpack && self.room_for_direct_unpack(host, dq_ptr) {
+                if want_unpack && self.room_for_direct_unpack(host, dq_ptr, nzb_ptr) {
                     host.direct_unpack_start_job(nzb_ptr);
                 }
             }

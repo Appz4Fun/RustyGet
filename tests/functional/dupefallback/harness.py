@@ -4956,6 +4956,15 @@ def scenario_failcont_aescontainer(daemon, t):
     ids = _failcont_requests(t)
     a_bytes, a_count, a_again, _ = _failcont_bytes(ids, tag + 'A/')
     b_bytes, b_count, b_again, _ = _failcont_bytes(ids, tag + 'B/')
+    # the late 430s (SCENARIO_NSERV_ARGS -x) make the primary's missing articles stragglers,
+    # asked again by #732 ("Asking again for"): those serve nothing. Data the primary serves
+    # must never be fetched twice.
+    a_seen, a_data_again = set(), 0
+    for mid in ids:
+        if mid.startswith(tag + 'A/') and not mid.endswith('!2') and '.par2?' not in mid:
+            a_data_again += mid in a_seen
+            a_seen.add(mid)
+    a_missing_again = a_again - a_data_again
     failed_over = _grep_log(t, 'Failing over Primary')
     cancelled = _grep_log(t, 'Cancelling direct unpack')
     backup_unpacks = _grep_log(t, 'Directly unpacking Backup') + _grep_log(t, 'Unpacking Backup')
@@ -4975,15 +4984,17 @@ def scenario_failcont_aescontainer(daemon, t):
     tail = donor_total * (total - cut) // total
     b_budget = tail + (2 * holes + 2 * len(donor_vols) + 2) * donor_seg
     ok = (integ and winner == 'Primary' and failed_over == 0 and cancelled == 0 and backup_unpacks == 0
-          and du_ok == 1 and used_direct == 1 and a_again == 0 and b_again == 0 and b_bytes <= b_budget
+          and du_ok == 1 and used_direct == 1 and a_data_again == 0 and b_again == 0 and b_bytes <= b_budget
           and bp.get('DupeKind') == 'alt' and bp.get('DupeLiveVideo') == 'same:%d' % hp['NZBID']
           and relabel >= 1 and refused == 0)
     return (name, ok,
-            'winner=%s primary=%s backup=%s secs=%.1f primary_served=%d/%d B (%d articles, %d again) '
+            'winner=%s primary=%s backup=%s secs=%.1f primary_served=%d/%d B (%d articles, %d again, '
+            '%d missing asked again) '
             'backup_served=%d B of %d (budget %d: tail %d + %d holes, %d articles, %d again) refused=%d '
             'backup_kind=%s live=%s relabel_logs=%d failover_logs=%d du_cancelled=%d du_ok=%d used_direct=%d '
             'backup_unpacks=%d extracted_ok=%s'
-            % (winner, hp['Status'], hb['Status'], elapsed, a_bytes, total, a_count, a_again, b_bytes,
+            % (winner, hp['Status'], hb['Status'], elapsed, a_bytes, total, a_count, a_data_again,
+               a_missing_again, b_bytes,
                donor_total, b_budget, tail, holes, b_count, b_again, refused, bp.get('DupeKind'),
                bp.get('DupeLiveVideo'), relabel, failed_over, cancelled, du_ok, used_direct,
                backup_unpacks, integ))

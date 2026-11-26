@@ -11830,14 +11830,18 @@ def scenario_livepargrow(daemon, t):
 
 def scenario_liveparzeroreads(daemon, t):
     """An article that came over the wire is never read twice: a plain download with damage
-    (three damaged blocks in three files, the recovery blocks in four volumes, and an article
-    cache of 4 MB, so cache flushes keep writing articles before live PAR captures them). Live PAR takes every byte from RAM: the captures, bytes kept when a flush
+    (three damaged blocks in three files, the recovery blocks in four volumes, the article
+    cache on). Live PAR takes every byte from RAM: the captures, bytes kept when a flush
     wrote an article first (lending free ParBuffer instead of dropping them), bytes written
     before the session started, recovery volumes from their written bytes, and slots for every
     queued recovery block planned up front (no back-fill). So par-rs reads no source byte
     (source_bytes_read 0, no article read from its file), back-fills nothing, reads no
     recovery volume back and checks no target again; the live repair finishes the job as the
-    download ends, byte-exact. Before: main read flushed articles back (6790: 601 MB of a
+    download ends, byte-exact. The harness's captures win the race with the cache flush, so
+    the flush-first and pre-session paths are pinned by the parchecker unit tests
+    (live_flush_before_capture_lends_for_the_kept_bytes,
+    live_bytes_written_before_the_session_are_kept_for_it) and liveparnocache. Before: main
+    read flushed articles back (6790: 601 MB of a
     3.3 GB set), back-filled growth slots (1550 MB) and read recovery volumes back (75 MB)."""
     h, intact, io = _livepar_run(daemon, t, 'lzr', 12550, {1: {6}, 4: {17}, 6: {29}}, 8, volumes=4)
     live = _grep_log(t, 'as the download ended')
@@ -11845,8 +11849,7 @@ def scenario_liveparzeroreads(daemon, t):
     ok = (h['Status'].startswith('SUCCESS') and intact and live >= 1 and batch == 0 and bool(io)
           and io['source_mb'] == 0.0 and io['read_by_parrs'] == 0 and io['backfill_mb'] == 0.0
           and io['recovery_mb'] == 0.0 and io.get('verify_mb', 99) == 0.0
-          and io.get('not_kept', 99) == 0
-          and io.get('stashed', 0) + io.get('presession', 0) > 0)
+          and io.get('not_kept', 99) == 0)
     return ('liveparzeroreads', ok, 'status=%s intact=%s live_repairs=%d batch_repairs=%d io=%s'
             % (h['Status'], intact, live, batch, io))
 
@@ -14790,7 +14793,7 @@ SCENARIO_OPTIONS = {
                           'ParRename=yes', 'DirectRename=no'],
     'liveparplanned': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
     'livepargrow': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
-    'liveparzeroreads': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=4', 'DirectWrite=yes'],
+    'liveparzeroreads': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
     'livepartrusted': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
     'livepartrustedtemp': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=0', 'DirectWrite=no'],
     'parinplace': ['ParCheck=auto', 'LiveParRepair=no'],

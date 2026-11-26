@@ -6437,8 +6437,12 @@ pub enum DonorFetchOrigin {
 
 /// What a donor's fetched articles were used for: by origin (single, read batch, wave), how
 /// many were fetched and how many left the cache (or the borrow ended) without a byte read,
-/// and how many were fetched again after the cache had dropped them. A borrow that fetches
+/// and how many were needed again after the cache had dropped them. A borrow that fetches
 /// much more than it recovers tells here which path asks for the spare articles.
+/// "Fetched" counts what reached the member, from the server or from the coordinator's memory
+/// of recent articles alike: an article needed again is served from that memory while it
+/// still holds it (the fetch cost line counts those apart, `taken from memory`), so it is not
+/// necessarily downloaded twice (on 6790, A50's 4 such articles all came from memory).
 /// Articles that came back failed count as fetched but never as "never read" (they were
 /// wanted); articles a cancelled batch dropped before delivery are not counted at all.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -6469,12 +6473,12 @@ impl DonorArticleUse {
         self.fetched.iter().fold(0u32, |a, &b| a.saturating_add(b))
     }
 
-    /// `"N fetched (w wave, r read, s single), U never read (w/r/s), A fetched again"`.
+    /// `"N fetched (w wave, r read, s single), U never read (w/r/s), A needed again"`.
     pub fn summary(&self) -> String {
         let [s, r, w] = self.fetched;
         let [us, ur, uw] = self.unread;
         format!(
-            "{} article(s) fetched ({w} by wave, {r} by read, {s} single), {} never read ({uw} by wave, {ur} by read, {us} single; {} just before a read part, {} just after, {} alone), {} fetched again after the cache dropped them",
+            "{} article(s) fetched ({w} by wave, {r} by read, {s} single), {} never read ({uw} by wave, {ur} by read, {us} single; {} just before a read part, {} just after, {} alone), {} needed again after the cache dropped them",
             self.total_fetched(),
             us.saturating_add(ur).saturating_add(uw),
             self.unread_before,
@@ -10249,12 +10253,16 @@ impl CrossPackRepairSession {
     }
 
     /// The payload size of the video set a match of the last [`Self::process_donor`] call was
-    /// for (see [`Self::video_confirmed`]).
+    /// for (see [`Self::video_confirmed`]). None for an encrypted download: its check compares
+    /// ciphertext and never says "differs", so [`Self::donor_accepted`] never reuses a match
+    /// there and none is recorded.
     pub fn video_confirmed_size(&self) -> Option<i64> {
         self.video_confirmed
             .then(|| self.video_set())
             .flatten()
-            .and_then(|i| self.repair_sets.get(i)?.map.as_ref().map(ContentMap::inner_size))
+            .and_then(|i| self.repair_sets.get(i)?.map.as_ref())
+            .filter(|m| !m.encrypted())
+            .map(ContentMap::inner_size)
     }
 
     /// Whether a probe verdict lets the donor lend set `repair_set_idx` (see
@@ -18442,7 +18450,7 @@ mod tests {
         assert!(src.read_with_transport(&mut transport, 1040, &mut one).is_ok());
         let u = src.take_article_use();
         assert!(u.again >= 1, "{u:?}");
-        assert!(u.summary().contains("fetched again"));
+        assert!(u.summary().contains("needed again after the cache dropped them"));
 
         // A part that comes back failed was wanted: fetched, never "never read".
         transport.parts[30].success = false;
@@ -19936,6 +19944,16 @@ mod tests {
         session.note_donor_identity(0, DonorCheck::Differs);
         assert!(session.donor_differed());
         assert!(!session.donor_accepted(0, DonorCheck::Inconclusive));
+        // A match is recorded for the plain video's size only: an encrypted download's check
+        // compares ciphertext, nothing reuses it, so nothing is recorded (review of edaa5f25).
+        session.video_confirmed = true;
+        assert_eq!(session.video_confirmed_size(), Some(32768));
+        session.repair_sets[0].map.as_mut().unwrap().run_cryptos_mut().push(RunCrypto {
+            crypto: None,
+            cipher_data_offset: 0,
+            cipher_size: 32768,
+        });
+        assert_eq!(session.video_confirmed_size(), None);
         let _ = std::fs::remove_dir_all(&temp_root);
     }
 

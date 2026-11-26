@@ -43,14 +43,12 @@ pub enum Kind {
 
 struct Waiter {
     ticket: u64,
-    nzb_id: i32,
     class: Class,
     kind: Kind,
 }
 
 struct Holder {
     ticket: u64,
-    nzb_id: i32,
     kind: Kind,
 }
 
@@ -152,11 +150,6 @@ pub fn in_use() -> usize {
     lock().holders.len()
 }
 
-/// Whether download `nzb_id`'s extraction waits for a slot right now.
-pub fn waiting_for_slot(nzb_id: i32) -> bool {
-    lock().waiters.iter().any(|w| w.nzb_id == nzb_id)
-}
-
 /// A held slot; dropping it hands it to the next waiter.
 #[must_use]
 pub struct Slot {
@@ -172,26 +165,25 @@ impl Drop for Slot {
     }
 }
 
-/// Takes a slot for download `nzb_id`, waiting while none is free for it. `class` is asked
+/// Takes a slot for an extraction, waiting while none is free for it. `class` is asked
 /// before the first wait and again every quarter second while waiting (it may lock the queue:
 /// it is never called with the pool's lock held). `stopped` is asked as often: true gives up
 /// (None). `on_wait(in_use, capacity)` is called once, when the first look found no slot.
 pub fn acquire(
-    nzb_id: i32,
     kind: Kind,
     class: &mut dyn FnMut() -> Class,
     stopped: &mut dyn FnMut() -> bool,
     on_wait: &mut dyn FnMut(usize, usize),
 ) -> Option<Slot> {
     // Fast path: a free slot and no one waiting.
+    let cap = capacity();
     let ticket = {
         let mut st = lock();
         let ticket = st.next_ticket;
         st.next_ticket += 1;
-        if st.waiters.is_empty() && st.holders.len() < capacity() {
+        if st.waiters.is_empty() && st.holders.len() < cap {
             st.holders.push(Holder {
                 ticket,
-                nzb_id,
                 kind,
             });
             return Some(Slot { ticket });
@@ -214,7 +206,6 @@ pub fn acquire(
             Some(w) => w.class = my_class,
             None => st.waiters.push(Waiter {
                 ticket,
-                nzb_id,
                 class: my_class,
                 kind,
             }),
@@ -225,7 +216,6 @@ pub fn acquire(
             st.waiters.retain(|w| w.ticket != ticket);
             st.holders.push(Holder {
                 ticket,
-                nzb_id,
                 kind,
             });
             return Some(Slot { ticket });
@@ -321,7 +311,6 @@ mod tests {
             holders: (0..holders)
                 .map(|i| Holder {
                     ticket: i as u64,
-                    nzb_id: i as i32,
                     kind: Kind::Direct,
                 })
                 .collect(),
@@ -330,7 +319,6 @@ mod tests {
                 .enumerate()
                 .map(|(i, &class)| Waiter {
                     ticket: 50 + i as u64,
-                    nzb_id: 50 + i as i32,
                     class,
                     kind: Kind::Direct,
                 })

@@ -1293,10 +1293,18 @@ impl ActiveStreamingSession {
 
     /// A back-fill is pending, none runs, and no retry delay is in force.    /// A back-fill is pending, none runs, and no retry delay is in force.
     fn backfill_due(&self) -> bool {
-        self.session.needs_backfill()
-            && !self.backfill_running.load(Ordering::Acquire)
-            && !self.nothing_to_repair()
-            && self
+        if !self.session.needs_backfill() || self.backfill_running.load(Ordering::Acquire) {
+            return false;
+        }
+        if self.nothing_to_repair() {
+            // No back-fill will run: give back the bytes a flush held for one.
+            let mut held = self.held_backfill.lock().unwrap_or_else(|e| e.into_inner());
+            if held.1 > 0 {
+                *held = (Vec::new(), 0);
+            }
+            return false;
+        }
+        self
                 .backfill_retry_at
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -1475,12 +1483,12 @@ impl ActiveStreamingSession {
     }
 
     /// The download has ended for the set and nothing waits to change the damage count: every
-    /// slice arrived or failed, no fold is queued, no article waits for its turn, and no staged
+    /// slice arrived or failed (a queued fold is of a slice already verified), no article
+    /// waits for its turn, and no staged
     /// slice waits for a retry after a flush (par-rs counts a RAM-only slice damaged while the
     /// bytes it reads from its file are not final yet, and retries it once they are).
     fn download_settled(&self, status: &LiveStatus) -> bool {
         status.unarrived + status.partially_arrived == 0
-            && status.pending_folds == 0
             && !self.staged_due.load(Ordering::Acquire)
             && self
                 .articles
@@ -1691,7 +1699,45 @@ impl ActiveStreamingSession {
                 }
             }
         }
+        // The download may have just settled short (its last slice failed or completed
+        // damaged): give held volumes back now, not at the next poll, so they are fetched
+        // before the job leaves the download queue.
+        if !self
+            .held_volumes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
+        {
+            let status = self.session.status();
+            if status.needed_recovery_blocks > 0 && self.release_held_volumes(&status) {
+                if let Some(more) = self.session.request_unpause() {
+                    let mut ids = self
+                        .pending_unpause_ids
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    for id in &more.volume_ids_to_unpause {
+                        if !ids.contains(id) {
+                            ids.push(*id);
+                        }
+                    }
+                }
+                self.grow_for_damage();
+            }
+        }
     }
+}
+
+/// Whether job `nzb_id`'s live session holds queue file `file_id`, a paused recovery volume
+/// past the plan ([`ActiveStreamingSession::register_volume`]): other volume pickers leave it
+/// paused too, or its late slots would be back-filled from disk.
+pub(crate) fn streaming_session_holds_volume(nzb_id: i32, file_id: i32) -> bool {
+    active_streaming_session(nzb_id).is_some_and(|entry| {
+        entry
+            .held_volumes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&(file_id as u64))
+    })
 }
 
 /// Wall time live PAR spent on each job's work, verifying and repairing, kept past the
@@ -6984,20 +7030,16 @@ mod tests {
             assert!(streaming_session_take_unpause_ids(nzb_id).is_empty(), "held in the grace");
             assert_eq!(entry.held_volumes.lock().unwrap().len(), 2);
             if settle {
+                // The last slice settles the download: the held volumes go at once, from
+                // the slice's own outcome, without waiting for the next poll.
                 for s in 57..60usize {
                     feed_good_slice(&entry, &f0, s);
-                }
-                // The pool folds in the background: settled once its queue is empty.
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-                while entry.session.status().pending_folds > 0 {
-                    assert!(std::time::Instant::now() < deadline, "folds never drained");
-                    std::thread::sleep(std::time::Duration::from_millis(5));
                 }
             } else {
                 *entry.shortfall_since.lock().unwrap() =
                     Some(std::time::Instant::now() - HELD_VOLUME_GRACE);
+                let _ = streaming_session_poll(nzb_id, true);
             }
-            let _ = streaming_session_poll(nzb_id, true);
             let more = streaming_session_take_unpause_ids(nzb_id);
             assert_eq!(
                 more.len(),

@@ -408,7 +408,7 @@ fn stream_reply_timeout_secs() -> i32 {
     }
 }
 
-/// How many message-ids [`note_missing_everywhere`] keeps before it starts over.
+/// How many message-ids [`note_missing_everywhere_since`] keeps before it starts over.
 const KNOWN_MISSING_CAP: usize = 100_000;
 
 /// How long an article stays recorded as missing everywhere: a fresh post
@@ -459,7 +459,7 @@ pub(crate) fn note_missing_everywhere(message_id: &[u8]) {
     note_missing_everywhere_since(message_id, missing_epoch());
 }
 
-/// [`note_missing_everywhere`] for a fetch that began at `epoch`
+/// `note_missing_everywhere` for a fetch that began at `epoch`
 /// ([`missing_epoch`]): dropped when the servers or their backbones changed
 /// since, so a fetch still running on the old ones cannot record a miss the
 /// change has made stale.
@@ -494,7 +494,7 @@ pub(crate) fn forget_missing_everywhere() {
     set.clear();
 }
 
-/// Whether [`note_missing_everywhere`] recorded `message_id` (with or without
+/// Whether [`note_missing_everywhere_since`] recorded `message_id` (with or without
 /// angle brackets) less than [`KNOWN_MISSING_TTL`] ago.
 pub(crate) fn known_missing_everywhere(message_id: &[u8]) -> bool {
     let mut set = known_missing().lock().unwrap_or_else(|e| e.into_inner());

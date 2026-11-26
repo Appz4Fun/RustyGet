@@ -3970,6 +3970,9 @@ impl NzbgetRsArticleDownloader {
             // a server or backbone change meanwhile voids those 430s
             let missing_epoch = crate::articlefetcher::missing_epoch();
             let mut missing_epoch_seen = missing_epoch;
+            // set when the epoch moved: the next server-list advance starts over at
+            // the first level (a retry of the same server keeps its level)
+            let mut restart_levels = false;
             // every server asked answered 430 (none failed another way)
             let mut asked_430 = 0u32;
             let mut only_430 = true;
@@ -4039,6 +4042,7 @@ impl NzbgetRsArticleDownloader {
                 if crate::articlefetcher::missing_epoch() != missing_epoch_seen {
                     missing_epoch_seen = crate::articlefetcher::missing_epoch();
                     missing.clear();
+                    restart_levels = true;
                 }
                 let (stopped, _, _, _, _, _, _) = runtime_flags();
                 if stopped {
@@ -4348,6 +4352,10 @@ impl NzbgetRsArticleDownloader {
                     if crate::articlefetcher::missing_epoch() != missing_epoch_seen {
                         missing_epoch_seen = crate::articlefetcher::missing_epoch();
                         missing.clear();
+                        restart_levels = true;
+                    }
+                    if restart_levels {
+                        restart_levels = false;
                         level = 0;
                     }
 

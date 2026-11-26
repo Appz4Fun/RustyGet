@@ -7446,6 +7446,26 @@ def scenario_live7zlzma2(daemon, t):
     return _live_archive(daemon, t, 'live7zlzma2', 'RelL7L', 'l7lA', volumes, [('movie.mkv', movie)])
 
 
+def scenario_live7zlzma2threads(daemon, t):
+    """A 7z LZMA2 set written in many independent blocks (7-Zip -mmt with a 1 MiB block
+    size: a dictionary reset every block) decoded live with FeedThreads=4: the blocks whose
+    data arrived are decoded on worker threads (zipfast FeedOptions::threads) and the movie
+    comes out byte-identical, extracted while it downloads and never again."""
+    if not generators.HAVE_7Z:
+        return ('live7zlzma2threads', None, 'SKIP: 7z not installed')
+    rnd = _payload(12_000_000, 7121)
+    movie = b''.join(rnd[i:i + 4096] + bytes(4096) for i in range(0, len(rnd), 4096))
+    with tempfile.TemporaryDirectory(prefix='l7zt-') as workdir:
+        with open(os.path.join(workdir, 'movie.mkv'), 'wb') as f:
+            f.write(movie)
+        subprocess.run([generators.SEVENZIP_PATH, 'a', '-bd', '-m0=LZMA2:d=1m:c=1m', '-mx5', '-mmt=4', '-v4m',
+                        'out.7z', 'movie.mkv'], cwd=workdir, check=True, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
+        names = sorted(n for n in os.listdir(workdir) if n.startswith('out.7z.'))
+        volumes = [('Movie' + n[len('out'):], open(os.path.join(workdir, n), 'rb').read()) for n in names]
+    return _live_archive(daemon, t, 'live7zlzma2threads', 'RelL7T', 'l7tA', volumes, [('movie.mkv', movie)])
+
+
 def scenario_livezipsplit(daemon, t):
     """A stored ZIP cut into byte pieces (movie.zip.001 ...) is extracted while it
     downloads; it used to be joined into a .zip after the download."""
@@ -14958,6 +14978,7 @@ SCENARIOS = {
     'jointwosets': scenario_jointwosets,
     'live7zsplit': scenario_live7zsplit,
     'live7zlzma2': scenario_live7zlzma2,
+    'live7zlzma2threads': scenario_live7zlzma2threads,
     'livezipsplit': scenario_livezipsplit,
     'livezipz01': scenario_livezipz01,
     'livesplitjoin': scenario_livesplitjoin,
@@ -15452,6 +15473,7 @@ SCENARIO_OPTIONS = {
     'directunpacksimple': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1'],
     'live7zsplit': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1', 'UnpackCleanupDisk=yes', 'DownloadRate=8000'],
     'live7zlzma2': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1', 'UnpackCleanupDisk=yes', 'DownloadRate=8000'],
+    'live7zlzma2threads': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1', 'UnpackCleanupDisk=yes', 'DownloadRate=8000', 'FeedThreads=4'],
     'livezipsplit': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1', 'UnpackCleanupDisk=yes', 'DownloadRate=8000'],
     'livezipz01': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1', 'UnpackCleanupDisk=yes', 'DownloadRate=8000'],
     'livesplitjoin': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1', 'UnpackCleanupDisk=yes', 'DownloadRate=8000'],

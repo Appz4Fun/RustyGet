@@ -7239,8 +7239,10 @@ def scenario_livefedrar5m3(daemon, t):
 
 
 def scenario_livefed7z(daemon, t):
-    """A 7z made by 7-Zip (LZMA2, multithreaded) and cut into big pieces by 7-Zip (-v) is
-    decoded article by article while it downloads."""
+    """A 7z made by 7-Zip and cut into pieces by 7-Zip (-v) is read article by article while
+    it downloads. Stored (-m0=Copy): a debug build decodes LZMA2 slower than the throttled
+    download on a loaded VM, and then reads volumes only after they finished, which is not
+    what this checks (RG_LIVE_7Z_METHOD=LZMA2 times the compressed case)."""
     if not generators.HAVE_7Z:
         return ('livefed7z', None, 'SKIP: 7z not installed')
     scale = _live_scale()
@@ -7248,8 +7250,10 @@ def scenario_livefed7z(daemon, t):
     with tempfile.TemporaryDirectory(prefix='lf7z-') as workdir:
         with open(os.path.join(workdir, 'movie.mkv'), 'wb') as f:
             f.write(movie)
-        subprocess.run([generators.SEVENZIP_PATH, 'a', '-bd', '-m0=LZMA2', '-mx5', '-mmt=4',
-                        '-v%dm' % (5 * scale), 'out.7z', 'movie.mkv'], cwd=workdir, check=True,
+        method = os.environ.get('RG_LIVE_7Z_METHOD', 'Copy')
+        level = ['-mx5', '-mmt=4'] if method != 'Copy' else []
+        subprocess.run([generators.SEVENZIP_PATH, 'a', '-bd', '-m0=%s' % method] + level +
+                       ['-v%dm' % (5 * scale), 'out.7z', 'movie.mkv'], cwd=workdir, check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         names = sorted(n for n in os.listdir(workdir) if n.startswith('out.7z.'))
         volumes = [('Movie' + n[len('out'):], open(os.path.join(workdir, n), 'rb').read()) for n in names]

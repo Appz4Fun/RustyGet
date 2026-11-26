@@ -99,7 +99,7 @@ struct CandSnap {
     queued_filename: Vec<u8>,
     password: Vec<u8>,
     other_container: bool,
-    same_video_label: bool,
+    other_video: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -301,24 +301,87 @@ struct DonorSource {
     /// Labelled as not a twin of this download (see [`other_container`]): its volume files are
     /// never compared with this download's or copied over them.
     other_container: bool,
-    /// Labelled as holding the same video (see [`same_video_label`]): only then may a check that
-    /// matched in one run let later runs lend it unchecked.
-    same_video_label: bool,
+    /// Labelled as holding another video (see [`other_video_label`]): a check that matched in
+    /// an earlier run never lets later runs lend it unchecked.
+    other_video: bool,
 }
 
-/// Whether a copy's labels say it holds the same video as the download: TwinCheck's `twin` or
-/// `alt` (checked against the download itself), or a fleet intake that read the video inside
-/// (`DupeVideo=same`). A packing kind alone (`borrowable*`) says nothing of the video, and a
-/// fleet kind `twin` only says the copy is a twin of some member of its fleet, not of this
-/// download; nor does `container`, `other`, a near twin, or no label say it: each run's own
-/// check must match before such a copy lends (failover-continue's carry-over needs both a match
-/// and this label).
-fn same_video_label(_copy_kind: Option<&[u8]>, twin_label: Option<&[u8]>, video: Option<&[u8]>) -> bool {
-    match twin_label.map(<[u8]>::trim_ascii) {
-        Some(b"twin") | Some(b"alt") => true,
-        Some(label) if !label.is_empty() => false,
-        _ => video.map(<[u8]>::trim_ascii) == Some(b"same"),
+/// Whether a copy's labels say it holds another video than the download: TwinCheck's `other`
+/// (the fleet intake read both videos and they differ) or the intake's `DupeVideo=different`.
+///
+/// Any other label lets a match carry over (failover-continue): the match is a check of the
+/// copy's video bytes, reached through the one payload map, against the download's own bytes,
+/// and that check is the proof that the copy holds the same video (AGENTS.md: other par2
+/// checksums prove only another container; a `container` copy becomes an alt once the video
+/// inside is proven to match). So a copy labelled `container`, a near twin, a fleet kind alone
+/// or no label lends the later dead volumes unchecked once a run of this download matched its
+/// video; before such a match, every run's own check must match.
+fn other_video_label(twin_label: Option<&[u8]>, video: Option<&[u8]>) -> bool {
+    let trimmed = |v: Option<&[u8]>| v.map(|v| cstr::until_nul(v).trim_ascii().to_vec());
+    trimmed(twin_label).as_deref() == Some(b"other")
+        || trimmed(video).as_deref() == Some(crate::dupesearch_coord::VIDEO_DIFFERENT)
+}
+
+/// A download in the queue or in history, by NZBID, and whether it is in history.
+fn find_queued_or_history(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    dq_ptr: usize,
+    nzb_id: i32,
+) -> Option<(NzbRef, bool)> {
+    let queued = host.queue_find_by_id(dq_ptr, nzb_id);
+    if queued.is_some() {
+        return Some((queued, false));
     }
+    (0..host.history_len(dq_ptr)).find_map(|idx| {
+        let h = host.history_at(dq_ptr, idx);
+        (h.kind == crate::queuesubsys_host::HK_NZB
+            && h.nzb().is_some()
+            && host.nzb_snap(h.nzb(), false).id == nzb_id)
+            .then(|| (h.nzb(), true))
+    })
+}
+
+/// Leaves on donor `donor_id` the evidence that a live borrow of download `nzb_id` compared the
+/// donor's video, read through the payload map, with the download's own bytes and found it the
+/// same ([`crate::twin::LIVE_VIDEO_PARAM`]), and labels a copy TwinCheck could only call another
+/// container (`container`, or no kind yet) an alt of that download, saying how that was proven
+/// (AGENTS.md: a container copy becomes an alt once the video inside is proven to match).
+/// TwinCheck keeps the label while that download is its primary (`twin::live_alt`). A twin, a
+/// near twin and a copy labelled `other` keep their labels. Written once per pair.
+fn note_live_video_match(host: &crate::queuesubsys_host::QueueSubsysHost, nzb_id: i32, donor_id: i32) {
+    let evidence = crate::twin::live_video_value(nzb_id);
+    host.with_locked_queue(|dq_ptr| {
+        let Some((donor, in_history)) = find_queued_or_history(host, dq_ptr, donor_id) else {
+            return;
+        };
+        let param = |name: &[u8]| {
+            host.nzb_get_param(donor, name)
+                .map(|v| cstr::until_nul(&v).trim_ascii().to_vec())
+                .unwrap_or_default()
+        };
+        if param(crate::twin::LIVE_VIDEO_PARAM) == evidence {
+            return;
+        }
+        host.nzb_set_param(donor, crate::twin::LIVE_VIDEO_PARAM, Some(&evidence));
+        let (kind, live) = crate::twin::live_alt(param(b"DupeKind"), &evidence, nzb_id);
+        if live {
+            host.nzb_set_param(donor, b"DupeKind", Some(&kind));
+            let download_name = find_queued_or_history(host, dq_ptr, nzb_id)
+                .map(|(n, _)| cstr::until_nul(&host.nzb_snap(n, false).name).to_vec())
+                .unwrap_or_default();
+            let donor_name = cstr::until_nul(&host.nzb_snap(donor, false).name).to_vec();
+            host.nzb_print_message(
+                donor,
+                crate::queuesubsys_host::MK_INFO,
+                &crate::twin::format_live_alt_message(&donor_name, &download_name),
+            );
+        }
+        host.nzb_set_int(donor, crate::queuesubsys_host::NZB_INT_CHANGED, 1);
+        if in_history {
+            host.dq_history_changed(dq_ptr);
+        }
+        host.dq_save(dq_ptr);
+    });
 }
 
 /// Whether TwinCheck's labels prove a copy's files differ from this download's: `container`
@@ -502,6 +565,9 @@ struct DonorFetchStats {
     largest: u32,
     bytes: u64,
     waited: std::time::Duration,
+    /// Articles served from the memory of recent articles ([`RECENT_SINGLES`],
+    /// [`RECENT_BATCHED`]) instead of the network: not in `singles` or `batch_parts`.
+    from_memory: u32,
 }
 
 impl DonorFetchStats {
@@ -523,7 +589,7 @@ impl DonorFetchStats {
         msg.extend_from_slice(donor);
         msg.extend_from_slice(
             format!(
-                ": {:.1} MB in {:.1} s, waiting on the network {:.1} s; {} single fetch(es), {} batch(es) of {} article(s) ({} wave(s) of {} across volumes, largest {}), {} worker(s)",
+                ": {:.1} MB in {:.1} s, waiting on the network {:.1} s; {} single fetch(es), {} batch(es) of {} article(s) ({} wave(s) of {} across volumes, largest {}), {} taken from memory, {} worker(s)",
                 self.bytes as f64 / 1_000_000.0,
                 elapsed.as_secs_f64(),
                 self.waited.as_secs_f64(),
@@ -533,6 +599,7 @@ impl DonorFetchStats {
                 self.waves,
                 self.wave_parts,
                 self.largest,
+                self.from_memory,
                 workers,
             )
             .as_bytes(),
@@ -597,7 +664,10 @@ impl NzbgetRsStreamRepairCtrl {
     fn next_planned_article(&self) -> Option<FetchedDonorArticle> {
         let slot = self.prefetch_plan.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
         let message_id = match slot {
-            Some(PrefetchSlot::Held(hit)) => return Some(hit),
+            Some(PrefetchSlot::Held(hit)) => {
+                self.fetch_stats.lock().unwrap_or_else(|e| e.into_inner()).from_memory += 1;
+                return Some(hit);
+            }
             Some(PrefetchSlot::Fetching(id)) => Some(id),
             None => None,
         };
@@ -826,8 +896,7 @@ impl NzbgetRsStreamRepairCtrl {
                     host.nzb_get_param(cand, b"DupeKind").as_deref(),
                     host.nzb_get_param(cand, b"DupeSampled").as_deref(),
                 ),
-                same_video_label: same_video_label(
-                    host.nzb_get_param(cand, crate::donorkind::KIND_PARAM).as_deref(),
+                other_video: other_video_label(
                     host.nzb_get_param(cand, b"DupeKind").as_deref(),
                     host.nzb_get_param(cand, crate::dupesearch_coord::VIDEO_PARAM).as_deref(),
                 ),
@@ -974,7 +1043,7 @@ impl NzbgetRsStreamRepairCtrl {
             info_name: Vec<u8>,
             password: Vec<u8>,
             other_container: bool,
-            same_video_label: bool,
+            other_video: bool,
         }
         let mut cand_rows: Vec<CandRow> = Vec::new();
         for (from_history, count) in [(false, queue_count), (true, history_count)] {
@@ -999,7 +1068,7 @@ impl NzbgetRsStreamRepairCtrl {
                     info_name: cand.name,
                     password: cand.password,
                     other_container: cand.other_container,
-                    same_video_label: cand.same_video_label,
+                    other_video: cand.other_video,
                 });
             }
         }
@@ -1025,7 +1094,7 @@ impl NzbgetRsStreamRepairCtrl {
                 info_name: row.info_name,
                 password: row.password,
                 other_container: row.other_container,
-                same_video_label: row.same_video_label,
+                other_video: row.other_video,
             });
         }
 
@@ -1910,6 +1979,7 @@ impl NzbgetRsStreamRepairCtrl {
                     let df = self.donor_files.get(member_index as usize)?;
                     let msg_id = df.article_msg_ids.get(part_index as usize)?;
                     if let Some(hit) = recent_single(msg_id) {
+                        self.ctrl.fetch_stats.lock().unwrap_or_else(|e| e.into_inner()).from_memory += 1;
                         return Some(hit);
                     }
                     let started = std::time::Instant::now();
@@ -2106,9 +2176,12 @@ impl NzbgetRsStreamRepairCtrl {
             *self.fetch_stats.lock().unwrap_or_else(|e| e.into_inner()) =
                 DonorFetchStats::default();
             let donor_started = std::time::Instant::now();
+            // A match of an earlier run of this download (its video bytes against the
+            // download's own) carries over to the dead volumes that have none of the download's
+            // bytes left around them, unless a label says the copy holds another video.
             session.set_donor_known_same(
                 dead_nzb_id
-                    .filter(|_| donor.same_video_label)
+                    .filter(|_| !donor.other_video)
                     .and_then(|id| crate::postproc::dead_volume_donor_confirmed(id, donor.id)),
             );
             session.process_donor(
@@ -2155,6 +2228,9 @@ impl NzbgetRsStreamRepairCtrl {
                     (confirmed, session.donor_differed(), session.video_confirmed_size())
                 {
                     crate::postproc::note_dead_volume_donor_confirmed(id, donor.id, size);
+                    if !donor.other_video {
+                        note_live_video_match(q.host, id, donor.id);
+                    }
                 }
             }
             if let (Some(id), true) = (dead_nzb_id, session.donor_differed()) {
@@ -3211,23 +3287,23 @@ mod tests {
     }
 
     #[test]
-    fn only_a_label_of_the_same_video_lets_a_confirmation_carry() {
-        assert!(same_video_label(None, Some(b"twin"), None));
-        assert!(same_video_label(None, Some(b"alt"), None));
-        // A fleet kind `twin` is a twin of some fleet member, not necessarily of this download.
-        assert!(!same_video_label(Some(b"twin"), None, None));
-        assert!(same_video_label(Some(b"borrowable"), None, Some(b"same")));
-        // A packing kind alone proves nothing of the video.
-        assert!(!same_video_label(Some(b"borrowable"), None, None));
-        assert!(!same_video_label(Some(b"borrowable"), None, Some(b"unverified")));
-        assert!(!same_video_label(Some(b"borrowable-encrypted"), None, Some(b"differ")));
-        assert!(!same_video_label(Some(b"borrowable-encrypted"), None, None));
-        assert!(same_video_label(Some(b"unknown"), None, Some(b"same")));
-        assert!(!same_video_label(Some(b"borrowable"), Some(b"container"), None));
-        assert!(!same_video_label(Some(b"borrowable"), Some(b"other"), None));
-        assert!(!same_video_label(None, Some(b"twin:2/3"), None));
-        assert!(!same_video_label(Some(b"unknown"), None, None));
-        assert!(!same_video_label(None, None, None));
+    fn only_a_label_of_another_video_stops_a_confirmation_carrying() {
+        // The intake read another video in it: a match never carries over.
+        assert!(other_video_label(Some(b"other"), None));
+        assert!(other_video_label(None, Some(b"different")));
+        assert!(other_video_label(Some(b"alt"), Some(b"different")));
+        assert!(other_video_label(Some(b"other\0"), None));
+        // Everything else carries a match of the video bytes over: twins and alts, and copies
+        // whose video no label proves yet (the 6790 XB copy 05: `container`, par2 checksums
+        // differ, the damaged primary's headers unreadable at intake).
+        assert!(!other_video_label(Some(b"twin"), None));
+        assert!(!other_video_label(Some(b"alt"), None));
+        assert!(!other_video_label(Some(b"container"), None));
+        assert!(!other_video_label(Some(b"twin:2/3"), None));
+        assert!(!other_video_label(None, Some(b"same")));
+        assert!(!other_video_label(None, Some(b"unverified")));
+        assert!(!other_video_label(Some(b""), None));
+        assert!(!other_video_label(None, None));
     }
 
     #[test]
@@ -3256,11 +3332,12 @@ mod tests {
             largest: 30,
             bytes: 30_000_000,
             waited: std::time::Duration::from_secs(9),
+            from_memory: 41,
         };
         let line = String::from_utf8(st.line(b"Copy.05", std::time::Duration::from_secs(12), 8)).unwrap();
         assert_eq!(
             line,
-            "Fetch cost of borrowing from Copy.05: 30.0 MB in 12.0 s, waiting on the network 9.0 s; 3 single fetch(es), 2 batch(es) of 40 article(s) (1 wave(s) of 30 across volumes, largest 30), 8 worker(s)"
+            "Fetch cost of borrowing from Copy.05: 30.0 MB in 12.0 s, waiting on the network 9.0 s; 3 single fetch(es), 2 batch(es) of 40 article(s) (1 wave(s) of 30 across volumes, largest 30), 41 taken from memory, 8 worker(s)"
         );
     }
 

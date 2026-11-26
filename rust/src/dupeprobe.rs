@@ -207,6 +207,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const CONNECTION_WAIT_SEC: i64 = 10;
+
+/// How long a dead-pick probe waiting for a connection holds its download back (see
+/// [`probe_waiting_for_connection`]): enough for the articles the download has under way to
+/// finish and free a connection, so a probe that still gets none later polls for it beside the
+/// download, as before.
+pub const CONNECTION_HOLD_SEC: i64 = 3;
 pub const PROBE_LIMIT_SEC: i32 = 90;
 pub const RECHECK_LIMIT_SEC: i32 = 60;
 
@@ -373,8 +379,7 @@ pub fn probe_probing_for(nzb_id: i32) -> i32 {
 }
 
 /// True while the dead-pick probe of download `nzb_id` waits for its first connection, for at
-/// most [`CONNECTION_WAIT_SEC`] (less when its first server gives none, see
-/// `end_connection_wait`): the queue then picks no article of that download (other
+/// most [`CONNECTION_HOLD_SEC`] (less when its server is blocked, see `end_connection_wait`): the queue then picks no article of that download (other
 /// downloads go on), so a connection the download frees goes to the probe. Without that, a
 /// download using every connection of a small server takes each freed one back at once, and
 /// the probe, polling for one, may only get it after the download failed over on its health
@@ -392,7 +397,7 @@ pub fn probe_waiting_for_connection(nzb_id: i32) -> bool {
             && !entry.count_all
             && !entry.connected
             && !entry.stopped.load(Ordering::SeqCst)
-            && now - entry.started <= CONNECTION_WAIT_SEC
+            && now - entry.started <= CONNECTION_HOLD_SEC
     })
 }
 
@@ -537,13 +542,22 @@ impl NzbgetRsDupeProbe {
                 actual_server_id = c.server.id;
                 join_group = c.server.join_group;
                 server_name = c.server.name.to_bytes().to_vec();
+                // got one (a server already probed included): the download goes on
+                self.end_connection_wait();
             } else {
+                // a blocked server frees no connection for the probe: the download need not
+                // hold back for it
+                if pool
+                    .server_by_id(server_id)
+                    .is_some_and(|wanted| pool.is_server_blocked(&wanted))
+                {
+                    self.end_connection_wait();
+                }
                 std::thread::sleep(Duration::from_millis(50));
             }
         }
 
         if conn_ptr == 0 {
-            // its download no longer waits for this probe's connection
             self.end_connection_wait();
             result.unreachable = match pool.server_by_id(server_id) {
                 None => false,

@@ -17,8 +17,9 @@
 //! being probed ([`FleetProbing`]), its requests keep a floor of
 //! [`PROBE_READ_FLOOR`] at once per server ([`probe_reads`]): the light
 //! connections, plus idle connections of the probe share the main pool
-//! already grants them, taken even while a download was refused one (never a
-//! connection a download holds). While the floor is what admits them (a
+//! already grants them (at most a quarter of the server's connections in
+//! all), taken even while a download was refused one (never a connection a
+//! download holds). While the floor is what admits them (a
 //! download was refused a connection just now, downloads not held), every
 //! probe request, a BODY read or a STAT exchange, holds a slot of
 //! [`crate::light_pool::PROBE_READS`], so the slots never outnumber the
@@ -66,8 +67,9 @@ pub fn fleet_probing() -> bool {
 }
 
 /// The probe requests one server may have at once: its light connections
-/// (`light`), raised to [`PROBE_READ_FLOOR`] with check connections of its
-/// [`probe_share`]. A flaky server (`flaky`: recent errors or timeouts, as
+/// (`light`), raised to [`PROBE_READ_FLOOR`] with check connections, at most
+/// a quarter of its connections in all (well inside its [`probe_share`], so
+/// a server with 9 to 19 connections lends 2 to 4). A flaky server (`flaky`: recent errors or timeouts, as
 /// the light reserve measures them) keeps one; a server with at most
 /// [`crate::light_pool::FEW_CONNECTIONS`] keeps its light count; 0 for a
 /// server with no light reserve (the main pool serves its probes as any
@@ -80,7 +82,7 @@ pub fn probe_reads(light: i32, max_connections: i32, flaky: bool) -> i32 {
     } else if max_connections <= crate::light_pool::FEW_CONNECTIONS {
         light
     } else {
-        light.max(PROBE_READ_FLOOR.min(probe_share(max_connections) as i32))
+        light.max(PROBE_READ_FLOOR.min(max_connections / 4))
     }
 }
 
@@ -362,9 +364,12 @@ mod tests {
         // few connections: its light count only
         assert_eq!(probe_reads(1, 8, false), 1);
         assert_eq!(probe_check_floor(1, 8, false), 1);
-        // never more than the probe share (half the connections)
-        assert_eq!(probe_reads(1, 9, false), 4);
-        assert_eq!(probe_check_floor(1, 9, false), 3);
+        // review: never more than a quarter of the connections in all
+        assert_eq!(probe_reads(1, 9, false), 2);
+        assert_eq!(probe_check_floor(1, 9, false), 1);
+        assert_eq!(probe_reads(1, 12, false), 3);
+        assert_eq!(probe_reads(1, 20, false), 5);
+        assert!((9..=200).all(|n| probe_reads(1, n, false) as usize <= probe_share(n)));
         // no reserve (off, or too few connections): unchanged
         assert_eq!(probe_reads(0, 60, false), 0);
         assert_eq!(crate::light_pool::parallel_jobs(16, probe_reads(0, 60, false)), 16);

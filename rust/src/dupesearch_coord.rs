@@ -1699,7 +1699,7 @@ impl DonorServerExchange for NntpHealthTransportShared {
                     busy: true,
                 });
             };
-            wait_start = host_now(ctx, host_cb);
+            // the slot and the connection share one wait
             let ids = self.server_ids.lock().unwrap_or_else(|e| e.into_inner()).clone();
             // servers of this backbone whose connect failed during this exchange
             let mut failed: Vec<i32> = Vec::new();

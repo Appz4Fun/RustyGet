@@ -4514,13 +4514,14 @@ def scenario_failcont_aescontainer(daemon, t):
     bp = _params(hb)
     # the dead tail (the backup's bytes past the primary's cut, at the same payload share),
     # each hole (a 50 KB hole lies in at most two 100 KB articles), each volume's first and
-    # last article (encrypted headers: its payload map) and two articles at the cut
+    # last article (encrypted headers: the payload map is built from every volume's headers,
+    # not only those of the volumes it lends from) and two articles at the cut
     tail = donor_total * (total - cut) // total
     b_budget = tail + (2 * holes + 2 * len(donor_vols) + 2) * donor_seg
     ok = (integ and winner == 'Primary' and failed_over == 0 and cancelled == 0 and backup_unpacks == 0
           and du_ok == 1 and used_direct == 1 and a_again == 0 and b_again == 0 and b_bytes <= b_budget
           and bp.get('DupeKind') == 'alt' and bp.get('DupeLiveVideo') == 'same:%d' % hp['NZBID']
-          and relabel >= 1)
+          and relabel >= 1 and refused == 0)
     return (name, ok,
             'winner=%s primary=%s backup=%s secs=%.1f primary_served=%d/%d B (%d articles, %d again) '
             'backup_served=%d B of %d (budget %d: tail %d + %d holes, %d articles, %d again) refused=%d '

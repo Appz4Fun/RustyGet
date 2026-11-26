@@ -576,7 +576,10 @@ What made a dead tail fail before, now fixed:
   "B is an alt of A (another container, the same video inside: a live borrow
   matched its video bytes with the download's own)" (`twin::live_alt`). A
   copy with no kind yet keeps none (it may be a twin whose sample is still
-  pending). On #715 the carry-over still needed a twin/alt label,
+  pending). A later check that compares in full and differs takes the
+  evidence back with the match, so TwinCheck labels the copy `container`
+  again; a pack merge or split drops it too. On #715 the carry-over still
+  needed a twin/alt label,
   and the real XB copy 05 on 6790 (an AES RAR5 alt labelled `container`)
   lent only the first dead volume before every later one was refused.
 - A dead volume's headers are rebuilt from a sibling; the nearest sibling may

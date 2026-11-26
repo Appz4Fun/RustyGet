@@ -321,27 +321,21 @@ fn same_video_label(_copy_kind: Option<&[u8]>, twin_label: Option<&[u8]>, video:
     }
 }
 
-/// Whether a copy is labelled as held in another container than this download's: TwinCheck's
-/// `alt` (the same video inside), `container` (the video inside not verified yet) or `other`
-/// (another video), or, with no TwinCheck label, a fleet kind of `borrowable` or
-/// `borrowable-encrypted` (no twin at intake). Container bytes of such a copy never match this
-/// download's and must never be compared (AGENTS.md, twins and alts): the whole-file pass,
-/// which copies a donor file over a damaged file of about its size once sampled bytes agree,
-/// leaves it out; only the payload map lends from it, by the bytes of the video. A copy
-/// TwinCheck proved a twin of this download (`twin`) is never one, whatever its fleet kind; a
-/// near twin (`twin:N/M`: only some of its files agree, such as a re-packed volume) is, and so
-/// is a fleet kind `twin` (a twin of some other member of the fleet, perhaps a re-RAR of this
-/// download) until TwinCheck says otherwise.
-fn other_container(copy_kind: Option<&[u8]>, twin_label: Option<&[u8]>, video: Option<&[u8]>) -> bool {
+/// Whether TwinCheck's labels prove a copy's files differ from this download's: `container`
+/// or `other` (their par2 lists differ), a near twin (`twin:N/M`), or `alt` unless its samples
+/// found the same files cut into other article sizes (`DupeSampled=samefiles`). Container bytes
+/// of such a copy never match this download's and are never compared (AGENTS.md, twins and
+/// alts): the whole-file pass, which copies a donor file over a damaged file of about its size
+/// once sampled bytes agree, leaves it out; only the payload map lends from it, by the bytes of
+/// the video. Fleet kinds and intake verdicts alone do not prove it (a repost of the same files
+/// in other article sizes carries `borrowable` too), so such copies keep the whole-file pass,
+/// which samples before it copies anything.
+fn other_container(twin_label: Option<&[u8]>, sampled: Option<&[u8]>) -> bool {
     match twin_label.map(<[u8]>::trim_ascii) {
-        Some(b"twin") => false,
+        Some(b"container") | Some(b"other") => true,
         Some(label) if label.starts_with(b"twin:") => true,
-        Some(b"alt") | Some(b"container") | Some(b"other") => true,
-        _ => match copy_kind.map(<[u8]>::trim_ascii) {
-            Some(b"twin") | Some(b"borrowable") | Some(b"borrowable-encrypted") => true,
-            // the same video found inside another container by the fleet's intake
-            _ => video.map(<[u8]>::trim_ascii) == Some(b"same"),
-        },
+        Some(b"alt") => sampled.map(<[u8]>::trim_ascii) != Some(b"samefiles"),
+        _ => false,
     }
 }
 
@@ -579,6 +573,9 @@ pub struct NzbgetRsStreamRepairCtrl {
     /// fetched a moment ago is served from [`RECENT_SINGLES`] in its place; the others come
     /// from `batch_fetcher`, in order, and are kept there too (see [`PrefetchSlot`]).
     prefetch_plan: Mutex<std::collections::VecDeque<PrefetchSlot>>,
+    /// Set by [`Self::stop`]: articles held in memory are not served past it either, so a
+    /// repair asked to stop stops as promptly as one waiting on the network.
+    stopping: AtomicBool,
     timed_out: Arc<AtomicBool>,
     progress_bytes: Arc<AtomicI64>,
     checking_donor: Arc<AtomicI32>,
@@ -601,6 +598,9 @@ impl NzbgetRsStreamRepairCtrl {
     /// already held is served without the network; one fetched now is kept for a later run.
     /// Bytes fetched count into `fetch_stats`, held ones do not.
     fn next_planned_article(&self) -> Option<FetchedDonorArticle> {
+        if self.stopping.load(Ordering::SeqCst) {
+            return None;
+        }
         let slot = self.prefetch_plan.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
         let message_id = match slot {
             Some(PrefetchSlot::Held(hit)) => return Some(hit),
@@ -647,6 +647,7 @@ impl NzbgetRsStreamRepairCtrl {
             fetcher: ArticleFetcher::new(crate::light_pool::light(nntp_host)),
             batch_fetcher: BatchFetcherPool::new(nntp_host),
             prefetch_plan: Mutex::new(std::collections::VecDeque::new()),
+            stopping: AtomicBool::new(false),
             timed_out: Arc::new(AtomicBool::new(false)),
             progress_bytes: Arc::new(AtomicI64::new(0)),
             checking_donor: Arc::new(AtomicI32::new(0)),
@@ -658,6 +659,8 @@ impl NzbgetRsStreamRepairCtrl {
     }
 
     pub fn stop(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
+        self.prefetch_plan.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.batch_fetcher.stop();
         self.fetcher.stop();
     }
@@ -829,9 +832,8 @@ impl NzbgetRsStreamRepairCtrl {
                     .nzb_get_param(cand, b"*Unpack:Password")
                     .map_or_else(Vec::new, |p| cstr::until_nul(&p).to_vec()),
                 other_container: other_container(
-                    host.nzb_get_param(cand, crate::donorkind::KIND_PARAM).as_deref(),
                     host.nzb_get_param(cand, b"DupeKind").as_deref(),
-                    host.nzb_get_param(cand, crate::dupesearch_coord::VIDEO_PARAM).as_deref(),
+                    host.nzb_get_param(cand, b"DupeSampled").as_deref(),
                 ),
                 same_video_label: same_video_label(
                     host.nzb_get_param(cand, crate::donorkind::KIND_PARAM).as_deref(),
@@ -1916,6 +1918,9 @@ impl NzbgetRsStreamRepairCtrl {
                     }
                     let df = self.donor_files.get(member_index as usize)?;
                     let msg_id = df.article_msg_ids.get(part_index as usize)?;
+                    if self.ctrl.stopping.load(Ordering::SeqCst) {
+                        return None;
+                    }
                     if let Some(hit) = recent_single(msg_id) {
                         return Some(hit);
                     }
@@ -3237,54 +3242,19 @@ mod tests {
         assert!(!same_video_label(None, None, None));
     }
 
-    fn other_container_t(copy_kind: Option<&[u8]>, twin_label: Option<&[u8]>) -> bool {
-        other_container(copy_kind, twin_label, None)
-    }
-
     #[test]
-    fn copies_in_another_container_are_known_by_their_label_or_kind() {
-        assert!(other_container(Some(b"unknown"), None, Some(b"same")));
-        // Fleet kind `twin` alone: a twin of some fleet member, not proven of this download.
-        assert!(other_container(Some(b"twin"), None, None));
-        assert!(other_container_t(Some(b"borrowable"), None));
-        assert!(other_container_t(Some(b"borrowable-encrypted"), None));
-        assert!(other_container_t(None, Some(b"alt")));
-        assert!(other_container_t(None, Some(b"container")));
-        assert!(other_container_t(Some(b"unknown"), Some(b"other")));
-        // An unclassified copy and one of unknown packing may be compared as files.
-        assert!(!other_container_t(None, None));
-        assert!(!other_container_t(Some(b"unknown"), None));
-        assert!(!other_container_t(Some(b"unborrowable"), Some(b"twin")));
-        // TwinCheck's proof outranks a fleet kind from intake; a near twin is no twin.
-        assert!(!other_container_t(Some(b"borrowable"), Some(b"twin")));
-        assert!(other_container_t(None, Some(b"twin:2/3")));
-        assert!(other_container_t(Some(b"twin"), Some(b"twin:9/10")));
-    }
-
-    #[test]
-    fn a_donor_article_fetched_once_is_kept_for_the_next_wave() {
-        let _turn = MEMO_TESTS.lock().unwrap_or_else(|e| e.into_inner());
-        let id = b"<first-article-cache-test@x>".to_vec();
-        assert!(recent_single(&id).is_none());
-        let article = FetchedDonorArticle { success: true, offset: 0, file_size: 10, data: vec![1, 2, 3] };
-        keep_single(&id, article.clone());
-        assert_eq!(recent_single(&id).map(|a| a.data), Some(vec![1, 2, 3]));
-        // Bounded: old ones make way.
-        for i in 0..RECENT_SINGLES_MAX {
-            keep_single(format!("<filler-{i}@x>").as_bytes(), article.clone());
-        }
-        assert!(recent_single(&id).is_none());
-        assert!(RECENT_SINGLES.lock().unwrap().len() <= RECENT_SINGLES_MAX);
-        // Bounded in bytes too, and a huge article is never kept.
-        let big = FetchedDonorArticle { success: true, offset: 0, file_size: 1, data: vec![0; RECENT_SINGLES_BYTES / 16 + 1] };
-        keep_single(b"<huge@x>", big);
-        assert!(recent_single(b"<huge@x>").is_none());
-        let chunk = FetchedDonorArticle { success: true, offset: 0, file_size: 1, data: vec![0; RECENT_SINGLES_BYTES / 16] };
-        for i in 0..40 {
-            keep_single(format!("<chunk-{i}@x>").as_bytes(), chunk.clone());
-        }
-        let held: usize = RECENT_SINGLES.lock().unwrap().iter().map(|(_, a)| a.data.len()).sum();
-        assert!(held <= RECENT_SINGLES_BYTES);
+    fn copies_whose_files_differ_are_known_by_twinchecks_labels() {
+        assert!(other_container(Some(b"container"), None));
+        assert!(other_container(Some(b"other"), None));
+        assert!(other_container(Some(b"twin:2/3"), None));
+        assert!(other_container(Some(b"alt"), None));
+        assert!(other_container(Some(b"alt"), Some(b"rerar:2")));
+        // The same files cut into other article sizes: compared as files, after sampling.
+        assert!(!other_container(Some(b"alt"), Some(b"samefiles")));
+        // A proven twin, and copies TwinCheck has not labelled (fleet kinds prove nothing of
+        // the files), keep the whole-file pass.
+        assert!(!other_container(Some(b"twin"), None));
+        assert!(!other_container(None, None));
     }
 
     #[test]

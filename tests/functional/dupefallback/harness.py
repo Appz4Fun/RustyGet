@@ -4243,8 +4243,9 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
         alt = generators.rar3_store_volumes_valid('movie.mkv', donor_movie, 1_400_000)
         donor_vols = [('Other.part%02d.rar' % (i + 1), d) for i, d in enumerate(alt)]
         donor_seg = 100_000
-        labels = ([('DupeCopyKind', 'borrowable'), ('DupeVideo', 'same')] if backup == 'alt'
-                  else [('DupeKind', 'container')])
+        # as a fleet's intake and TwinCheck label it (another container, the same video)
+        labels = ([('DupeCopyKind', 'borrowable'), ('DupeVideo', 'same'), ('DupeKind', 'alt')]
+                  if backup == 'alt' else [('DupeKind', 'container')])
     else:
         with tempfile.TemporaryDirectory(prefix='fc-') as workdir:
             if backup == 'aes':
@@ -4260,7 +4261,8 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
                 enc = [open(os.path.join(workdir, n), 'rb').read() for n in outs]
         donor_vols = [('Other.part%d.rar' % (i + 1), d) for i, d in enumerate(enc)]
         donor_seg = 100_000
-        labels = ([('DupeCopyKind', 'borrowable-encrypted'), ('DupeLocked', 'yes'), ('DupeVideo', 'same')]
+        labels = ([('DupeCopyKind', 'borrowable-encrypted'), ('DupeLocked', 'yes'), ('DupeVideo', 'same'),
+                   ('DupeKind', 'alt')]
                   if backup == 'aes' else [('DupeCopyKind', 'unborrowable')])
     donor_members = []
     for vname, data in donor_vols:
@@ -4319,6 +4321,10 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
         header_articles = 0
     b_budget = int(donor_total * (1 - die)) + (header_articles + 2) * donor_seg
     b_before = _failcont_before(ids, tag + 'B/', cut, seg) if backup == 'twin' else 0
+    # Known residual: before TwinCheck labels an alt (another container), the whole-file pass
+    # may sample one of its volumes of about a damaged volume's size; a sample batch it cancels
+    # drops an article the borrow then fetches again. At most one.
+    b_again_ok = 0 if backup == 'twin' else 1
     if backup == 'compressed':
         ok = (integ and winner == 'Backup' and failed_over == 1 and
               _grep_log(t, 'cannot continue the extraction of Primary') >= 1)
@@ -4335,8 +4341,8 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
         # the extraction that ran before the cut is the one that finished: direct unpack of
         # the primary succeeded and post-processing took its files, extracting nothing again
         ok = (integ and winner == 'Primary' and failed_over == 0 and cancelled == 0 and backup_unpacks == 0
-              and du_ok == 1 and used_direct == 1 and a_again == 0 and b_again == 0 and b_bytes <= b_budget
-              and b_before == 0)
+              and du_ok == 1 and used_direct == 1 and a_again == 0 and b_again <= b_again_ok
+              and b_bytes <= b_budget and b_before == 0)
     return (name, ok,
             'winner=%s primary=%s backup=%s secs=%.1f primary_served=%d/%d B (%d articles, %d again, '
             'par2 %d again) backup_served=%d B of %d (budget %d, %d articles, %d again, par2 %d again) '

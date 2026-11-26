@@ -583,14 +583,13 @@ What made a dead tail fail before, now fixed:
   120 s, checked whenever a repair run fetches or ends), so on a large set this narrows
   refetches rather than ruling them out; the process-wide body cache of
   nntp-rs is meant to close the rest.
-- A copy labelled as held in another container (TwinCheck `alt`, `container`
-  or `other`, or with no TwinCheck label a fleet kind `twin`, `borrowable` or
-  `borrowable-encrypted`, or `DupeVideo=same`) is never compared or copied as
-  whole files (the whole-file pass compared such a copy's volume with a
-  damaged volume of about its size): container bytes of alts never match. A
-  twin TwinCheck proved of this download is never left out; a fleet kind
-  `twin` alone (a twin of some fleet member, maybe a re-RAR of this download)
-  is, until TwinCheck labels it.
+- A copy whose files TwinCheck proved different (`container`, `other`, a
+  near twin, or `alt` unless its samples found the same files cut into other
+  article sizes) is never compared or copied as whole files (the whole-file
+  pass compared such a copy's volume with a damaged volume of about its size):
+  container bytes of alts never match. Fleet kinds alone prove nothing of the
+  files (a repost in other article sizes is `borrowable` too), so those
+  copies keep the whole-file pass, which samples before it copies.
 
 When the backup cannot continue a running extraction, the download fails
 over as before, and the log says why first: "Backup B cannot continue the

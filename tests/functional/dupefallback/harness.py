@@ -15113,7 +15113,12 @@ SCENARIO_OPTIONS = {
     'directrenamesubdirjoin': ['DirectRename=yes', 'DirectWrite=no', 'ParCheck=auto'],
     'parvolnames': ['ParCheck=auto'],
     'pardamagefailover': ['ParCheck=auto', 'HealthCheck=dupe', 'DupeArticleFallback=no'],
-    'pardamageborrow': ['ParCheck=auto', 'HealthCheck=dupe', 'DupeArticleFallback=live'],
+    # Lost articles count towards the 32 tried only once the par2 damage is known (before, they
+    # wait for par-check): with 4 connections several files are under way by then, and of the
+    # 48 lost 30 to 35 counted in eight runs, so 1 in 8 missed the sample. With 2 the files
+    # come nearly one after the other (12 of 12 runs passed under load).
+    'pardamageborrow': ['ParCheck=auto', 'HealthCheck=dupe', 'DupeArticleFallback=live',
+                        'Server1.Connections=2'],
     'nosourceonce': ['DupeArticleFallback=live', 'HealthCheck=none'],
     'twinalt': ['HealthCheck=dupe'],
     'twinlabelonadd': ['HealthCheck=dupe'],

@@ -493,12 +493,15 @@ pub fn alt_covers_lost_articles(
     backup_mismatched: bool,
 ) -> bool {
     use crate::donorkind::DonorKind;
+    // A backup labelled the same video lends while the extraction runs even when a fleet found
+    // it unborrowable by range (its video compressed): zipfast restarts its decoder near the
+    // frontier (`restartlend`). One that cannot be restarted is refused by that try and counts
+    // as mismatched (`backup_mismatched`), and the download fails over then.
     let backup_lends = matches!(
         backup_kind,
         DonorKind::Twin | DonorKind::Borrowable | DonorKind::EncryptedBorrowable
-    )
-        || ((borrow_underway || (extracting && labelled_same_video))
-            && backup_kind != DonorKind::Unborrowable);
+    ) || (extracting && labelled_same_video)
+        || (borrow_underway && backup_kind != DonorKind::Unborrowable);
     // While direct unpack runs, failing over would throw its extraction away and start the
     // backup from its first byte: the download stays however much of it is gone, and every
     // volume it lost is borrowed from the backup, so the extraction carries on with the
@@ -528,9 +531,15 @@ pub const WEAK_SWITCH_MAX_DONE_PERMILLE: i32 = 500;
 pub enum WeakSwitch {
     /// keep it as it is (borrowing what it lacks)
     Stay,
-    /// fail over to the alt now, while little of the primary came (a frontier
-    /// handover into a live alt is an OPEN ITEM)
+    /// fail over to the alt now, while little of the primary came: the alt
+    /// downloads and extracts from its first byte (only when the primary's
+    /// extraction is not running or the alt cannot lend live)
     FailOver,
+    /// cut the primary at its frontier (`frontiercut`): its extraction goes on,
+    /// it fetches none of its own data articles left, and the alt lends every
+    /// byte past the frontier (failover-continue), so nothing the primary
+    /// downloaded is fetched again
+    ContinueAtFrontier,
 }
 
 /// The facts [`weak_primary_switch`] decides on.
@@ -557,6 +566,12 @@ pub struct WeakSwitchFacts {
     pub done: i32,
     /// direct unpack already finished and verified the extraction
     pub extraction_verified: bool,
+    /// the primary's extraction runs and the alt can lend what lies past its
+    /// frontier live (live borrowing on, the alt not refused by a check or a
+    /// restart): the switch cuts the primary there instead of failing over
+    pub continuable: bool,
+    /// the primary is cut at its frontier already
+    pub cut: bool,
 }
 
 /// Dune on 6790: a 77% primary downloaded for hours, borrowing hole by hole
@@ -572,6 +587,7 @@ pub struct WeakSwitchFacts {
 pub fn weak_primary_switch(f: &WeakSwitchFacts) -> WeakSwitch {
     let weak = f.held_in_fleet
         && !f.primary_held
+        && !f.cut
         && f.same_video
         && !f.backup_twin
         && !f.backup_locked
@@ -582,10 +598,12 @@ pub fn weak_primary_switch(f: &WeakSwitchFacts) -> WeakSwitch {
         && f.backup_alive >= SWITCH_BACKUP_ALIVE_PERMILLE
         && f.backup_alive >= f.projected + 50
         && f.done < WEAK_SWITCH_MAX_DONE_PERMILLE;
-    if weak {
-        WeakSwitch::FailOver
-    } else {
+    if !weak {
         WeakSwitch::Stay
+    } else if f.continuable {
+        WeakSwitch::ContinueAtFrontier
+    } else {
+        WeakSwitch::FailOver
     }
 }
 
@@ -631,33 +649,38 @@ fn cannot_continue_reason(
     opts: &crate::queuesubsys_host::GlobalOptsSnap,
     nzb: &crate::queuesubsys_host::NzbSnap,
     backup: &crate::queuesubsys_host::NzbSnap,
-) -> &'static str {
+) -> std::borrow::Cow<'static, str> {
     use crate::donorkind::DonorKind;
     let kind = |ptr| {
         DonorKind::from_param(host.nzb_get_param(ptr, crate::donorkind::KIND_PARAM).as_deref())
     };
+    if let Some(why) = crate::restartlend::refusal(nzb.id, &backup.queued_filename) {
+        // zipfast could not restart its decoder near the frontier (no restart point in its
+        // coder, say): the reason the restart gave
+        return format!("zipfast could not restart its decoder near the frontier ({why})").into();
+    }
     if !live_borrowing(opts) {
-        "live borrowing is off (it needs DupeArticleFallback=live, DirectUnpack and no RawArticle)"
+        "live borrowing is off (it needs DupeArticleFallback=live, DirectUnpack and no RawArticle)".into()
     } else if crate::postproc::dead_volume_donor_cannot_lend(nzb.id, &backup.queued_filename) {
-        "its video failed the check against the download's, or it holds the video compressed"
+        "its video failed the check against the download's, or it holds the video compressed".into()
     } else if kind(backup.ptr) == DonorKind::Unborrowable {
-        "it holds the video compressed (or encrypted with no password), which live repair cannot lend from"
+        "it holds the video compressed (or encrypted with no password), which live repair cannot lend from".into()
     } else if kind(nzb.ptr) == DonorKind::Unborrowable {
-        "the download's own archive cannot be borrowed into"
+        "the download's own archive cannot be borrowed into".into()
     } else if host
         .nzb_get_param(backup.ptr, b"DupeKind")
         .is_some_and(|k| k.trim_ascii() == b"other")
     {
-        "TwinCheck found another video in it"
+        "TwinCheck found another video in it".into()
     } else if host
         .nzb_get_param(backup.ptr, b"DupeKind")
         .is_some_and(|k| k.trim_ascii().starts_with(b"twin:"))
     {
-        "it is a near twin (only some of its files agree), which proves nothing of the video"
+        "it is a near twin (only some of its files agree), which proves nothing of the video".into()
     } else if kind(backup.ptr) == DonorKind::Unknown && !backup_may_lend_while_extracting(host, backup.ptr) {
-        "nothing shows it holds the same video"
+        "nothing shows it holds the same video".into()
     } else {
-        "its labels do not show it can lend what lies past the frontier"
+        "its labels do not show it can lend what lies past the frontier".into()
     }
 }
 
@@ -670,6 +693,9 @@ fn note_cannot_continue(
     nzb: &crate::queuesubsys_host::NzbSnap,
     backup: &crate::queuesubsys_host::NzbSnap,
 ) {
+    // failing over ends a frontier cut (`frontiercut`): the download fetches its own articles
+    // again if it is ever released
+    crate::frontiercut::forget(nzb.id);
     if nzb.direct_unpack_status != DirectUnpackStatus::Running {
         return;
     }
@@ -697,6 +723,15 @@ fn backup_continues_extraction(
     nzb: &crate::queuesubsys_host::NzbSnap,
     backup: &crate::queuesubsys_host::NzbSnap,
 ) -> bool {
+    // a primary cut at its frontier (`frontiercut`) has its alt lend the rest while it can
+    if nzb.direct_unpack_status == DirectUnpackStatus::Running
+        && crate::frontiercut::cut_for(nzb.id) == Some(backup.id)
+        && live_borrowing(opts)
+        && crate::restartlend::refusal(nzb.id, &backup.queued_filename).is_none()
+        && !backup_cannot_lend(host, nzb, backup)
+    {
+        return true;
+    }
     nzb.direct_unpack_status == DirectUnpackStatus::Running
         && alt_covers_lost_articles(
             true,
@@ -783,6 +818,7 @@ fn was_kept_for_borrowing(nzb_id: i32) -> bool {
 #[cfg(unix)]
 fn weak_switch_facts(
     host: &crate::queuesubsys_host::QueueSubsysHost,
+    opts: &crate::queuesubsys_host::GlobalOptsSnap,
     nzb: &crate::queuesubsys_host::NzbSnap,
     backup_nzb: &crate::queuesubsys_host::NzbSnap,
     tried: i32,
@@ -801,6 +837,14 @@ fn weak_switch_facts(
         backup_locked: crate::dupecoord::locked_host(host, backup_nzb.ptr),
         done: data_done_permille(nzb),
         extraction_verified: direct_unpack_verified(nzb.direct_unpack_status),
+        // (a cut is kept only for the alt it was made for: another copy the failover order
+        // picks later was never proven to hold the video)
+        continuable: nzb.direct_unpack_status == DirectUnpackStatus::Running
+            && crate::frontiercut::cut_for(nzb.id).is_none_or(|alt| alt == backup_nzb.id)
+            && live_borrowing(opts)
+            && !crate::postproc::dead_volume_donor_cannot_lend(nzb.id, &backup_nzb.queued_filename)
+            && crate::restartlend::refusal(nzb.id, &backup_nzb.queued_filename).is_none(),
+        cut: crate::frontiercut::is_cut(nzb.id),
     }
 }
 
@@ -829,7 +873,9 @@ fn backup_cannot_lend(
     nzb: &crate::queuesubsys_host::NzbSnap,
     backup: &crate::queuesubsys_host::NzbSnap,
 ) -> bool {
-    if !crate::postproc::dead_volume_donor_cannot_lend(nzb.id, &backup.queued_filename) {
+    if !crate::postproc::dead_volume_donor_cannot_lend(nzb.id, &backup.queued_filename)
+        && crate::restartlend::refusal(nzb.id, &backup.queued_filename).is_none()
+    {
         return false;
     }
     let was_kept = was_kept_for_borrowing(nzb.id);
@@ -843,13 +889,21 @@ fn backup_cannot_lend(
         msg.extend_from_slice(&nzb.name);
         msg.extend_from_slice(b" for borrowing: duplicate ");
         msg.extend_from_slice(&backup.name);
-        msg.extend_from_slice(
-            format!(
-                " cannot lend its dead volumes (in {} borrow attempts the video inside did not match, or was compressed, which live repair cannot lend from)",
-                crate::postproc::DEAD_VOLUME_DONOR_MISMATCH_RUNS
-            )
-            .as_bytes(),
-        );
+        match crate::restartlend::refusal(nzb.id, &backup.queued_filename) {
+            // its video is compressed and zipfast found no restart near the frontier: no word
+            // on whether it is the same video
+            Some(why) => msg.extend_from_slice(
+                format!(" cannot lend its dead volumes: zipfast could not restart its decoder near the frontier ({why})")
+                    .as_bytes(),
+            ),
+            None => msg.extend_from_slice(
+                format!(
+                    " cannot lend its dead volumes (in {} borrow attempts the video inside did not match, or was compressed, which live repair cannot lend from)",
+                    crate::postproc::DEAD_VOLUME_DONOR_MISMATCH_RUNS
+                )
+                .as_bytes(),
+            ),
+        }
         host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
     }
     true
@@ -1921,6 +1975,54 @@ fn join_path(dir: &[u8], name: &[u8]) -> Vec<u8> {
     out.extend_from_slice(name);
     out
 }
+
+/// The IDs of the files of the download's video set: the files whose name has the same set stem
+/// (the name without its volume number: `.partNN.rar`, `.rNN`, `.rar`, `.7z.NNN`, `.zNN`,
+/// `.zip`, `.NNN`) as its largest file. A frontier cut covers only these: extras (subs, a
+/// sample, a second set) are not lent by the alt. (Files already completed have left the
+/// queue's list; the stem needs none of them.)
+#[cfg(unix)]
+fn video_set_file_ids(host: &crate::queuesubsys_host::QueueSubsysHost, nzb_ptr: NzbRef) -> Vec<i32> {
+    let files: Vec<_> = (0..host.nzb_file_len(nzb_ptr))
+        .map(|j| host.file_snap(host.nzb_file_at(nzb_ptr, j)))
+        .filter(|f| !f.par_file)
+        .collect();
+    let Some(largest) = files.iter().max_by_key(|f| f.size) else {
+        return Vec::new();
+    };
+    let stem = set_stem(&largest.filename);
+    files.iter().filter(|f| set_stem(&f.filename) == stem).map(|f| f.id).collect()
+}
+
+/// A volume's name without its volume number, lower case (see [`video_set_file_ids`]).
+fn set_stem(name: &[u8]) -> Vec<u8> {
+    fn numeric(b: &[u8]) -> bool {
+        !b.is_empty() && b.iter().all(u8::is_ascii_digit)
+    }
+    fn split_ext(n: &[u8]) -> Option<(&[u8], &[u8])> {
+        let dot = n.iter().rposition(|&b| b == b'.')?;
+        Some((&n[..dot], &n[dot + 1..]))
+    }
+    let n = name.to_ascii_lowercase();
+    let Some((base, ext)) = split_ext(&n) else {
+        return n;
+    };
+    if ext == b"rar" {
+        // name.partNN.rar or name.rar
+        if let Some((inner, part)) = split_ext(base) {
+            if part.starts_with(b"part") && numeric(&part[4..]) {
+                return inner.to_vec();
+            }
+        }
+        return base.to_vec();
+    }
+    let numbered = ext.len() >= 2 && matches!(ext[0], b'r' | b's' | b'z') && numeric(&ext[1..]);
+    if numbered || ext == b"zip" || numeric(ext) {
+        return base.to_vec();
+    }
+    n
+}
+
 
 /// The share of a download's data (par2 left out) that came, success or
 /// failure, in permille of its total size.
@@ -5632,6 +5734,10 @@ impl NzbgetRsQueueCoordinator {
                         nzb.current_success_articles,
                         failed,
                     ));
+            // A primary cut at its frontier lends from its alt by design (`frontiercut`).
+            let lendable = lendable
+                || (crate::frontiercut::is_cut(nzb.id)
+                    && backup_continues_extraction(host, &opts, &nzb, &backup_nzb));
             // A duplicate whose bytes the running extraction already patched in (a nested or
             // otherwise unlabelled alt the cross-packing repair maps by the video inside) lends:
             // the article-level count of recovered articles misses those bytes.
@@ -5887,9 +5993,43 @@ impl NzbgetRsQueueCoordinator {
             host.nzb_get_param(nzb.ptr, crate::donorkind::KIND_PARAM)
                 .as_deref(),
         );
-        let facts = weak_switch_facts(host, &nzb, &backup_nzb, eval.tried, eval.projected);
+        let facts = weak_switch_facts(host, opts, &nzb, &backup_nzb, eval.tried, eval.projected);
+        // A primary cut at its frontier keeps its extraction while its alt lends the rest:
+        // its own articles fail by design, so the dead-download check does not fail it over
+        // unless the alt turned out unable to lend (a check found its video different, or
+        // it could not be restarted).
+        if facts.cut {
+            if facts.continuable {
+                return;
+            }
+            crate::frontiercut::forget(nzb.id);
+        }
         match weak_primary_switch(&facts) {
             WeakSwitch::Stay => {}
+            WeakSwitch::ContinueAtFrontier => {
+                crate::frontiercut::cut(nzb.id, backup_nzb.id, video_set_file_ids(host, nzb.ptr));
+                let mut msg = b"Continuing ".to_vec();
+                msg.extend_from_slice(&nzb.name);
+                msg.extend_from_slice(b" at its frontier from alt ");
+                msg.extend_from_slice(&backup_nzb.name);
+                msg.extend_from_slice(
+                    format!(
+                        ": weak, {} of {} tried article(s) of its own arrived (projected {:.1}%), {:.1}% of it downloaded; the alt holds the same video (equal inner keys) and is {:.0}% alive, so it lends everything past the frontier and the extraction carries on (nothing downloaded is fetched again)",
+                        eval.own,
+                        eval.tried,
+                        (eval.projected as f64) / 10.0,
+                        (facts.done as f64) / 10.0,
+                        (facts.backup_alive as f64) / 10.0
+                    )
+                    .as_bytes(),
+                );
+                host.nzb_print_message(
+                    nzb.ptr,
+                    crate::queuesubsys_host::MK_WARNING,
+                    &crate::releasename::log_name(&msg),
+                );
+                return;
+            }
             WeakSwitch::FailOver => {
                 // the fleet's failover order picked this alt (no dupe score
                 // check: held copies of a fleet are ranked by it already)
@@ -6288,8 +6428,14 @@ impl NzbgetRsQueueCoordinator {
         };
         // a weak fleet primary the doomed path switches to its alt (#724): that switch stops
         // its extraction and live writes first, which the par2 failover would skip
-        if weak_primary_switch(&weak_switch_facts(host, nzb, &backup_nzb, tried, projected))
-            == WeakSwitch::FailOver
+        // (as does its continuing at the frontier, which the dead-download check makes; a
+        // primary already cut there fails its own articles by design while its alt lends)
+        let facts = weak_switch_facts(host, opts, nzb, &backup_nzb, tried, projected);
+        if (facts.cut && facts.continuable)
+            || matches!(
+                weak_primary_switch(&facts),
+                WeakSwitch::FailOver | WeakSwitch::ContinueAtFrontier
+            )
         {
             return false;
         }
@@ -7445,6 +7591,10 @@ mod tests {
     #[test]
     fn a_weak_primary_switches_to_a_whole_copy_of_the_same_video() {
         use super::{weak_primary_switch, WeakSwitch, WeakSwitchFacts};
+        assert_eq!(super::set_stem(b"Show.part07.rar"), super::set_stem(b"show.part12.rar"));
+        assert_eq!(super::set_stem(b"Show.r07"), super::set_stem(b"Show.rar"));
+        assert_eq!(super::set_stem(b"movie.7z.003"), b"movie.7z".to_vec());
+        assert_ne!(super::set_stem(b"Subs.part01.rar"), super::set_stem(b"Show.part01.rar"));
         let dune = WeakSwitchFacts {
             held_in_fleet: true,
             tried: 73477,
@@ -7456,8 +7606,20 @@ mod tests {
             backup_locked: false,
             done: 300,
             extraction_verified: false,
+            continuable: false,
+            cut: false,
         };
         assert_eq!(weak_primary_switch(&dune), WeakSwitch::FailOver);
+        assert_eq!(
+            weak_primary_switch(&WeakSwitchFacts { continuable: true, ..dune }),
+            WeakSwitch::ContinueAtFrontier,
+            "the extraction runs and the alt lends live: cut at the frontier, not from zero"
+        );
+        assert_eq!(
+            weak_primary_switch(&WeakSwitchFacts { continuable: true, cut: true, ..dune }),
+            WeakSwitch::Stay,
+            "cut once"
+        );
         assert_eq!(weak_primary_switch(&WeakSwitchFacts { backup_twin: true, ..dune }), WeakSwitch::Stay, "a twin lends one for one");
         assert_eq!(weak_primary_switch(&WeakSwitchFacts { primary_held: true, ..dune }), WeakSwitch::Stay, "failed over already");
         assert_eq!(weak_primary_switch(&WeakSwitchFacts { done: 600, ..dune }), WeakSwitch::Stay, "most of it came: borrow on");
@@ -7767,13 +7929,20 @@ mod tests {
             true, true, Unknown, Unknown, 952, true, false, true, false
         ));
         // ... or while direct unpack runs if labelled an alt (no par2: the first dead volume
-        // trips the failed-in-a-row check before it ends), but never an unborrowable one, nor
-        // when live borrowing is off.
+        // trips the failed-in-a-row check before it ends), also one a fleet found unborrowable
+        // by range (its video compressed: zipfast restarts it near the frontier) until that
+        // restart is refused (mismatched), but never when live borrowing is off.
         assert!(alt_covers_lost_articles(
             false, true, Borrowable, Unknown, 952, false, true, true, false
         ));
-        assert!(!alt_covers_lost_articles(
+        assert!(alt_covers_lost_articles(
             false, true, Borrowable, Unborrowable, 952, false, true, true, false
+        ));
+        assert!(!alt_covers_lost_articles(
+            false, true, Borrowable, Unborrowable, 952, false, true, true, true
+        ));
+        assert!(!alt_covers_lost_articles(
+            false, true, Borrowable, Unborrowable, 952, false, true, false, false
         ));
         assert!(!alt_covers_lost_articles(
             false, false, Borrowable, Unknown, 952, false, true, true, false
@@ -7789,10 +7958,14 @@ mod tests {
         assert!(alt_covers_lost_articles(
             false, true, Unknown, Borrowable, 0, false, true, false, false
         ));
-        // ... but never from an unborrowable or mismatched backup, an unborrowable download,
-        // or with live borrowing off.
+        // ... but never from an unlabelled unborrowable or a mismatched backup (a compressed
+        // one zipfast could not restart counts as mismatched), an unborrowable download, or
+        // with live borrowing off.
         assert!(!alt_covers_lost_articles(
-            true, true, Borrowable, Unborrowable, 100, false, true, true, false
+            true, true, Borrowable, Unborrowable, 100, false, true, false, false
+        ));
+        assert!(!alt_covers_lost_articles(
+            true, true, Borrowable, Unborrowable, 100, false, true, true, true
         ));
         assert!(!alt_covers_lost_articles(
             true, true, Borrowable, Borrowable, 100, false, true, true, true

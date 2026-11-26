@@ -144,7 +144,10 @@ pub fn ranks(nzb_id: i32) -> Option<Arc<Ranks>> {
 
 fn push_urgent(nzb_id: i32, u: Urgent) {
     let mut map = lock(&ORDERS);
-    let order = map.entry(nzb_id).or_default();
+    // Only for a download extracted live in order (an extraction ending may race this).
+    let Some(order) = map.get_mut(&nzb_id) else {
+        return;
+    };
     if order.urgent.contains(&u) {
         return;
     }
@@ -152,7 +155,6 @@ fn push_urgent(nzb_id: i32, u: Urgent) {
         order.urgent.remove(0);
     }
     order.urgent.push(u);
-    ANY.store(true, Ordering::Release);
 }
 
 /// The extraction of download `nzb_id` waits for byte `offset` of the file named `name`
@@ -329,6 +331,9 @@ mod tests {
     #[test]
     fn urgent_offsets_are_kept_once_until_handed_out() {
         let id = -7_320_002;
+        urge(id, b"Movie.7z.007", 1);
+        assert!(urgent(id).is_empty(), "no order, nothing asked for");
+        set_order(id, &[b"Movie.7z.001".to_vec(), b"Movie.7z.007".to_vec()]);
         urge(id, b"/dl/Movie.7z.007", 177_000_000);
         urge(id, b"Movie.7z.007", 177_000_000);
         urge_whole(id, b"Movie.7z.007");

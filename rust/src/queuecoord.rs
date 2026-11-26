@@ -89,6 +89,25 @@ fn live_set_order(
     (rars > 1).then(|| crate::postproc::rar_volume_names(&first, rars))
 }
 
+/// Whether direct unpack may extract download `nzb_ptr` live at all: it is on, the download
+/// writes its files to disk, and unpacking is not turned off for it. Only such downloads get an
+/// extraction order (and their slow articles asked again).
+fn live_extraction_allowed(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb_ptr: NzbRef,
+    nzb: &crate::queuesubsys_host::NzbSnap,
+) -> bool {
+    let opts = host.opts();
+    opts.direct_unpack
+        && !opts.raw_article
+        && !opts.skip_write
+        && !nzb.skip_disk_write
+        && host
+            .nzb_get_param(nzb_ptr, b"*Unpack:")
+            .as_ref()
+            .is_none_or(|v| v.eq_ignore_ascii_case(b"yes"))
+}
+
 /// The name of the first volume download `nzb_id` has written the headers of, if any.
 fn head_name(nzb_id: i32) -> Option<Vec<u8>> {
     let heads = crate::livewrite::heads(nzb_id);
@@ -2948,6 +2967,9 @@ impl NzbgetRsQueueCoordinator {
                 {
                     let propagation_delay = opts.propagation_delay;
                     let order = cached_live_order(&mut orders, host, nzb_ptr, nzb.id);
+                    // A par2 file with articles to fetch seen earlier in the list: the window
+                    // does not go ahead of it (live PAR reads it early).
+                    let mut par_before = false;
                     for j in 0..flen {
                         let fp = host.nzb_file_at(nzb_ptr, j);
                         if checked_files.contains(&fp) {
@@ -2957,6 +2979,7 @@ impl NzbgetRsQueueCoordinator {
                         if f.paused || f.deleted {
                             continue;
                         }
+                        let par_file = f.par_file;
                         let prop_wait = is_propagation_wait(f.time, propagation_delay, cur_date);
                         if !prop_wait {
                             // A volume of a set extracted live, within the window: taken in
@@ -2971,15 +2994,14 @@ impl NzbgetRsQueueCoordinator {
                                         || (f.extra_priority && !bf.extra_priority)
                                         || (f.extra_priority == bf.extra_priority
                                             && best_nzb.ptr == nzb.ptr
-                                            && rank.is_some_and(|r| match best_rank {
-                                                Some(b) => r < *b,
-                                                None => !bf.par_file,
-                                            }))
+                                            && !par_before
+                                            && rank.is_some_and(|r| best_rank.is_none_or(|b| r < b)))
                                 }
                             };
                             if higher {
                                 best_file = Some((nzb.clone(), f, rank));
                             }
+                            par_before |= par_file;
                         } else if prop_wait_file
                             .as_ref()
                             .is_none_or(|(_, pw)| f.time < pw.time)
@@ -3101,7 +3123,8 @@ impl NzbgetRsQueueCoordinator {
             };
             let f = self.ensure_articles_loaded(host, opts, nzb, fp);
             let n = f.articles_len;
-            if n == 0 {
+            // (a file led by duplicates gets its articles from them, in the usual order)
+            if n == 0 || f.dupe_cutover {
                 continue;
             }
             let candidates: Vec<usize> = match &u {
@@ -3180,9 +3203,13 @@ impl NzbgetRsQueueCoordinator {
                     // Running (it picks the volume up itself), done, or the download is over.
                     continue;
                 }
+                if !live_extraction_allowed(host, nzb_ptr, &nzb) {
+                    // Never extracted live (unpack off for it, nothing written to disk).
+                    continue;
+                }
                 // The set's extraction order from now on (by the names it has now, after a
                 // direct rename), also while direct rename runs.
-                if host.opts().direct_unpack {
+                {
                     if let Some(order) = head_name(id)
                         .and_then(|first| live_set_order(host, nzb_ptr, Some(&first)))
                     {
@@ -3223,8 +3250,7 @@ impl NzbgetRsQueueCoordinator {
             return;
         }
         NEXT_ORDER_BY_NAME_MS.store(now + 500, std::sync::atomic::Ordering::Relaxed);
-        let opts = host.opts();
-        if !opts.direct_unpack {
+        if !host.opts().direct_unpack {
             return;
         }
         host.with_locked_queue(|dq_ptr| {
@@ -3240,6 +3266,7 @@ impl NzbgetRsQueueCoordinator {
                 seen.push(nzb.id);
                 if nzb.direct_unpack_status != DirectUnpackStatus::None
                     || crate::liveorder::ranks(nzb.id).is_some()
+                    || !live_extraction_allowed(host, nzb_ptr, &nzb)
                 {
                     continue;
                 }
@@ -3302,6 +3329,10 @@ impl NzbgetRsQueueCoordinator {
                     continue;
                 }
                 if !crate::liveorder::note_restart(nzb.id, ad.article_ptr) {
+                    continue;
+                }
+                // Finished meanwhile: nothing to ask again.
+                if ad.status() != crate::queuesubsys_host::AD_RUNNING {
                     continue;
                 }
                 let ran = now.saturating_sub(ad.running_since_ms().unwrap_or(now));

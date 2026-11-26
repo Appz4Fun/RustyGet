@@ -1315,7 +1315,10 @@ pub(crate) fn header_source(volume: &Path) -> PathBuf {
     if volume.is_file() {
         return volume.to_path_buf();
     }
-    crate::livewrite::head_path(volume).unwrap_or_else(|| volume.to_path_buf())
+    // (renamed to its final name meanwhile: the volume itself)
+    crate::livewrite::head_path(volume)
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| volume.to_path_buf())
 }
 
 /// The headers of members that start in `volume` (not continuations), in order, for the

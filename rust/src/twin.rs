@@ -945,6 +945,57 @@ pub fn live_alt(kind: Vec<u8>, live_param: &[u8], primary_id: i32) -> (Vec<u8>, 
     }
 }
 
+/// The live evidence of a copy as [`live_alt`] may use it: none once the fleet intake found
+/// another video in it (`DupeVideo=different`, a re-check after the live match), which no
+/// earlier match outweighs.
+pub fn live_evidence<'a>(live_param: &'a [u8], video_param: &[u8]) -> &'a [u8] {
+    if crate::cstr::until_nul(video_param).trim_ascii() == crate::dupesearch_coord::VIDEO_DIFFERENT {
+        &[]
+    } else {
+        live_param
+    }
+}
+
+/// Clears, on every download in the queue and in history, the live evidence that names download
+/// `nzb_id` ([`LIVE_VIDEO_PARAM`] `same:<nzb_id>`): its files changed (a pack merge or split),
+/// so a match made on its earlier files proves nothing now. The caller holds the queue lock;
+/// TwinCheck relabels those copies by their par2 lists on its next round. Returns whether
+/// anything was cleared.
+pub(crate) fn clear_live_evidence_naming(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    dq_ptr: usize,
+    nzb_id: i32,
+) -> bool {
+    let evidence = live_video_value(nzb_id);
+    let names = |ptr: NzbRef| {
+        host.nzb_get_param(ptr, LIVE_VIDEO_PARAM)
+            .is_some_and(|v| crate::cstr::until_nul(&v).trim_ascii() == evidence.as_slice())
+    };
+    let mut cleared = false;
+    for idx in 0..host.queue_len(dq_ptr) {
+        let ptr = host.queue_at(dq_ptr, idx);
+        if ptr.is_some() && names(ptr) {
+            host.nzb_set_param(ptr, LIVE_VIDEO_PARAM, None);
+            host.nzb_set_int(ptr, crate::queuesubsys_host::NZB_INT_CHANGED, 1);
+            cleared = true;
+        }
+    }
+    let mut in_history = false;
+    for idx in 0..host.history_len(dq_ptr) {
+        let h = host.history_at(dq_ptr, idx);
+        if h.kind == crate::queuesubsys_host::HK_NZB && h.nzb().is_some() && names(h.nzb()) {
+            host.nzb_set_param(h.nzb(), LIVE_VIDEO_PARAM, None);
+            host.nzb_set_int(h.nzb(), crate::queuesubsys_host::NZB_INT_CHANGED, 1);
+            cleared = true;
+            in_history = true;
+        }
+    }
+    if in_history {
+        host.dq_history_changed(dq_ptr);
+    }
+    cleared
+}
+
 /// The log line for a copy a live borrow proved an alt ([`live_alt`]).
 pub fn format_live_alt_message(nzb_name: &[u8], primary_name: &[u8]) -> Vec<u8> {
     let mut out = nzb_name.to_vec();
@@ -1295,6 +1346,7 @@ struct TwinQueueItem {
     inner_param: Vec<u8>,
     inner_key_param: Vec<u8>,
     live_param: Vec<u8>,
+    video_param: Vec<u8>,
 }
 
 #[cfg(unix)]
@@ -1363,6 +1415,9 @@ fn run_service_work_locked(
             .nzb_get_param(nzb_ptr, crate::twinfields::INNER_KEY_PARAM)
             .unwrap_or_default();
         let live_param = qh.nzb_get_param(nzb_ptr, LIVE_VIDEO_PARAM).unwrap_or_default();
+        let video_param = qh
+            .nzb_get_param(nzb_ptr, crate::dupesearch_coord::VIDEO_PARAM)
+            .unwrap_or_default();
         let item = TwinQueueItem {
             nzb_ptr,
             id,
@@ -1386,6 +1441,7 @@ fn run_service_work_locked(
             inner_param,
             inner_key_param,
             live_param,
+            video_param,
         };
         keys.entry(key).or_default().push(item);
     };
@@ -1542,7 +1598,7 @@ fn run_service_work_locked(
             } else {
                 live_alt(
                     resolved_kind,
-                    &item.live_param,
+                    live_evidence(&item.live_param, &item.video_param),
                     primary_usize.map_or(0, |pi| items[pi].id),
                 )
             };
@@ -2367,6 +2423,15 @@ mod tests {
         let ev = live_video_value(1873);
         assert_eq!(ev, b"same:1873");
         assert_eq!(live_alt(b"container".to_vec(), &ev, 1873), (b"alt".to_vec(), true));
+        // a later intake re-check that found another video outweighs the earlier live match
+        assert_eq!(live_evidence(&ev, b"different"), b"");
+        assert_eq!(live_evidence(&ev, b"different\0"), b"");
+        assert_eq!(live_evidence(&ev, b"same"), ev.as_slice());
+        assert_eq!(live_evidence(&ev, b""), ev.as_slice());
+        assert_eq!(
+            live_alt(b"container".to_vec(), live_evidence(&ev, b"different"), 1873),
+            (b"container".to_vec(), false)
+        );
         // no kind yet: nothing showed another container (it may be a twin whose sample is pending)
         assert_eq!(live_alt(Vec::new(), &ev, 1873), (Vec::new(), false));
         // stored values may carry the host's NUL

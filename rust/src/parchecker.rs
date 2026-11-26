@@ -2064,6 +2064,10 @@ pub(crate) fn streaming_session_articles_written(
     if entry.session.is_cancelled() || items.is_empty() {
         return 0;
     }
+    if let Some(queue_id) = identity.0 {
+        let offsets: Vec<u64> = items.iter().map(|&(offset, _)| offset).collect();
+        presession_drop(nzb_id, queue_id, &offsets);
+    }
     let Ok(id) = live_source_id(&entry, identity.0, identity.1, identity.2) else {
         return 0;
     };
@@ -2118,6 +2122,12 @@ pub(crate) fn presession_keep(nzb_id: i32, file_id: i32, items: &[(u64, &[u8])])
     let mut added = 0u64;
     for &(offset, bytes) in items {
         let size = bytes.len() as u64;
+        // A copy of an earlier write of this article is stale now: never hand it over.
+        let stale = kept
+            .jobs
+            .get_mut(&nzb_id)
+            .and_then(|job| job.articles.remove(&(file_id, offset)));
+        kept.bytes -= stale.map_or(0, |b| b.len() as u64);
         if size == 0 || kept.bytes.saturating_add(size) > PRESESSION_LIMIT {
             continue;
         }
@@ -2125,12 +2135,30 @@ pub(crate) fn presession_keep(nzb_id: i32, file_id: i32, items: &[(u64, &[u8])])
             since: now,
             articles: HashMap::new(),
         });
-        let old = job.articles.insert((file_id, offset), bytes.to_vec());
-        let old = old.map_or(0, |b| b.len() as u64);
-        kept.bytes = kept.bytes - old + size;
+        job.articles.insert((file_id, offset), bytes.to_vec());
+        kept.bytes += size;
         added += size;
     }
+    kept.jobs.retain(|_, job| !job.articles.is_empty());
     added
+}
+
+/// Drops kept copies of articles of queue file `file_id` written again at `offsets` (the
+/// later write is what is on disk now).
+pub(crate) fn presession_drop(nzb_id: i32, file_id: i32, offsets: &[u64]) {
+    let mut kept = PRESESSION.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(job) = kept.jobs.get_mut(&nzb_id) else {
+        return;
+    };
+    let freed: u64 = offsets
+        .iter()
+        .filter_map(|offset| job.articles.remove(&(file_id, *offset)))
+        .map(|b| b.len() as u64)
+        .sum();
+    if job.articles.is_empty() {
+        kept.jobs.remove(&nzb_id);
+    }
+    kept.bytes -= freed;
 }
 
 /// The kept bytes of the article of queue file `file_id` at `offset` of `size` bytes.

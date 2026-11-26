@@ -2102,12 +2102,16 @@ impl RsArticleWriter {
                 Err(_) => crate::parchecker::streaming_session_recovery_void(nzb_id, file_id),
             }
         }
-        if let Some((nzb_id, file_id, bytes)) =
-            presession_tee.filter(|_| !has_cached && !skip_disk_write)
-        {
-            // Written whole: kept for the session's capture or the volume's tee.
+        if !has_cached && !skip_disk_write {
             if let Ok(offset) = u64::try_from(self.article_offset) {
-                crate::parchecker::presession_keep(nzb_id, file_id, &[(offset, &bytes)]);
+                match presession_tee {
+                    // Written whole: kept for the session's capture or the volume's tee.
+                    Some((nzb_id, file_id, bytes)) => {
+                        crate::parchecker::presession_keep(nzb_id, file_id, &[(offset, &bytes)]);
+                    }
+                    // Written again without a copy kept: an older kept copy is stale.
+                    None => crate::parchecker::presession_drop(nzb.id, fsnap.id, &[offset]),
+                }
             }
         }
         if let Some(tee) = live_tee.filter(|_| !has_cached && !skip_disk_write) {

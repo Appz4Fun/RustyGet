@@ -2083,6 +2083,16 @@ fn live_bytes_written_before_the_session_are_kept_for_it() {
     entry.release_recovery_tee(tee);
     drop(entry);
     streaming_session_forget(id);
+    // An article written again replaces its kept copy, also when the new one is not kept
+    // (no room): a stale copy is never handed over.
+    presession_keep(id, 7, &[(0, &[1u8; 10][..])]);
+    presession_keep(id, 7, &[(0, &[2u8; 10][..])]);
+    assert_eq!(presession_take(id, 7, 0, 10), Some(vec![2u8; 10]));
+    presession_keep(id, 7, &[(0, &[1u8; 10][..])]);
+    let huge = vec![0u8; PRESESSION_LIMIT as usize + 1];
+    presession_keep(id, 7, &[(0, &huge[..])]);
+    assert_eq!(presession_take(id, 7, 0, 10), None);
+    assert_eq!(presession_bytes_for_test(id), 0);
     // A job whose session never starts: forgetting it drops what was kept.
     presession_keep(id, 1, &[(0, &[1u8; 10][..])]);
     presession_forget(id);

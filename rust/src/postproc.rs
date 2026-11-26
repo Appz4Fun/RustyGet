@@ -5265,11 +5265,14 @@ impl NzbgetRsDirectUnpack {
             nzb_id: self.nzb_id,
             expected_volumes: local.expected_volumes,
         });
-        // The download takes the set's volumes in extraction order.
-        crate::liveorder::set_order(
-            self.nzb_id,
-            &rar_volume_names(archive_name, local.expected_volumes),
-        );
+        // The download takes the set's volumes in extraction order (as registered from the
+        // set's names already, when it was).
+        if crate::liveorder::ranks(self.nzb_id).is_none() {
+            crate::liveorder::set_order(
+                self.nzb_id,
+                &rar_volume_names(archive_name, local.expected_volumes),
+            );
+        }
         let reads = crate::livewrite::read_counts();
         let res = crate::unpack::extract_archive_with_feed(
             crate::fsops::path(&full_archive_path),

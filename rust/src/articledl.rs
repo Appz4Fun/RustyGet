@@ -3124,6 +3124,9 @@ pub struct NzbgetRsArticleDownloader {
     /// When the current request started (`liveorder::now_ms`, 0: none yet): a request far
     /// slower than the others is asked again for a live extraction (see `liveorder`).
     running_since_ms: std::sync::atomic::AtomicU64,
+    /// The current request's body is read: it is decoded and written from here on, and must
+    /// not be restarted (see `body_read`).
+    body_read: AtomicBool,
     conn_state: Mutex<(usize, Vec<u8>)>,
     worker: Mutex<DlWorker>,
 }
@@ -3152,6 +3155,7 @@ impl NzbgetRsArticleDownloader {
             status: AtomicI32::new(AD_UNDEFINED),
             last_update_time: AtomicI64::new(now_sec()),
             running_since_ms: std::sync::atomic::AtomicU64::new(0),
+            body_read: AtomicBool::new(false),
             conn_state: Mutex::new((initial_conn, Vec::new())),
             worker: Mutex::new(DlWorker {
                 decoder: Decoder::new(
@@ -3192,6 +3196,16 @@ impl NzbgetRsArticleDownloader {
     /// When the request running now started (`liveorder::now_ms`); `None` before the first.
     pub(crate) fn running_since_ms(&self) -> Option<u64> {
         Some(self.running_since_ms.load(Ordering::SeqCst)).filter(|&ms| ms > 0)
+    }
+
+    /// Whether the current request's body has been read in full. A restart for a live
+    /// extraction (`queuecoord::restart_live_stragglers`) skips such a download: it is being
+    /// decoded and written, and stopping it now would fetch a committed article again. The
+    /// reader sets this before it looks at `stopped`, the restart reads it before it stops the
+    /// download (both SeqCst): either the restart sees it, or the reader sees the stop and
+    /// commits nothing.
+    pub(crate) fn body_read(&self) -> bool {
+        self.body_read.load(Ordering::SeqCst)
     }
 
     /// The text this download logs itself under (`nzb/file [part/count]`).
@@ -3354,6 +3368,7 @@ impl NzbgetRsArticleDownloader {
             self.last_update_time.store(now_sec(), Ordering::SeqCst);
         }
         if st == AD_RUNNING && touch_now {
+            self.body_read.store(false, Ordering::SeqCst);
             self.running_since_ms
                 .store(crate::liveorder::now_ms().max(1), Ordering::SeqCst);
         }
@@ -3849,6 +3864,7 @@ impl NzbgetRsArticleDownloader {
             }
         }
 
+        self.body_read.store(true, Ordering::SeqCst);
         if host.is_stopped() {
             status = AD_FAILED;
         }

@@ -143,7 +143,8 @@ fn cached_live_order<'c>(
                 let lowest = (0..host.nzb_file_len(nzb_ptr))
                     .filter_map(|j| {
                         let f = host.file_snap(host.nzb_file_at(nzb_ptr, j));
-                        (!f.deleted).then(|| ranks.of(&f.filename)).flatten()
+                        // (a paused volume waits: the window goes on past it)
+                        (!f.deleted && !f.paused).then(|| ranks.of(&f.filename)).flatten()
                     })
                     .min();
                 LiveOrder { ranks, lowest }
@@ -3263,13 +3264,17 @@ impl NzbgetRsQueueCoordinator {
                 if seen.contains(&nzb.id) {
                     continue;
                 }
-                seen.push(nzb.id);
                 if nzb.direct_unpack_status != DirectUnpackStatus::None
                     || crate::liveorder::ranks(nzb.id).is_some()
-                    || !live_extraction_allowed(host, nzb_ptr, &nzb)
                 {
+                    seen.push(nzb.id);
                     continue;
                 }
+                // (looked at again while it may not be extracted live: that can change)
+                if !live_extraction_allowed(host, nzb_ptr, &nzb) {
+                    continue;
+                }
+                seen.push(nzb.id);
                 if let Some(order) = live_set_order(host, nzb_ptr, None) {
                     crate::liveorder::set_order(nzb.id, &order);
                 }
@@ -3331,8 +3336,9 @@ impl NzbgetRsQueueCoordinator {
                 if !crate::liveorder::note_restart(nzb.id, ad.article_ptr) {
                     continue;
                 }
-                // Finished meanwhile: nothing to ask again.
-                if ad.status() != crate::queuesubsys_host::AD_RUNNING {
+                // Finished meanwhile, or its body is read and being written: nothing to ask
+                // again (the stop would turn a committed article into a retry).
+                if ad.status() != crate::queuesubsys_host::AD_RUNNING || ad.body_read() {
                     continue;
                 }
                 let ran = now.saturating_sub(ad.running_since_ms().unwrap_or(now));

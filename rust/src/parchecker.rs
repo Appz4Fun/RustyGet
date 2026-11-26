@@ -1342,9 +1342,11 @@ impl ActiveStreamingSession {
     }
 
     /// Grow the syndrome slots so every damaged block can take a recovery
-    /// block, paid from free ParBuffer: each slot costs two slices (its
-    /// syndrome and its reconstructed output). The memory goes back to the
-    /// pool when the session ends.
+    /// block, paid from free ParBuffer: each slot costs one slice (its
+    /// syndrome). par-rs writes rebuilt slices to their targets and refolds
+    /// them from there one at a time; that one read-back slice is covered by
+    /// the session's initial reservation. The memory goes back to the pool
+    /// when the session ends.
     fn grow_for_damage(&self) {
         let status = self.session.status();
         let coming: u64 = self
@@ -1374,7 +1376,7 @@ impl ActiveStreamingSession {
         if self.session.is_cancelled() || want <= self.session.max_syndrome_slots() {
             return;
         }
-        let unit = self.session.slice_size().saturating_mul(2);
+        let unit = self.session.slice_size();
         let mut lease = self.budget.lock().unwrap_or_else(|e| e.into_inner());
         let cap = self.session.max_syndrome_slots();
         if want <= cap {
@@ -6198,11 +6200,11 @@ mod tests {
                 .unwrap();
         }
         // Three damaged blocks: the cap grew to one slot per block that can
-        // come, two slices each.
+        // come, one slice each.
         assert_eq!(entry.session.status().damaged, 3);
         let grown = 3.min(recovery_blocks as usize);
         assert_eq!(entry.session.max_syndrome_slots(), grown);
-        assert_eq!(reserved(&entry), start_bytes + (grown as u64 - 1) * 2 * 4096);
+        assert_eq!(reserved(&entry), start_bytes + (grown as u64 - 1) * 4096);
         for (idx, (vname, bytes)) in built.volumes.iter().enumerate() {
             let path = dir.join(vname);
             std::fs::write(&path, bytes).unwrap();
@@ -6220,7 +6222,7 @@ mod tests {
         }
         assert_eq!(
             reserved(&entry),
-            start_bytes + (final_cap as u64 - 1) * 2 * 4096
+            start_bytes + (final_cap as u64 - 1) * 4096
         );
         if recovery_blocks < 3 {
             assert_eq!(entry.session.status().ready_recovery, recovery_blocks as usize);

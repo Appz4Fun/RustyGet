@@ -174,6 +174,18 @@ struct ActiveStreamingSession {
     /// most recovery a damaged block can still get, so growth never charges
     /// ParBuffer for slots no block could fill.
     queued_blocks: Mutex<HashMap<u64, u64>>,
+    /// Queued recovery volumes that fill none of the slots planned up front
+    /// ([`beyond_plan_volumes`]): fetching one adds slots after slices verified, and those
+    /// are back-filled from disk. See [`ActiveStreamingSession::release_held_volumes`].
+    beyond_plan: HashSet<u64>,
+    /// The paused ones among them (queue id, blocks), kept out of the volume selector's
+    /// reach (registered as not paused) and out of `queued_blocks` while the planned
+    /// volumes may still cover the damage.
+    held_volumes: Mutex<HashMap<u64, i32>>,
+    /// When the selector last started to fall short of recovery blocks with volumes held.
+    shortfall_since: Mutex<Option<std::time::Instant>>,
+    /// The held volumes were given back; none is held any more.
+    held_released: AtomicBool,
     /// Slot cap last written to the log, so growth is not logged per block.
     logged_slots: AtomicUsize,
     file_lengths: HashMap<FileId, u64>,
@@ -396,7 +408,7 @@ fn build_streaming_session(
     budget: SessionBudgetLease,
     writers: Arc<WriteCoordinator>,
 ) -> Result<Arc<ActiveStreamingSession>, RepairError> {
-    build_streaming_session_with(set, base_dir, options, budget, writers, None)
+    build_streaming_session_with(set, base_dir, options, budget, writers, None, HashSet::new())
 }
 
 /// What the queue knows when live PAR starts, to size the recovery slots up front
@@ -551,6 +563,29 @@ pub(crate) fn extend_plan_with_queued_volumes(
     plan.exponents = exponents;
 }
 
+/// The paused queue volumes whose recovery blocks fill none of the planned slots (every
+/// exponent of theirs is neither planned nor loaded). They are fetched only when the planned
+/// volumes fall short for a while, or when the download has ended short
+/// ([`ActiveStreamingSession::release_held_volumes`]): the volume selector takes the smallest
+/// volume that covers the shortfall at once, and that may be one past the plan although the
+/// planned volumes left cover it too. A volume of unknown size (`count` 0) is never held.
+pub(crate) fn beyond_plan_volumes(
+    hint: &LivePlanHint,
+    planned: &[u32],
+    loaded: &HashSet<u32>,
+) -> HashSet<u64> {
+    let planned: HashSet<u32> = planned.iter().copied().collect();
+    hint.volumes
+        .iter()
+        .filter(|v| v.paused && v.count > 0)
+        .filter(|v| {
+            !(v.first_exponent..v.first_exponent.saturating_add(v.count))
+                .any(|e| planned.contains(&e) && !loaded.contains(&e))
+        })
+        .map(|v| v.id)
+        .collect()
+}
+
 /// Creates the engine sized by a recovery plan (`StreamingParSession::with_recovery_plan`):
 /// syndrome slots for the loaded and planned exponents, no more, and the lease shrunk to
 /// match; `grow_for_damage` adds slots when damage outgrows the plan.
@@ -598,6 +633,7 @@ fn build_planned_streaming_session(
         budget,
         writers,
         Some((&plan, syndrome_ram)),
+        beyond_plan_volumes(hint, &plan.exponents, &loaded),
     )
 }
 
@@ -608,6 +644,7 @@ fn build_streaming_session_with(
     budget: SessionBudgetLease,
     writers: Arc<WriteCoordinator>,
     plan: Option<(&par_rs::recovery_plan::RecoveryArticlePlan, u64)>,
+    beyond_plan: HashSet<u64>,
 ) -> Result<Arc<ActiveStreamingSession>, RepairError> {
     let main = set.main.as_ref().ok_or(RepairError::NoMainPacket)?;
     let mut lengths = HashMap::new();
@@ -674,6 +711,10 @@ fn build_streaming_session_with(
         backfill_running: AtomicBool::new(false),
         backfill_retry_at: Mutex::new(None),
         queued_blocks: Mutex::new(HashMap::new()),
+        beyond_plan,
+        held_volumes: Mutex::new(HashMap::new()),
+        shortfall_since: Mutex::new(None),
+        held_released: AtomicBool::new(false),
         logged_slots: AtomicUsize::new(0),
         file_lengths: lengths,
         target_names,
@@ -1254,6 +1295,7 @@ impl ActiveStreamingSession {
     fn backfill_due(&self) -> bool {
         self.session.needs_backfill()
             && !self.backfill_running.load(Ordering::Acquire)
+            && !self.nothing_to_repair()
             && self
                 .backfill_retry_at
                 .lock()
@@ -1430,6 +1472,132 @@ impl ActiveStreamingSession {
                 mb(self.lent_memory.load(Ordering::Relaxed)),
             )
         })
+    }
+
+    /// The download has ended for the set and nothing waits to change the damage count: every
+    /// slice arrived or failed, no fold is queued, no article waits for its turn, and no staged
+    /// slice waits for a retry after a flush (par-rs counts a RAM-only slice damaged while the
+    /// bytes it reads from its file are not final yet, and retries it once they are).
+    fn download_settled(&self, status: &LiveStatus) -> bool {
+        status.unarrived + status.partially_arrived == 0
+            && status.pending_folds == 0
+            && !self.staged_due.load(Ordering::Acquire)
+            && self
+                .articles
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .pending
+                .is_empty()
+    }
+
+    /// Nothing is left to repair: the download has ended, no slice is damaged and no repaired
+    /// target diverged. A back-fill then fills slots no repair will use.
+    fn nothing_to_repair(&self) -> bool {
+        let status = self.session.status();
+        status.damaged == 0
+            && status.unarrived + status.partially_arrived == 0
+            && status.early_cutover_possible
+    }
+
+    /// Registers a queued recovery volume with the selector. A paused one past the plan
+    /// ([`beyond_plan_volumes`]) is held: the selector sees it as not paused (so never picks
+    /// it) and its blocks do not count as coming, so neither a fetch nor slot growth follows
+    /// from damage the planned volumes still cover.
+    fn register_volume(&self, volume_id: u64, blocks: i32, paused: bool) {
+        let mut held = self.held_volumes.lock().unwrap_or_else(|e| e.into_inner());
+        if paused
+            && !self.held_released.load(Ordering::Acquire)
+            && self.beyond_plan.contains(&volume_id)
+        {
+            held.insert(volume_id, blocks);
+            self.session.register_queued_volume(QueuedVolume {
+                id: volume_id,
+                blocks,
+                paused: false,
+            });
+            return;
+        }
+        held.remove(&volume_id);
+        drop(held);
+        self.session.register_queued_volume(QueuedVolume {
+            id: volume_id,
+            blocks,
+            paused,
+        });
+        self.queued_blocks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(volume_id, u64::try_from(blocks).unwrap_or(0));
+    }
+
+    /// The volume selector falls short (`status.needed_recovery_blocks > 0`). Held volumes
+    /// ([`Self::register_volume`]) are given back to it once the shortfall has lasted
+    /// [`HELD_VOLUME_GRACE`] or the download has settled short ([`Self::download_settled`]):
+    /// damage that passes within the grace (a slice counted damaged while its file bytes were
+    /// not final) fetches nothing past the plan, and so adds no slot that a back-fill would
+    /// fill by reading every verified slice again. Returns whether volumes were given back.
+    fn release_held_volumes(&self, status: &LiveStatus) -> bool {
+        if self
+            .held_volumes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
+        {
+            return false;
+        }
+        let settled = self.download_settled(status);
+        let now = std::time::Instant::now();
+        {
+            let mut since = self.shortfall_since.lock().unwrap_or_else(|e| e.into_inner());
+            let first = *since.get_or_insert(now);
+            if !settled && now.duration_since(first) < HELD_VOLUME_GRACE {
+                return false;
+            }
+        }
+        let released: Vec<(u64, i32)> = {
+            let mut held = self.held_volumes.lock().unwrap_or_else(|e| e.into_inner());
+            self.held_released.store(true, Ordering::Release);
+            held.drain().collect()
+        };
+        if released.is_empty() {
+            return false;
+        }
+        let blocks: i64 = released.iter().map(|(_, b)| i64::from(*b)).sum();
+        for (id, b) in released.iter().copied() {
+            self.session.register_queued_volume(QueuedVolume {
+                id,
+                blocks: b,
+                paused: true,
+            });
+            self.queued_blocks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(id, u64::try_from(b).unwrap_or(0));
+        }
+        let name = self
+            .par_name
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let msg = format!(
+            "Live PAR for {}: {} damaged blocks outgrew the {} recovery blocks of the planned volumes ({}); {} more in {} volume(s) past the plan may be fetched",
+            String::from_utf8_lossy(&name),
+            status.damaged,
+            status.ready_recovery as i64 + status.unpaused_in_flight,
+            if settled { "download ended" } else { "for a while" },
+            blocks,
+            released.len(),
+        );
+        crate::log::log_active_bytes(crate::queuesubsys_host::MK_DETAIL, msg.as_bytes());
+        true
+    }
+
+    /// A held volume arrived or was lost anyway (fetched by the batch path or by hand).
+    fn forget_held_volume(&self, volume_id: u64) {
+        self.held_volumes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&volume_id);
     }
 
     /// Grow the syndrome slots so every damaged block can take a recovery
@@ -3828,16 +3996,7 @@ pub fn streaming_session_register_queued_volume(
     let Some(entry) = active_streaming_session(nzb_id) else {
         return false;
     };
-    entry.session.register_queued_volume(QueuedVolume {
-        id: volume_id,
-        blocks,
-        paused,
-    });
-    entry
-        .queued_blocks
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(volume_id, u64::try_from(blocks).unwrap_or(0));
+    entry.register_volume(volume_id, blocks, paused);
     true
 }
 
@@ -3888,6 +4047,7 @@ pub(crate) fn streaming_session_on_recovery_volume_lost(nzb_id: i32, queued_id: 
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&queued_id);
+        entry.forget_held_volume(queued_id);
         entry.unpause(entry.session.on_recovery_volume_lost(queued_id).as_ref());
         Ok(())
     });
@@ -3936,6 +4096,7 @@ pub(crate) fn streaming_session_on_recovery_volume_completed(
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(&id);
+            entry.forget_held_volume(id);
         }
         let count = entry
             .session
@@ -3975,6 +4136,7 @@ pub fn streaming_session_on_recovery_volume_arrived(
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(&id);
+            entry.forget_held_volume(id);
         }
         let count = entry.session.on_recovery_volume_arrived(path, queued_id)?;
         entry.grow_for_damage();
@@ -4069,6 +4231,11 @@ pub(crate) fn streaming_session_kick_backfill(nzb_id: i32) {
     }
 }
 
+/// How long the planned volumes may fall short before held volumes past the plan are given
+/// to the selector ([`ActiveStreamingSession::release_held_volumes`]). On 6790 a slice counted
+/// damaged while its file bytes were not final was verified again within 4-8 s.
+pub(crate) const HELD_VOLUME_GRACE: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// How often each job's live status is polled ([`streaming_session_poll`]).
 pub(crate) const LIVE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
 
@@ -4111,9 +4278,12 @@ pub(crate) fn streaming_session_poll(nzb_id: i32, force: bool) -> Option<LiveSta
     }
     let mut status = entry.session.status();
     if status.needed_recovery_blocks > 0 {
+        entry.release_held_volumes(&status);
         let action = entry.session.request_unpause();
         entry.unpause(action.as_ref());
         status = entry.session.status();
+    } else {
+        *entry.shortfall_since.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
     LIVE_POLLS
         .lock()
@@ -6600,6 +6770,267 @@ mod tests {
         let (backfill, slots) = single_volume_backfill_case(0x6a0f_0041, false);
         assert_eq!(slots, 2);
         assert!(backfill > 0);
+    }
+
+    /// 60 source slices with 25 recovery blocks in five volumes of five (queue ids 10-14):
+    /// the plan takes three whole volumes (15 blocks, ids 10-12) and leaves two past it
+    /// (ids 13, 14). Returns the fixture, the planned entry and the volumes by queue id.
+    #[allow(clippy::type_complexity)]
+    fn five_volume_session(
+        nzb_id: i32,
+    ) -> (
+        PathBuf,
+        Arc<ActiveStreamingSession>,
+        Vec<u8>,
+        HashMap<u64, (String, Vec<u8>)>,
+    ) {
+        use par_rs::create::{build_set, SetOptions, VolumeScheme};
+
+        let dir = std::env::temp_dir().join(format!(
+            "rustyget-parchecker-held-{}-{nzb_id}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f0 = make_deterministic_bytes(60 * 4096, 460);
+        let built = build_set(
+            "held",
+            &[("part01.rar", &f0)],
+            &SetOptions {
+                slice_size: 4096,
+                recovery_blocks: 25,
+                first_exponent: 0,
+                volumes: VolumeScheme::Uniform(5),
+                creator: "rustyget-test".to_string(),
+                unicode_names: false,
+                kernel: Kernel::detect(),
+            },
+        )
+        .unwrap();
+        let index_path = dir.join("held.par2");
+        std::fs::write(&index_path, &built.index).unwrap();
+        let mut volumes = HashMap::new();
+        let mut hint = LivePlanHint::default();
+        for (i, (name, bytes)) in built.volumes.iter().enumerate() {
+            let (first_exponent, count) = volume_range(name.as_bytes()).unwrap();
+            assert_eq!((first_exponent, count), (5 * i as u32, 5));
+            let id = 10 + i as u64;
+            hint.volumes.push(LiveQueuedVolume {
+                id,
+                first_exponent,
+                count,
+                size: bytes.len() as u64,
+                articles: 2,
+                paused: true,
+            });
+            volumes.insert(id, (name.clone(), bytes.clone()));
+        }
+        std::fs::write(dir.join("part01.rar"), &f0).unwrap();
+        let pool = Arc::new(crate::parlive::BudgetPool::with_size(500 << 20));
+        let limits = crate::parlive::resources(4096, 500 << 20).unwrap();
+        let budget = pool.acquire(limits.reservation_bytes, 500 << 20).unwrap();
+        let writers = download_writes(nzb_id, &dir).unwrap();
+        let set = load_par2_set(&index_path).unwrap();
+        let entry =
+            build_planned_streaming_session(&set, &dir, limits.options, budget, writers, &hint)
+                .unwrap();
+        install_streaming_session(nzb_id, Arc::clone(&entry)).unwrap();
+        assert_eq!(entry.session.status().syndrome_slots, 15);
+        assert_eq!(entry.beyond_plan, HashSet::from([13, 14]));
+        for id in 10..15u64 {
+            assert!(streaming_session_register_queued_volume(nzb_id, id, 5, true));
+        }
+        let id0 = entry.session.file_id_by_name(b"part01.rar").unwrap();
+        entry.note_written(id0, &dir.join("part01.rar"));
+        entry.apply_target_paths().unwrap();
+        (dir, entry, f0, volumes)
+    }
+
+    fn feed_good_slice(entry: &ActiveStreamingSession, f0: &[u8], s: usize) {
+        let id0 = entry.session.file_id_by_name(b"part01.rar").unwrap();
+        let chunk = &f0[s * 4096..(s + 1) * 4096];
+        let outcome = entry
+            .session
+            .on_article_finished(&id0, (s * 4096) as u64, 4096, par_rs::crc::crc32(chunk), Some(chunk))
+            .unwrap();
+        entry.unpause(outcome.unpause.as_ref());
+    }
+
+    fn fail_slices(nzb_id: i32, entry: &ActiveStreamingSession, first: usize, count: usize) {
+        let id0 = entry.session.file_id_by_name(b"part01.rar").unwrap();
+        let disk_path = entry.base_dir.join("part01.rar");
+        let mut disk = std::fs::read(&disk_path).unwrap();
+        disk[first * 4096..(first + count) * 4096].fill(0);
+        std::fs::write(&disk_path, &disk).unwrap();
+        // One article lost on every server whose bytes span `count` slices: the damage
+        // grows by all of them in one step, as for an article longer than a slice.
+        let _ = streaming_session_on_article_failed_permanently(
+            nzb_id,
+            &id0,
+            (first * 4096) as u64,
+            (count * 4096) as u64,
+        )
+        .unwrap()
+        .unwrap();
+    }
+
+    fn deliver_volume(
+        nzb_id: i32,
+        dir: &Path,
+        volumes: &HashMap<u64, (String, Vec<u8>)>,
+        id: u64,
+    ) {
+        let (name, bytes) = &volumes[&id];
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        streaming_session_on_recovery_volume_arrived(nzb_id, &path, Some(id))
+            .unwrap()
+            .unwrap();
+    }
+
+    /// The 6790 case (PR #729 measurement, job 3082): the planned recovery volumes cover the
+    /// damage, but the volume selector takes the smallest volume that covers the shortfall at
+    /// once, and that was one past the plan. Its blocks needed slots added after nearly every
+    /// slice verified, and the back-fill read the set again (3169.7 MB of 3.3 GB). Held past
+    /// the plan, the selector fetches planned volumes only, and nothing is back-filled. The
+    /// control (every volume visible to the selector, as before) fetches a volume past the
+    /// plan and back-fills from disk.
+    fn held_volume_case(nzb_id: i32, hold: bool) -> (u64, Vec<u64>) {
+        let (dir, entry, f0, volumes) = five_volume_session(nzb_id);
+        if !hold {
+            for id in 10..15u64 {
+                entry.forget_held_volume(id);
+                entry.held_released.store(true, Ordering::Release);
+                entry.register_volume(id, 5, true);
+            }
+        } else {
+            assert_eq!(
+                entry.held_volumes.lock().unwrap().keys().copied().collect::<HashSet<_>>(),
+                HashSet::from([13, 14])
+            );
+        }
+        for s in 0..48usize {
+            feed_good_slice(&entry, &f0, s);
+        }
+        // Nine damaged blocks at once: 15 planned blocks cover them.
+        fail_slices(nzb_id, &entry, 48, 9);
+        let mut fetched = streaming_session_take_unpause_ids(nzb_id);
+        fetched.sort_unstable();
+        for &id in &fetched {
+            deliver_volume(nzb_id, &dir, &volumes, id);
+        }
+        for s in 57..60usize {
+            feed_good_slice(&entry, &f0, s);
+        }
+        let _ = streaming_session_poll(nzb_id, true);
+        let more = streaming_session_take_unpause_ids(nzb_id);
+        assert!(more.is_empty(), "nothing more fetched: {more:?}");
+        while entry.session.needs_backfill() {
+            entry.session.backfill_pending().unwrap();
+        }
+        let id0 = entry.session.file_id_by_name(b"part01.rar").unwrap();
+        let report = streaming_session_repair_available_targets_now(nzb_id, &[id0])
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.repaired_slices.len(), 9);
+        assert_eq!(std::fs::read(dir.join("part01.rar")).unwrap(), f0);
+        let backfill = entry.session.io_stats().backfill_bytes_read;
+        streaming_session_cancel(nzb_id);
+        drop(entry);
+        crate::parlive::forget_download_writes(nzb_id);
+        let _ = std::fs::remove_dir_all(&dir);
+        (backfill, fetched)
+    }
+
+    #[test]
+    fn live_planned_volumes_cover_the_damage_before_any_volume_past_the_plan() {
+        let (backfill, fetched) = held_volume_case(0x6a0f_0050, true);
+        assert!(
+            fetched.iter().all(|id| (10..13).contains(id)) && !fetched.is_empty(),
+            "planned volumes only: {fetched:?}"
+        );
+        assert_eq!(backfill, 0, "no verified slice is read again");
+        // The control: the selector sees every volume and takes one past the plan.
+        let (backfill, fetched) = held_volume_case(0x6a0f_0051, false);
+        assert!(fetched.iter().any(|id| *id >= 13), "control fetched {fetched:?}");
+        assert!(backfill > 0, "the control back-fills from disk");
+    }
+
+    /// Damage past every planned block: the held volumes stay held while the shortfall is
+    /// younger than the grace and the download runs (a slice counted damaged while its file
+    /// bytes were not final passes within it), then go to the selector once the grace has
+    /// passed. With the download settled short, they go at once.
+    #[test]
+    fn live_held_volumes_are_fetched_after_the_grace_or_when_the_download_settles_short() {
+        for settle in [false, true] {
+            let nzb_id = 0x6a0f_0052 + i32::from(settle);
+            let (dir, entry, f0, volumes) = five_volume_session(nzb_id);
+            for s in 0..40usize {
+                feed_good_slice(&entry, &f0, s);
+            }
+            // 17 damaged blocks: more than the 15 planned.
+            fail_slices(nzb_id, &entry, 40, 17);
+            let mut fetched = streaming_session_take_unpause_ids(nzb_id);
+            fetched.sort_unstable();
+            assert_eq!(fetched, vec![10, 11, 12], "the planned volumes first");
+            for &id in &fetched {
+                deliver_volume(nzb_id, &dir, &volumes, id);
+            }
+            let status = streaming_session_poll(nzb_id, true).unwrap();
+            assert_eq!(status.needed_recovery_blocks, 2);
+            assert_eq!(status.syndrome_slots, 15, "no slot for blocks not coming");
+            assert!(streaming_session_take_unpause_ids(nzb_id).is_empty(), "held in the grace");
+            assert_eq!(entry.held_volumes.lock().unwrap().len(), 2);
+            if settle {
+                for s in 57..60usize {
+                    feed_good_slice(&entry, &f0, s);
+                }
+                // The pool folds in the background: settled once its queue is empty.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while entry.session.status().pending_folds > 0 {
+                    assert!(std::time::Instant::now() < deadline, "folds never drained");
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            } else {
+                *entry.shortfall_since.lock().unwrap() =
+                    Some(std::time::Instant::now() - HELD_VOLUME_GRACE);
+            }
+            let _ = streaming_session_poll(nzb_id, true);
+            let more = streaming_session_take_unpause_ids(nzb_id);
+            assert_eq!(
+                more.len(),
+                1,
+                "one volume past the plan covers 2 blocks (settle {settle}): {more:?} {:?}",
+                entry.session.status()
+            );
+            assert!(more[0] >= 13);
+            assert!(entry.held_volumes.lock().unwrap().is_empty());
+            streaming_session_cancel(nzb_id);
+            drop(entry);
+            crate::parlive::forget_download_writes(nzb_id);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// A recovery volume that arrives after the repair finished (no damage left, the
+    /// download over) waits for no back-fill: the slots it would fill serve no repair.
+    #[test]
+    fn live_no_backfill_once_nothing_is_left_to_repair() {
+        let nzb_id = 0x6a0f_0054;
+        let (dir, entry, f0, volumes) = five_volume_session(nzb_id);
+        for s in 0..60usize {
+            feed_good_slice(&entry, &f0, s);
+        }
+        entry.session.set_max_syndrome_slots(20).unwrap();
+        entry.forget_held_volume(13);
+        deliver_volume(nzb_id, &dir, &volumes, 13);
+        assert!(entry.session.needs_backfill(), "the new slots wait for a back-fill");
+        assert!(entry.nothing_to_repair());
+        assert!(!entry.backfill_due(), "no back-fill once nothing is left to repair");
+        streaming_session_cancel(nzb_id);
+        drop(entry);
+        crate::parlive::forget_download_writes(nzb_id);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A hostile par2 index: one forged FileDesc claims a file of 4 TiB in 4-byte slices

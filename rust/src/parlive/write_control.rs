@@ -62,6 +62,31 @@ impl FileStamp {
         None
     }
 }
+/// Whether `left` and `right` are the same file now (device and inode, not following a final
+/// symlink). A path that does not exist is no file; one that cannot be checked otherwise
+/// counts as the same (conservative).
+fn same_file(left: &std::path::Path, right: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let id = |path: &std::path::Path| match std::fs::symlink_metadata(path) {
+            Ok(meta) => Some(Some((meta.dev(), meta.ino()))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(None),
+            Err(_) => None,
+        };
+        match (id(left), id(right)) {
+            (Some(Some(a)), Some(Some(b))) => a == b,
+            (Some(None), _) | (_, Some(None)) => false,
+            _ => true,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (left, right);
+        true
+    }
+}
+
 struct WriteState {
     physical_root: Option<Arc<super::source_identity::SourceRoot>>,
     generation: SessionGeneration,
@@ -510,9 +535,21 @@ impl WriteCoordinator {
                 })
         };
         match (left.file_name(), right.file_name()) {
-            (Some(left), Some(right)) if flat_ascii(left) && flat_ascii(right) => left
-                .as_encoded_bytes()
-                .eq_ignore_ascii_case(right.as_encoded_bytes()),
+            (Some(l), Some(r)) if flat_ascii(l) && flat_ascii(r) => {
+                l.as_encoded_bytes().eq_ignore_ascii_case(r.as_encoded_bytes())
+            }
+            // Other names (non-ASCII, unusual characters) may still name one file through
+            // case folding or Unicode normalization: the file system decides. They alias
+            // only when both resolve to the same file (device and inode); a name that does
+            // not exist yet is not the certified file. Treating every such pair as one file
+            // made a cache flush drop the articles of an uncertified file whose name differs
+            // from a certified one only in non-ASCII characters (they were counted, never
+            // written).
+            // Bare leaves (cross-job writer names, no folder to resolve them in) stay
+            // conservative.
+            (Some(_), Some(_)) if left.is_absolute() && right.is_absolute() => {
+                same_file(left, right)
+            }
             _ => true,
         }
     }

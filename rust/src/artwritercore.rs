@@ -2190,6 +2190,77 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// Two files whose names differ only in non-ASCII characters, in one folder: live PAR has
+    /// certified one. The other's cached articles must be written, not dropped as "already
+    /// certified" (they were counted and discarded, so their bytes were lost). A name that
+    /// really is the certified file (a hard link here, as case folding or normalization would
+    /// give) is still protected.
+    #[test]
+    fn live_cache_flush_writes_an_uncertified_file_with_a_similar_non_ascii_name() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = std::env::temp_dir().join(format!("rustyget-cache-nonascii-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let certified = dir.join("Ärger.part40.rar");
+        let other = dir.join("Örger.part41.rar");
+        std::fs::write(&certified, b"original").unwrap();
+        std::fs::write(&other, vec![0u8; 8]).unwrap();
+        let gate = crate::parlive::download_writes(-1900233, &dir).unwrap();
+        let generation = crate::parlive::SessionGeneration(1);
+        gate.advance_generation(generation).unwrap();
+        let lease = gate
+            .begin_repair(
+                generation,
+                vec![crate::parlive::WriterTarget {
+                    file_id: 40,
+                    path: certified.clone(),
+                }],
+                crate::parlive::reserve_control(-1900233, 4096, 500 << 20).unwrap(),
+            )
+            .unwrap();
+        std::fs::write(&certified, b"repaired").unwrap();
+        lease.publish(&[(40, 0)], || ()).unwrap();
+        let flush = |path: &std::path::Path, file_id: i32, content: &'static [u8]| {
+            let name = path.file_name().unwrap().as_bytes().to_vec();
+            let context =
+                crate::parlive::source_write_context(-1900233, file_id, &dir, &name).unwrap();
+            let items = [ArticleWriterFlushItem {
+                segment_offset: 0,
+                segment_size: content.len() as i32,
+                segment_content: content,
+                result_filename: None,
+            }];
+            let mut skipped = Vec::new();
+            let mut errors = Vec::new();
+            let result = article_writer_flush_cache_guarded(
+                &items,
+                true,
+                false,
+                path.as_os_str().as_bytes(),
+                &context,
+                || false,
+                |_| {},
+                |idx| skipped.push(idx),
+                |msg| errors.push(msg.to_vec()),
+            );
+            (result, skipped, errors)
+        };
+        let (result, skipped, errors) = flush(&other, 41, b"new-data");
+        assert_eq!(result, (1, 8));
+        assert!(skipped.is_empty(), "the uncertified file's article is not dropped");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(std::fs::read(&other).unwrap(), b"new-data", "and it is written");
+        assert_eq!(std::fs::read(&certified).unwrap(), b"repaired");
+        // The certified file under another non-ASCII name stays sealed.
+        let alias = dir.join("Ärger-link.part40.rar");
+        std::fs::hard_link(&certified, &alias).unwrap();
+        let (_, skipped, _) = flush(&alias, 42, b"late-old");
+        assert_eq!(skipped, [0], "the same file is still protected");
+        assert_eq!(std::fs::read(&certified).unwrap(), b"repaired");
+        crate::parlive::forget_download_writes(-1900233);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn live_cache_flush_failure_cancels_before_callbacks() {
         use std::os::unix::ffi::OsStrExt;

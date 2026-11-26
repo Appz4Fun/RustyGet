@@ -448,14 +448,14 @@ fn certified_target_seal_covers_ascii_case_alias_after_cancellation() {
 }
 
 #[test]
-fn certified_target_seal_refuses_uncertain_namespace() {
+fn certified_target_seal_follows_the_exact_file() {
     let disk = Disk::new("sealed-uncertain-alias");
     let gate = WriteCoordinator::new(SessionGeneration(131));
     // Unsupported live identities keep their ordinary write path before any seal.
     assert!(gate
         .writer(&WriterIdentity::FileAndPath(
             41,
-            disk.0.with_file_name("sourcé.rar")
+            disk.0.with_file_name("sourc\u{e9}.rar")
         ))
         .is_ok());
     let lease = gate
@@ -466,16 +466,25 @@ fn certified_target_seal_refuses_uncertain_namespace() {
         )
         .unwrap();
     lease.publish(&[(40, 0)], || ()).unwrap();
-    for leaf in ["sourcé.rar", "source.rar.", "sub/../source.rar"] {
-        let identity = WriterIdentity::FileAndPath(41, disk.0.parent().unwrap().join(leaf));
-        assert!(
-            matches!(gate.writer(&identity), Err(WriteBlocked::Certified)),
-            "unprovable alias {leaf} must not bypass the existing seal"
-        );
+    // A path through another folder cannot be proven disjoint: refused.
+    let up = WriterIdentity::FileAndPath(41, disk.0.parent().unwrap().join("sub/../source.rar"));
+    assert!(matches!(gate.writer(&up), Err(WriteBlocked::Certified)));
+    // A non-ASCII name that is the certified file (a hard link, as case folding or Unicode
+    // normalization would give) is refused.
+    let link = disk.0.with_file_name("sourc\u{e9}-link.rar");
+    std::fs::hard_link(&disk.0, &link).unwrap();
+    let identity = WriterIdentity::FileAndPath(41, link.clone());
+    assert!(
+        matches!(gate.writer(&identity), Err(WriteBlocked::Certified)),
+        "the certified file under another name must not bypass the seal"
+    );
+    // Names that are other files (or no file yet) keep downloading: refusing them dropped
+    // their cached articles as "already certified".
+    for leaf in ["sourc\u{e9}.rar", "source.rar.", "other.rar"] {
+        let identity = WriterIdentity::FileAndPath(42, disk.0.parent().unwrap().join(leaf));
+        assert!(gate.writer(&identity).is_ok(), "{leaf} is another file");
     }
-    // A distinct eligible source in the same established root keeps downloading.
-    let other = WriterIdentity::FileAndPath(42, disk.0.with_file_name("other.rar"));
-    assert!(gate.writer(&other).is_ok());
+    let _ = std::fs::remove_file(link);
 }
 
 #[test]

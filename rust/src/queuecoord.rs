@@ -1211,7 +1211,9 @@ pub fn should_park_dead_without_backup(
 /// damage is known (before, they wait for par-check), so a download whose damage turned up
 /// late may never reach the sample, and it would download to its end and fail par-repair
 /// before any failover (functional `pardamageborrow` with 4 connections counted 30 to 35 of
-/// its 48 lost articles).
+/// its 48 lost articles). It then judges on what it counted, but never on fewer than half the
+/// sample: one or two failed borrows (a donor not read yet, say) are no reason to throw away a
+/// download that is nearly done.
 #[allow(clippy::too_many_arguments)]
 #[inline]
 pub fn should_wait_for_borrowing_on_par_damage(
@@ -1229,7 +1231,8 @@ pub fn should_wait_for_borrowing_on_par_damage(
     if fallback_enabled && !raw_article && dupe_mode != DupeMode::Force && has_par2 {
         defer_state == dp_deferred
             || (attempted < failover_sample
-                && attempted.saturating_add(untried.max(0)) >= failover_sample)
+                && (attempted < failover_sample / 2
+                    || attempted.saturating_add(untried.max(0)) >= failover_sample))
             || recovered.saturating_mul(2) >= attempted
     } else {
         false
@@ -1538,17 +1541,17 @@ const BACKUP_CLASSIFY_GRACE_SEC: i64 = 120;
 /// then lets go.
 ///
 /// The grace for an unknown kind is only worth its wait while a backup could keep the
-/// extraction going (`lending_possible`, see [`live_borrowing`]): the kind is read only
-/// by [`alt_covers_lost_articles`], which keeps a download only under live borrowing. Without
-/// it (`RawArticle`, `DupeArticleFallback` below `live`, or no `DirectUnpack`) no kind found
-/// later could save anything, and waiting would only download the dead copy in full (B25,
-/// functional `dupefailoverraw`; B48/B49 `projectedswap`, `projectededge`, `parlesscritical`).
+/// extraction going (`lending_possible`, see [`extraction_fed_by_duplicates`]). Without that
+/// (`RawArticle`, `DupeArticleFallback=no`, or no `DirectUnpack`) no kind found later could
+/// save anything, and waiting would only download the dead copy in full (B25, functional
+/// `dupefailoverraw`; B48/B49 `projectedswap`, `projectededge`, `parlesscritical`).
 ///
 /// Nor is it once TwinCheck labelled the backup (`labelled`: a `DupeKind` of `twin`, `alt`,
 /// `container`, `other`, ...): that label is what [`alt_covers_lost_articles`] reads for a copy
-/// of unknown kind, and only the fleet probes ever set the kind itself, which a backup outside a
-/// fleet never gets: waiting on for it only downloaded a doomed copy further (functional
-/// `pardamageborrow`, labelled `container` within 2 s, then held for its 120 s).
+/// of unknown kind. The kind itself is set as a copy is added (fleet intake, dupe search), so a
+/// plain duplicate never gets one later: waiting on for it only downloaded a doomed copy further
+/// (functional `pardamageborrow`, labelled `container` within 2 s, then held for its 120 s).
+/// The fleet intake still reading a copy's video holds it all the same (`checking`).
 fn backup_still_unclassified(
     kind: crate::donorkind::DonorKind,
     labelled: bool,
@@ -1575,14 +1578,23 @@ fn backup_twincheck_labelled(
         .is_some_and(|k| !k.trim_ascii().is_empty())
 }
 
+/// Whether a duplicate's bytes can feed the extraction while the download runs (the
+/// `lending_possible` argument of [`backup_still_unclassified`]): live borrowing (see
+/// [`live_borrowing`]), or live stream repair (`DupeArticleFallback=stream`) patching what
+/// direct unpack extracted, which keeps a download whose extraction a duplicate already
+/// patched (`dupe_recovered_bytes`, see `check_dupe_failover`). Not with
+/// `DupeArticleFallback=no`, without `DirectUnpack`, or with `RawArticle`.
+#[cfg(unix)]
+fn extraction_fed_by_duplicates(opts: &crate::queuesubsys_host::GlobalOptsSnap) -> bool {
+    opts.dupe_article_fallback >= crate::queuesubsys_host::DAF_STREAM
+        && opts.direct_unpack
+        && !opts.raw_article
+}
+
 /// Whether the live dead-volume borrow can feed a running extraction (the `live_borrowing`
 /// argument of [`alt_covers_lost_articles`]): `DupeArticleFallback=live` with `DirectUnpack`,
 /// and a duplicate can lend at all: not with `RawArticle`, which keeps articles encoded
 /// (article borrowing, stream repair and extraction all skip it).
-///
-/// It is also the `lending_possible` argument of [`backup_still_unclassified`]: a duplicate's
-/// kind is read only by [`alt_covers_lost_articles`], so without live borrowing no kind found
-/// later changes what a failover does.
 #[cfg(unix)]
 fn live_borrowing(opts: &crate::queuesubsys_host::GlobalOptsSnap) -> bool {
     opts.dupe_article_fallback == crate::queuesubsys_host::DAF_LIVE
@@ -5104,7 +5116,7 @@ impl NzbgetRsQueueCoordinator {
                 backup_hi.time,
                 now,
                 crate::dupesearch_coord::intake_pending(backup_nzb.id, &nzb.dupe_key),
-                live_borrowing(opts),
+                extraction_fed_by_duplicates(opts),
             ) && !download_hopeless(nzb.total_articles, nzb.current_success_articles, failed)
             {
                 // Not checked yet: the next round looks again instead of waiting for
@@ -5481,7 +5493,7 @@ impl NzbgetRsQueueCoordinator {
                     backup_hi.time,
                     now,
                     true,
-                    live_borrowing(opts),
+                    extraction_fed_by_duplicates(opts),
                 )
             {
                 return;
@@ -5526,7 +5538,7 @@ impl NzbgetRsQueueCoordinator {
                 backup_hi.time,
                 now,
                 crate::dupesearch_coord::intake_pending(backup_nzb.id, &nzb.dupe_key),
-                live_borrowing(opts),
+                extraction_fed_by_duplicates(opts),
             ) {
                 return;
             }
@@ -5630,6 +5642,13 @@ impl NzbgetRsQueueCoordinator {
         if !certain && !verdict.projected() {
             return false;
         }
+        let attempted = nzb.dupe_attempted_articles + nzb.dupe_unsourced_articles;
+        // (walks the files: only while the sample is not reached)
+        let untried = if (DUPE_FAILOVER_SAMPLE / 2..DUPE_FAILOVER_SAMPLE).contains(&attempted) {
+            Self::untried_articles(host, nzb)
+        } else {
+            0
+        };
         if should_wait_for_borrowing_on_par_damage(
             opts.dupe_article_fallback != crate::queuesubsys_host::DAF_NONE,
             opts.raw_article,
@@ -5637,10 +5656,10 @@ impl NzbgetRsQueueCoordinator {
             crate::dupefallback::has_par2_host(host, nzb),
             nzb.dupe_par_defer_state,
             crate::queuesubsys_host::DP_DEFERRED,
-            nzb.dupe_attempted_articles + nzb.dupe_unsourced_articles,
+            attempted,
             DUPE_FAILOVER_SAMPLE,
             nzb.dupe_recovered_articles,
-            Self::untried_articles(host, nzb),
+            untried,
         ) {
             return false;
         }
@@ -6972,6 +6991,10 @@ mod tests {
         // pardamageborrow: 30 counted, too few articles left to reach 32: fail over now
         assert!(!wait(30, 0, 1));
         assert!(!wait(30, 0, 0));
+        assert!(!wait(16, 0, 0));
+        // but never on fewer than half the sample: one failed borrow near the end waits
+        assert!(wait(1, 0, 0));
+        assert!(wait(15, 7, 3));
         // the sample reached: under half recovered fails over, half or more keeps borrowing
         assert!(!wait(32, 15, 0));
         assert!(wait(32, 16, 0));
@@ -6984,7 +7007,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_grace_waits_only_under_live_borrowing() {
+    fn classify_grace_waits_only_while_duplicates_feed_the_extraction() {
         use crate::queuesubsys_host::{GlobalOptsSnap, DAF_LIVE, DAF_NONE, DAF_STREAM};
         let opts = |daf, direct_unpack, raw_article| GlobalOptsSnap {
             dupe_article_fallback: daf,
@@ -7001,6 +7024,12 @@ mod tests {
         assert!(!super::live_borrowing(&opts(DAF_STREAM, true, false)));
         assert!(!super::live_borrowing(&opts(DAF_LIVE, false, false)));
         assert!(!super::live_borrowing(&opts(DAF_LIVE, true, true)));
+        // the grace: live borrowing, or live stream repair patching the extraction
+        assert!(super::extraction_fed_by_duplicates(&opts(DAF_LIVE, true, false)));
+        assert!(super::extraction_fed_by_duplicates(&opts(DAF_STREAM, true, false)));
+        assert!(!super::extraction_fed_by_duplicates(&opts(DAF_NONE, true, false)));
+        assert!(!super::extraction_fed_by_duplicates(&opts(DAF_STREAM, false, false)));
+        assert!(!super::extraction_fed_by_duplicates(&opts(DAF_LIVE, true, true)));
     }
 
     #[test]

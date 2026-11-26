@@ -1106,8 +1106,7 @@ pub struct LeadView {
 /// healthy one easiest to borrow into (most alive, then the order they came,
 /// on a tie). `current` (index, ease) already downloads: it is kept unless a
 /// healthy copy strictly easier to borrow into is found, or its own probe has
-/// since measured it weak (its view is no longer healthy) while a healthy copy
-/// is there: health gates the lead before ease does (F10), so a copy released
+/// since measured it weak ([`measured_weak`]) while a healthy copy is there: health gates the lead before ease does (F10), so a copy released
 /// early on its first few answers gives way once its whole sample shows it
 /// misses articles (Dune on 6790: `_1` released early, then 103 of 133
 /// sampled articles alive, while `_12` was 200 of 200). None: nothing to do.
@@ -1120,9 +1119,19 @@ pub fn pick_lead(views: &[LeadView], current: Option<(usize, u8)>) -> Option<usi
         None => Some(best.idx),
         Some((idx, _)) if best.idx == idx => None,
         Some((_, ease)) if best.ease < ease => Some(best.idx),
-        Some((idx, _)) if views.iter().any(|v| v.idx == idx && !v.healthy) => Some(best.idx),
+        Some((idx, _)) if views.iter().any(|v| v.idx == idx && measured_weak(v)) => Some(best.idx),
         _ => None,
     }
+}
+
+/// A leader whose own probe measured at most this share alive (permille) is
+/// weak: it gives way to a healthy copy (see [`pick_lead`]).
+pub const WEAK_LEADER_PERMILLE: i32 = 900;
+
+/// Whether a copy's probe measured it weak: an alive share known and at most
+/// [`WEAK_LEADER_PERMILLE`] (not just under the healthy line, and not locked).
+pub fn measured_weak(v: &LeadView) -> bool {
+    v.alive >= 0 && v.alive <= WEAK_LEADER_PERMILLE
 }
 
 /// What a primary has downloaded, for [`fleet_switch_allowed`]: the largest of
@@ -1147,16 +1156,14 @@ pub fn fleet_leader_switchable(downloaded: i64, post_processing: bool, left: i64
     fleet_switch_allowed(downloaded) && !post_processing && left > 0
 }
 
-/// [`fleet_leader_switchable`], with no byte limit for a leader its probe
-/// measured weak (`weak`): a copy missing articles costs a borrow for every
-/// one of them however much of it came, so it gives way to a healthy copy
-/// while it still downloads and is not post-processed.
-pub fn weak_leader_switchable(weak: bool, downloaded: i64, post_processing: bool, left: i64) -> bool {
-    if weak {
-        !post_processing && left > 0
-    } else {
-        fleet_leader_switchable(downloaded, post_processing, left)
-    }
+/// [`fleet_leader_switchable`], for a leader its probe measured weak (`weak`)
+/// past the byte limit while less than half of it (`total`) came: a copy
+/// missing articles costs a borrow for every one of them, so it gives way to a
+/// healthy copy while it still downloads, is not post-processed, and most of
+/// it is still to come (as `queuecoord::WEAK_SWITCH_MAX_DONE_PERMILLE`).
+pub fn weak_leader_switchable(weak: bool, downloaded: i64, total: i64, post_processing: bool, left: i64) -> bool {
+    fleet_leader_switchable(downloaded, post_processing, left)
+        || (weak && !post_processing && left > 0 && total > 0 && downloaded.saturating_mul(2) < total)
 }
 
 /// Whether the probe's findings may be written onto a fleet copy already in
@@ -1267,7 +1274,7 @@ fn fleet_lead_release(
                 old_q.success_size + old_q.failed_size,
             );
             let left = old_q.remaining_size - old_q.paused_size;
-            if !weak_leader_switchable(old_weak, downloaded, old_q.has_post_info, left) {
+            if !weak_leader_switchable(old_weak, downloaded, old_q.size, old_q.has_post_info, left) {
                 return false;
             }
             crate::fleethold::hold_host(
@@ -8183,7 +8190,7 @@ pub unsafe fn fleet_append(
                             let old_id = leader.map_or(0, |(_, _, id)| id);
                             // the leader's own probe now measures it weak
                             let old_weak = leader
-                                .is_some_and(|(li, _, _)| views.iter().any(|v| v.idx == li && !v.healthy));
+                                .is_some_and(|(li, _, _)| views.iter().any(|v| v.idx == li && measured_weak(v)));
                             let released = fleet_lead_release(
                                 ctx_addr as *mut c_void,
                                 host_cb,
@@ -8983,15 +8990,19 @@ mod tests {
         assert_eq!(pick_lead(&[v(3, false, 1, 774), v(2, true, 3, 1000)], Some((3, 1))), Some(2));
         // a healthy leader stays against an equally easy healthier copy
         assert_eq!(pick_lead(&[v(3, true, 1, 980), v(1, true, 1, 1000)], Some((3, 1))), None);
+        // under the healthy line but not weak (95%), or not measured: it stays
+        assert_eq!(pick_lead(&[v(3, false, 1, 950), v(1, true, 1, 1000)], Some((3, 1))), None);
+        assert_eq!(pick_lead(&[v(3, false, 1, -1), v(1, true, 1, 1000)], Some((3, 1))), None);
         // no healthy copy: the weak leader stays
         assert_eq!(pick_lead(&[v(3, false, 1, 774), v(1, false, 1, 900)], Some((3, 1))), None);
         // the leader is the best: nothing to do
         assert_eq!(pick_lead(&[v(1, true, 1, 1000)], Some((1, 1))), None);
         let gb = 1024 * 1024 * 1024;
-        assert!(weak_leader_switchable(true, 4 * gb, false, gb), "weak: no byte limit");
-        assert!(!weak_leader_switchable(false, 4 * gb, false, gb), "healthy: the 512 MB limit");
-        assert!(!weak_leader_switchable(true, 4 * gb, true, gb), "never in post-processing");
-        assert!(!weak_leader_switchable(true, 4 * gb, false, 0), "nothing left");
+        assert!(weak_leader_switchable(true, 4 * gb, 74 * gb, false, gb), "weak, under half: past 512 MB");
+        assert!(!weak_leader_switchable(true, 40 * gb, 74 * gb, false, gb), "weak, most of it came");
+        assert!(!weak_leader_switchable(false, 4 * gb, 74 * gb, false, gb), "healthy: the 512 MB limit");
+        assert!(!weak_leader_switchable(true, 4 * gb, 74 * gb, true, gb), "never in post-processing");
+        assert!(!weak_leader_switchable(true, 4 * gb, 74 * gb, false, 0), "nothing left");
     }
 
     /// F6/F7: only answers are evidence. A copy a paused server left with

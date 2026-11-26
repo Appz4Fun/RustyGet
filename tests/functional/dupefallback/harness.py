@@ -3981,12 +3981,18 @@ def _prod_rar(daemon, t, tag, damage):
 def scenario_prodrarwhole(daemon, t):
     """Fix 2 on a rar set under the production option set: the third volume is
     missing entirely while direct unpack extracts the others. The volume is
-    recreated, par-check passes, and unpack extracts a byte-identical movie."""
+    recreated, par-check passes, and unpack extracts a byte-identical movie.
+    When direct unpack is still running as the volume is found dead, the live
+    dead-volume borrow hands it the volume instead (it extracts on past it and
+    patches it in once borrowed; its archive checksums vouch for the movie, so
+    par-check is skipped): no file needs recreating then."""
     h, ok = _prod_rar(daemon, t, 'RW', {2: set(range(1, 6))})
     recreated = _grep_log(t, 'Recreating')
-    return ('prodrarwhole', ok and recreated == 1 and h['Status'].startswith('SUCCESS'),
-            'status=%s par=%s unpack=%s recreated_logs=%d extracted_ok=%s'
-            % (h['Status'], h['ParStatus'], h['UnpackStatus'], recreated, ok))
+    lent_live = _grep_log(t, 'for dead volume Rel.part03.rar from a duplicate; direct unpack reads it in place')
+    return ('prodrarwhole', ok and (recreated == 1 or (recreated == 0 and lent_live == 1)) and
+            h['Status'].startswith('SUCCESS'),
+            'status=%s par=%s unpack=%s recreated_logs=%d lent_to_direct_unpack=%d extracted_ok=%s'
+            % (h['Status'], h['ParStatus'], h['UnpackStatus'], recreated, lent_live, ok))
 
 
 def scenario_prodrarstream(daemon, t):
@@ -4040,8 +4046,13 @@ def _skiphole_rar(daemon, t, tag, donor, recovery, damage=None):
     daemon.append(api, 'Rel' + tag, build_multi_nzb(members), False, tag + '-key', 100)
     h = daemon.wait_history(api, 'Rel' + tag, timeout=300)
     ok = _verify_output(t, movie, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
-    skipped = _grep_log(t, 'extracted past damage in movie.mkv')
-    patched = _grep_log(t, 'repaired movie.mkv from the repaired volumes')
+    # a set extracted while it downloads goes to persistent partial files (Linux): the hole
+    # is noted as it is met and patched inline once its volume is repaired, before the
+    # extraction ends; otherwise it is reported at the end and patched afterwards
+    skipped = (_grep_log(t, 'extracted past damage in movie.mkv') +
+               _grep_log(t, 'Unrar: movie.mkv has a hole at'))
+    patched = (_grep_log(t, 'repaired movie.mkv from the repaired volumes') +
+               _grep_log(t, 'Unrar: patched movie.mkv from repaired Rel.part02.rar while extracting'))
     paused = _grep_log(t, 'Pausing direct unpack at Rel.part02.rar')
     detail = 'status=%s par=%s unpack=%s extracted_ok=%s skipped=%d patched=%d paused=%d' % (
         h['Status'], h['ParStatus'], h['UnpackStatus'], ok, skipped, patched, paused)
@@ -4696,18 +4707,25 @@ def _headlost_volume(daemon, t, name, rar5, par=False):
     hp = daemon.wait_history(api, 'Primary', timeout=300)
     failed_over = _grep_log(t, 'Failing over Primary')
     cancelled = _grep_log(t, 'Cancelling direct unpack')
-    rebuilt = _grep_log(t, 'Volume Show.part07.rar lost its headers')
-    # Written back over the file on disk, byte for byte: par verification finds it whole
-    # (RAR5 only: RAR 1.5-4 headers are rebuilt, not restored).
+    # From a sibling volume, or (RAR5) from the volume's own quick-open record as it arrives.
+    from_sibling = _grep_log(t, 'Volume Show.part07.rar lost its headers')
+    quick_open = _grep_log(t, 'Rebuilt the headers of Show.part07.rar')
+    rebuilt = from_sibling + quick_open
+    # Rebuilt from a sibling, the volume is written back over the file on disk, byte for
+    # byte, so par verification finds it whole (RAR5 only: RAR 1.5-4 headers are rebuilt,
+    # not restored). Rebuilt from its quick-open record, direct unpack reads on past the
+    # lost data and its archive checksums vouch for every byte (par-check is skipped).
     on_disk = _grep_log(t, 'Rebuilt Show.part07.rar on disk')
+    on_disk_ok = (on_disk == 1 or quick_open >= 1) if rar5 else on_disk == 0
     par_failed = _grep_log(t, 'Repair failed for Primary')
     du_ok = _grep_log(t, 'Direct unpack for Primary successful')
     integ = _verify_output(t, movie, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
-    ok = (failed_over == 0 and cancelled == 0 and rebuilt >= 1 and on_disk == (1 if rar5 else 0) and
+    ok = (failed_over == 0 and cancelled == 0 and rebuilt >= 1 and on_disk_ok and
           par_failed == 0 and du_ok == 1 and integ and hp['Status'].startswith('SUCCESS'))
     return (name, ok,
-            'status=%s failover_logs=%d du_cancelled=%d headers_rebuilt=%d on_disk=%d par_failed=%d du_ok=%d extracted_ok=%s'
-            % (hp['Status'], failed_over, cancelled, rebuilt, on_disk, par_failed, du_ok, integ))
+            'status=%s failover_logs=%d du_cancelled=%d headers_rebuilt=%d (quick_open=%d) on_disk=%d '
+            'par_failed=%d du_ok=%d extracted_ok=%s'
+            % (hp['Status'], failed_over, cancelled, rebuilt, quick_open, on_disk, par_failed, du_ok, integ))
 
 
 def scenario_headlostvolume(daemon, t):
@@ -5247,7 +5265,8 @@ def scenario_xpackdeadserver(daemon, t):
     h = daemon.wait_history(api, 'RelXD', timeout=300)
     log = t.read_file('nzbget.log').decode(errors='replace')
     def when(pattern):
-        m = re.search(r'^(\w{3} \w{3} +\d+ [\d:]+ \d{4})\t\w+\t' + pattern, log, re.M)
+        # date, then (in the current log format) the process and thread ids, then the kind
+        m = re.search(r'^(\w{3} \w{3} +\d+ [\d:]+ \d{4})\t(?:\d+\t\d+\t)?\w+\t' + pattern, log, re.M)
         return time.mktime(time.strptime(m.group(1), '%a %b %d %H:%M:%S %Y')) if m else None
     start, end = when('Cross-packing repair of'), when(r'Recovered .*\(cross-packing\)')
     seconds = end - start if start is not None and end is not None else None

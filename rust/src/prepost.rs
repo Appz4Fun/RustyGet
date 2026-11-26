@@ -308,14 +308,6 @@ pub fn can_run_more_jobs(
     }
 }
 
-/// Whether a download's remaining files cannot arrive for now: it has files left and every
-/// one is paused, or downloads are paused for it (`downloads_paused`: every download paused
-/// or the quota reached, and the item not forced). Its direct unpack waiting for a volume
-/// is stopped when a finished job waits to unpack (`stop_stalled_direct_unpacks`).
-pub fn download_stands_still(remaining_files: usize, paused_files: i32, downloads_paused: bool) -> bool {
-    downloads_paused || (remaining_files > 0 && remaining_files as i64 == i64::from(paused_files))
-}
-
 /// `PrePostProcessor::PickNextJob` candidate selector.
 /// Returns the selected index or `-1`.
 pub fn pick_next_post_job(
@@ -1405,77 +1397,6 @@ impl NzbgetRsPrePostProcessor {
         false
     }
 
-    /// Stops the direct unpack of a download that stands still ([`download_stands_still`]:
-    /// paused whole, or every download paused) while it waits for a volume, when a finished
-    /// job waits to unpack. An extraction holds the one unpack slot (`UNPACK_MUTEX`) all
-    /// through its wait, so the finished job's unpack waited for as long as the pause lasted
-    /// (6790: a finished job sat in PP_QUEUED for 36 minutes behind a paused download's
-    /// direct unpack). The stopped one is unpacked after its download instead, as when its
-    /// direct unpack fails.
-    fn stop_stalled_direct_unpacks(&self, host: &crate::queuesubsys_host::QueueSubsysHost, dq_ptr: usize) {
-        static STOPPED: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
-        let opts = host.opts();
-        let active = self.active_jobs.lock().unwrap().clone();
-        let qlen = host.queue_len(dq_ptr);
-        let mut waiting_job: Option<Vec<u8>> = None;
-        let mut stalled: Vec<crate::queuesubsys_host::NzbSnap> = Vec::new();
-        let mut with_thread: Vec<i32> = Vec::new();
-        for qi in 0..qlen {
-            let nzb_ptr = host.queue_at(dq_ptr, qi);
-            let nzb = host.nzb_snap(nzb_ptr, false);
-            if nzb.has_unpack_thread {
-                with_thread.push(nzb.id);
-                if host.direct_unpack_is_active(nzb_ptr, true)
-                    && !host.direct_unpack_is_active(nzb_ptr, false)
-                    && download_stands_still(
-                        host.nzb_file_len(nzb_ptr),
-                        nzb.paused_file_count,
-                        (opts.pause_download || opts.quota_reached) && !nzb.force_priority,
-                    )
-                {
-                    stalled.push(nzb);
-                }
-                continue;
-            }
-            // (only a job the post queue would start were the slot free: not one paused by
-            // PausePostProcess, nor one held at its duplicate key's post gate)
-            if waiting_job.is_none()
-                && nzb.post_info_ptr.is_some()
-                && nzb.is_download_completed
-                && !active.contains(&nzb_ptr)
-                && (!opts.pause_post_process || nzb.force_priority)
-                && !(dupe_gate_has(&DUPE_GATE_HELD, nzb.id)
-                    && dupe_post_gate_host(host, dq_ptr, &nzb).0 != GateVerdict::Pass)
-            {
-                let ps = host.post_snap(nzb.post_info_ptr);
-                if ps.need_unpack && !ps.working && ps.stage == PostStage::Queued {
-                    waiting_job = Some(nzb.name.clone());
-                }
-            }
-        }
-        let mut stopped = STOPPED.lock().unwrap_or_else(|e| e.into_inner());
-        stopped.retain(|id| with_thread.contains(id));
-        crate::postproc::retain_direct_unpack_yields(&with_thread);
-        let Some(waiting) = waiting_job else {
-            return;
-        };
-        for nzb in stalled {
-            if stopped.contains(&nzb.id) {
-                continue;
-            }
-            stopped.push(nzb.id);
-            let mut msg = b"Stopping the direct unpack of ".to_vec();
-            msg.extend_from_slice(&nzb.name);
-            msg.extend_from_slice(b": its download is paused while it waits for a volume, and ");
-            msg.extend_from_slice(&waiting);
-            msg.extend_from_slice(b" waits to unpack; it is unpacked after its download instead");
-            host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
-            // Its download goes on: the dead volumes it borrowed stay for post-processing.
-            crate::postproc::note_direct_unpack_yield(nzb.id);
-            host.direct_unpack_stop(dq_ptr, nzb.ptr);
-        }
-    }
-
     pub(crate) fn nzb_added(
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
@@ -1953,6 +1874,61 @@ impl NzbgetRsPrePostProcessor {
         stages
     }
 
+    /// Whether direct unpack of download `nzb_ptr` may start now: not while another copy of its
+    /// release (its duplicate key) extracts or went past the post gate (`dupe_post_gate`), so
+    /// only one copy extracts into the destination. (Under the one global unpack lock a second
+    /// copy's direct unpack never started while the first one's ran; it reached the post gate
+    /// instead, and still does.)
+    ///
+    /// Direct unpack sessions waiting for volumes hold no slot but keep their decoder state
+    /// and open volumes; past `unpackslots::session_limit` sessions this is logged (once per
+    /// limit crossing) but the new one still starts: the download that downloads now goes
+    /// first, and stopping another session (a cancel) would delete its borrowed volumes.
+    fn room_for_direct_unpack(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        dq_ptr: usize,
+        nzb_ptr: NzbRef,
+    ) -> bool {
+        if dupe_post_gate_host(host, dq_ptr, &host.nzb_snap(nzb_ptr, false)).0 != GateVerdict::Pass {
+            return false;
+        }
+        static OVER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let limit = crate::unpackslots::session_limit();
+        let sessions = (0..host.queue_len(dq_ptr))
+            .filter(|&qi| host.nzb_snap(host.queue_at(dq_ptr, qi), false).has_unpack_thread)
+            .count();
+        let over = sessions >= limit;
+        if over && !OVER.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            let mut msg = b"Starting the direct unpack of ".to_vec();
+            msg.extend_from_slice(crate::cstr::until_nul(&host.nzb_snap(nzb_ptr, false).name));
+            msg.extend_from_slice(
+                format!(
+                    " although {sessions} direct unpacks exist (UnpackSlots suggests at most {limit}); paused ones waiting for volumes keep their state"
+                )
+                .as_bytes(),
+            );
+            host.nzb_print_message(nzb_ptr, crate::queuesubsys_host::MK_WARNING, &msg);
+        } else if !over {
+            OVER.store(false, std::sync::atomic::Ordering::Release);
+        }
+        true
+    }
+
+    /// Whether a finished job's unpack would find no unpack slot now (`unpackslots`): slots
+    /// held, an active download's extraction waiting for one, and jobs already in their unpack
+    /// stage leave none. A direct unpack waiting for a volume (a paused download's, say) holds
+    /// none and keeps no job waiting.
+    fn unpack_slot_lacking(&self, host: &crate::queuesubsys_host::QueueSubsysHost) -> bool {
+        let unpacking = self
+            .active_job_stages(host)
+            .iter()
+            .filter(|&&s| s == PostStage::Unpacking)
+            .count();
+        let starting = unpacking.saturating_sub(crate::unpackslots::post_users());
+        !crate::unpackslots::room_for_finished(starting)
+    }
+
     fn can_run_more_jobs(&self, host: &crate::queuesubsys_host::QueueSubsysHost) -> (bool, bool) {
                 let stages = self.active_job_stages(host);
         let opts = host.opts();
@@ -2014,7 +1990,7 @@ impl NzbgetRsPrePostProcessor {
             });
         }
 
-        let has_active_unpack = self.has_active_unpack(host, dq_ptr, true);
+        let has_active_unpack = self.unpack_slot_lacking(host);
         let pause_post = host.opts().pause_post_process;
         let idx = pick_next_post_job(&cands, allow_par, has_active_unpack, pause_post);
         if idx >= 0 {
@@ -2030,7 +2006,6 @@ impl NzbgetRsPrePostProcessor {
             let count_before = self.active_jobs.lock().unwrap().len();
             self.check_request_par(host, dq_ptr);
             self.cleanup_jobs(host, dq_ptr);
-            self.stop_stalled_direct_unpacks(host, dq_ptr);
             let mut changed = self.active_jobs.lock().unwrap().len() != count_before;
 
             loop {
@@ -2495,7 +2470,7 @@ impl NzbgetRsPrePostProcessor {
         }
 
         if dec.unpack != 0 {
-            if self.has_active_unpack(host, dq_ptr, true) {
+            if self.unpack_slot_lacking(host) {
                 host.post_set_int(post_ptr, POST_INT_NEED_UNPACK, 1);
                 return;
             }
@@ -2648,15 +2623,15 @@ impl NzbgetRsPrePostProcessor {
             nzb.direct_rename_status,
             nzb.has_unpack_thread,
         );
-        if act != 1 || !self.can_run_more_jobs(host).0 || self.has_active_unpack(host, dq_ptr, true)
-        {
+        // (direct unpack waits for an unpack slot itself, see `unpackslots`)
+        if act != 1 {
             return;
         }
         let want_unpack = host
             .nzb_get_param(nzb_ptr, b"*Unpack:")
             .as_ref()
             .map_or(true, |v| v.eq_ignore_ascii_case(b"yes"));
-        if want_unpack {
+        if want_unpack && self.room_for_direct_unpack(host, dq_ptr, nzb_ptr) {
             host.direct_unpack_start_job(nzb_ptr);
         }
     }
@@ -2750,16 +2725,18 @@ impl NzbgetRsPrePostProcessor {
         );
         if act == 1 {
             let file = host.file_snap(file_ptr);
-            if (crate::filetypes::is_rar_file(&file.filename)
-                || crate::livefeed::is_live_volume(&file.filename))
-                && self.can_run_more_jobs(host).0
-                && !self.has_active_unpack(host, dq_ptr, true)
+            if crate::filetypes::is_rar_file(&file.filename)
+                || crate::livefeed::is_live_volume(&file.filename)
             {
+                // It starts whatever else extracts or post-processes: the extraction waits for
+                // an unpack slot itself (`unpackslots`), an active download's first. A paused
+                // download's extraction waiting for a volume holds none, so it never keeps a
+                // new download from extracting while it downloads.
                 let unpack_param = host.nzb_get_param(nzb_ptr, b"*Unpack:");
                 let want_unpack = unpack_param
                     .as_ref()
                     .map_or(true, |v| v.eq_ignore_ascii_case(b"yes"));
-                if want_unpack {
+                if want_unpack && self.room_for_direct_unpack(host, dq_ptr, nzb_ptr) {
                     host.direct_unpack_start_job(nzb_ptr);
                 }
             }
@@ -2786,20 +2763,6 @@ mod tests {
         // once through, it stays through
         assert_eq!(gate(copy(true, false), &[copy(true, true)]), Pass);
         assert_eq!(gate(copy(false, false), &[]), Pass);
-    }
-
-    #[test]
-    fn a_waiting_direct_unpack_holds_unpacks_back_only_while_its_volumes_can_arrive() {
-        use super::download_stands_still as still;
-        // paused whole: its volumes cannot arrive
-        assert!(still(5, 5, false));
-        // some files still download (a paused par2 among them is no stop)
-        assert!(!still(5, 1, false));
-        assert!(!still(5, 0, false));
-        // every file arrived: nothing left to wait for, it finishes on its own
-        assert!(!still(0, 0, false));
-        // every download paused (or the quota reached) for it
-        assert!(still(5, 0, true));
     }
 
     #[test]

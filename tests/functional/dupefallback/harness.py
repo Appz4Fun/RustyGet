@@ -5569,7 +5569,9 @@ def scenario_fleetmostlydead(daemon, t):
     reply = _fleet(daemon, [('Show.S01E01.md', _fake_nzb_ids(_fleet_ids('md', 200), 2_000_000).decode())],
                    key='fleet:md', timeout=8)
     m = reply['Members'][0]
-    ok = reply['Chosen'] == 0 and m['Alive'] >= 0 and m['Status'] == 'DEAD' and reply['Reason'] == 'ALL_DEAD'
+    # B2b: some of it is alive, so it is WEAK (its share in the reason), never DEAD
+    ok = (reply['Chosen'] == 0 and m['Alive'] > 0 and m['Status'] == 'WEAK' and str(m['Alive']) + '%' in m.get('Reason', '')
+          and reply['Reason'] == 'ALL_WEAK')
     return ('fleetmostlydead', ok, 'reply=%s' % reply)
 
 
@@ -7214,7 +7216,8 @@ def scenario_fleettimeoutunverified(daemon, t):
     """F6: timeouts are never evidence. A copy whose every check fails with a
     temporary error (451, as a server or proxy that times out answers) is
     unverified: Alive -1, a backup, never DEAD; a copy the server says it
-    lacks is dead."""
+    lacks is dead, or, when its par2 index is still there (B2b: any alive
+    article makes a donor), a weak backup with its small share."""
     daemon.fake_nntp.alive = set()
     api = daemon.wait_ready()
     whole = _fleet_copy(daemon, 'tw', 'a.mkv', 400_000, None, _payload(400_000, 7901))
@@ -7226,8 +7229,9 @@ def scenario_fleettimeoutunverified(daemon, t):
     byname = {m['Name']: (m['Status'], m['Alive']) for m in reply['Members']}
     items = {g['NZBName']: {p['Name']: p['Value'] for p in g.get('Parameters', [])}
              for g in api.listgroups() + api.history() if g.get('DupeKey') == 'fleet:timeout'}
+    dead_status, dead_alive = byname.get('Show.S01E01.dead', ('', -1))
     ok = (byname.get('Show.S01E01.flaky', ('', 0))[1] == -1 and byname['Show.S01E01.flaky'][0] in ('BACKUP', 'QUEUED')
-          and byname.get('Show.S01E01.dead', ('', 0))[0] == 'DEAD'
+          and dead_status == 'BACKUP' and 0 < dead_alive <= 5
           and items.get('Show.S01E01.flaky', {}).get('DupeAlive') is None)
     return ('fleettimeoutunverified', ok, 'members=%s params=%s' % (byname, items.get('Show.S01E01.flaky')))
 
@@ -13036,6 +13040,172 @@ def scenario_fleetfailoverorder(daemon, t):
         order, primary, nxt, released, new_order))
 
 
+def scenario_fleetprimaryfirst(daemon, t):
+    """F2c (6790, 2026-11-25): a fleet's primary downloads before every other
+    queued item, whatever their priorities. The released primary used to keep
+    priority 0 and sat QUEUED for 45 minutes behind items at 47-96: the
+    scheduler takes the highest priority before the queue order. Now the
+    primary goes one above the highest queued item (97 here, its own 0 kept
+    as DupeFleetOwnPriority, never force), the held copies stay at -100, and
+    after a failover the new primary is raised the same way while the old one
+    (deleted by hand) reaches History without the raise. Once downloads resume, the first article
+    fetched of the primary or the item at priority 96 is the primary's, and
+    the primary's own priority is back once its fleet ends."""
+    rel = 'First.Movie.2024.1080p.WEB-DL.x264-GRP'
+    key = 'dupes:first.movie.2024.1080p.web.dl.x264.grp'
+    data = _payload(1_500_000, 16501)
+    copies = {tag: _drop_copy(t, tag, data, set()) for tag in ('pfA', 'pfB', 'pfC')}
+    other_data = _payload(3_000_000, 16502)
+    other_path = _place_copy(t, 'pfO', other_data, 'other.bin')
+    other_nzb = build_nzb(other_path, 'Other.Show.bin', len(other_data), 100_000, set())
+    other = 'Other.Show.S01E01.720p.HDTV.x264-OTHER'
+    api = daemon.wait_ready()
+    api.pausedownload()
+    api.append(other + '.nzb', base64.standard_b64encode(other_nzb.encode()).decode(), 'test', 96, False, False,
+               '', 0, 'score', [])
+    _fleet(daemon, [(rel + '.nzb', copies['pfA']), (rel + '_1.nzb', copies['pfB']), (rel + '_2.nzb', copies['pfC'])],
+           key=key, timeout=60)
+    tag_of = {rel: 'pfA', rel + '_1': 'pfB', rel + '_2': 'pfC'}
+
+    def primary_state(exclude=None):
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            items = _queued(api, key)
+            free = [g for g in items if _params(g).get('DupeHeld') != 'yes' and g['NZBName'] != exclude]
+            if len(free) == 1 and int(free[0].get('MaxPriority', 0)) == 97:
+                return free[0], items
+            time.sleep(0.25)
+        return None, _queued(api, key)
+
+    _wait_probed(api, key, 3)
+    first, items = primary_state()
+    held_prio = sorted(int(g.get('MaxPriority', 0)) for g in items if _params(g).get('DupeHeld') == 'yes')
+    first_own = _params(first or {}).get('DupeFleetOwnPriority')
+    # failover while paused: the next copy is raised, the old primary held at -100
+    if first:
+        api.editqueue('GroupDelete', 0, '', [first['NZBID']])
+    second, after = primary_state(exclude=first and first['NZBName'])
+    second_own = _params(second or {}).get('DupeFleetOwnPriority')
+    other_prio = next((int(g.get('MaxPriority', 0)) for g in api.listgroups() if g['NZBName'] == other), None)
+    mark = len(t.read_file('nserv.log'))
+    api.resumedownload()
+    done = _wait_key_success(api, key)
+    log = t.read_file('nserv.log')[mark:].decode(errors='replace')
+    bodies = re.findall(r'Received: (?:BODY|ARTICLE) <(pf[ABCO])/', log)
+    # the primary's articles come before any of the item at 96 (a held copy may
+    # still be read for a header or a lent article)
+    prim_tag = tag_of.get((second or {}).get('NZBName'))
+    first_body = next((b for b in bodies if b in (prim_tag, 'pfO')), None)
+    raised = _grep_log(t, 'above every other queued item: the primary of its fleet downloads first')
+    gone = next((h for h in api.history() if first and h['NZBName'] == first['NZBName']), None)
+    gone_unraised = gone is not None and 'DupeFleetBoost' not in _params(gone)
+    ok = (first is not None and first_own == '0' and held_prio == [-100, -100] and
+          second is not None and second_own == '0' and other_prio == 96 and raised >= 2 and
+          first_body is not None and first_body == prim_tag and
+          done is not None and done['NZBName'] == second['NZBName'] and _verify_output(t, data) and
+          'DupeFleetBoost' not in _params(done) and gone_unraised)
+    return ('fleetprimaryfirst', ok, 'first=%s own=%s held=%s second=%s own2=%s other_prio=%s raised=%d '
+            'first_body=%s bodies=%s done=%s done_boost=%s gone=%s' % (
+                first and first['NZBName'], first_own, held_prio, second and second['NZBName'], second_own,
+                other_prio, raised, first_body, bodies[:6], done and done['NZBName'],
+                _params(done or {}).get('DupeFleetBoost'),
+                gone and (gone.get('Status'), _params(gone).get('DupeFleetBoost'))))
+
+
+def scenario_fleetallweak(daemon, t):
+    """B2b (review): a fleet whose copies are all under DupeMinAlive (50%)
+    but not all at 0% is no dead fleet. Its weak copies (about 30% alive)
+    used to go to history as DEAD ("every copy of its fleet is dead"); now
+    they stay queued as donors with their alive share (DupeAlive > 0), the
+    0% copy stays as a dead held copy, nothing goes to history while the
+    fleet is open and no copy with alive articles is called dead."""
+    rel = 'Weak.Movie.2024.1080p.WEB-DL.x264-GRP'
+    key = 'dupes:weak.movie.2024.1080p.web.dl.x264.grp'
+    data = _payload(2_000_000, 16701)
+    gone_a = set(range(1, 21)) - {1, 4, 7, 10, 13, 16}
+    gone_b = set(range(1, 21)) - {2, 5, 8, 11, 14, 17}
+    weak_a = _drop_copy(t, 'awA', data, gone_a)
+    weak_b = _drop_copy(t, 'awB', data, gone_b)
+    dead = _drop_copy(t, 'awC', data, set(range(1, 21)), dead_par=True)
+    api = daemon.wait_ready()
+    api.pausedownload()
+    _fleet(daemon, [(rel + '.nzb', weak_a), (rel + '_1.nzb', weak_b), (rel + '_2.nzb', dead)], key=key, timeout=60)
+    items = _wait_probed(api, key, 3, timeout=90)
+    byname = {g['NZBName']: _params(g) for g in items}
+    history = [h['NZBName'] for h in _history_of(api, key)]
+    weak_alive = [int(byname.get(n, {}).get('DupeAlive', '0') or 0) for n in (rel, rel + '_1')]
+    dead_alive = byname.get(rel + '_2', {}).get('DupeAlive')
+    # the best weak copy is tried (released), the others stay held
+    free = [n for n, p in byname.items() if p.get('DupeHeld') != 'yes']
+    api.resumedownload()
+    ok = (len(items) == 3 and not history and all(0 < a < 50 for a in weak_alive) and dead_alive == '0' and
+          len(free) == 1 and free[0] in (rel, rel + '_1') and
+          _grep_log(t, 'every copy of its fleet is dead') == 0)
+    return ('fleetallweak', ok, 'queued=%s free=%s history=%s weak_alive=%s dead_alive=%s' % (
+        sorted(byname), free, history, weak_alive, dead_alive))
+
+
+def _rar_drop_copy(t, tag, data, vol_size=300_000):
+    """One posting of ``data`` as RAR3 store volumes with a par2 index of the
+    volumes: what a fleet's kind probe reads (the par2 list, the largest
+    file's head, the first and last volume's headers for the archive key)."""
+    files = []
+    members = []
+    for i, vol in enumerate(generators.rar3_store_volumes('Speed.Movie.mkv', data, vol_size)):
+        name = 'speed.movie.part%02d.rar' % (i + 1)
+        path = '%s/%s' % (tag, name)
+        t.write_file(os.path.join('data', path), vol)
+        files.append((name, vol))
+        members.append((path, name, len(vol), 100_000, set()))
+    par = generators.par2_index(files)
+    t.write_file(os.path.join('data', tag, 'speed.movie.par2'), par)
+    members.append((tag + '/speed.movie.par2', 'speed.movie.par2', len(par), 500_000, set()))
+    return build_multi_nzb(members)
+
+
+def scenario_fleetprobespeed(daemon, t):
+    """Probe speed: four RAR copies of one release behind a server that takes
+    300 ms per request (nserv -w 300), with 40 connections (5 light ones, as
+    on 6790). Each copy's kind probe reads its par2 list, its largest file's
+    head and its archive key (first and last volume headers); the reads of
+    one copy used to run one after another, each wait polled every 20 ms. The
+    scenario logs each copy's kind probe time ("Fleet kind probe of ...: N
+    ms") and STAT check time ("Fleet probe of ...: N ms") for the PR's
+    before/after table; it passes when every copy was probed, the fleet's
+    primary downloads and a copy took less than its reads one after another
+    would (N x 300 ms; measured before: about 1.3 s for 4; after: 0.6-0.95 s)."""
+    rel = 'Speed.Movie.2024.1080p.WEB-DL.x264-GRP'
+    key = 'dupes:speed.movie.2024.1080p.web.dl.x264.grp'
+    data = _payload(1_200_000, 16601)
+    names = [rel + '.nzb', rel + '_1.nzb', rel + '_2.nzb', rel + '_3.nzb']
+    copies = [_rar_drop_copy(t, 'ps%d' % i, data) for i in range(len(names))]
+    api = daemon.wait_ready()
+    api.pausedownload()
+    start = time.time()
+    _fleet(daemon, list(zip(names, copies)), key=key, timeout=60)
+    items = _wait_probed(api, key, len(names))
+    probed_s = time.time() - start
+    log = t.read_file('nzbget.log').decode(errors='replace')
+    # the light reserve the probes had (it grows once the probes start)
+    grown = re.findall(r'Light connections of Server1: \d+ -> (\d+)', log)
+    light = int(grown[-1]) if grown else 0
+    kind_ms = {m.group(1): int(m.group(2)) for m in
+               re.finditer(r'Fleet kind probe of (\S+?)(?:\.nzb)?: (\d+) ms', log)}
+    stat_ms = {m.group(1): int(m.group(2)) for m in re.finditer(r'Fleet probe of (\S+?)(?:\.nzb)?: (\d+) ms', log)}
+    kind_reads = [(int(m.group(1)), int(m.group(2))) for m in
+                  re.finditer(r'Fleet kind probe of \S+?: (\d+) ms, (\d+) article', log)]
+    api.resumedownload()
+    done = _wait_key_success(api, key, timeout=240)
+    kinds = sorted(kind_ms.values())
+    ok = (len(items) == len(names) and len(kind_ms) == len(names) and len(stat_ms) == len(names) and
+          done is not None and
+          # a copy that read N articles one after another took at least N x 300
+          # ms (nserv -w 300); one below that proves its reads overlapped
+          any(ms < reads * 300 for ms, reads in kind_reads))
+    return ('fleetprobespeed', ok, 'light=%d probed_in=%.1fs kind_ms=%s (median %s) stat_ms=%s done=%s' % (
+        light, probed_s, kind_ms, kinds[len(kinds) // 2] if kinds else None, stat_ms, done and done['NZBName']))
+
+
 def scenario_fleetslowprobe(daemon, t):
     """B1 and B5 (fleet-e2e-6790): behind a server that answers a missing
     article only after 2 s (nserv -x 2000; the LAN proxy took 1.5 s), a copy
@@ -13409,6 +13579,9 @@ SCENARIOS = {
     'dropkeepdonor': scenario_dropkeepdonor,
     'fleetstaysqueued': scenario_fleetstaysqueued,
     'fleetfailoverorder': scenario_fleetfailoverorder,
+    'fleetprimaryfirst': scenario_fleetprimaryfirst,
+    'fleetprobespeed': scenario_fleetprobespeed,
+    'fleetallweak': scenario_fleetallweak,
     'fleetslowprobe': scenario_fleetslowprobe,
     'fleetfailoverkeepsalive': scenario_fleetfailoverkeepsalive,
     'fleetsalvage': scenario_fleetsalvage,
@@ -13848,6 +14021,9 @@ SCENARIO_OPTIONS = {
     'dropkeepdonor': ['HealthCheck=dupe', 'DupeArticleFallback=article'],
     'fleetstaysqueued': ['HealthCheck=dupe', 'DupeArticleFallback=article'],
     'fleetfailoverorder': ['HealthCheck=dupe', 'DupeArticleFallback=article'],
+    'fleetprimaryfirst': ['HealthCheck=dupe', 'DupeArticleFallback=article'],
+    'fleetprobespeed': ['HealthCheck=dupe', 'DupeArticleFallback=article', 'Server1.Connections=40'],
+    'fleetallweak': ['HealthCheck=dupe', 'DupeArticleFallback=article'],
     'fleetslowprobe': ['HealthCheck=dupe', 'DupeArticleFallback=article'],
     'fleetfailoverkeepsalive': ['HealthCheck=dupe', 'DupeArticleFallback=article', 'DupeWatch=yes'],
     'fleetsalvage': ['HealthCheck=dupe', 'DupeArticleFallback=article'],
@@ -14234,9 +14410,9 @@ def _promote_fallback(options, mode):
 # finished job is rightly not redone
 FALLBACK_MODE_BOUND = {'livegate', 'streamrestartcredit', 'wholefilerestart', 'wholefilestale'}
 # scenarios that read nserv's request log (nserv.log)
-CAPTURE_REQUESTS = {'repost', 'wholefileproofcost', 'dropnzbdir', 'fleetstaysqueued'}
+CAPTURE_REQUESTS = {'repost', 'wholefileproofcost', 'dropnzbdir', 'fleetstaysqueued', 'fleetprimaryfirst'}
 # extra nserv arguments per scenario (-w: response latency in ms)
-SCENARIO_NSERV_ARGS = {'fleetslowprobe': ['-x', '2000'], 'fleetprobehealthfail': ['-w', '800'], 'finaldeletemidway': ['-w', '300'], 'finaldeleterestart': ['-w', '300'], 'restartmidway': ['-w', '300'], 'xpacklatency': ['-w', '1000'], 'deadpickprobe': ['-w', '500'], 'deadpickafterreload': ['-w', '500'],
+SCENARIO_NSERV_ARGS = {'fleetslowprobe': ['-x', '2000'], 'fleetprobespeed': ['-w', '300'], 'fleetprobehealthfail': ['-w', '800'], 'finaldeletemidway': ['-w', '300'], 'finaldeleterestart': ['-w', '300'], 'restartmidway': ['-w', '300'], 'xpacklatency': ['-w', '1000'], 'deadpickprobe': ['-w', '500'], 'deadpickafterreload': ['-w', '500'],
                        'deadpickpartial': ['-w', '100'], 'deadpickstray': ['-w', '500'], 'forcefailover': ['-w', '500'], 'copybackup': ['-w', '500'], 'copyoffailed': ['-w', '500'], 'deaddownloadstray2': ['-w', '300'], 'deaddownloadrestart': ['-w', '300'], 'deadbackupsonly': ['-w', '500'], 'backuporder': ['-w', '500'], 'deaddownloadlate': ['-w', '300'], 'deadpickservers': ['-w', '200'],
                        'deadpickfewservers': ['-w', '200']}
 

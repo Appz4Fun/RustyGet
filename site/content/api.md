@@ -98,9 +98,9 @@ The result:
 |---|---|
 | `Chosen` | The ID of the download that runs: a new member, or a download of the key that was already running. `0` if none. |
 | `Complete` | `false` when the time limit cut the check short, so some members are less well measured. |
-| `Reason` | Why nothing new is downloading, when that's the case: `ALREADY_QUEUED`, `ALREADY_DOWNLOADED`, `ALL_DEAD`, `INCOMPLETE`, `NO_USABLE_MEMBERS`, `NO_MEMBERS`, `NOT_QUEUED`, `KEY_BUSY`, or `SHUTDOWN`. Retry after `KEY_BUSY` and `SHUTDOWN`. |
+| `Reason` | Why nothing new is downloading, when that's the case: `ALREADY_QUEUED`, `ALREADY_DOWNLOADED`, `ALL_DEAD` (no member has an alive article), `ALL_WEAK` (members have alive articles, but none enough to download), `INCOMPLETE`, `NO_USABLE_MEMBERS`, `NO_MEMBERS`, `NOT_QUEUED`, `KEY_BUSY`, or `SHUTDOWN`. Retry after `KEY_BUSY` and `SHUTDOWN`. |
 | `Members` | One entry per member, in rank order. |
-| `Members[].Status` | `QUEUED` (downloading), `BACKUP` (kept in history), `SAME_POSTING` (a copy of another member or of an existing item), `COPY` (the same NZB file as an existing item), `DEAD`, `SKIPPED`, or `ERROR` (unreadable, or holding another video than the fleet: `Reason` says which). |
+| `Members[].Status` | `QUEUED` (downloading), `BACKUP` (kept as a donor: held in the queue for a `dupes:` fleet, in history for any other key; for a weak copy, under `DupeMinAlive`, `Reason` gives its alive share), `SAME_POSTING` (a copy of another member or of an existing item), `COPY` (the same NZB file as an existing item), `WEAK` (some articles alive but too few, and no member can complete: not queued, its share in `Reason`), `DEAD` (none of its sampled articles is on the servers), `SKIPPED`, or `ERROR` (unreadable, or holding another video than the fleet: `Reason` says which). |
 | `Members[].Alive` | Percent of the sampled articles found, or `-1` if unknown. |
 | `Members[].SameAs`, `SameAsRank` | For `SAME_POSTING`: the ID of the item it duplicates, and that member's rank. |
 

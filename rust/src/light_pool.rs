@@ -322,6 +322,110 @@ pub fn parallel_jobs_now(max: usize) -> usize {
     parallel_jobs(max, light)
 }
 
+/// A count of light reads running at once, shared by every caller, so a
+/// job that reads several articles at once (a fleet copy's probe) never
+/// runs more reads than [`parallel_jobs`] allows in all: a read past the
+/// limit waits for one to end (woken when it does, never polling for a
+/// connection). Waiters are served in the order they came, so no copy's
+/// reads keep losing the race until its deadline.
+pub struct ReadSlots {
+    state: std::sync::Mutex<SlotState>,
+    freed: std::sync::Condvar,
+}
+
+struct SlotState {
+    used: usize,
+    next_ticket: u64,
+    waiting: std::collections::VecDeque<u64>,
+}
+
+/// A slot taken from [`ReadSlots`]; given back when dropped.
+pub struct ReadSlot<'a>(&'a ReadSlots);
+
+impl ReadSlots {
+    pub const fn new() -> Self {
+        Self {
+            state: std::sync::Mutex::new(SlotState {
+                used: 0,
+                next_ticket: 0,
+                waiting: std::collections::VecDeque::new(),
+            }),
+            freed: std::sync::Condvar::new(),
+        }
+    }
+
+    /// Takes a slot once fewer than `limit()` are taken and every read that
+    /// asked before has one; None when `give_up()` says so first (a deadline,
+    /// a stop: looked at every 100 ms).
+    pub fn take(
+        &self,
+        limit: impl Fn() -> usize,
+        give_up: impl Fn() -> bool,
+    ) -> Option<ReadSlot<'_>> {
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let ticket = st.next_ticket;
+        st.next_ticket += 1;
+        st.waiting.push_back(ticket);
+        loop {
+            if give_up() {
+                st.waiting.retain(|&t| t != ticket);
+                drop(st);
+                // the next in line may be first now
+                self.freed.notify_all();
+                return None;
+            }
+            if st.waiting.front() == Some(&ticket) && st.used < limit().max(1) {
+                st.waiting.pop_front();
+                st.used += 1;
+                drop(st);
+                // the next in line may fit too
+                self.freed.notify_all();
+                return Some(ReadSlot(self));
+            }
+            st = self
+                .freed
+                .wait_timeout(st, std::time::Duration::from_millis(100))
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+    }
+
+    /// Slots taken now.
+    #[cfg(test)]
+    pub fn used(&self) -> usize {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).used
+    }
+
+    /// Reads waiting for a slot now.
+    #[cfg(test)]
+    pub fn waiting(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .waiting
+            .len()
+    }
+}
+
+impl Default for ReadSlots {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for ReadSlot<'_> {
+    fn drop(&mut self) {
+        let mut st = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.used = st.used.saturating_sub(1);
+        drop(st);
+        self.0.freed.notify_all();
+    }
+}
+
+/// The reads of fleet probes (par2 lists, archive heads and keys, intake
+/// samples): at most [`parallel_jobs_now`] at once, all fleets together.
+pub static PROBE_READS: ReadSlots = ReadSlots::new();
+
 /// A checked-out connection that goes back to the pool when dropped (an early
 /// return or an unwinding panic), disconnected since its state is unknown.
 /// [`Checkout::release`] returns it the normal way.
@@ -362,6 +466,65 @@ impl Drop for Checkout<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Probe speed: reads several jobs run at once never pass the limit, a
+    /// read past it waits for one to end and is woken when it does, and a
+    /// read that gives up first takes nothing.
+    #[test]
+    fn read_slots_hold_the_limit_and_wake_a_waiter() {
+        let slots = ReadSlots::new();
+        let a = slots.take(|| 2, || false).expect("first");
+        let _b = slots.take(|| 2, || false).expect("second");
+        assert_eq!(slots.used(), 2);
+        assert!(
+            slots.take(|| 2, || true).is_none(),
+            "gave up: nothing taken"
+        );
+        assert_eq!(slots.used(), 2);
+        let peak = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|s| {
+            let waiter = s.spawn(|| {
+                let start = std::time::Instant::now();
+                let _c = slots.take(|| 2, || false).expect("third, once one ends");
+                peak.fetch_max(slots.used(), std::sync::atomic::Ordering::SeqCst);
+                start.elapsed()
+            });
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            drop(a);
+            let waited = waiter.join().unwrap();
+            assert!(waited >= std::time::Duration::from_millis(25), "{waited:?}");
+        });
+        assert!(peak.load(std::sync::atomic::Ordering::SeqCst) <= 2);
+        assert_eq!(slots.used(), 1);
+
+        // review: waiters are served in the order they came
+        let one = ReadSlots::new();
+        let held = one.take(|| 1, || false).expect("first");
+        let order = std::sync::Mutex::new(Vec::new());
+        std::thread::scope(|s| {
+            let (one, order) = (&one, &order);
+            let a = s.spawn(move || {
+                let _x = one.take(|| 1, || false).expect("a");
+                order.lock().unwrap().push('a');
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            });
+            // b asks only once a is waiting, and the slot frees only once both are
+            while one.waiting() < 1 {
+                std::thread::yield_now();
+            }
+            let b = s.spawn(move || {
+                let _x = one.take(|| 1, || false).expect("b");
+                order.lock().unwrap().push('b');
+            });
+            while one.waiting() < 2 {
+                std::thread::yield_now();
+            }
+            drop(held);
+            a.join().unwrap();
+            b.join().unwrap();
+        });
+        assert_eq!(*order.lock().unwrap(), vec!['a', 'b']);
+    }
 
     #[test]
     fn workers_fit_the_main_pool() {

@@ -996,12 +996,16 @@ fn fleet_key_for(base_filename: &[u8], extension: &[u8]) -> Option<Vec<u8>> {
     (!key.is_empty()).then_some(key)
 }
 
+/// One copy of a fleet reply, for the log: its name, nzb id, status and
+/// measured alive share (percent, `-1` unverified).
+pub type FleetCopy = (Vec<u8>, c_int, Vec<u8>, c_int);
+
 /// Collects what `appendfleet` replies, for the log.
 #[derive(Default)]
 struct FleetReply {
     chosen: c_int,
     reason: Vec<u8>,
-    added: Vec<(Vec<u8>, c_int, Vec<u8>)>,
+    added: Vec<FleetCopy>,
 }
 
 impl crate::xmlrpc_format::RpcEmit for FleetReply {
@@ -1016,7 +1020,7 @@ impl crate::xmlrpc_format::RpcEmit for FleetReply {
         self.reason = reason.to_bytes().to_vec();
         self.added = members
             .iter()
-            .map(|m| (m.name.to_bytes().to_vec(), m.nzb_id, m.status.to_bytes().to_vec()))
+            .map(|m| (m.name.to_bytes().to_vec(), m.nzb_id, m.status.to_bytes().to_vec(), m.alive))
             .collect();
     }
 }
@@ -1056,11 +1060,27 @@ pub const FLEET_SUMMARY_LINE_MAX: usize = 900;
 /// what downloads and how many copies ended how, then the copies with their
 /// outcome over as many lines as it takes, none over
 /// [`FLEET_SUMMARY_LINE_MAX`] (a name longer than that alone is cut).
+/// B2b: how the summary names a copy's outcome (its group in the counts, and
+/// its word in the list), with the same honest wording as its parameters and
+/// the web UI: a copy with any alive article is never DEAD (F3, F15). A
+/// backup under the healthy share (97.5%) is a weak one, with its share; a
+/// copy the fleet dropped while some of it is alive says so instead of DEAD.
+pub fn fleet_copy_outcome(status: &[u8], alive: c_int) -> (Vec<u8>, Vec<u8>) {
+    let healthy = crate::dupesearch_nzb::FLEET_HEALTHY_ALIVE_PERMILLE;
+    if status == b"BACKUP" && alive >= 0 && alive * 10 < healthy {
+        (b"BACKUP (weak)".to_vec(), format!("BACKUP (weak, {alive}% alive)").into_bytes())
+    } else if (status == b"DEAD" || status == b"WEAK") && alive > 0 {
+        (b"too weak".to_vec(), format!("too weak ({alive}% alive)").into_bytes())
+    } else {
+        (status.to_vec(), status.to_vec())
+    }
+}
+
 pub fn fleet_summary_lines(
     key: &[u8],
     reason: &[u8],
     chosen: c_int,
-    added: &[(Vec<u8>, c_int, Vec<u8>)],
+    added: &[FleetCopy],
 ) -> Vec<Vec<u8>> {
     let mut head = b"Fleet ".to_vec();
     head.extend_from_slice(key);
@@ -1077,10 +1097,11 @@ pub fn fleet_summary_lines(
     }
     head.extend_from_slice(&said.join(&b", "[..]));
     let mut counts: Vec<(Vec<u8>, usize)> = Vec::new();
-    for (_, _, status) in added {
-        match counts.iter_mut().find(|(s, _)| s == status) {
+    for (_, _, status, alive) in added {
+        let (group, _) = fleet_copy_outcome(status, *alive);
+        match counts.iter_mut().find(|(s, _)| *s == group) {
             Some((_, n)) => *n += 1,
-            None => counts.push((status.clone(), 1)),
+            None => counts.push((group, 1)),
         }
     }
     head.extend_from_slice(format!("; {} cop(ies)", added.len()).as_bytes());
@@ -1095,10 +1116,13 @@ pub fn fleet_summary_lines(
     prefix.extend_from_slice(key);
     prefix.extend_from_slice(b" from NzbDir, copies: ");
     let mut line = prefix.clone();
-    for (name, id, status) in added {
+    for (name, id, status, alive) in added {
         let mut item = crate::releasename::log_name(name);
+        if item.is_empty() {
+            item.extend_from_slice(b"(no name)");
+        }
         item.push(b' ');
-        item.extend_from_slice(status);
+        item.extend_from_slice(&fleet_copy_outcome(status, *alive).1);
         if *id > 0 {
             item.extend_from_slice(format!(" #{id}").as_bytes());
         }
@@ -1191,14 +1215,14 @@ fn spawn_nzbdir_fleet(
                         &mut reply,
                     );
                 }
-                for (name, id, _) in &reply.added {
+                for (name, id, _, _) in &reply.added {
                     if *id > 0 {
                         if let Some(c) = copies.iter().find(|c| c.0 == *name) {
                             let _ = std::fs::remove_file(crate::fsops::path(&c.2));
                         }
                     }
                 }
-                if fleet_never_ran(&reply.reason, reply.added.iter().any(|(_, id, _)| *id > 0)) {
+                if fleet_never_ran(&reply.reason, reply.added.iter().any(|(_, id, _, _)| *id > 0)) {
                     // the key was busy or the program stops: the next scan
                     // sends these copies again
                     for c in &copies {
@@ -2530,12 +2554,13 @@ mod tests {
     #[test]
     fn a_fleet_summary_is_split_never_cut() {
         let key = b"dupes:dune.part.two.2024.uhd.bluray.2160p.truehd.atmos.7.1.dv.hevc.remux.framestor";
-        let added: Vec<(Vec<u8>, c_int, Vec<u8>)> = (0..17)
+        let added: Vec<super::FleetCopy> = (0..17)
             .map(|i| {
                 (
                     format!("Dune.Part.Two.2024.UHD.BluRay.2160p.TrueHD.Atmos.7.1.DV.HEVC.REMUX-FraMeSToR_{i}.nzb").into_bytes(),
                     if i < 14 { 460 + i } else { 0 },
                     if i == 0 { b"QUEUED".to_vec() } else if i < 14 { b"BACKUP".to_vec() } else { b"SAME_POSTING".to_vec() },
+                    if i < 14 { 100 } else { -1 },
                 )
             })
             .collect();
@@ -2552,11 +2577,59 @@ mod tests {
         assert!(all.contains("FraMeSToR_16.nzb SAME_POSTING"));
         // a name longer than a line is cut, never inside a UTF-8 character
         let long = ("é".repeat(600) + ".nzb").into_bytes();
-        let cut = super::fleet_summary_lines(key, b"", 9, &[(long, 9, b"BACKUP".to_vec())]);
+        let cut = super::fleet_summary_lines(key, b"", 9, &[(long, 9, b"BACKUP".to_vec(), 100)]);
         assert!(cut.iter().all(|l| std::str::from_utf8(l).is_ok() && l.len() <= super::FLEET_SUMMARY_LINE_MAX));
         let none = super::fleet_summary_lines(key, b"KEY_BUSY", 0, &[]);
         assert_eq!(none.len(), 1);
         assert!(String::from_utf8_lossy(&none[0]).contains("from NzbDir: KEY_BUSY; 0 cop(ies)"));
+    }
+
+    /// B2b (6790, 2026-11-25): the summary called weak donors DEAD (_3 29%,
+    /// _5 6%, _13 5%) while their parameters and the web UI said N% alive.
+    /// Any alive article makes a donor: DEAD only for 0%; a backup under the
+    /// healthy share is "BACKUP (weak, N% alive)", a healthy or unverified one
+    /// plain BACKUP; a copy with no name still shows as one.
+    #[test]
+    fn a_fleet_summary_calls_weak_donors_weak_never_dead() {
+        let key = b"dupes:dune.part.two.2024";
+        let copy = |n: &str, id: c_int, status: &[u8], alive: c_int| -> super::FleetCopy {
+            (n.as_bytes().to_vec(), id, status.to_vec(), alive)
+        };
+        let added = vec![
+            copy("Dune_12.nzb", 1795, b"QUEUED", 100),
+            copy("Dune_1.nzb", 1786, b"BACKUP", 99),
+            copy("Dune_3.nzb", 1787, b"BACKUP", 29),
+            copy("Dune_5.nzb", 1788, b"BACKUP", 6),
+            copy("Dune_13.nzb", 1796, b"BACKUP", 5),
+            copy("Dune_7.nzb", 1790, b"DEAD", 0),
+            copy("Dune_8.nzb", 1791, b"BACKUP", -1),
+            copy("Dune_9.nzb", 0, b"WEAK", 20),
+            copy("", 1799, b"BACKUP", 100),
+        ];
+        let lines = super::fleet_summary_lines(key, b"", 1795, &added);
+        let first = String::from_utf8_lossy(&lines[0]).to_string();
+        assert!(
+            first.contains("9 cop(ies): 1 QUEUED, 3 BACKUP, 3 BACKUP (weak), 1 DEAD, 1 too weak"),
+            "{first}"
+        );
+        let all = lines[1..].iter().map(|l| String::from_utf8_lossy(l).to_string()).collect::<Vec<_>>().join("\n");
+        assert!(all.contains("Dune_3.nzb BACKUP (weak, 29% alive) #1787"), "{all}");
+        assert!(all.contains("Dune_5.nzb BACKUP (weak, 6% alive) #1788"), "{all}");
+        assert!(all.contains("Dune_13.nzb BACKUP (weak, 5% alive) #1796"), "{all}");
+        assert!(all.contains("Dune_7.nzb DEAD #1790"), "{all}");
+        assert!(all.contains("Dune_8.nzb BACKUP #1791"), "{all}");
+        assert!(all.contains("Dune_9.nzb too weak (20% alive)"), "{all}");
+        assert!(all.contains("Dune_1.nzb BACKUP #1786"), "{all}");
+        assert!(all.contains("(no name) BACKUP #1799"), "{all}");
+        assert!(!all.contains("copies: ;") && !all.contains(";  "), "{all}");
+        // the reply's own status: DEAD only for 0% alive
+        assert_eq!(crate::dupesearch_coord::fleet_added_status(true, 29).0, b"BACKUP");
+        assert!(String::from_utf8_lossy(&crate::dupesearch_coord::fleet_added_status(true, 29).1).contains("29%"));
+        assert_eq!(crate::dupesearch_coord::fleet_added_status(true, 0).0, b"DEAD");
+        assert_eq!(crate::dupesearch_coord::fleet_added_status(false, 99).0, b"BACKUP");
+        // not queued because no copy of the fleet can complete: WEAK, never DEAD
+        assert_eq!(crate::dupesearch_coord::fleet_unqueued_status(20).0, b"WEAK");
+        assert_eq!(crate::dupesearch_coord::fleet_unqueued_status(0).0, b"DEAD");
     }
     #[test]
     fn a_scan_folder_that_cannot_be_read_is_warned_about_once_until_it_works() {

@@ -2667,7 +2667,7 @@ impl PooledNntpConn {
 
     /// Counts an outcome on the server, unless the connection was cancelled
     /// (a stop is not the server's fault).
-    fn note_io(&self, ok: bool) {
+    pub(crate) fn note_io(&self, ok: bool) {
         if ok || !self.is_cancelled() {
             self.server.note_io(ok);
         }

@@ -1594,6 +1594,10 @@ pub(crate) fn nzb_completed_host(
     if dq_ptr == 0 || nzb_ptr.is_none() {
         return;
     }
+    // F2c: a primary leaving the queue keeps its own priority, not its
+    // fleet's raise, whatever its fleet or DupeCheck is now (nothing to do
+    // for a copy never raised)
+    crate::fleethold::unboost_host(host, nzb_ptr);
     let opts = host.opts();
     let nzb = host.nzb_snap(nzb_ptr, false);
 

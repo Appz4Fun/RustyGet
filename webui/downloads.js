@@ -294,7 +294,7 @@ var Downloads = (new function($)
 
 		var category = group.Category !== '' ? Util.textToHtml(group.Category) : '<span class="none-category">' + I18n.translate('label_none') + '</span>';
 		var backup = DownloadsUI.buildBackupLabel(group);
-		var dupeScore = DownloadsUI.buildDupeScoreLabel(group.DupeScore, DownloadsUI.shownHealth(group), group.Parameters);
+		var dupeScore = DownloadsUI.buildDupeScoreLabel(group.DupeScore, DownloadsUI.shownHealth(group), group.Parameters, true);
 
 		if (!UISettings.miniTheme)
 		{
@@ -1387,7 +1387,8 @@ var DownloadsUI = (new function($)
 			' <span class="label label-important">' + Util.textToHtml(I18n.translate('label_donor_dead')) + '</span>';
 	}
 
-	this.buildDupeScoreLabel = function(dupeScore, health, parameters)
+	// `queued`: a download in Downloads, whose fleet's live order counts
+	this.buildDupeScoreLabel = function(dupeScore, health, parameters, queued)
 	{
 		if (!dupeScore)
 		{
@@ -1400,6 +1401,16 @@ var DownloadsUI = (new function($)
 			// on, not a score that only orders the copies
 			var shown = Math.floor(health) / 10;
 			var fcls = shown >= 95 ? 'label-success' : shown >= 50 ? 'label-warning' : 'label-important';
+			// DupeFleet is the rank the probe gave when the copy was added; in
+			// Downloads the fleet's live order (DupeFleetOrder) replaces it, so a
+			// copy released by a failover shows "primary", not its old "#2"
+			var order = queued ? DownloadsUI.parameterValue(parameters, 'DupeFleetOrder') : '';
+			if (order !== '' && !isNaN(parseInt(order, 10)))
+			{
+				var place = DownloadsUI.fleetPosition({ Parameters: parameters });
+				return ' <span class="label ' + fcls + '" title="' + Util.textToAttr(I18n.translate('desc_fleet_place')) + '">' +
+					Util.textToHtml(I18n.translate('label_fleet_place', place, shown.toFixed(1))) + '</span>';
+			}
 			return ' <span class="label ' + fcls + '" title="' + Util.textToAttr(I18n.translate('desc_fleet_rank')) + '">' +
 				Util.textToHtml(I18n.translate('label_fleet_rank', rank, shown.toFixed(1))) + '</span>';
 		}

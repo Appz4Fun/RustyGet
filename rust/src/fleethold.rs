@@ -36,6 +36,16 @@ pub const HELD_PRIORITY: i32 = -100;
 /// The ids of the files a hold paused (comma separated): only these are
 /// resumed on release, so files the user paused and extra par2 volumes stay.
 pub const HELD_FILES_PARAM: &[u8] = b"DupeHeldFiles";
+/// F2c: the priority the fleet gave its primary so it downloads first (the
+/// scheduler takes the highest priority before the queue order, so the front
+/// of the queue alone loses to any item of a higher priority).
+pub const BOOST_PARAM: &[u8] = b"DupeFleetBoost";
+/// The priority the primary had before its fleet raised it ([`BOOST_PARAM`]),
+/// given back when the copy is held again or leaves its fleet.
+pub const OWN_PRIORITY_PARAM: &[u8] = b"DupeFleetOwnPriority";
+/// The highest priority a fleet gives its primary: just under force (900),
+/// which would download it even while downloads are paused.
+pub const PRIMARY_PRIORITY_MAX: i32 = 899;
 
 /// What the failover order is computed from, per held copy.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -191,6 +201,34 @@ pub fn released_priority(current: i32, stored: Option<i32>) -> i32 {
         current
     } else {
         stored.unwrap_or(0)
+    }
+}
+
+/// F2c: the priority a fleet's primary needs to download before every other
+/// queued item, or None when it keeps its own. `current` is its priority now,
+/// `boost` the one the fleet gave it last ([`BOOST_PARAM`], None when it never
+/// did) and `others` the priorities of the queued items it competes with (not
+/// held, not another fleet's primary). The scheduler takes the highest
+/// priority first and the queue order only among equals, so the primary goes
+/// one above the highest, never to force (900 and up, which downloads even
+/// while downloads are paused; an item there keeps winning). A priority the
+/// user set after the fleet raised it stays theirs.
+pub fn primary_priority(current: i32, boost: Option<i32>, others: &[i32]) -> Option<i32> {
+    if boost.is_some_and(|b| b != current) {
+        return None;
+    }
+    let top = others.iter().copied().filter(|&p| p <= PRIMARY_PRIORITY_MAX).max()?;
+    let want = top.saturating_add(1).min(PRIMARY_PRIORITY_MAX);
+    (want > current).then_some(want)
+}
+
+/// The priority to keep for a copy its fleet raised ([`primary_priority`]):
+/// its own from before while the raised one is still in place, else the
+/// current one (the user changed it since).
+pub fn unboosted_priority(current: i32, boost: Option<i32>, own: Option<i32>) -> i32 {
+    match (boost, own) {
+        (Some(b), Some(o)) if b == current => o,
+        _ => current,
     }
 }
 
@@ -434,12 +472,96 @@ mod host {
             .any(|q| q.ptr != exclude && !is_held(host, q.ptr))
     }
 
+    fn int_param(host: &QueueSubsysHost, ptr: NzbRef, name: &[u8]) -> Option<i32> {
+        host.nzb_get_param(ptr, name)
+            .and_then(|v| std::str::from_utf8(&v).ok()?.trim().parse::<i32>().ok())
+    }
+
+    /// The copy's priority without its fleet's raise ([`unboosted_priority`]),
+    /// the raise's marks gone.
+    fn drop_boost(host: &QueueSubsysHost, ptr: NzbRef, current: i32) -> i32 {
+        let own = unboosted_priority(
+            current,
+            int_param(host, ptr, BOOST_PARAM),
+            int_param(host, ptr, OWN_PRIORITY_PARAM),
+        );
+        host.nzb_set_param(ptr, BOOST_PARAM, None);
+        host.nzb_set_param(ptr, OWN_PRIORITY_PARAM, None);
+        own
+    }
+
+    /// A primary whose fleet ends (it succeeded, or it failed and goes to
+    /// history) gets its own priority back and loses the raise's marks, so
+    /// post-processing order, History and a later return from it never see
+    /// the raise.
+    pub(crate) fn unboost_host(host: &QueueSubsysHost, ptr: NzbRef) {
+        if host.nzb_get_param(ptr, BOOST_PARAM).is_none() {
+            return;
+        }
+        let current = host.nzb_snap(ptr, false).priority;
+        let own = drop_boost(host, ptr, current);
+        host.nzb_set_int(ptr, crate::queuesubsys_host::NZB_INT_PRIORITY, own);
+        host.nzb_set_int(ptr, crate::queuesubsys_host::NZB_INT_CHANGED, 1);
+    }
+
+    /// F2c: raises a downloading copy of `key` (its primary) above every other
+    /// queued item ([`primary_priority`]), so it downloads at once whatever
+    /// the priorities of the rest of the queue. Returns whether it changed.
+    pub(crate) fn boost_primary_host(host: &QueueSubsysHost, dq_ptr: usize, key: &[u8], ptr: NzbRef) -> bool {
+        let q = host.nzb_snap(ptr, false);
+        let mut others = Vec::new();
+        for i in 0..host.queue_len(dq_ptr) {
+            let qp = host.queue_at(dq_ptr, i);
+            if qp.is_none() || qp == ptr {
+                continue;
+            }
+            let o = host.nzb_snap(qp, false);
+            // only what competes for the download: not this fleet, not a
+            // held copy, not another fleet's primary (two fleets would raise
+            // each other in turn), not an item paused whole
+            if o.kind != crate::queuesubsys_host::NK_NZB
+                || o.deleting
+                || o.delete_status != DeleteStatus::None
+                || o.dupe_key.eq_ignore_ascii_case(key)
+                || is_held(host, qp)
+                || host.nzb_get_param(qp, BOOST_PARAM).is_some()
+                // another fleet's primary by its role, raised or not: two
+                // fleets keep their own order and never leapfrog
+                || (holds_in_queue(host, &o) && host.nzb_get_param(qp, ORDER_PARAM).as_deref() == Some(b"0"))
+                || host.nzb_file_len(qp) as i32 == o.paused_file_count
+            {
+                continue;
+            }
+            others.push(o.priority);
+        }
+        let boost = int_param(host, ptr, BOOST_PARAM);
+        let Some(want) = primary_priority(q.priority, boost, &others) else {
+            return false;
+        };
+        if boost.is_none() {
+            host.nzb_set_param(ptr, OWN_PRIORITY_PARAM, Some(q.priority.to_string().as_bytes()));
+        }
+        host.nzb_set_param(ptr, BOOST_PARAM, Some(want.to_string().as_bytes()));
+        host.nzb_set_int(ptr, crate::queuesubsys_host::NZB_INT_PRIORITY, want);
+        let mut msg = b"Raising ".to_vec();
+        msg.extend_from_slice(&q.name);
+        msg.extend_from_slice(
+            format!(" to priority {want}, above every other queued item: the primary of its fleet downloads first")
+                .as_bytes(),
+        );
+        host.nzb_print_message(ptr, crate::queuesubsys_host::MK_INFO, &crate::releasename::log_name(&msg));
+        host.nzb_set_int(ptr, crate::queuesubsys_host::NZB_INT_CHANGED, 1);
+        true
+    }
+
     /// Holds a queued copy: paused, at the lowest priority, marked [`HELD_PARAM`].
     /// A copy already in the queue records the files the hold paused
     /// ([`HELD_FILES_PARAM`]), so a release resumes only those.
     pub(crate) fn hold_host(host: &QueueSubsysHost, dq_ptr: usize, q: &NzbSnap, why: &[u8]) {
         if !is_held(host, q.ptr) {
-            host.nzb_set_param(q.ptr, HELD_PRIORITY_PARAM, Some(q.priority.to_string().as_bytes()));
+            // a primary held again keeps its own priority, not its fleet's raise
+            let own = drop_boost(host, q.ptr, q.priority);
+            host.nzb_set_param(q.ptr, HELD_PRIORITY_PARAM, Some(own.to_string().as_bytes()));
             if host.queue_find_by_id(dq_ptr, q.id).is_some() {
                 let mut paused_now = Vec::new();
                 for i in 0..host.nzb_file_len(q.ptr) {
@@ -473,11 +595,13 @@ mod host {
     /// Its files stay as they are.
     pub(crate) fn leave_fleet_host(host: &QueueSubsysHost, ptr: NzbRef) {
         let q = host.nzb_snap(ptr, false);
-        let stored = host
-            .nzb_get_param(ptr, HELD_PRIORITY_PARAM)
-            .and_then(|v| std::str::from_utf8(&v).ok()?.trim().parse::<i32>().ok());
+        let stored = int_param(host, ptr, HELD_PRIORITY_PARAM);
         if stored.is_some() || is_held(host, ptr) {
             host.nzb_set_int(ptr, crate::queuesubsys_host::NZB_INT_PRIORITY, released_priority(q.priority, stored));
+        } else if host.nzb_get_param(ptr, BOOST_PARAM).is_some() {
+            // a primary leaving its fleet gets its own priority back
+            let own = drop_boost(host, ptr, q.priority);
+            host.nzb_set_int(ptr, crate::queuesubsys_host::NZB_INT_PRIORITY, own);
         }
         for name in [HELD_PARAM, HELD_PRIORITY_PARAM, PROBING_PARAM, HELD_FILES_PARAM] {
             host.nzb_set_param(ptr, name, None);
@@ -580,6 +704,7 @@ mod host {
             }
             end_fleet_host(host, dq_ptr, &nzb.dupe_key, nzb.ptr);
         }
+        unboost_host(host, nzb.ptr);
         host.nzb_set_delete_status(nzb.ptr, DeleteStatus::Health);
         host.dq_edit_entry(
             dq_ptr,
@@ -647,6 +772,7 @@ mod host {
     /// The primary of a fleet succeeded: every other queued copy goes to
     /// history as DELETED/DUPE (its nzb kept), whatever the HealthCheck mode.
     pub(crate) fn fleet_succeeded_host(host: &QueueSubsysHost, dq_ptr: usize, nzb: &NzbSnap) {
+        unboost_host(host, nzb.ptr);
         if !holds_in_queue(host, nzb) {
             return;
         }
@@ -755,6 +881,16 @@ mod host {
         let primary = active.first().map_or(0, |q| q.id).to_string();
         let mut changed = false;
         for q in active {
+            // F2c: the fleet's download goes before every other queued item,
+            // also after a failover (each refresh looks again)
+            if !q.has_post_info {
+                changed |= boost_primary_host(host, dq_ptr, &q.dupe_key, q.ptr);
+            } else if host.nzb_get_param(q.ptr, BOOST_PARAM).is_some() {
+                // downloaded: post-processing (and History after it) sees its
+                // own priority, whatever way it ends
+                unboost_host(host, q.ptr);
+                changed = true;
+            }
             changed |= set_if_changed(host, q.ptr, ORDER_PARAM, b"0");
             changed |= set_if_changed(host, q.ptr, PRIMARY_PARAM, primary.as_bytes());
         }
@@ -907,6 +1043,30 @@ mod tests {
         assert_eq!(released_priority(100, Some(50)), 100);
         assert_eq!(parse_held_files(held_files_param(&[3, 17, 40]).as_bytes()), vec![3, 17, 40]);
         assert!(parse_held_files(b"").is_empty());
+    }
+
+    /// F2c (6790, 2026-11-25): a primary released at priority 0 sat QUEUED for
+    /// 45 minutes behind items at 47-96. It goes one above the highest queued
+    /// item, never to force, and a priority the user set after the raise stays.
+    #[test]
+    fn the_primary_goes_above_every_queued_priority() {
+        assert_eq!(primary_priority(0, None, &[47, 96, 50]), Some(97));
+        assert_eq!(primary_priority(0, None, &[]), None, "nothing to beat");
+        assert_eq!(primary_priority(100, None, &[47, 96]), None, "already first");
+        assert_eq!(primary_priority(96, None, &[96]), Some(97), "ties go by queue order: one above");
+        // force items run anyway; the primary stays under force
+        assert_eq!(primary_priority(0, None, &[900, 50]), Some(51));
+        assert_eq!(primary_priority(0, None, &[899]), Some(899));
+        assert_eq!(primary_priority(899, None, &[899]), None);
+        // a newer item above the raise: raised again
+        assert_eq!(primary_priority(97, Some(97), &[120]), Some(121));
+        // the user changed the raised priority: theirs stays
+        assert_eq!(primary_priority(10, Some(97), &[120]), None);
+        // held again or leaving the fleet: its own priority back, unless the
+        // user changed it since the raise
+        assert_eq!(unboosted_priority(97, Some(97), Some(0)), 0);
+        assert_eq!(unboosted_priority(50, Some(97), Some(0)), 50);
+        assert_eq!(unboosted_priority(50, None, None), 50);
     }
 
     /// Re-review 1: a nested end or refresh of a key already being handled

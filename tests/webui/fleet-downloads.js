@@ -126,6 +126,30 @@ function fleetHistory(history) {
         await shot('collapsed');
       });
 
+      // 6790 (2026-11-25): after a failover the new primary's pill said "#2",
+      // the rank its probe gave when it was added (DupeFleet). In Downloads
+      // the pill shows the fleet's live place (DupeFleetOrder); History keeps
+      // the probe's rank.
+      await check('the primary pill shows its live place, not the probe rank', async () => {
+        const row = await fleetRows().first().innerText();
+        assert.match(row, /primary · 99\.0% alive/i);
+        assert.doesNotMatch(row, /#1 · /);
+        const pills = await page.evaluate(() => {
+          const p = map => Object.entries(map).map(([Name, Value]) => ({ Name, Value }));
+          const failedOver = p({ DupeFleet: '2', DupeFleetOrder: '0', DupeAlive: '98.5' });
+          return [
+            DownloadsUI.buildDupeScoreLabel(96, 985, failedOver, true),
+            DownloadsUI.buildDupeScoreLabel(96, 985, failedOver, false),
+            DownloadsUI.buildDupeScoreLabel(96, 985, p({ DupeFleet: '3', DupeFleetOrder: '1', DupeAlive: '98' }), true),
+            DownloadsUI.buildDupeScoreLabel(96, 985, p({ DupeFleet: '3' }), true)];
+        });
+        assert.match(pills[0], />primary · 98\.5% alive</);
+        assert.doesNotMatch(pills[0], /#2/);
+        assert.match(pills[1], />#2 · 98\.5% alive</, 'History keeps the probe rank');
+        assert.match(pills[2], />next · 98\.5% alive</);
+        assert.match(pills[3], />#3 · 98\.5% alive</, 'no live order: the probe rank');
+      });
+
       await check('expanded: every member in failover order with label and state', async () => {
         await toggle().click();
         await page.locator('#DownloadsTable .fleet-sublist .fleet-sub').first().waitFor();

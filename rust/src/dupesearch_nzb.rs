@@ -712,6 +712,10 @@ pub fn eval_fleet_member_health(
     };
     let alive_pct = if alive < 0.0 {
         -1
+    } else if present > 0 {
+        // any alive article makes a donor (F3, F15): never rounded down to
+        // 0%, which reads as dead everywhere the share is shown
+        ((100.0 * alive).round() as i32).max(1)
     } else {
         (100.0 * alive).round() as i32
     };
@@ -1882,6 +1886,10 @@ where
     out
 }
 
+/// How often a fetch waiting for its article looks at its deadline and the
+/// stop flags, in ms (the article itself is handed over at once).
+const FETCH_STOP_CHECK_MS: u64 = 100;
+
 /// Fetches one article, giving up at `deadline` (unix seconds) or a stop.
 pub fn fetch_article_until<N, S, F, C>(
     message_id: &[u8],
@@ -1902,30 +1910,41 @@ where
         return FetchedArticleResult::default();
     }
     let bracketed_id = crate::nntp::nntp_health_format_bracketed_id(message_id);
-    let done = std::sync::atomic::AtomicBool::new(false);
     let mut out = FetchedArticleResult::default();
+    // the article comes back over a channel the moment it is read (it used to
+    // be polled for every 20 ms, up to 20 ms lost per read); the wait wakes
+    // only to see the deadline or a stop
+    let (tx, rx) = std::sync::mpsc::channel::<Option<FetchedArticleResult>>();
     std::thread::scope(|s| {
-        let done_ref = &done;
-        let out_ref = &mut out;
         let id_slice = bracketed_id.as_slice();
         let handle = s.spawn(move || {
-            if let Ok(res) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                fetch_fn(id_slice, groups)
-            })) {
-                if let Ok(article) = res {
-                    *out_ref = article;
-                }
-            }
-            done_ref.store(true, std::sync::atomic::Ordering::SeqCst);
+            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fetch_fn(id_slice, groups)));
+            let _ = tx.send(match res {
+                Ok(Ok(article)) => Some(article),
+                _ => None,
+            });
         });
-        while !done.load(std::sync::atomic::Ordering::SeqCst)
-            && now_fn() < deadline
-            && !stopped_fn()
-            && !donor_stopping()
-        {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        if !done.load(std::sync::atomic::Ordering::SeqCst) {
+        let done = loop {
+            if stopped_fn() || donor_stopping() {
+                break false;
+            }
+            let left_sec = deadline - now_fn();
+            if left_sec <= 0 {
+                break false;
+            }
+            let wait = std::time::Duration::from_millis((left_sec as u64).saturating_mul(1000).min(FETCH_STOP_CHECK_MS));
+            match rx.recv_timeout(wait) {
+                Ok(article) => {
+                    if let Some(article) = article {
+                        out = article;
+                    }
+                    break true;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break true,
+            }
+        };
+        if !done {
             stop_fetch_fn();
         }
         let _ = handle.join();
@@ -4810,6 +4829,68 @@ mod tests {
         assert_eq!(eval_fleet_member_health(true, true, 2, 0, 18, 5, 80), (-1, false, false));
         assert_eq!(eval_fleet_member_health(true, true, 10, 0, 30, 5, 80), (100, false, true));
         assert_eq!(eval_fleet_member_health(true, true, 0, 10, 30, 5, 80), (0, true, true));
+    }
+
+    /// Probe speed: a fetched article is handed over the moment it is read.
+    /// The old wait polled every 20 ms, so 50 instant reads took about a
+    /// second; a read that never ends is stopped at its deadline.
+    #[test]
+    fn a_fetched_article_is_handed_over_at_once() {
+        let _donor_guard = DONOR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        donor_reset();
+        let start = std::time::Instant::now();
+        for _ in 0..50 {
+            let got = fetch_article_until(
+                b"a@x",
+                &[],
+                i64::MAX,
+                || 0,
+                || false,
+                |_, _| Ok(FetchedArticleResult { success: true, data: b"x".to_vec(), ..Default::default() }),
+                || {},
+            );
+            assert!(got.success);
+        }
+        let took = start.elapsed();
+        assert!(took < std::time::Duration::from_millis(800), "50 reads took {took:?}");
+
+        // a read that hangs until it is stopped: stopped at its deadline
+        let stop = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let (s1, s2) = (stop.clone(), stop.clone());
+        let base = std::time::Instant::now();
+        let got = fetch_article_until(
+            b"a@x",
+            &[],
+            1,
+            move || base.elapsed().as_secs() as i64,
+            || false,
+            move |_, _| {
+                let (m, c) = &*s1;
+                let mut stopped = m.lock().unwrap();
+                while !*stopped {
+                    stopped = c.wait(stopped).unwrap();
+                }
+                Ok(FetchedArticleResult { success: true, ..Default::default() })
+            },
+            move || {
+                let (m, c) = &*s2;
+                *m.lock().unwrap() = true;
+                c.notify_all();
+            },
+        );
+        assert!(!got.success, "past its deadline: nothing");
+        let waited = base.elapsed();
+        assert!(waited >= std::time::Duration::from_millis(900) && waited < std::time::Duration::from_secs(3), "{waited:?}");
+    }
+
+    /// B2b: a copy with any alive article is never 0% (which reads as dead):
+    /// 1 of 300 sampled articles alive is 1%, still under DupeMinAlive, so it
+    /// does not lead, but it stays a donor. Only 0 alive is 0%.
+    #[test]
+    fn a_copy_with_any_alive_article_is_never_zero_percent() {
+        assert_eq!(eval_fleet_member_health(true, true, 1, 299, 0, 5, 10), (1, true, true));
+        assert_eq!(eval_fleet_member_health(true, true, 5, 95, 0, 5, 10), (5, true, true));
+        assert_eq!(eval_fleet_member_health(true, true, 0, 300, 0, 5, 10), (0, true, true));
     }
 
     #[test]

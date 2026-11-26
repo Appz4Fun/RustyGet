@@ -2686,6 +2686,14 @@
     "message": "Place in the fleet (1 downloads first) and the share of its articles the check found alive",
     "description": "Tooltip of the fleet member pill."
   },
+  "label_fleet_place": {
+    "message": "$1 · $2% alive",
+    "description": "Fleet member pill in Downloads: $1 its place in the fleet's failover order now (\"primary\", \"next\" or a number), $2 the alive share its health check measured."
+  },
+  "desc_fleet_place": {
+    "message": "Place in the fleet now (the primary downloads; failover takes the next) and the share of its articles the check found alive",
+    "description": "Tooltip of the fleet member pill in Downloads."
+  },
   "status_projected_health": {
     "message": "projected health: $1%",
     "description": "Status label. Health judged from the articles tried so far. $1 is the projected health percentage."

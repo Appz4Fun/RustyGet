@@ -295,6 +295,52 @@ fn c_buf(bytes: &[u8]) -> Vec<u8> {
     v
 }
 
+/// Most STATs a probe sends before it reads their answers (pipelined).
+pub const STAT_PIPELINE_DEPTH: usize = 16;
+
+/// The samples a probe asks at once from `start` (pipelined): the ones not
+/// found yet, at most [`STAT_PIPELINE_DEPTH`]; on a server that needs its
+/// group joined, only those of the group joined for `start`'s sample.
+pub fn stat_batch(samples: &[ProbeSample], found: &[bool], start: usize, join_group: bool) -> Vec<usize> {
+    let mut out = Vec::new();
+    for i in start..samples.len() {
+        if out.len() >= STAT_PIPELINE_DEPTH {
+            break;
+        }
+        if found.get(i).copied().unwrap_or(false) {
+            continue;
+        }
+        if (join_group && i != start && samples[i].groups != samples[start].groups)
+            || !pipelinable(&samples[i].message_id)
+        {
+            break;
+        }
+        out.push(i);
+    }
+    out
+}
+
+/// Whether a message-id can be sent in a pipelined STAT: no byte that could
+/// end the command or start another (CR, LF, NUL, space, tab), at most 250
+/// bytes as RFC 3977 allows plus its brackets.
+pub fn pipelinable(message_id: &[u8]) -> bool {
+    !message_id.is_empty()
+        && message_id.len() <= 252
+        && !message_id.iter().any(|&b| matches!(b, b'\r' | b'\n' | 0 | b' ' | b'\t'))
+}
+
+/// `STAT <id>` with its line end, never past 1023 bytes nor past a NUL in
+/// the id (as the single request was sent).
+pub fn stat_command(message_id: &[u8]) -> Vec<u8> {
+    let id = message_id.split(|&b| b == 0).next().unwrap_or(&[]);
+    let mut cmd = Vec::with_capacity(id.len() + 7);
+    cmd.extend_from_slice(b"STAT ");
+    cmd.extend_from_slice(id);
+    cmd.truncate(1021);
+    cmd.extend_from_slice(b"\r\n");
+    cmd
+}
+
 #[cfg(unix)]
 unsafe fn bytes_from_ptr(p: *const c_char) -> Vec<u8> {
     if p.is_null() {
@@ -483,18 +529,27 @@ impl NzbgetRsDupeProbe {
                 conn.prepare_for_use();
             }
 
-            let mut remaining = self.samples.len() as i32;
-            for index in 0..self.samples.len() {
+            let n = self.samples.len();
+            let mut index = 0usize;
+            'walk: while index < n {
                 if self.is_stopped() {
                     break;
                 }
-                remaining -= 1;
                 if self.found[index] {
+                    index += 1;
+                    continue;
+                }
+                if !pipelinable(&self.samples[index].message_id) {
+                    // an id that could carry a second command (CR, LF, a
+                    // space) or is longer than a message-id may be is never
+                    // sent: unknown, never evidence
+                    result.unknown += 1;
+                    index += 1;
                     continue;
                 }
 
                 if !unsafe { conn.connect() } {
-                    result.unknown += remaining + 1;
+                    result.unknown += (n - index) as i32;
                     never_answered = result.exists + result.missing == 0;
                     // a light connection that could not connect proves nothing
                     // about the server: unknown, never fewer servers to a dead verdict
@@ -523,7 +578,7 @@ impl NzbgetRsDupeProbe {
                         None => false,
                     };
                     if !joined_ok {
-                        result.unknown += remaining + 1;
+                        result.unknown += (n - index) as i32;
                         if joined.is_none() {
                             unsafe {
                                 conn.disconnect();
@@ -533,48 +588,100 @@ impl NzbgetRsDupeProbe {
                     }
                 }
 
-                let mut cmd = Vec::with_capacity(self.samples[index].message_id.len() + 8);
-                cmd.extend_from_slice(b"STAT ");
-                cmd.extend_from_slice(&self.samples[index].message_id);
-                cmd.extend_from_slice(b"\r\n");
-                if cmd.len() >= 1024 {
-                    cmd.truncate(1023);
+                // the samples left from here, asked at once (pipelined): one
+                // round trip for the batch instead of one per article
+                let batch = stat_batch(&self.samples, &self.found, index, join_group);
+                let mut cmds = Vec::with_capacity(batch.len() * 64);
+                for &i in &batch {
+                    cmds.extend_from_slice(&stat_command(&self.samples[i].message_id));
                 }
-                let cmd_c = c_buf(&cmd);
-                let ans = unsafe { conn.request(cmd_c.as_ptr() as *const c_char) };
-                if ans.is_null() {
+                if !unsafe { conn.send_bytes(&cmds) } {
+                    conn.note_io(false);
                     unsafe {
                         conn.disconnect();
                     }
-                    result.unknown += remaining + 1;
+                    result.unknown += (n - index) as i32;
                     break;
                 }
-
-                let resp = unsafe { bytes_from_ptr(ans) };
-                match classify(Some(&resp)) {
-                    DUPE_PROBE_EXISTS => {
-                        result.exists += 1;
-                        self.found[index] = true;
-                        if self.found_on.is_empty() {
-                            self.found_on.extend_from_slice(&server_name);
-                            self.found_on.extend_from_slice(b" (");
-                            self.found_on
-                                .extend_from_slice(&self.samples[index].message_id);
-                            self.found_on.push(b')');
+                let mut answers: Vec<i32> = Vec::with_capacity(batch.len());
+                let mut line = [0u8; 1024];
+                for _ in &batch {
+                    match unsafe { conn.read_line(&mut line) } {
+                        // only a whole line is an answer: one that fills the
+                        // buffer has more behind it, one without its end was
+                        // cut by a close; either way stop here
+                        Some(len) if len > 0 && len < line.len() - 1 && line[len - 1] == b'\n' => answers.push(classify(Some(&line[..len]))),
+                        _ => break,
+                    }
+                }
+                let read_all = answers.len() == batch.len();
+                // the light reserve's flakiness check counts what the server
+                // did: one outcome per answer, as one request each did
+                for _ in &answers {
+                    conn.note_io(true);
+                }
+                let mut broken = !read_all;
+                if broken {
+                    conn.note_io(false);
+                    // out of step or closed: never handed to the next borrower
+                    unsafe {
+                        conn.disconnect();
+                    }
+                }
+                for (k, &i) in batch.iter().enumerate() {
+                    let Some(&read) = answers.get(k) else {
+                        // never answered (the connection broke in the batch):
+                        // this and every sample after it unknown
+                        result.unknown += (n - i) as i32;
+                        break 'walk;
+                    };
+                    let mut cls = read;
+                    if cls == DUPE_PROBE_UNKNOWN && !broken {
+                        // an answer that is neither (a login asked for again,
+                        // a busy server): asked alone, the way that logs in
+                        // again and resends
+                        let cmd_c = c_buf(&stat_command(&self.samples[i].message_id));
+                        let ans = unsafe { conn.request(cmd_c.as_ptr() as *const c_char) };
+                        if ans.is_null() {
+                            unsafe {
+                                conn.disconnect();
+                            }
+                            // the answers already read still count
+                            broken = true;
+                        } else {
+                            cls = classify(Some(&unsafe { bytes_from_ptr(ans) }));
                         }
                     }
-                    DUPE_PROBE_MISSING => {
-                        result.missing += 1;
+                    match cls {
+                        DUPE_PROBE_EXISTS => {
+                            result.exists += 1;
+                            self.found[i] = true;
+                            if self.found_on.is_empty() {
+                                self.found_on.extend_from_slice(&server_name);
+                                self.found_on.extend_from_slice(b" (");
+                                self.found_on.extend_from_slice(&self.samples[i].message_id);
+                                self.found_on.push(b')');
+                            }
+                        }
+                        DUPE_PROBE_MISSING => {
+                            result.missing += 1;
+                        }
+                        _ => {
+                            result.unknown += 1;
+                        }
                     }
-                    _ => {
-                        result.unknown += 1;
+                    let found_count = self.found.iter().filter(|&&b| b).count() as i32;
+                    if !self.count_all && found_count >= MIN_ALIVE_SAMPLES {
+                        break 'walk;
                     }
                 }
-
-                let found_count = self.found.iter().filter(|&&b| b).count() as i32;
-                if !self.count_all && found_count >= MIN_ALIVE_SAMPLES {
+                let next = batch.last().map_or(index + 1, |&last| last + 1);
+                if broken {
+                    // the connection is gone: the samples after the batch unknown
+                    result.unknown += (n - next) as i32;
                     break;
                 }
+                index = next;
             }
             probed_server = !never_answered;
         }
@@ -897,6 +1004,230 @@ mod tests {
         assert_eq!(pool.light_status(), vec![(7, size, 0)]);
         assert_eq!(pool.connections_in_use(), 0);
         out
+    }
+
+    /// Probe speed: a probe sends its STATs at once and reads the answers
+    /// after (pipelined). The fake server waits 60 ms before answering each
+    /// chunk it reads: ten STATs one by one took ten waits, pipelined they take
+    /// one or two. An answer that is neither present nor missing ("503") is
+    /// asked again alone. The batches skip found samples and stop at a group
+    /// change on a server that joins groups.
+    #[cfg(unix)]
+    #[test]
+    fn a_probe_pipelines_its_stats() {
+        use std::sync::Arc;
+        let chunks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let port = fake_stat_server(Arc::clone(&chunks));
+        let pool = crate::net::NzbgetRsServerPool::new(crate::ffi::tls_host());
+        let srv = Arc::new(crate::net::RsNewsServer::new(
+            9, true, b"s9", b"127.0.0.1", port as i32, 0, b"", b"", false, false, b"", 4, 0, 0, 0, false, 0,
+        ));
+        pool.add_server(Arc::clone(&srv));
+        pool.init_connections();
+        let mut probe = NzbgetRsDupeProbe::new(1, true, 0);
+        for i in 0..8 {
+            probe.add_sample(format!("<gone{i}@x>").into_bytes(), Vec::new());
+        }
+        probe.add_sample(b"<alive1@x>".to_vec(), Vec::new());
+        probe.add_sample(b"<busy@x>".to_vec(), Vec::new());
+        let mut probed = BTreeSet::new();
+        let start = std::time::Instant::now();
+        let (reached, result) = probe.probe_server_native(&pool, 9, &mut probed);
+        let took = start.elapsed();
+        assert!(reached);
+        assert_eq!((result.exists, result.missing, result.unknown), (2, 8, 0), "{result:?}");
+        // one chunk for the batch, one for the busy sample asked alone
+        let sent = chunks.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(sent <= 3, "{sent} chunks: not pipelined");
+        // the chunk count above is the proof; the time only catches a stall
+        assert!(took < std::time::Duration::from_secs(3), "{took:?}");
+
+        // review: without count_all the probe stops once enough are found (it
+        // reads the whole batch first, so the connection stays in step, and
+        // counts nothing past the find that was enough, as before), and an id
+        // that could carry a second command is never sent: unknown
+        let chunks2 = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let port2 = fake_stat_server(Arc::clone(&chunks2));
+        let pool2 = crate::net::NzbgetRsServerPool::new(crate::ffi::tls_host());
+        let srv2 = Arc::new(crate::net::RsNewsServer::new(
+            10, true, b"s10", b"127.0.0.1", port2 as i32, 0, b"", b"", false, false, b"", 4, 0, 0, 0, false, 0,
+        ));
+        pool2.add_server(Arc::clone(&srv2));
+        pool2.init_connections();
+        let mut early = NzbgetRsDupeProbe::new(2, false, 0);
+        early.add_sample(b"<x@y>\r\nQUIT".to_vec(), Vec::new());
+        early.add_sample(b"<alive1@x>".to_vec(), Vec::new());
+        early.add_sample(b"<alive2@x>".to_vec(), Vec::new());
+        early.add_sample(b"<gone1@x>".to_vec(), Vec::new());
+        let mut probed2 = BTreeSet::new();
+        let (reached2, r2) = early.probe_server_native(&pool2, 10, &mut probed2);
+        assert!(reached2);
+        assert_eq!((r2.exists, r2.missing, r2.unknown), (2, 0, 1), "{r2:?}");
+        assert!(early.found[1] && early.found[2] && !early.found[0]);
+        assert_eq!(pool2.connections_in_use(), 0);
+        assert!(!pipelinable(b"<a b>") && !pipelinable(b"<a\nb>") && !pipelinable(&[b'x'; 300]));
+        assert!(pipelinable(b"<part1of9.abc@news.example>"));
+        pipeline_batch_rules();
+    }
+
+    /// A fake news server for [`a_probe_pipelines_its_stats`]: answers STAT
+    /// for `<alive…>` and (the second time) `<busy@x>` with 223, else 430,
+    /// waiting 60 ms before each chunk of lines it reads (counted in `chunks`).
+    #[cfg(unix)]
+    fn fake_stat_server(chunks: std::sync::Arc<std::sync::atomic::AtomicUsize>) -> u16 {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let chunks_srv = chunks;
+        std::thread::spawn(move || {
+            let (sock, _) = listener.accept().unwrap();
+            let mut out = sock.try_clone().unwrap();
+            out.write_all(b"200 fake ready\r\n").unwrap();
+            let mut reader = BufReader::new(sock);
+            let mut asked_busy = false;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    break;
+                }
+                // one wait per chunk the client sent: a pipelined batch waits once
+                let mut lines = vec![line];
+                while !reader.buffer().is_empty() {
+                    let mut more = String::new();
+                    if reader.read_line(&mut more).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    lines.push(more);
+                }
+                chunks_srv.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(60));
+                for l in lines {
+                    let reply: &[u8] = if l.starts_with("QUIT") {
+                        b"205 bye\r\n"
+                    } else if l.contains("<busy@x>") && !asked_busy {
+                        asked_busy = true;
+                        b"503 try again\r\n"
+                    } else if l.contains("<busy@x>") || l.contains("<alive") {
+                        b"223 0 <x>\r\n"
+                    } else {
+                        b"430 no such article\r\n"
+                    };
+                    let _ = out.write_all(reply);
+                }
+            }
+        });
+        port
+    }
+
+    /// Review: a server that answers part of a batch and closes (here two 223
+    /// lines for four STATs) is never handed on in that state, even when the
+    /// answers it gave were enough to stop: the connection is closed, the rest
+    /// unknown.
+    #[cfg(unix)]
+    #[test]
+    fn a_short_answer_closes_the_connection() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::sync::Arc;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (sock, _) = listener.accept().unwrap();
+            let mut out = sock.try_clone().unwrap();
+            out.write_all(b"200 fake ready\r\n").unwrap();
+            let mut reader = BufReader::new(sock);
+            let mut line = String::new();
+            let _ = reader.read_line(&mut line);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let _ = out.write_all(b"223 0 <a>\r\n223 0 <b>\r\n");
+            let _ = out.shutdown(std::net::Shutdown::Both);
+        });
+        let pool = crate::net::NzbgetRsServerPool::new(crate::ffi::tls_host());
+        let srv = Arc::new(crate::net::RsNewsServer::new(
+            11, true, b"s11", b"127.0.0.1", port as i32, 0, b"", b"", false, false, b"", 4, 0, 0, 0, false, 0,
+        ));
+        pool.add_server(Arc::clone(&srv));
+        pool.init_connections();
+        let mut probe = NzbgetRsDupeProbe::new(3, false, 0);
+        for id in ["<alive1@x>", "<alive2@x>", "<c@x>", "<d@x>"] {
+            probe.add_sample(id.as_bytes().to_vec(), Vec::new());
+        }
+        let mut probed = BTreeSet::new();
+        let (reached, result) = probe.probe_server_native(&pool, 11, &mut probed);
+        assert!(reached);
+        assert_eq!(result.exists, 2, "{result:?}");
+        assert_eq!(result.missing, 0, "{result:?}");
+        assert_eq!(pool.connections_in_use(), 0);
+        let conn = pool.get_check_connection_by_server_id(11);
+        assert!(!conn.is_null());
+        // SAFETY: just handed out by the pool, given back below
+        assert!(!unsafe { &*conn }.is_connected(), "a short batch closes its connection");
+        pool.free_connection(conn, false);
+    }
+
+    /// Review: when asking an unclear answer again alone fails (the server
+    /// closes), the answers of the batch already read still count.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_retry_keeps_the_answers_read() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::sync::Arc;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (sock, _) = listener.accept().unwrap();
+            let mut out = sock.try_clone().unwrap();
+            out.write_all(b"200 fake ready\r\n").unwrap();
+            let mut reader = BufReader::new(sock);
+            let mut line = String::new();
+            let _ = reader.read_line(&mut line);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            while !reader.buffer().is_empty() {
+                let mut more = String::new();
+                if reader.read_line(&mut more).unwrap_or(0) == 0 {
+                    break;
+                }
+            }
+            let _ = out.write_all(b"503 busy\r\n223 0 <b>\r\n430 no\r\n");
+            // the retry of the first: closed instead of answered
+            let mut retry = String::new();
+            let _ = reader.read_line(&mut retry);
+            let _ = out.shutdown(std::net::Shutdown::Both);
+        });
+        let pool = crate::net::NzbgetRsServerPool::new(crate::ffi::tls_host());
+        let srv = Arc::new(crate::net::RsNewsServer::new(
+            12, true, b"s12", b"127.0.0.1", port as i32, 0, b"", b"", false, false, b"", 4, 0, 0, 0, false, 0,
+        ));
+        pool.add_server(Arc::clone(&srv));
+        pool.init_connections();
+        let mut probe = NzbgetRsDupeProbe::new(4, true, 0);
+        for id in ["<a@x>", "<b@x>", "<c@x>"] {
+            probe.add_sample(id.as_bytes().to_vec(), Vec::new());
+        }
+        let mut probed = BTreeSet::new();
+        let (_, result) = probe.probe_server_native(&pool, 12, &mut probed);
+        assert_eq!((result.exists, result.missing, result.unknown), (1, 1, 1), "{result:?}");
+        assert_eq!(pool.connections_in_use(), 0);
+    }
+
+    /// The batch and command rules [`a_probe_pipelines_its_stats`] relies on.
+    #[cfg(unix)]
+    fn pipeline_batch_rules() {
+        let s = |id: &str, g: &[&str]| ProbeSample {
+            message_id: id.as_bytes().to_vec(),
+            groups: g.iter().map(|x| x.as_bytes().to_vec()).collect(),
+        };
+        let samples = vec![s("<1>", &["a"]), s("<2>", &["a"]), s("<3>", &["b"]), s("<4>", &["b"])];
+        assert_eq!(stat_batch(&samples, &[false, true, false, false], 0, false), vec![0, 2, 3]);
+        assert_eq!(stat_batch(&samples, &[false; 4], 0, true), vec![0, 1]);
+        assert_eq!(stat_batch(&samples, &[false; 4], 2, true), vec![2, 3]);
+        let odd = vec![s("<1>", &[]), s("<2 x>", &[]), s("<3>", &[])];
+        assert_eq!(stat_batch(&odd, &[false; 3], 0, false), vec![0], "a batch ends before an id never sent");
+        assert_eq!(stat_command(b"<a@b>"), b"STAT <a@b>\r\n");
+        assert_eq!(stat_command(b"<a\0b>"), b"STAT <a\r\n");
+        let long = vec![b'x'; 2000];
+        let cmd = stat_command(&long);
+        assert_eq!(cmd.len(), 1023);
+        assert!(cmd.ends_with(b"\r\n"));
     }
 
     #[cfg(unix)]

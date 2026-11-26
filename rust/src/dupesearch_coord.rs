@@ -1170,6 +1170,40 @@ pub fn leader_gone(deleting: bool, delete_status: DeleteStatus, held: bool) -> b
     deleting || delete_status != DeleteStatus::None || held
 }
 
+/// B2b: the status (and reason) a fleet reply gives a copy it does not queue
+/// because no copy of its fleet can complete: DEAD only when none of its
+/// sampled articles is there (0%), else WEAK with its share.
+pub fn fleet_unqueued_status(alive: i32) -> (&'static [u8], Vec<u8>) {
+    if alive > 0 {
+        (
+            b"WEAK",
+            format!("{alive}% of its sampled articles alive: too few to download, and no copy of its fleet has more")
+                .into_bytes(),
+        )
+    } else {
+        (b"DEAD", Vec::new())
+    }
+}
+
+/// B2b: the status (and reason) a fleet reply gives a copy it added, from
+/// whether its check ranked it dead for leading (under DupeMinAlive) and its
+/// measured alive share. DEAD only when its sampled articles were really all
+/// missing (0%); a copy with any alive article is a BACKUP, a weak one with
+/// its share as the reason (F3, F15: any alive article makes a donor).
+pub fn fleet_added_status(dead: bool, alive: i32) -> (&'static [u8], Vec<u8>) {
+    if !dead {
+        (b"BACKUP", Vec::new())
+    } else if alive == 0 {
+        (b"DEAD", b"none of its sampled articles is on the servers".to_vec())
+    } else {
+        (
+            b"BACKUP",
+            format!("weak: {alive}% of its sampled articles alive, too few to download first; kept as a donor")
+                .into_bytes(),
+        )
+    }
+}
+
 /// B1c: releases `new_id` as its fleet's primary while the other copies are
 /// still being probed, with what its probe found written on it (`params`).
 /// `old_id`, the primary released before (0: none), goes back to its hold,
@@ -1247,6 +1281,18 @@ fn fleet_probe_log_tail(elapsed_ms: i64, h: &DonorHealthResult) -> String {
         h.missing,
         h.error
     )
+}
+
+/// The log line of a copy's kind probe (its par2 list, its packing and its
+/// archive key, read by BODY): how long it took, the probe speed measure.
+fn fleet_kind_log_line(name: &[u8], elapsed_ms: i64, articles: usize) -> Vec<u8> {
+    let mut msg = b"Fleet kind probe of ".to_vec();
+    msg.extend_from_slice(&crate::releasename::log_name(name));
+    msg.extend_from_slice(
+        format!(": {} ms, {articles} article(s) read (par2 list, packing and archive key)", elapsed_ms.max(0))
+            .as_bytes(),
+    );
+    msg
 }
 
 fn scanner_add_external(
@@ -1877,10 +1923,20 @@ fn fetch_any_article_via_host(
     let Some(nntp_host) = get_nntp_fetch_host(host_ctx, host_cb) else {
         return FetchedArticleResult::default();
     };
+    let ctx_addr = host_ctx as usize;
+    // no more probe reads at once than there are light connections (#703),
+    // whatever reads them at once (each copy's probe reads several): a read
+    // past that waits for one to end instead of polling for a connection
+    #[cfg(unix)]
+    let Some(_slot) = crate::light_pool::PROBE_READS.take(
+        || crate::light_pool::parallel_jobs_now(FLEET_KIND_PROBE_PARALLEL),
+        || host_now(ctx_addr as *mut c_void, host_cb) >= deadline || http_stopped() || donor_stopping(),
+    ) else {
+        return FetchedArticleResult::default();
+    };
     // fleet checks read a bounded handful of articles: never throttled
     let fetcher = Arc::new(crate::articlefetcher::ArticleFetcher::unthrottled(nntp_host));
     let fetcher_stop = Arc::clone(&fetcher);
-    let ctx_addr = host_ctx as usize;
     crate::dupesearch_nzb::fetch_article_until(
         message_id,
         groups,
@@ -2097,7 +2153,8 @@ fn probe_copies_salvaged(
                 if i >= n || now_unix_sec() >= deadline || donor_stopping() || http_stopped() {
                     break;
                 }
-                let got = probe_one_copy(ctx_addr as *mut c_void, host_cb, summaries[i], deadline);
+                let reads = CopyReads::default();
+                let got = probe_one_copy(ctx_addr as *mut c_void, host_cb, summaries[i], deadline, &reads);
                 *slots[i].lock().unwrap_or_else(|e| e.into_inner()) = got;
             });
         }
@@ -2108,20 +2165,144 @@ fn probe_copies_salvaged(
         .collect()
 }
 
+/// A file's place in its RAR volume set: `name.partN.rar` is N, an old-style
+/// `name.rar` 0 and `name.rNN` NN + 1; any other name goes last.
+fn volume_order(name: &[u8]) -> u32 {
+    if let Some((_, n, _, _)) = crate::streamrepair::rar_part_number(name) {
+        return n;
+    }
+    let lower = name.to_ascii_lowercase();
+    if lower.ends_with(b".rar") {
+        return 0;
+    }
+    let ext = lower.rsplit(|&b| b == b'.').next().unwrap_or(&[]);
+    if ext.len() >= 3 && ext[0] == b'r' && ext[1..].iter().all(u8::is_ascii_digit) {
+        if let Some(n) = std::str::from_utf8(&ext[1..]).ok().and_then(|d| d.parse::<u32>().ok()) {
+            return n.saturating_add(1);
+        }
+    }
+    u32::MAX
+}
+
+/// One copy's article reads while it is probed: each article is read once,
+/// however many parts of the probe ask for it, also when they ask at the same
+/// time (its largest file's head is often the first volume its archive key
+/// reads, and the two run at once). What a read gave, a failure too, is kept:
+/// a `CopyReads` lives for one probe of one copy, within one deadline, so a
+/// read cut by that deadline is never reused by a later check as "missing"
+/// (F6: timeouts are never evidence).
+#[derive(Default)]
+struct CopyReads {
+    arts: Mutex<std::collections::HashMap<Vec<u8>, Arc<OnceLock<FetchedArticleResult>>>>,
+}
+
+impl CopyReads {
+    /// The article `id`, read by `read` only by the first to ask; anyone
+    /// asking while it is read waits for that read.
+    fn get(&self, id: &[u8], read: impl FnOnce() -> FetchedArticleResult) -> FetchedArticleResult {
+        let cell = {
+            let mut arts = self.arts.lock().unwrap_or_else(|e| e.into_inner());
+            Arc::clone(arts.entry(id.to_vec()).or_default())
+        };
+        cell.get_or_init(read).clone()
+    }
+
+    /// Articles read (or being read) so far.
+    fn count(&self) -> usize {
+        self.arts.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+}
+
+/// [`fetch_any_article_via_host`] through a copy's [`CopyReads`].
+fn fetch_any_cached(
+    ctx: *mut c_void,
+    host_cb: DupeHostFn,
+    reads: &CopyReads,
+    message_id: &[u8],
+    groups: &[String],
+    deadline: i64,
+) -> FetchedArticleResult {
+    reads.get(message_id, || fetch_any_article_via_host(ctx, host_cb, message_id, groups, deadline))
+}
+
+/// [`fetch_article_via_host`] (a file's first article only) through a copy's [`CopyReads`].
+fn fetch_first_cached(
+    ctx: *mut c_void,
+    host_cb: DupeHostFn,
+    reads: &CopyReads,
+    message_id: &[u8],
+    groups: &[String],
+    deadline: i64,
+) -> FetchedArticleResult {
+    let out = fetch_any_cached(ctx, host_cb, reads, message_id, groups, deadline);
+    if out.offset != 0 {
+        return FetchedArticleResult::default();
+    }
+    out
+}
+
 /// The kind probe of one copy (see [`probe_copies_salvaged`]), until
-/// `deadline` (unix seconds).
+/// `deadline` (unix seconds). Its largest file's head is read while its par2
+/// list is (both are always read), and the volume tails a par2 list may need
+/// all at once: the reads of one copy no longer wait for each other.
 fn probe_one_copy(
     ctx: *mut c_void,
     host_cb: DupeHostFn,
     info: &NzbSummaryData,
     deadline: i64,
+    reads: &CopyReads,
 ) -> CopyProbe {
     use crate::donorkind::Packing;
     let groups = summary_groups_arc(info);
+    let ctx_addr = ctx as usize;
+    std::thread::scope(|s| {
+        let groups_ref = &groups;
+        let head = s.spawn(move || {
+            let ctx = ctx_addr as *mut c_void;
+            let mut packing = Packing::Unknown;
+            // of volumes of one size the first volume (part01, or .rar before
+            // .r00): the article the archive key reads first, so the two share
+            // one read
+            let largest = info.heads.iter().max_by_key(|h| {
+                (h.bytes, std::cmp::Reverse((volume_order(&h.name), h.name.to_ascii_lowercase())))
+            });
+            if let Some(head) = largest {
+                let art = fetch_first_cached(ctx, host_cb, reads, &head.id, groups_ref, deadline);
+                if art.success {
+                    packing = crate::donorkind::packing_of_head(&art.data, &head.name, summary_password(info));
+                } else if summary_password_known(info) && crate::donorkind::is_7z_name(&head.name) {
+                    // a 7-Zip whose nzb carries a password is
+                    // unborrowable whatever its head holds (as
+                    // packing_of_head rules for a read head), so an
+                    // unread head (missing, or no time left) gives the
+                    // same answer instead of "unknown", which ranked
+                    // such a copy ahead of whole encrypted copies
+                    packing = Packing::Unborrowable;
+                }
+            }
+            packing
+        });
+        let (listed, salvaged) = probe_par_list(ctx_addr as *mut c_void, host_cb, info, groups_ref, deadline, reads);
+        let packing = head.join().unwrap_or(Packing::Unknown);
+        (listed, packing, salvaged)
+    })
+}
+
+/// The par2 file list of a copy for [`probe_one_copy`]: its index, else what
+/// its volumes' tails salvage (F2b), else the tail of the volume read for it.
+fn probe_par_list(
+    ctx: *mut c_void,
+    host_cb: DupeHostFn,
+    info: &NzbSummaryData,
+    groups: &Arc<Vec<String>>,
+    deadline: i64,
+    reads: &CopyReads,
+) -> (crate::twin::Listed, Option<crate::twinfields::Salvaged>) {
+    let groups = Arc::clone(groups);
     let mut listed = crate::twin::Listed::default();
     let mut salvaged = None;
     if !info.par_list.id.is_empty() {
-        let art = fetch_article_via_host(ctx, host_cb, &info.par_list.id, &groups, deadline);
+        let art = fetch_first_cached(ctx, host_cb, reads, &info.par_list.id, &groups, deadline);
         if !art.success {
             // F2b: the index is lost; its volumes repeat its
             // critical packets at their tail
@@ -2160,17 +2341,22 @@ fn probe_one_copy(
             && !tail.is_empty()
             && tail.last() != Some(&info.par_list.id)
         {
-            let mut data = Vec::new();
-            let mut all = true;
-            for id in tail.iter().filter(|id| **id != info.par_list.id) {
-                let art = fetch_article_via_host(ctx, host_cb, id, &groups, deadline);
-                if !art.success {
-                    all = false;
-                    break;
-                }
-                data.extend_from_slice(&art.data);
-            }
-            if all {
+            // the tail's articles all at once, joined in their order (any
+            // article of the volume: a tail never starts at offset 0)
+            let ids: Vec<&Vec<u8>> = tail.iter().filter(|id| **id != info.par_list.id).collect();
+            let ctx_addr = ctx as usize;
+            let arts: Vec<FetchedArticleResult> = std::thread::scope(|s| {
+                let handles: Vec<_> = ids
+                    .iter()
+                    .map(|id| {
+                        let groups = &groups;
+                        s.spawn(move || fetch_any_cached(ctx_addr as *mut c_void, host_cb, reads, id, groups, deadline))
+                    })
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap_or_default()).collect()
+            });
+            if arts.iter().all(|a| a.success) {
+                let data: Vec<u8> = arts.iter().flat_map(|a| a.data.iter().copied()).collect();
                 let (sigs, complete) = crate::twin::par2_set(&data);
                 if complete {
                     listed.sigs = sigs;
@@ -2181,22 +2367,7 @@ fn probe_one_copy(
             }
         }
     }
-    let mut packing = Packing::Unknown;
-    if let Some(head) = info.heads.iter().max_by_key(|h| h.bytes) {
-        let art = fetch_article_via_host(ctx, host_cb, &head.id, &groups, deadline);
-        if art.success {
-            packing = crate::donorkind::packing_of_head(&art.data, &head.name, summary_password(info));
-        } else if summary_password_known(info) && crate::donorkind::is_7z_name(&head.name) {
-            // a 7-Zip whose nzb carries a password is
-            // unborrowable whatever its head holds (as
-            // packing_of_head rules for a read head), so an
-            // unread head (missing, or no time left) gives the
-            // same answer instead of "unknown", which ranked
-            // such a copy ahead of whole encrypted copies
-            packing = Packing::Unborrowable;
-        }
-    }
-    (listed, packing, salvaged)
+    (listed, salvaged)
 }
 
 /// Longest a fleet spends opening its copies down to the video at intake.
@@ -2206,23 +2377,23 @@ const FLEET_INTAKE_LATER_SEC: i64 = 180;
 /// Why the intake left a copy unverified when it had no time for it.
 const INTAKE_TIME_RAN_OUT: &str = "time ran out";
 
-/// Articles of one copy, read from the news servers for the intake.
-struct HostArticles {
+/// Articles of one copy, read from the news servers for the intake (through
+/// the copy's [`CopyReads`] when its probe shares them).
+struct HostArticles<'a> {
     ctx: usize,
     cb: DupeHostFn,
     groups: Arc<Vec<String>>,
     deadline: i64,
+    reads: Option<&'a CopyReads>,
 }
 
-impl crate::dupeintake::ArticleFetch for HostArticles {
+impl crate::dupeintake::ArticleFetch for HostArticles<'_> {
     fn fetch(&self, message_id: &[u8]) -> Option<crate::dupeintake::Fetched> {
-        let art = fetch_any_article_via_host(
-            self.ctx as *mut c_void,
-            self.cb,
-            message_id,
-            &self.groups,
-            self.deadline,
-        );
+        let ctx = self.ctx as *mut c_void;
+        let art = match self.reads {
+            Some(reads) => fetch_any_cached(ctx, self.cb, reads, message_id, &self.groups, self.deadline),
+            None => fetch_any_article_via_host(ctx, self.cb, message_id, &self.groups, self.deadline),
+        };
         art.success.then_some(crate::dupeintake::Fetched {
             offset: art.offset,
             file_size: art.file_size,
@@ -2278,6 +2449,7 @@ fn fleet_prints_keyed(
                         cb: host_cb,
                         groups: summary_groups_arc(info),
                         deadline,
+                        reads: None,
                     };
                     let password = info
                         .meta
@@ -2327,12 +2499,14 @@ fn key_one_copy(
     host_cb: DupeHostFn,
     info: &NzbSummaryData,
     deadline: i64,
+    reads: &CopyReads,
 ) -> Option<crate::twinfields::InnerKey> {
     let fetch = HostArticles {
         ctx: ctx as usize,
         cb: host_cb,
         groups: summary_groups_arc(info),
         deadline,
+        reads: Some(reads),
     };
     crate::dupeintake::inner_key_copy_with(&info.data_segments, &fetch, summary_password(info))
 }
@@ -7608,6 +7782,7 @@ pub unsafe fn fleet_append(
             // dead needs neither (its kind ranks nothing)
             {
                 let (kinds_done, kind_slots, health_done) = (&kinds_done, &kind_slots, &health_done);
+                let kind_names = &probe_names;
                 s.spawn(move || {
                     let _done = Done(kinds_done);
                     let total = summaries_ref.len();
@@ -7671,12 +7846,30 @@ pub unsafe fn fleet_append(
                                 let copy_deadline =
                                     (now_unix_sec() + i64::from(GROUP_CHECK_SEC_PER_COPY)).min(overall_deadline);
                                 let info = summaries_ref[k];
-                                let probe = probe_one_copy(ctx, host_cb, info, copy_deadline);
-                                let key = if k < usable_ref.len() {
-                                    key_one_copy(ctx, host_cb, info, copy_deadline)
-                                } else {
-                                    None
-                                };
+                                let kind_start = donor_now_ms();
+                                // its kind and its archive key at once, sharing
+                                // the articles both read (CopyReads)
+                                let reads = CopyReads::default();
+                                let (probe, key) = std::thread::scope(|s3| {
+                                    let reads = &reads;
+                                    let key = (k < usable_ref.len()).then(|| {
+                                        s3.spawn(move || {
+                                            key_one_copy(ctx_addr as *mut c_void, host_cb, info, copy_deadline, reads)
+                                        })
+                                    });
+                                    let probe = probe_one_copy(ctx, host_cb, info, copy_deadline, reads);
+                                    (probe, key.and_then(|h| h.join().ok().flatten()))
+                                });
+                                let name = usable_ref
+                                    .get(k)
+                                    .and_then(|&i| kind_names.get(&candidates_ref[i].index))
+                                    .map_or(info.main_name.as_slice(), |n| n.as_slice());
+                                fleet_log(
+                                    std::ptr::null_mut(),
+                                    host_cb,
+                                    MK_INFO,
+                                    &fleet_kind_log_line(name, donor_now_ms() - kind_start, reads.count()),
+                                );
                                 *kind_slots[k].lock().unwrap_or_else(|e| e.into_inner()) = Some((probe, key));
                             });
                         }
@@ -8224,6 +8417,14 @@ pub unsafe fn fleet_append(
     // a copy sent later to a fleet already queued: one found dead stays in
     // the fleet as a dead held copy instead of failing the whole fleet
     let fleet_has_others = running_id != 0 || !earlier.is_empty();
+    // B2b (F3, F15): a grouped fleet whose copies are all under DupeMinAlive
+    // but not all at 0% is no dead fleet: its weak copies stay held donors
+    // (the best of them tried first) and its 0% copies stay as dead held
+    // copies, as for a copy sent to a fleet already queued
+    let any_weak = ranked_idx.iter().any(|&idx| {
+        let c = &candidates[idx];
+        c.same_as < 0 && c.error.is_empty() && c.alive > 0
+    });
     // copies added held that end up not part of the fleet: (id, why, dead)
     let mut pre_dropped: Vec<(i32, Vec<u8>, bool)> = Vec::new();
     let mut added = vec![0i32; candidates.len()];
@@ -8288,8 +8489,12 @@ pub unsafe fn fleet_append(
                     }
                 }
             }
-        } else if !any_alive && !(holds && fleet_has_others) {
-            entry.status = b"DEAD".to_vec();
+        } else if !any_alive && !(holds && (fleet_has_others || any_weak)) {
+            // B2b: DEAD only when none of its sampled articles is there; a
+            // copy of a fleet no copy of which can complete is WEAK
+            let (status, reason) = fleet_unqueued_status(cand.alive);
+            entry.status = status.to_vec();
+            entry.reason = reason;
             if cand.pre_added != 0 {
                 pre_dropped.push((cand.pre_added, b"every copy of its fleet is dead".to_vec(), true));
                 entry.nzb_id = cand.pre_added;
@@ -8376,10 +8581,10 @@ pub unsafe fn fleet_append(
             if entry.nzb_id == 0 {
                 entry.status = b"ERROR".to_vec();
                 entry.reason = b"RustyGet could not add the nzb-file".to_vec();
-            } else if cand.dead {
-                entry.status = b"DEAD".to_vec();
             } else {
-                entry.status = b"BACKUP".to_vec();
+                let (status, reason) = fleet_added_status(cand.dead, cand.alive);
+                entry.status = status.to_vec();
+                entry.reason = reason;
             }
         }
         out_entries.push(entry);
@@ -8514,6 +8719,8 @@ pub unsafe fn fleet_append(
         reason = match code {
             0 => b"NO_USABLE_MEMBERS".to_vec(),
             1 => b"INCOMPLETE".to_vec(),
+            // B2b: dead only when none of its copies has an alive article
+            2 if any_weak => b"ALL_WEAK".to_vec(),
             2 => b"ALL_DEAD".to_vec(),
             3 => b"ALREADY_DOWNLOADED".to_vec(),
             _ => b"NOT_QUEUED".to_vec(),
@@ -8574,6 +8781,31 @@ pub unsafe fn fleet_append(
 
 #[cfg(test)]
 mod tests {
+
+    /// Probe speed: a copy's kind probe and archive key run at once and
+    /// often ask for the same article (the largest file's head is the first
+    /// volume): it is read once, the second asker waits for that read, and a
+    /// failed read is kept too (no second request for a missing article).
+    #[test]
+    fn a_copy_reads_each_article_once_however_many_ask() {
+        let reads = super::CopyReads::default();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let read = |ok: bool| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            super::FetchedArticleResult { success: ok, data: b"head".to_vec(), ..Default::default() }
+        };
+        let got: Vec<super::FetchedArticleResult> = std::thread::scope(|s| {
+            let hs: Vec<_> = (0..4).map(|_| s.spawn(|| reads.get(b"part01@x", || read(true)))).collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert!(got.iter().all(|a| a.success && a.data == b"head"));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1, "read once for four askers");
+        assert!(!reads.get(b"gone@x", || read(false)).success);
+        assert!(!reads.get(b"gone@x", || read(true)).success, "the failed read is kept");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(reads.count(), 2);
+    }
 
     #[test]
     fn health_checks_ask_the_longest_retention_server_of_a_backbone() {

@@ -1012,6 +1012,10 @@ pub(crate) fn delete_cleanup_host(
     use crate::queuesubsys_host::{c_bytes, MK_DETAIL, MK_ERROR};
     use std::ffi::{CStr, CString};
 
+    // F2c: a fleet primary deleted (by hand, HealthCheck=Delete) leaves with
+    // its own priority, not its fleet's raise
+    crate::fleethold::unboost_host(host, nzb.ptr);
+
     // a fleet copy that shares the primary's folder, or is kept as a donor or
     // a dead copy with its files: never cleaned up (fleethold::KEEP_FILES_PARAM)
     if host

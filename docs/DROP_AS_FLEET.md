@@ -115,6 +115,18 @@ A group goes to the front of the queue at once: a fleet with a `dupes:` key adds
 its copies at the top (`dupesearch_coord.rs` `scanner_add_external`, `add_top`),
 and the daemon-side join moves the queued copies of the group to the top.
 
+The front of the queue alone is not enough: the scheduler takes the highest
+priority before the queue order, so a primary released at priority 0 waited
+behind items at 47-96 on 6790 (F2c). The primary is raised one above the
+highest priority of the other queued items (`fleethold::primary_priority`,
+never to force, 900), its own priority kept as `DupeFleetOwnPriority` and the
+raise as `DupeFleetBoost`. Every refresh looks again (an item added later at a
+higher priority raises it again), a failover's new primary is raised the same
+way, and the old one is held with its own priority; a primary whose fleet
+ends (success, or failure to history) gets its own priority back. A priority the user sets
+after the raise stays theirs, and two fleets' primaries never raise each other
+(each ignores the other).
+
 Each copy is scored from a probe of about 1 MB of articles
 (`dupesearch_coord.rs` `GROUP_PROBE_BYTES`), never by downloading it:
 
@@ -433,7 +445,16 @@ branch `fleet-e2e-fixes` fixes them:
 - **B4, logs.** The NzbDir fleet summary names what downloads first
   ("downloading #N; 17 cop(ies): 1 QUEUED, 13 BACKUP, 3 SAME_POSTING") and
   lists the copies over lines of at most 900 bytes instead of one line cut at
-  1023 (`scanner::fleet_summary_lines`). "Error reading diskstate ...
+  1023 (`scanner::fleet_summary_lines`). B2b: it uses the same words as the
+  copies' parameters and the web UI (`scanner::fleet_copy_outcome`): a backup
+  under the healthy share is "BACKUP (weak, 29% alive)", DEAD only when none
+  of its sampled articles is on the servers; the reply calls a weak copy a
+  BACKUP with its share as the reason (`dupesearch_coord::fleet_added_status`),
+  and a copy with any alive article is never rounded down to 0%. A grouped
+  fleet whose copies are all under DupeMinAlive but not all at 0% keeps them
+  as held donors (the best tried first) instead of dropping them as dead; a
+  copy a fleet does not queue because none of its copies can complete is
+  WEAK with its share, DEAD only at 0% (`fleet_unqueued_status`). "Error reading diskstate ...
   queue/19464" came from the failed-article recheck of a download moved to
   history: it read the article list of a file deleted with the download; it
   now skips a file whose list is gone (`diskstate_format::active_file_info_exists`).
@@ -559,6 +580,10 @@ Review fixes (76a80014 review):
 | B2: after a failover the probe's alive shares and the failover order stay. | functional `fleetfailoverkeepsalive` (a 27% donor keeps its share and its place above the dead copy, no backup pass); Rust `dupesearch_coord::tests::the_backup_pass_leaves_held_fleets_alone` |
 | B3: the fleet toggle shows an icon. | Playwright `fleet-downloads.js` ("the toggle shows an icon, not its name": both glyphs in the subset, icon-sized) |
 | B4: the NzbDir summary is split, never cut, and names what downloads. | Rust `scanner::tests::a_fleet_summary_is_split_never_cut` |
+| B2b: the summary and the reply call weak donors weak, never DEAD; any alive article is never 0%; an all-weak fleet keeps its copies. | Rust `scanner::tests::a_fleet_summary_calls_weak_donors_weak_never_dead`, `dupesearch_nzb::tests::a_copy_with_any_alive_article_is_never_zero_percent`; functional `fleetallweak`, `fleetmostlydead` (WEAK with its share), `fleettimeoutunverified` |
+| F2c: the primary downloads before every other queued item, whatever their priority, also after a failover. | Rust `fleethold::tests::the_primary_goes_above_every_queued_priority`; functional `fleetprimaryfirst` (an item at 96 queued: the primary at 97, its own 0 kept, held copies at -100, a failover's new primary raised, its articles fetched first) |
+| In Downloads the fleet pill shows the live place ("primary" after a failover), not the probe's rank ("#2"). | Playwright `fleet-downloads.js` ("the primary pill shows its live place, not the probe rank") |
+| Probe speed: a copy's reads run at once (its par2 list with its head, its archive key beside them, shared reads once), within the light connections (#703); a read is handed over without a 20 ms poll; recheck probes pipeline their STATs. | functional `fleetprobespeed` (per-copy "Fleet kind probe" times); Rust `dupesearch_coord::tests::a_copy_reads_each_article_once_however_many_ask`, `light_pool::tests::read_slots_hold_the_limit_and_wake_a_waiter`, `dupesearch_nzb::tests::a_fetched_article_is_handed_over_at_once`, `dupeprobe::tests::a_probe_pipelines_its_stats` |
 | B5: a copy being probed is never "next". | Rust `fleethold::tests::next_is_the_copy_failover_takes`; functional `fleetslowprobe` |
 | F11: a RAR set whose first article is gone is keyed from its last volume. | Rust `dupeintake::tests::a_rar_set_gets_its_key_from_the_last_volume` |
 | A paused server never stalls a copy's check; a sample it cut short is never dead on its few answers and is checked again after the pause. | Rust `dupesearch_nzb::tests::a_paused_server_never_stalls_a_fleet_probe`, `dupesearch_coord::tests::a_copy_a_pause_cut_short_is_checked_again_after_it` |

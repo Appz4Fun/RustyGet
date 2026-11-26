@@ -4310,6 +4310,37 @@ fn kept_borrows() -> std::sync::MutexGuard<
     KEPT_BORROWS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Downloads whose direct unpack was stopped only to free the unpack slot
+/// (`prepost::stop_stalled_direct_unpacks`): the download goes on, and post-processing
+/// still needs the dead volumes it borrowed, so its stop keeps them.
+static YIELDED_DIRECT_UNPACKS: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
+
+/// Marks download `nzb_id`'s direct unpack as stopped to free the unpack slot: when it
+/// ends, its borrowed dead volumes are kept for post-processing.
+pub(crate) fn note_direct_unpack_yield(nzb_id: i32) {
+    let mut y = YIELDED_DIRECT_UNPACKS.lock().unwrap_or_else(|e| e.into_inner());
+    if !y.contains(&nzb_id) {
+        y.push(nzb_id);
+    }
+}
+
+/// Forgets the yield marks of downloads not in `with_thread` (their direct unpack ended).
+pub(crate) fn retain_direct_unpack_yields(with_thread: &[i32]) {
+    YIELDED_DIRECT_UNPACKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|id| with_thread.contains(id));
+}
+
+/// Takes download `nzb_id`'s yield mark: true when its direct unpack was stopped to free
+/// the unpack slot.
+fn take_direct_unpack_yield(nzb_id: i32) -> bool {
+    let mut y = YIELDED_DIRECT_UNPACKS.lock().unwrap_or_else(|e| e.into_inner());
+    let had = y.contains(&nzb_id);
+    y.retain(|id| *id != nzb_id);
+    had
+}
+
 /// Forgets download `nzb_id`'s holds and deletes the scratch files of its borrowed dead
 /// volumes: the download is done with them (it left post-processing, was deleted, or
 /// direct unpack extracted them).
@@ -5570,10 +5601,14 @@ impl NzbgetRsDirectUnpack {
         }
 
         let mut extracted = false;
+        let mut yielded = false;
         let valid_owner = host.with_locked_queue(|dq_ptr| {
             let Some(nzb) = self.find_nzb(host, dq_ptr).filter(|n| n.owned) else {
                 return false;
             };
+            // (taken under the queue lock, before the thread mark is cleared, so the post
+            // queue's scan cannot forget it first)
+            yielded = take_direct_unpack_yield(self.nzb_id);
             let nzb_ptr = nzb.ptr;
 
             let processed = self.processed.load(Ordering::Acquire);
@@ -5624,9 +5659,10 @@ impl NzbgetRsDirectUnpack {
             return;
         }
 
-        if extracted || cancelled {
+        if extracted || (cancelled && !yielded) {
             // Direct unpack read the borrowed dead volumes, or the download is going away:
-            // nothing else needs them.
+            // nothing else needs them. (One stopped only to free the unpack slot keeps them:
+            // its download goes on.)
             direct_unpack_forget_holds(self.nzb_id);
         } else {
             // Post-processing repairs and unpacks the download: its borrowed dead volumes

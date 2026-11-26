@@ -1455,6 +1455,7 @@ impl NzbgetRsPrePostProcessor {
         }
         let mut stopped = STOPPED.lock().unwrap_or_else(|e| e.into_inner());
         stopped.retain(|id| with_thread.contains(id));
+        crate::postproc::retain_direct_unpack_yields(&with_thread);
         let Some(waiting) = waiting_job else {
             return;
         };
@@ -1469,6 +1470,8 @@ impl NzbgetRsPrePostProcessor {
             msg.extend_from_slice(&waiting);
             msg.extend_from_slice(b" waits to unpack; it is unpacked after its download instead");
             host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
+            // Its download goes on: the dead volumes it borrowed stay for post-processing.
+            crate::postproc::note_direct_unpack_yield(nzb.id);
             host.direct_unpack_stop(dq_ptr, nzb.ptr);
         }
     }

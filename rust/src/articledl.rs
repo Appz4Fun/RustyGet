@@ -3110,9 +3110,52 @@ struct DlWorker {
     message_id: Vec<u8>,
     downloaded_size: i32,
     decoded_file_size: i64,
+    /// A pooled download ran out of retries on temporary server errors.
+    pooled_transient_exhausted: bool,
 }
 
 const AD_UNDEFINED: i32 = 0;
+
+/// What [`NzbgetRsArticleDownloader::download_pooled`] needs to know about
+/// the article's job.
+#[cfg(unix)]
+struct PooledJob {
+    force: bool,
+    extra_priority: bool,
+    has_desired_server: bool,
+    desired_server_id: i32,
+    dupe_fallback_round: i32,
+    file_time: i64,
+    retries: i32,
+    interval_sec: i32,
+    server_config_gen: i32,
+}
+
+/// Paces a pooled download as the read loop did: every read counts on the
+/// speed meter and keeps the download from looking stalled; while over the
+/// speed limit (or yielding to repair fetches) the next read waits.
+#[cfg(unix)]
+struct DownloadPacer {
+    dl: std::sync::Arc<NzbgetRsArticleDownloader>,
+}
+
+#[cfg(unix)]
+impl nntp_rs::Pacer for DownloadPacer {
+    fn received(&self, _server: usize, bytes: usize) -> std::time::Duration {
+        if let Some(sm) = crate::statmeter::active_statmeter() {
+            sm.add_speed_reading_locked(i32::try_from(bytes).unwrap_or(i32::MAX));
+        }
+        // the speed limit as one bucket for all connections; while repair
+        // fetches wait, the download takes a quarter of the line
+        let wait = crate::articlefetcher::paced_delay(bytes, crate::articlefetcher::PaceClass::Download);
+        // running, and fresh until the wait ends (the hanging-download check
+        // must not take a paced download for a stalled one)
+        let until = now_sec() + i64::try_from(wait.as_secs()).unwrap_or(i64::MAX / 2) + 1;
+        self.dl.last_update_time.store(until, Ordering::SeqCst);
+        self.dl.status.store(AD_RUNNING, Ordering::SeqCst);
+        wait
+    }
+}
 
 pub struct NzbgetRsArticleDownloader {
     pub(crate) file_ptr: FileRef,
@@ -3130,6 +3173,8 @@ pub struct NzbgetRsArticleDownloader {
     request_state: std::sync::atomic::AtomicU8,
     conn_state: Mutex<(usize, Vec<u8>)>,
     worker: Mutex<DlWorker>,
+    /// Cancels a fetch in flight through the shared nntp-rs pool ([`Self::stop`]).
+    cancel: nntp_rs::CancelHandle,
 }
 
 /// `NzbgetRsArticleDownloader::request_state` values.
@@ -3163,6 +3208,7 @@ impl NzbgetRsArticleDownloader {
             running_since_ms: std::sync::atomic::AtomicU64::new(0),
             request_state: std::sync::atomic::AtomicU8::new(REQ_READING),
             conn_state: Mutex::new((initial_conn, Vec::new())),
+            cancel: nntp_rs::CancelHandle::new(),
             worker: Mutex::new(DlWorker {
                 decoder: Decoder::new(
                     crate::decoder::yenc_decode_piece,
@@ -3187,6 +3233,7 @@ impl NzbgetRsArticleDownloader {
                 message_id: Vec::new(),
                 downloaded_size: 0,
                 decoded_file_size: 0,
+                pooled_transient_exhausted: false,
             }),
         }
     }
@@ -3228,6 +3275,7 @@ impl NzbgetRsArticleDownloader {
     pub(crate) fn stop(&self) {
         crate::log::log_active_bytes(MK_DEBUG, b"Trying to stop ArticleDownloader");
         self.stopped.store(true, Ordering::SeqCst);
+        self.cancel.cancel();
         let cs = self.conn_state.lock().unwrap_or_else(|e| e.into_inner());
         if cs.0 != 0 {
             let conn = unsafe { &*(cs.0 as *const crate::net::PooledNntpConn) };
@@ -3903,6 +3951,600 @@ impl NzbgetRsArticleDownloader {
         status
     }
 
+    /// One article through the shared nntp-rs pool: nntp-rs picks the server
+    /// (levels, blocked and paused servers, a 430 shared within a backend),
+    /// and concurrent or recent requests for the same article share one body.
+    /// Every server attempt is logged and counted as the per-connection
+    /// download did. A copy the writer rejects (a dupe-fallback round's wrong
+    /// bytes) is fetched again from another server; temporary failures are
+    /// retried `ArticleRetries` times, `ArticleInterval` apart.
+    #[cfg(unix)]
+    fn download_pooled(
+        self: &std::sync::Arc<Self>,
+        w: &mut DlWorker,
+        host: &DlHost,
+        shared: &crate::nntprs_pool::Shared,
+        job: PooledJob,
+    ) -> i32 {
+        let opts = crate::options::active_options();
+        let (raw_article, crc_check, opt_skip_write) = match opts.as_deref() {
+            Some(o) => {
+                let s = o.scalars();
+                (s.raw_article != 0, s.crc_check != 0, s.skip_write != 0)
+            }
+            None => (false, true, false),
+        };
+        drop(opts);
+        let (nzb_skip, art) = host.qh.with_locked_queue(|_| {
+            let fsnap = host.qh.file_snap(host.file_ptr);
+            let nzb_skip =
+                fsnap.nzb_ptr.is_some() && host.qh.nzb_snap(fsnap.nzb_ptr, false).skip_disk_write;
+            (nzb_skip, host.qh.article_snap(host.article_ptr))
+        });
+        let skip_disk_write = nzb_skip || opt_skip_write;
+        let message_id = art.message_id;
+        w.message_id.clone_from(&message_id);
+        let id = String::from_utf8_lossy(cstr::until_nul(&message_id)).into_owned();
+        let only_server = if job.has_desired_server {
+            match shared.index_of(job.desired_server_id).filter(|&i| {
+                shared
+                    .server(i)
+                    .is_some_and(|s| s.active.load(Ordering::SeqCst) && s.max_connections > 0)
+            }) {
+                Some(i) => Some(i),
+                None => {
+                    host.log(
+                        MK_DETAIL,
+                        &join_c_slices(&[
+                            b"Article ",
+                            &self.info_name,
+                            format!(
+                                " failed: desired server {} is not configured, switched off or has no connections",
+                                job.desired_server_id
+                            )
+                                .as_bytes(),
+                        ]),
+                    );
+                    return AD_FAILED;
+                }
+            }
+        } else {
+            None
+        };
+        // servers whose retention the file is older than are not asked (nntp-rs
+        // leaves them out); logged as the per-server download did
+        if only_server.is_none() {
+            let now_t = now_sec();
+            for idx in 0..shared.server_count() {
+                let Some(srv) = shared.server(idx) else { continue };
+                if !srv.active.load(Ordering::SeqCst) {
+                    continue;
+                }
+                let (retention_failure, file_age_days) =
+                    article_dl_is_retention_failure(srv.retention, job.file_time, now_t);
+                if retention_failure {
+                    let tail = format!(
+                        " failed: out of server retention (file age: {file_age_days}, configured retention: {})",
+                        srv.retention
+                    );
+                    host.log(
+                        MK_DETAIL,
+                        &join_c_slices(&[b"Article ", &self.info_name, b" @ ", &shared.conn_name(idx), tail.as_bytes()]),
+                    );
+                }
+            }
+        }
+        let posted = (job.file_time > 0)
+            .then(|| std::time::UNIX_EPOCH + std::time::Duration::from_secs(job.file_time as u64));
+        // servers whose copy was rejected: the next request skips them
+        let mut rejected: Vec<usize> = Vec::new();
+        // backbones whose 430 was logged
+        let mut noted_backbones: Vec<i32> = Vec::new();
+        // temporary errors so far: ArticleRetries requests in all, the waits
+        // between them doubling from ArticleInterval up to a minute (as the
+        // per-connection download's TransientRetries)
+        let mut transient_errors = 0i32;
+        let transient_exhausted;
+        loop {
+            let stopped = host.is_stopped();
+            let (paused_or_quota, dl_held) = match crate::ffi::active_workstate().as_deref() {
+                Some(ws) => (ws.pause_download() || ws.quota_reached(), ws.download_held()),
+                None => (false, false),
+            };
+            let generation = crate::net::active_server_pool().map_or(0, |p| p.generation());
+            if stopped
+                || (paused_or_quota && !job.force)
+                || (dl_held && !job.extra_priority)
+                || generation != job.server_config_gen
+            {
+                return AD_RETRY;
+            }
+            // waiting (for a connection, or on servers that do not answer)
+            // until bytes arrive: the pacer marks it running then, so the
+            // hanging-download check sees only a stalled body
+            self.set_status(AD_WAITING, true);
+            w.writing_started = false;
+            w.local_write_error = false;
+            w.content_rejected = false;
+            w.last_430 = false;
+            if let Some(ref mut ca) = w.analyzer {
+                ca.reset();
+            }
+            host.op45(
+                3,
+                0,
+                host.article_ptr,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+            let attempts = crate::nntprs_pool::AttemptLog::default();
+            let fetch_opts = nntp_rs::FetchOptions {
+                cancel: Some(self.cancel.clone()),
+                posted,
+                only_server,
+                skip_servers: rejected.clone(),
+                priority: if job.extra_priority || job.force {
+                    nntp_rs::Priority::Next
+                } else {
+                    nntp_rs::Priority::Bulk
+                },
+                skip_crc_check: !crc_check,
+                // RawArticle=yes wrote the ARTICLE reply exactly as it arrived
+                // (still dot-stuffed, with its terminator)
+                body: if raw_article {
+                    nntp_rs::BodyMode::Wire
+                } else {
+                    nntp_rs::BodyMode::Decode
+                },
+                observer: Some(attempts.observer_with(shared, Some({
+                    let dl = std::sync::Arc::clone(self);
+                    std::sync::Arc::new(move || dl.set_status(AD_WAITING, true))
+                }))),
+                pacer: Some(nntp_rs::Pace::new(DownloadPacer {
+                    dl: std::sync::Arc::clone(self),
+                })),
+                ..Default::default()
+            };
+            let got = shared.pool.fetch_shared(&id, &fetch_opts);
+            let recs = attempts.take();
+            self.log_attempts(w, host, shared, &recs, &mut noted_backbones);
+            let d = match got {
+                Ok(d) => d,
+                Err(nntp_rs::Error::Cancelled) => return AD_RETRY,
+                Err(nntp_rs::Error::NotFound) => {
+                    host.log(
+                        MK_DETAIL,
+                        &join_c_slices(&[b"Article ", &self.info_name, b" @ all servers failed"]),
+                    );
+                    if !host.is_stopped()
+                        && rejected.is_empty()
+                        && only_server.is_none()
+                        && crate::nntprs_pool::missing_everywhere(shared, &recs)
+                    {
+                        crate::articlefetcher::note_missing_everywhere(&w.message_id);
+                    }
+                    return AD_FAILED;
+                }
+                Err(nntp_rs::Error::Unavailable) if crate::nntprs_pool::missing_on_usable(shared, &recs) => {
+                    // every server switched on said 430; the switched-off ones were
+                    // never asked (as before), so the article is not found here
+                    host.log(
+                        MK_DETAIL,
+                        &join_c_slices(&[b"Article ", &self.info_name, b" @ all servers failed"]),
+                    );
+                    return AD_FAILED;
+                }
+                Err(e) if e.is_retryable() && !matches!(e, nntp_rs::Error::Decode(_)) => {
+                    transient_errors += 1;
+                    if transient_errors >= job.retries.max(1) {
+                        transient_exhausted = true;
+                        break;
+                    }
+                    let mut interval = job.interval_sec.max(0);
+                    for _ in 1..transient_errors {
+                        if interval >= crate::nntp::TransientRetries::MAX_INTERVAL_SEC {
+                            break;
+                        }
+                        interval = interval.saturating_mul(2);
+                    }
+                    let interval = interval.min(crate::nntp::TransientRetries::MAX_INTERVAL_SEC);
+                    let mut waited = 0;
+                    while waited < interval * 10 && !host.is_stopped() {
+                        sleep_ms(100);
+                        waited += 1;
+                    }
+                    continue;
+                }
+                Err(_) => {
+                    host.log(
+                        MK_DETAIL,
+                        &join_c_slices(&[b"Article ", &self.info_name, b" @ all servers failed"]),
+                    );
+                    return AD_FAILED;
+                }
+            };
+            let conn_name = shared.conn_name(d.server);
+            self.set_conn_name(conn_name.clone());
+            if recs.is_empty() {
+                // a body another request fetched (shared, or kept from just now)
+                host.log(
+                    MK_DETAIL,
+                    &join_c_slices(&[b"Downloading ", &self.info_name, b" @ ", &conn_name, b" (shared)"]),
+                );
+            }
+            let written = self.write_decoded_from(w, host, &d, raw_article, skip_disk_write);
+            let status = if written {
+                self.decode_check_from(w, host, &d, raw_article, crc_check)
+            } else {
+                let (wst, crej) = article_dl_classify_write_failure(
+                    i32::from(w.local_write_error),
+                    AD_FATAL_ERROR,
+                    AD_FAILED,
+                );
+                w.content_rejected = crej;
+                wst
+            };
+            if status != AD_FATAL_ERROR {
+                if let Some(srv) = shared.server(d.server) {
+                    let ok = status == AD_FINISHED;
+                    self.count_server_article(w, srv.id, i32::from(ok), i32::from(!ok));
+                }
+            }
+            if w.writing_started {
+                w.writer.finish(host, status == AD_FINISHED);
+            }
+            if status == AD_FINISHED {
+                host.log(
+                    MK_DETAIL,
+                    &join_c_slices(&[b"Successfully downloaded ", &self.info_name]),
+                );
+                return AD_FINISHED;
+            }
+            if status == AD_FATAL_ERROR {
+                return status;
+            }
+            if w.content_rejected {
+                if job.dupe_fallback_round > 0 || only_server.is_some() {
+                    return AD_FAILED;
+                }
+                // another copy, from another server (skip_servers also skips the cached body)
+                rejected.push(d.server);
+                if rejected.len() >= crate::nntprs_pool::usable_count(shared) {
+                    host.log(
+                        MK_DETAIL,
+                        &join_c_slices(&[b"Article ", &self.info_name, b" @ all servers failed"]),
+                    );
+                    return AD_FAILED;
+                }
+                continue;
+            }
+            // a decode failure after the pool accepted the body (range exceeded)
+            rejected.push(d.server);
+            if rejected.len() >= crate::nntprs_pool::usable_count(shared) {
+                return AD_FAILED;
+            }
+        }
+        w.pooled_transient_exhausted = transient_exhausted;
+        AD_FAILED
+    }
+
+    /// Logs a pooled fetch's server attempts as the per-connection download
+    /// did, and counts each on the server's article statistics.
+    #[cfg(unix)]
+    fn log_attempts(
+        &self,
+        w: &mut DlWorker,
+        host: &DlHost,
+        shared: &crate::nntprs_pool::Shared,
+        attempts: &[crate::nntprs_pool::Rec],
+        noted_backbones: &mut Vec<i32>,
+    ) {
+        use crate::nntp::article_dl_classify_attempt_stat;
+        use crate::nntprs_pool::{FailKind, Seen};
+        for a in attempts {
+            let conn_name = shared.conn_name(a.server);
+            let Some(srv) = shared.server(a.server) else {
+                continue;
+            };
+            host.log(
+                MK_DETAIL,
+                &join_c_slices(&[b"Downloading ", &self.info_name, b" @ ", &conn_name]),
+            );
+            let status = match (&a.outcome, a.fail) {
+                (Seen::Have, _) => AD_FINISHED,
+                (Seen::Missing, _) => {
+                    w.last_430 = true;
+                    let reply = a.reply.as_deref().unwrap_or("430 No Such Article");
+                    host.log(
+                        MK_DETAIL,
+                        &join_c_slices(&[
+                            b"Article ",
+                            &self.info_name,
+                            b" @ ",
+                            &conn_name,
+                            b" failed, could not fetch article: ",
+                            reply.as_bytes(),
+                        ]),
+                    );
+                    let backbone = srv.group();
+                    if backbone > 0 && !noted_backbones.contains(&backbone) {
+                        noted_backbones.push(backbone);
+                        let name = crate::backbones::name_of(backbone).unwrap_or_default();
+                        host.log(
+                            MK_DETAIL,
+                            &join_c_slices(&[
+                                b"Article ",
+                                &self.info_name,
+                                b" @ ",
+                                &conn_name,
+                                b" not found; not asking other servers on backbone ",
+                                name.as_bytes(),
+                            ]),
+                        );
+                    }
+                    AD_NOT_FOUND
+                }
+                (Seen::Unreachable(text), _) => {
+                    host.log(
+                        MK_DETAIL,
+                        &join_c_slices(&[
+                            b"Article ",
+                            &self.info_name,
+                            b" @ ",
+                            &conn_name,
+                            b" failed, could not fetch article: ",
+                            text.as_bytes(),
+                        ]),
+                    );
+                    AD_FAILED
+                }
+                (Seen::Failed(_), Some(FailKind::Decode(st))) => {
+                    let what: &[u8] = match st {
+                        nntp_rs::decoder::Status::CrcError => b" failed: CRC-Error",
+                        nntp_rs::decoder::Status::ArticleIncomplete => b" failed: article incomplete",
+                        nntp_rs::decoder::Status::InvalidSize => b" failed: size mismatch",
+                        nntp_rs::decoder::Status::NoBinaryData => b" failed: no binary data found",
+                        _ => b" failed",
+                    };
+                    host.log(MK_DETAIL, &join_c_slices(&[b"Decoding ", &self.info_name, what]));
+                    if st == nntp_rs::decoder::Status::CrcError {
+                        AD_CRC_ERROR
+                    } else {
+                        AD_FAILED
+                    }
+                }
+                (Seen::Failed(text), Some(FailKind::Login)) => {
+                    host.log(
+                        MK_DETAIL,
+                        &join_c_slices(&[
+                            b"Article ",
+                            &self.info_name,
+                            b" @ ",
+                            &conn_name,
+                            b" failed: could not establish connection (",
+                            text.as_bytes(),
+                            b")",
+                        ]),
+                    );
+                    AD_CONNECT_ERROR
+                }
+                (Seen::Failed(text), _) => {
+                    host.log(
+                        MK_DETAIL,
+                        &join_c_slices(&[
+                            b"Article ",
+                            &self.info_name,
+                            b" @ ",
+                            &conn_name,
+                            b" failed: ",
+                            text.as_bytes(),
+                        ]),
+                    );
+                    AD_FAILED
+                }
+            };
+            // a connection that never got an answer (connect, TLS) says nothing
+            // about the article, as before
+            let no_answer = matches!(a.fail, Some(FailKind::Other | FailKind::Timeout))
+                && a.reply.is_none()
+                && a.wire_bytes == 0;
+            let (rec, succ, fail) =
+                article_dl_classify_attempt_stat(status, AD_FINISHED, AD_FAILED, AD_NOT_FOUND, AD_CRC_ERROR);
+            // a copy that arrived is counted once the writer has taken or rejected it
+            if rec && status != AD_FINISHED && !no_answer {
+                self.count_server_article(w, srv.id, succ, fail);
+            }
+            w.downloaded_size = w
+                .downloaded_size
+                .wrapping_add(i32::try_from(a.wire_bytes).unwrap_or(i32::MAX));
+        }
+    }
+
+    /// One article success or failure on server `server_id`, for the file's
+    /// per-server counts and the statistics.
+    #[cfg(unix)]
+    fn count_server_article(&self, w: &mut DlWorker, server_id: i32, succ: i32, fail: i32) {
+        if let Some(ent) = w.server_stats.iter_mut().find(|(sid, _, _)| *sid == server_id) {
+            let (ns, nf) = crate::downloadinfo::server_stat_apply_op(ent.1, ent.2, succ, fail, 0, 0, 1, 2);
+            ent.1 = ns;
+            ent.2 = nf;
+        } else {
+            let (ns, nf) = crate::downloadinfo::server_stat_apply_op(0, 0, succ, fail, 0, 0, 1, 2);
+            w.server_stats.push((server_id, ns, nf));
+        }
+        if let Some(sm) = crate::statmeter::active_statmeter() {
+            let off = crate::ffi::active_workstate().map_or(0, |ws| ws.local_time_offset());
+            sm.add_server_stats(0, fail as u32, succ as u32, server_id, off);
+        }
+    }
+
+    /// [`Self::write_decoded`] for a whole article the pool decoded.
+    #[cfg(unix)]
+    fn write_decoded_from(
+        &self,
+        w: &mut DlWorker,
+        host: &DlHost,
+        d: &nntp_rs::Decoded,
+        raw_article: bool,
+        skip_disk_write: bool,
+    ) -> bool {
+        let mut art_filename_opt: Option<Vec<u8>> = None;
+        let mut article_file_size = 0i64;
+        let mut article_offset = 0i64;
+        let mut article_size = 0i32;
+        let format = if raw_article { Format::Unknown } else { d.format };
+        if !raw_article {
+            art_filename_opt = Some(d.filename.as_bytes().to_vec());
+            if d.format == Format::Yenc {
+                // nntp-rs gives a single-part article as begin 0 and end the
+                // file size; RustyGet's Decoder said 1..=size
+                let begin_pos = i64::try_from(d.part_begin.max(1)).unwrap_or(0);
+                let end_pos = i64::try_from(d.part_end).unwrap_or(0);
+                // the whole file's size (=ybegin size=), not the part's
+                article_file_size = i64::try_from(d.file_size).unwrap_or(0);
+                let mut vints = [0i32; 1];
+                let mut vi64s = [0i64; 3];
+                host.op45(
+                    4,
+                    0,
+                    host.article_ptr,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    vints.as_mut_ptr(),
+                    vi64s.as_mut_ptr(),
+                    std::ptr::null_mut(),
+                );
+                let dupe_round = vints[0];
+                let expected_file_size = vi64s[0];
+                let dupe_expected_offset = Some(vi64s[1]).filter(|&v| v >= 0);
+                let dupe_expected_end = Some(vi64s[2]).filter(|&v| v >= 0);
+                match article_downloader_validate_yenc(
+                    begin_pos,
+                    end_pos,
+                    article_file_size,
+                    expected_file_size,
+                    dupe_round,
+                    dupe_expected_offset,
+                    dupe_expected_end,
+                ) {
+                    Ok((off, sz)) => {
+                        w.decoded_file_size = article_file_size;
+                        article_offset = off;
+                        article_size = sz;
+                    }
+                    Err(YencRangeError::MissingBounds) => return false,
+                    Err(YencRangeError::Malformed) => {
+                        let tail = format!(
+                            ": range {begin_pos}-{end_pos} out of range (file size {article_file_size})"
+                        );
+                        host.log(
+                            MK_WARNING,
+                            &join_c_slices(&[b"Malformed article ", &self.info_name, tail.as_bytes()]),
+                        );
+                        return false;
+                    }
+                    Err(
+                        mismatch @ (YencRangeError::FileSizeMismatch
+                        | YencRangeError::OffsetMismatch
+                        | YencRangeError::EndMismatch),
+                    ) => {
+                        w.decoded_file_size = article_file_size;
+                        let tail = match mismatch {
+                            YencRangeError::FileSizeMismatch => format!(
+                                " from duplicate: file size mismatch ({article_file_size} vs {expected_file_size})"
+                            ),
+                            YencRangeError::OffsetMismatch => format!(
+                                " from duplicate: decoded offset mismatch ({} vs {})",
+                                begin_pos - 1,
+                                dupe_expected_offset.unwrap_or(-1)
+                            ),
+                            _ => format!(
+                                " from duplicate: decoded end mismatch ({end_pos} vs {})",
+                                dupe_expected_end.unwrap_or(-1)
+                            ),
+                        };
+                        host.log(
+                            MK_DETAIL,
+                            &join_c_slices(&[b"Discarding article ", &self.info_name, tail.as_bytes()]),
+                        );
+                        return false;
+                    }
+                }
+            }
+        }
+        if !w.writer.start(
+            host,
+            &self.info_name,
+            format,
+            art_filename_opt.as_deref(),
+            article_file_size,
+            article_offset,
+            article_size,
+        ) {
+            w.local_write_error = true;
+            return false;
+        }
+        w.writing_started = true;
+        let ok = w.writer.write(&d.data, raw_article, skip_disk_write);
+        if !ok {
+            w.local_write_error = true;
+        }
+        if let Some(ref mut ca) = w.analyzer {
+            let _ = ca.append(&d.data);
+        }
+        ok
+    }
+
+    /// [`Self::decode_check`] for a whole article the pool decoded (it
+    /// already refused bodies that did not decode).
+    #[cfg(unix)]
+    fn decode_check_from(
+        &self,
+        w: &mut DlWorker,
+        host: &DlHost,
+        d: &nntp_rs::Decoded,
+        raw_article: bool,
+        crc_check: bool,
+    ) -> i32 {
+        if raw_article {
+            return AD_FINISHED;
+        }
+        let is_yenc = d.format == Format::Yenc;
+        match article_dl_classify_decode_status(false, 1, is_yenc, w.writer.range_exceeded()) {
+            1 => {
+                w.article_filename_c = Some(nul_vec(d.filename.as_bytes()));
+                if is_yenc {
+                    let crc = if crc_check { d.calculated_crc } else { d.expected_crc };
+                    host.op45(
+                        3,
+                        crc as c_int,
+                        host.article_ptr,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                    );
+                }
+                AD_FINISHED
+            }
+            2 => {
+                host.log(
+                    MK_DETAIL,
+                    &join_c_slices(&[b"Decoding ", &self.info_name, b" failed: more data than its range"]),
+                );
+                AD_FAILED
+            }
+            _ => {
+                host.log(MK_DETAIL, &join_c_slices(&[b"Decoding ", &self.info_name, b" failed"]));
+                AD_FAILED
+            }
+        }
+    }
+
     pub(crate) fn run_with_coord(
         self: &std::sync::Arc<Self>,
         qh: &QueueSubsysHost,
@@ -4041,6 +4683,37 @@ impl NzbgetRsArticleDownloader {
                 pool.get_connection_missing(lvl, want_srv, &ign_refs, missing) as usize
             };
 
+            // with the shared nntp-rs pool (always, in the daemon) the article
+            // goes through it; one of another server generation means the
+            // servers changed: try again under the new one. The per-connection
+            // loop below serves only test setups without one.
+            #[cfg(unix)]
+            let pooled = crate::nntprs_pool::shared();
+            #[cfg(not(unix))]
+            let pooled: Option<std::sync::Arc<()>> = None;
+            if pooled.as_ref().is_some_and(|s| s.generation() != server_config_gen) {
+                status = AD_RETRY;
+            } else if let Some(shared) = pooled {
+                status = self.download_pooled(
+                    &mut w,
+                    &host,
+                    &shared,
+                    PooledJob {
+                        force,
+                        extra_priority,
+                        has_desired_server,
+                        desired_server_id: qh.with_locked_queue(|_| {
+                            let f = qh.file_snap(self.file_ptr);
+                            qh.nzb_snap(f.nzb_ptr, false).desired_server_id
+                        }),
+                        dupe_fallback_round,
+                        file_time,
+                        retries,
+                        interval_sec,
+                        server_config_gen,
+                    },
+                );
+            } else {
             loop {
                 if cut_at_frontier {
                     host.log(
@@ -4454,6 +5127,8 @@ impl NzbgetRsArticleDownloader {
                 }
             }
 
+            }
+
             self.free_connection(&host, &mut w.downloaded_size, status == AD_FINISHED);
 
             let (st_final, _, _, _, _, _, _) = runtime_flags();
@@ -4472,7 +5147,7 @@ impl NzbgetRsArticleDownloader {
                     &join_c_slices(&[b"Download ", &self.info_name, b" cancelled"]),
                 );
             }
-            if status == AD_FAILED && transient_retries.is_exhausted() {
+            if status == AD_FAILED && (transient_retries.is_exhausted() || w.pooled_transient_exhausted) {
                 host.log(
                     MK_DETAIL,
                     &join_c_slices(&[

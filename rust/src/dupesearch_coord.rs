@@ -1683,6 +1683,147 @@ fn dupe_check_server_cap(server_connections: i32, check_connections: i32) -> i32
     }
 }
 
+/// How a pooled donor exchange failed: the exchange's own error, or no
+/// connection to the server at all (the caller then asks a backbone sibling).
+#[cfg(unix)]
+enum PooledExchangeError {
+    Exchange(DonorExchangeError),
+    Connect,
+}
+
+/// A donor exchange through the shared nntp-rs pool: STAT for every request
+/// on one checked-out connection of server `idx`, then one BODY read for the
+/// gated ones the server has (each at most once per article, by its gate).
+#[cfg(unix)]
+fn pooled_donor_exchange(
+    shared: &crate::nntprs_pool::Shared,
+    idx: usize,
+    light: bool,
+    batch: &[DonorRequest],
+) -> Result<Vec<DonorAnswer>, PooledExchangeError> {
+    let timeout = Duration::from_secs(crate::fleetprobe::PROBE_IO_TIMEOUT_SEC.max(1) as u64);
+    // a light RustyGet slot runs in nntp-rs's light reserve; a probe or check
+    // slot of the main pool on a download slot, ahead of waiting downloads
+    let (work, priority) = if light {
+        (nntp_rs::Work::Light, nntp_rs::Priority::Next)
+    } else {
+        (nntp_rs::Work::Download, nntp_rs::Priority::Next)
+    };
+    let opts = nntp_rs::FetchOptions {
+        timeout: Some(timeout),
+        priority,
+        ..Default::default()
+    };
+    let mut co = match shared.pool.checkout(idx, work, &opts) {
+        Ok(c) => c,
+        Err(nntp_rs::Error::Timeout(_)) => {
+            return Err(PooledExchangeError::Exchange(DonorExchangeError {
+                answers: Vec::new(),
+                busy: true,
+            }))
+        }
+        // could not connect: a backbone sibling may answer instead
+        Err(_) => return Err(PooledExchangeError::Connect),
+    };
+    co.set_io_timeout(timeout);
+    if http_stopped() || donor_stopping() {
+        co.mark_broken();
+        return Err(PooledExchangeError::Exchange(DonorExchangeError {
+            answers: Vec::new(),
+            busy: false,
+        }));
+    }
+    // every request's STAT at once, pipelined on the held connection
+    let ids: Vec<String> = batch
+        .iter()
+        .map(|req| {
+            String::from_utf8_lossy(&crate::nntp::nntp_health_format_bracketed_id(
+                req.message_id.as_bytes(),
+            ))
+            .into_owned()
+        })
+        .collect();
+    let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let mut answers: Vec<DonorAnswer> = match co.stat_many(&refs, None) {
+        Ok(got) => got
+            .into_iter()
+            .map(|p| match p {
+                nntp_rs::Presence::Present => DonorAnswer::Present,
+                nntp_rs::Presence::Absent => DonorAnswer::Missing,
+                nntp_rs::Presence::Unknown => DonorAnswer::Error,
+            })
+            .collect(),
+        Err(_) => {
+            co.mark_broken();
+            return Err(PooledExchangeError::Exchange(DonorExchangeError {
+                answers: Vec::new(),
+                busy: false,
+            }));
+        }
+    };
+    // the body checks below read on this connection but into the pool's shared
+    // bodies (body_shared), so a borrow that follows finds the body kept
+    for i in 0..batch.len() {
+        if http_stopped() || donor_stopping() {
+            co.mark_broken();
+            for j in i..batch.len() {
+                if batch[j].gate.is_some() && answers[j] == DonorAnswer::Present {
+                    answers[j] = DonorAnswer::Error;
+                }
+            }
+            return Err(PooledExchangeError::Exchange(DonorExchangeError {
+                answers,
+                busy: false,
+            }));
+        }
+        let Some(gate) = batch[i].gate.as_ref() else {
+            continue;
+        };
+        if answers[i] != DonorAnswer::Present {
+            continue;
+        }
+        let res = gate.body_once_fallible(|| {
+            let id = String::from_utf8_lossy(&crate::nntp::nntp_health_format_bracketed_id(
+                batch[i].message_id.as_bytes(),
+            ))
+            .into_owned();
+            let attempts = crate::nntprs_pool::AttemptLog::default();
+            let fopts = nntp_rs::FetchOptions {
+                observer: Some(attempts.observer(shared)),
+                pacer: Some(crate::articlefetcher::repair_pace()),
+                ..Default::default()
+            };
+            let got = co.body_shared(&id, &fopts);
+            drop(attempts);
+            match got {
+                Ok(d) if d.format == nntp_rs::Format::Yenc && !d.data.is_empty() => {
+                    Ok(DonorAnswer::Present)
+                }
+                Ok(_) | Err(nntp_rs::Error::Decode(_)) => Ok(DonorAnswer::BodyBad),
+                Err(nntp_rs::Error::NotFound) => Ok(DonorAnswer::BodyBad),
+                Err(_) => Err(()),
+            }
+        });
+        match res {
+            Ok(ans) => answers[i] = ans,
+            Err(()) => {
+                co.mark_broken();
+                answers[i] = DonorAnswer::Error;
+                for j in (i + 1)..batch.len() {
+                    if batch[j].gate.is_some() && answers[j] == DonorAnswer::Present {
+                        answers[j] = DonorAnswer::Error;
+                    }
+                }
+                return Err(PooledExchangeError::Exchange(DonorExchangeError {
+                    answers,
+                    busy: false,
+                }));
+            }
+        }
+    }
+    Ok(answers)
+}
+
 struct NntpHealthTransportShared {
     /// the backbone's servers in the order to ask (one id for an independent server)
     server_ids: Arc<Mutex<Vec<i32>>>,
@@ -1786,10 +1927,27 @@ impl DonorServerExchange for NntpHealthTransportShared {
                     broken: false,
                 };
                 let conn = unsafe { &*(conn_ptr as *const crate::net::PooledNntpConn) };
-                unsafe {
-                    conn.prepare_for_use();
-                }
-                if unsafe { conn.connect() } {
+                // the shared nntp-rs pool owns the sockets: the slot held here
+                // keeps the probes' share, the exchange runs on a checked-out
+                // connection of the same server
+                let pooled = crate::nntprs_pool::shared()
+                    .and_then(|s| s.index_of(conn.server.id).map(|i| (s, i)));
+                let connected = if let Some((shared, idx)) = pooled {
+                    match pooled_donor_exchange(&shared, idx, crate::light_pool::is_light(conn), batch) {
+                        Ok(answers) => return Ok(answers),
+                        Err(PooledExchangeError::Exchange(e)) => {
+                            release.broken = true;
+                            return Err(e);
+                        }
+                        Err(PooledExchangeError::Connect) => false,
+                    }
+                } else {
+                    unsafe {
+                        conn.prepare_for_use();
+                    }
+                    unsafe { conn.connect() }
+                };
+                if connected {
                     crate::fleetprobe::probe_connected(conn);
                     break (release, need_join);
                 }

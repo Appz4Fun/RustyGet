@@ -519,6 +519,102 @@ impl NzbgetRsDupeProbe {
         self.stopped.load(Ordering::SeqCst)
     }
 
+    /// The sample walk through the shared nntp-rs pool: one connection of
+    /// server `idx` checked out as light work (the RustyGet check slot the
+    /// caller holds keeps the duplicate health checks' share), a STAT per
+    /// sample still unfound. Returns whether the server answered anything,
+    /// and whether it could not be reached at all.
+    #[cfg(unix)]
+    fn walk_pooled(
+        &mut self,
+        shared: &crate::nntprs_pool::Shared,
+        idx: usize,
+        server_name: &[u8],
+        light: bool,
+        result: &mut ServerResult,
+    ) -> (bool, bool) {
+        let n = self.samples.len();
+        let pending = |found: &[bool]| found.iter().filter(|&&f| !f).count() as i32;
+        let timeout = Duration::from_secs(crate::light_pool::LIGHT_IO_TIMEOUT_SECS as u64);
+        let opts = nntp_rs::FetchOptions {
+            timeout: Some(timeout),
+            ..Default::default()
+        };
+        // the RustyGet slot the caller holds says which share this is: a light
+        // one runs in nntp-rs's light reserve, a check slot of the main pool on
+        // one of the server's download slots, ahead of waiting downloads
+        let (work, priority) = if light {
+            (nntp_rs::Work::Light, nntp_rs::Priority::Next)
+        } else {
+            (nntp_rs::Work::Download, nntp_rs::Priority::Next)
+        };
+        let opts = nntp_rs::FetchOptions { priority, ..opts };
+        let mut co = match shared.pool.checkout(idx, work, &opts) {
+            Ok(c) => c,
+            Err(e) => {
+                result.unknown += pending(&self.found);
+                // a server that could not be reached at all is left out of the
+                // verdict, but a light connection that could not connect proves
+                // nothing about it (as before); a wait that ran out neither
+                let unreachable = !light
+                    && matches!(
+                        e,
+                        nntp_rs::Error::Io { .. } | nntp_rs::Error::Tls(_) | nntp_rs::Error::Unavailable
+                    );
+                return (false, unreachable);
+            }
+        };
+        co.set_io_timeout(timeout);
+        // the samples still unfound, asked at once (pipelined on the held
+        // connection); an id that could carry a second command is never sent
+        let mut todo = Vec::new();
+        for index in 0..n {
+            if self.found[index] {
+                continue;
+            }
+            if pipelinable(&self.samples[index].message_id) {
+                todo.push(index);
+            } else {
+                result.unknown += 1;
+            }
+        }
+        if self.is_stopped() || todo.is_empty() {
+            // connected: the server counts as reached
+            return (true, false);
+        }
+        let ids: Vec<String> = todo
+            .iter()
+            .map(|&i| String::from_utf8_lossy(&self.samples[i].message_id).into_owned())
+            .collect();
+        let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let answers = match co.stat_many(&refs, None) {
+            Ok(a) => a,
+            Err(_) => {
+                co.mark_broken();
+                result.unknown += todo.len() as i32;
+                // connected, but the exchange broke: reached, nothing proven
+                return (true, false);
+            }
+        };
+        for (&index, answer) in todo.iter().zip(answers) {
+            match answer {
+                nntp_rs::Presence::Present => {
+                    result.exists += 1;
+                    self.found[index] = true;
+                    if self.found_on.is_empty() {
+                        self.found_on.extend_from_slice(server_name);
+                        self.found_on.extend_from_slice(b" (");
+                        self.found_on.extend_from_slice(&self.samples[index].message_id);
+                        self.found_on.push(b')');
+                    }
+                }
+                nntp_rs::Presence::Absent => result.missing += 1,
+                nntp_rs::Presence::Unknown => result.unknown += 1,
+            }
+        }
+        (true, false)
+    }
+
     #[cfg(unix)]
     fn probe_server_native(
         &mut self,
@@ -585,7 +681,16 @@ impl NzbgetRsDupeProbe {
         // a server that could not even connect (login refused, TLS, network) before
         // answering anything does not count as reached: a sibling is asked instead
         let mut never_answered = false;
-        if fresh {
+        let pooled = crate::nntprs_pool::shared()
+            .and_then(|s| s.index_of(actual_server_id).map(|idx| (s, idx)));
+        if let (true, Some((shared, idx))) = (fresh, pooled) {
+            // SAFETY: the slot stays held (and valid) until `checkout` is released below
+            let light = crate::light_pool::is_light(unsafe { &*(conn_ptr as *const crate::net::PooledNntpConn) });
+            let (answered, unreachable) =
+                self.walk_pooled(&shared, idx, &server_name, light, &mut result);
+            result.unreachable = unreachable;
+            probed_server = answered;
+        } else if fresh {
             self.set_conn(conn_ptr);
             let conn = unsafe { &*(conn_ptr as *const crate::net::PooledNntpConn) };
             unsafe {

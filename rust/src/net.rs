@@ -3081,9 +3081,14 @@ impl NzbgetRsServerPool {
         } else {
             0
         };
+        let bandwidth_bound = crate::light_pool::bandwidth_bound(limit, speed);
+        #[cfg(unix)]
+        if let Some(shared) = crate::nntprs_pool::shared() {
+            shared.pool.pool().set_bandwidth_bound(bandwidth_bound);
+        }
         Some(LightInputs {
             cap,
-            bandwidth_bound: crate::light_pool::bandwidth_bound(limit, speed),
+            bandwidth_bound,
         })
     }
 
@@ -3814,7 +3819,7 @@ impl NzbgetRsServerPool {
         self.close_unused_connections();
         #[cfg(unix)]
         if let Some(me) = active_server_pool().filter(|p| std::ptr::eq(&**p, self)) {
-            crate::nntprs_pool::spawn_identification(&me);
+            crate::nntprs_pool::rebuild(&me);
         }
     }
 

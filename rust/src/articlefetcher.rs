@@ -117,6 +117,12 @@ pub trait NntpHost: Send + Sync {
     fn light_host(&self) -> Option<&'static dyn NntpHost> {
         None
     }
+    /// The daemon's hosts fetch through the shared nntp-rs pool
+    /// (`crate::nntprs_pool`) as this kind of work and rank; `None` (test
+    /// hosts): through [`Self::get_connection`] and the raw requests.
+    fn shared_work(&self) -> Option<(nntp_rs::Work, nntp_rs::Priority)> {
+        None
+    }
 }
 
 /// The daemon's [`NntpHost`]: the active server pool, stat meter, work state,
@@ -184,6 +190,11 @@ impl NntpHost for NativeNntpHost {
 
     fn light_host(&self) -> Option<&'static dyn NntpHost> {
         Some(&LIGHT_HOST)
+    }
+
+    fn shared_work(&self) -> Option<(nntp_rs::Work, nntp_rs::Priority)> {
+        // repair and donor reads: download slots, ahead of bulk downloads
+        Some((nntp_rs::Work::Download, nntp_rs::Priority::Repair))
     }
 
     fn release(&self, conn: ConnHandle, keep_connected: bool) {
@@ -348,6 +359,9 @@ impl NntpHost for LightNntpHost {
     }
     fn light_host(&self) -> Option<&'static dyn NntpHost> {
         Some(&LIGHT_HOST)
+    }
+    fn shared_work(&self) -> Option<(nntp_rs::Work, nntp_rs::Priority)> {
+        Some((nntp_rs::Work::Light, nntp_rs::Priority::Next))
     }
 }
 
@@ -620,6 +634,95 @@ pub fn download_must_wait(limit: i64, cur_speed: i64, mom_speed: i64) -> bool {
     )
 }
 
+/// The speed limit as one token bucket for every connection of the shared
+/// pool: `bytes` (counted `weight` times, so the download leaves most of the
+/// line to repair fetches that wait) are owed at the limit's rate, and the
+/// time until they are paid off is returned for the caller to wait before
+/// its next read. No limit: no wait. Credit never builds up beyond a moment.
+#[cfg(unix)]
+pub(crate) fn paced_delay(bytes: usize, class: PaceClass) -> Duration {
+    static ALL: Mutex<Option<Instant>> = Mutex::new(None);
+    static DOWNLOAD: Mutex<Option<Instant>> = Mutex::new(None);
+    let limit = crate::ffi::active_workstate().map_or(0, |w| i64::from(w.speed_limit()));
+    if limit <= 0 {
+        return Duration::ZERO;
+    }
+    let now = Instant::now();
+    // owe `bytes` to a bucket draining at `rate` bytes/s; when it is paid off
+    let owe = |bucket: &Mutex<Option<Instant>>, rate: f64| -> Instant {
+        let cost = Duration::from_secs_f64(bytes as f64 / rate);
+        let mut g = bucket.lock().unwrap_or_else(|e| e.into_inner());
+        let start = match *g {
+            Some(t) if t > now => t,
+            _ => now,
+        };
+        *g = Some(start + cost);
+        start + cost
+    };
+    let all = owe(&ALL, limit as f64);
+    let until = match class {
+        // reads past the limit still count, so the others back off
+        PaceClass::Unthrottled => return Duration::ZERO,
+        PaceClass::Repair => all,
+        PaceClass::Download if repair_waiting() => all.max(owe(&DOWNLOAD, limit as f64 / DOWNLOAD_SHARE_DURING_REPAIR as f64)),
+        PaceClass::Download => all,
+    };
+    until.saturating_duration_since(now + Duration::from_millis(5))
+}
+
+/// Who a read through the shared pool is paced as ([`paced_delay`]).
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PaceClass {
+    /// A download: a quarter of the line while repair fetches wait.
+    Download,
+    /// A repair or donor read.
+    Repair,
+    /// A read past the limit (fleet classification): counted, never held.
+    Unthrottled,
+}
+
+/// The pacer for repair-class reads outside an [`ArticleFetcher`] (donor
+/// body checks): the speed meter, repair traffic and the speed limit.
+#[cfg(unix)]
+pub(crate) fn repair_pace() -> nntp_rs::Pace {
+    nntp_rs::Pace::new(RepairPacer { unthrottled: false })
+}
+
+/// Whether a repair fetch was held back by the speed limit just now (the
+/// download then yields most of the line, see [`download_must_wait`]).
+#[cfg(unix)]
+pub(crate) fn repair_waiting() -> bool {
+    unix_now_ms() - REPAIR_WAITED_AT_MS.load(Ordering::SeqCst) <= REPAIR_DEMAND_MS
+}
+
+/// Paces a repair or donor fetch through the shared pool as the raw read
+/// loop did: every read counts on the speed meter and as repair traffic;
+/// over the speed limit the next read waits (and the download yields its
+/// share, see [`download_must_wait`]) unless the fetcher is unthrottled.
+#[cfg(unix)]
+struct RepairPacer {
+    unthrottled: bool,
+}
+
+#[cfg(unix)]
+impl nntp_rs::Pacer for RepairPacer {
+    fn received(&self, _server: usize, bytes: usize) -> Duration {
+        if let Some(sm) = crate::statmeter::active_statmeter() {
+            sm.add_speed_reading_locked(c_int::try_from(bytes).unwrap_or(c_int::MAX));
+        }
+        note_repair_bytes(bytes);
+        if self.unthrottled {
+            return paced_delay(bytes, PaceClass::Unthrottled);
+        }
+        let wait = paced_delay(bytes, PaceClass::Repair);
+        if !wait.is_zero() {
+            REPAIR_WAITED_AT_MS.store(unix_now_ms(), Ordering::SeqCst);
+        }
+        wait
+    }
+}
+
 /// A connection an [`ArticleFetcher`] holds: returned to the pool when dropped
 /// (disconnected, its state unknown) unless [`Lease::release`]d.
 struct Lease<'a> {
@@ -649,6 +752,8 @@ pub struct ArticleFetcher {
     /// Reads past the download speed limit (see [`ArticleFetcher::unthrottled`]).
     unthrottled: AtomicBool,
     conn_ptr: Mutex<ConnHandle>,
+    /// Cancels a fetch in flight through the shared pool ([`Self::stop`]).
+    cancel: nntp_rs::CancelHandle,
 }
 
 impl ArticleFetcher {
@@ -659,6 +764,7 @@ impl ArticleFetcher {
             stopped: AtomicBool::new(false),
             unthrottled: AtomicBool::new(false),
             conn_ptr: Mutex::new(ConnHandle::default()),
+            cancel: nntp_rs::CancelHandle::new(),
         }
     }
 
@@ -685,6 +791,7 @@ impl ArticleFetcher {
 
     pub fn stop(&self) {
         self.stopped.store(true, Ordering::SeqCst);
+        self.cancel.cancel();
         if let Ok(guard) = self.conn_ptr.lock() {
             let conn = *guard;
             if !conn.is_none() {
@@ -712,6 +819,44 @@ impl ArticleFetcher {
     }
 
     pub fn fetch(&self, message_id: &[u8], groups: &[Vec<u8>]) -> FetchedArticle {
+        #[cfg(unix)]
+        if let Some((work, priority)) = self.host.shared_work() {
+            if let Some(shared) = crate::nntprs_pool::shared() {
+                // temporary failures (a server turning connections away, a read
+                // that timed out) are tried again after a growing wait, as the
+                // per-connection fetch did; a 430 or a bad copy is final
+                let mut transient = 0;
+                let mut timed_out = 0;
+                // a server turned away for a while (blocked after a refused
+                // connection, or paused): wait it out, up to RetryInterval and a bit
+                let blocked_budget = crate::net::active_server_pool().map_or(10, |p| p.retry_interval().max(1)) + 5;
+                let mut blocked_waited = 0;
+                loop {
+                    let got = self.fetch_pooled(&shared, work, priority, message_id, None);
+                    if got.success || !got.transient || self.is_stopped() {
+                        return got;
+                    }
+                    if got.retry && blocked_waited < blocked_budget {
+                        blocked_waited += 1;
+                        if !self.wait_before_retry(1) {
+                            return got;
+                        }
+                        continue;
+                    }
+                    if got.timed_out {
+                        timed_out += 1;
+                        if timed_out >= MAX_TIMED_OUT_TRIES {
+                            return got;
+                        }
+                        continue;
+                    }
+                    transient += 1;
+                    if transient >= MAX_TRANSIENT_ATTEMPTS || !self.wait_before_retry(transient_retry_delay(transient)) {
+                        return got;
+                    }
+                }
+            }
+        }
         let mut result = FetchedArticle::default();
         // servers this article failed on (only those: a login error or "too many
         // connections" says nothing about a server's backbone siblings) ...
@@ -926,6 +1071,128 @@ impl ArticleFetcher {
 
         if gave_up > 0 && only_430 && !self.is_stopped() {
             note_missing_everywhere_since(message_id, epoch);
+        }
+        result
+    }
+
+    /// [`Self::fetch`] through the shared nntp-rs pool: nntp-rs walks the
+    /// servers by level, shares a 430 within a backend, and hands concurrent
+    /// and recent requests for one article the same body (fetched once).
+    /// `only_server`: ask that server alone (its nntp-rs index).
+    #[cfg(unix)]
+    pub(crate) fn fetch_pooled(
+        &self,
+        shared: &crate::nntprs_pool::Shared,
+        work: nntp_rs::Work,
+        priority: nntp_rs::Priority,
+        message_id: &[u8],
+        only_server: Option<usize>,
+    ) -> FetchedArticle {
+        let mut result = FetchedArticle::default();
+        if self.is_stopped() {
+            return result;
+        }
+        let end = message_id.iter().position(|&b| b == 0).unwrap_or(message_id.len());
+        let msg_slice = &message_id[..end];
+        let id = String::from_utf8_lossy(msg_slice).into_owned();
+        while self.host.status().quota_reached && !self.is_stopped() {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let wc = self.wait_counter.lock().ok().and_then(|g| g.clone());
+        if let Some(ref c) = wc {
+            c.fetch_add(1, Ordering::SeqCst);
+        }
+        let attempts = crate::nntprs_pool::AttemptLog::default();
+        let opts = nntp_rs::FetchOptions {
+            cancel: Some(self.cancel.clone()),
+            // no deadline for the whole fetch (a slot wait plus a paced body can
+            // be long under a speed limit); each read waits at most ArticleTimeout
+            work,
+            only_server,
+            priority,
+            observer: Some(attempts.observer(shared)),
+            pacer: Some(nntp_rs::Pace::new(RepairPacer {
+                unthrottled: self.unthrottled.load(Ordering::Relaxed),
+            })),
+            ..Default::default()
+        };
+        let got = shared.pool.fetch_shared(&id, &opts);
+        if let Some(ref c) = wc {
+            c.fetch_sub(1, Ordering::SeqCst);
+        }
+        let recs = attempts.take();
+        for a in &recs {
+            // stream-repair lines name the server alone, as before
+            let name = shared
+                .server(a.server)
+                .map(|s| s.name.to_bytes().to_vec())
+                .unwrap_or_default();
+            let line = match &a.outcome {
+                crate::nntprs_pool::Seen::Missing => {
+                    let mut l = b"Stream repair: article ".to_vec();
+                    l.extend_from_slice(msg_slice);
+                    l.extend_from_slice(b" not available on ");
+                    l.extend_from_slice(&name);
+                    Some(l)
+                }
+                crate::nntprs_pool::Seen::Failed(why) | crate::nntprs_pool::Seen::Unreachable(why) => {
+                    let mut l = b"Stream repair: article ".to_vec();
+                    l.extend_from_slice(msg_slice);
+                    l.extend_from_slice(b" from ");
+                    l.extend_from_slice(&name);
+                    l.extend_from_slice(b" failed: ");
+                    l.extend_from_slice(why.as_bytes());
+                    Some(l)
+                }
+                crate::nntprs_pool::Seen::Have => None,
+            };
+            if let Some(l) = line {
+                self.host.detail(&l);
+            }
+        }
+        match got {
+            Ok(d) => {
+                if d.format == nntp_rs::Format::Yenc && d.part_end >= d.part_begin && !d.data.is_empty() {
+                    result.offset = i64::try_from(d.offset).unwrap_or(0);
+                    result.file_size = i64::try_from(d.file_size).unwrap_or(0);
+                    result.data = d.data.clone();
+                    result.success = true;
+                    if let Some(srv) = shared.server(d.server) {
+                        set_server_unreachable(srv.id, false);
+                    }
+                } else {
+                    let mut l = b"Stream repair: article ".to_vec();
+                    l.extend_from_slice(msg_slice);
+                    l.extend_from_slice(b" failed decoding");
+                    self.host.detail(&l);
+                }
+            }
+            Err(nntp_rs::Error::NotFound) => {
+                result.not_found_430 = recs.iter().any(|r| r.outcome == crate::nntprs_pool::Seen::Missing);
+                if !self.is_stopped()
+                    && only_server.is_none()
+                    && crate::nntprs_pool::missing_everywhere(shared, &recs)
+                {
+                    note_missing_everywhere(message_id);
+                }
+            }
+            Err(nntp_rs::Error::Unavailable) if crate::nntprs_pool::missing_on_usable(shared, &recs) => {
+                // every server switched on said 430; switched-off ones were never asked
+                result.not_found_430 = true;
+            }
+            Err(nntp_rs::Error::Timeout(_)) => {
+                result.transient = true;
+                result.timed_out = true;
+            }
+            Err(nntp_rs::Error::Cancelled) => {}
+            Err(nntp_rs::Error::Unavailable) => {
+                // no server could be asked just now (blocked or paused)
+                result.transient = true;
+                result.retry = true;
+            }
+            Err(e) => {
+                result.transient = e.is_retryable();
+            }
         }
         result
     }

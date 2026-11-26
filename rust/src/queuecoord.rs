@@ -531,8 +531,7 @@ fn cannot_continue_reason(
     if let Some(why) = crate::restartlend::refusal(nzb.id, &backup.queued_filename) {
         // zipfast could not restart its decoder near the frontier (no restart point in its
         // coder, say): the reason the restart gave
-        return format!("it holds the video compressed and zipfast cannot restart it near the frontier ({why})")
-            .into();
+        return format!("zipfast could not restart its decoder near the frontier ({why})").into();
     }
     if !live_borrowing(opts) {
         "live borrowing is off (it needs DupeArticleFallback=live, DirectUnpack and no RawArticle)".into()
@@ -597,7 +596,7 @@ fn backup_continues_extraction(
 ) -> bool {
     // a primary cut at its frontier (`frontiercut`) has its alt lend the rest while it can
     if nzb.direct_unpack_status == DirectUnpackStatus::Running
-        && crate::frontiercut::is_cut(nzb.id)
+        && crate::frontiercut::cut_for(nzb.id) == Some(backup.id)
         && live_borrowing(opts)
         && crate::restartlend::refusal(nzb.id, &backup.queued_filename).is_none()
         && !backup_cannot_lend(host, nzb, backup)
@@ -721,13 +720,21 @@ fn backup_cannot_lend(
         msg.extend_from_slice(&nzb.name);
         msg.extend_from_slice(b" for borrowing: duplicate ");
         msg.extend_from_slice(&backup.name);
-        msg.extend_from_slice(
-            format!(
-                " cannot lend its dead volumes (in {} borrow attempts the video inside did not match, or was compressed, which live repair cannot lend from)",
-                crate::postproc::DEAD_VOLUME_DONOR_MISMATCH_RUNS
-            )
-            .as_bytes(),
-        );
+        match crate::restartlend::refusal(nzb.id, &backup.queued_filename) {
+            // its video is compressed and zipfast found no restart near the frontier: no word
+            // on whether it is the same video
+            Some(why) => msg.extend_from_slice(
+                format!(" cannot lend its dead volumes: zipfast could not restart its decoder near the frontier ({why})")
+                    .as_bytes(),
+            ),
+            None => msg.extend_from_slice(
+                format!(
+                    " cannot lend its dead volumes (in {} borrow attempts the video inside did not match, or was compressed, which live repair cannot lend from)",
+                    crate::postproc::DEAD_VOLUME_DONOR_MISMATCH_RUNS
+                )
+                .as_bytes(),
+            ),
+        }
         host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
     }
     true
@@ -5398,7 +5405,10 @@ impl NzbgetRsQueueCoordinator {
             backup_locked: crate::dupecoord::locked_host(host, backup_nzb.ptr),
             done: data_done_permille(&nzb),
             extraction_verified: direct_unpack_verified(nzb.direct_unpack_status),
+            // (a cut is kept only for the alt it was made for: another copy the failover order
+            // picks later was never proven to hold the video)
             continuable: nzb.direct_unpack_status == DirectUnpackStatus::Running
+                && crate::frontiercut::cut_for(nzb.id).is_none_or(|alt| alt == backup_nzb.id)
                 && live_borrowing(opts)
                 && !crate::postproc::dead_volume_donor_cannot_lend(nzb.id, &backup_nzb.queued_filename)
                 && crate::restartlend::refusal(nzb.id, &backup_nzb.queued_filename).is_none(),
@@ -5417,7 +5427,7 @@ impl NzbgetRsQueueCoordinator {
         match weak_primary_switch(&facts) {
             WeakSwitch::Stay => {}
             WeakSwitch::ContinueAtFrontier => {
-                crate::frontiercut::cut(nzb.id);
+                crate::frontiercut::cut(nzb.id, backup_nzb.id);
                 let mut msg = b"Continuing ".to_vec();
                 msg.extend_from_slice(&nzb.name);
                 msg.extend_from_slice(b" at its frontier from alt ");

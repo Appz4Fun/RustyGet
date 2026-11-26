@@ -308,3 +308,27 @@ fn rar5_compressed_aes_backup_is_decrypted_on_the_way() {
     let (r, _) = run(&vols, None, &movie, frontier, &fx.dir);
     assert!(r.is_err(), "no password: its headers do not even map");
 }
+
+#[test]
+fn a_restart_that_fails_after_its_scratch_file_was_made_leaves_nothing() {
+    let Some(rar) = tool(&["rar"]) else { return };
+    let fx = Fixture::new("leak");
+    let movie = payload(3_000_000, 29);
+    std::fs::write(fx.dir.join("movie.mkv"), &movie).unwrap();
+    assert!(std::process::Command::new(rar)
+        .args(["a", "-idq", "-m3", "-ma5", "-md1m", "-v1000000b", "out.rar", "movie.mkv"])
+        .current_dir(&fx.dir)
+        .status()
+        .unwrap()
+        .success());
+    std::fs::remove_file(fx.dir.join("movie.mkv")).unwrap();
+    let vols = fx.volumes("out.part");
+    // the download's own output differs from the backup's: the member's CRC32 refuses it
+    let mut other = movie.clone();
+    for b in &mut other[..200_000] {
+        *b ^= 0x5a;
+    }
+    let (r, _) = run(&vols, None, &other, 2_000_000, &fx.dir);
+    assert!(r.is_err(), "another video's prefix fails the member's CRC32");
+    assert!(fx.volumes(".rg-restart").is_empty(), "the scratch file is removed");
+}

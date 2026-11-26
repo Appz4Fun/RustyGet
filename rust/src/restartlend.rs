@@ -56,8 +56,8 @@ const RAR5_FIRST_SEARCH: u64 = zipfast::map::SEED_SEARCH;
 /// The most output of the download held in memory as the restart's window (RAR5 asks for its
 /// dictionary and a filter's reach, twice; LZMA2 for its dictionary).
 const MAX_KNOWN: u64 = 1 << 30;
-/// The most packed and decoded bytes an LZMA2 restart holds at once: zipfast decodes the rest of
-/// the folder in one buffer from packed bytes held in one buffer.
+/// The most an LZMA2 restart holds at once (packed rest, decoded rest and window): zipfast decodes
+/// the rest of the folder in one buffer from packed bytes held in one buffer.
 pub const LZMA2_MAX_REST: u64 = 768 << 20;
 /// Bytes read from the backup per call while the decoder is fed.
 const FEED_CHUNK: usize = 1 << 20;
@@ -156,6 +156,12 @@ pub fn refusal(nzb_id: i32, donor: &[u8]) -> Option<String> {
         }
     }
     why
+}
+
+/// Whether a refusal came from a read that failed (an article the backup lacks, a timeout, a
+/// header article missing) rather than from what the backup holds: no verdict, tried again.
+pub fn transient(why: &str) -> bool {
+    why.contains("could not be read") || why.contains("hole") || why.contains("asked for nothing")
 }
 
 /// Forgets the restarts of download `nzb_id` (their scratch files go with the last holder).
@@ -305,7 +311,10 @@ pub fn restart(
     }
     let fetched = reads.fetched();
     Ok(Restarted {
-        file: Mutex::new(out.into_file()),
+        file: Mutex::new(
+            out.into_file()
+                .ok_or_else(|| "its scratch file was closed".to_string())?,
+        ),
         path: scratch,
         from,
         size,
@@ -344,10 +353,21 @@ fn crc_of_known(known: &mut dyn FnMut(u64, &mut [u8]) -> bool, len: u64) -> Opti
 }
 
 /// The decoded output as it is written: in order, hashed on the way.
+/// Removed when dropped unless [`OutputFile::into_file`] hands it to a [`Restarted`]: a restart
+/// that fails part way leaves nothing beside the download.
 struct OutputFile {
-    writer: std::io::BufWriter<File>,
+    writer: Option<std::io::BufWriter<File>>,
+    path: PathBuf,
     hasher: zipfast::crc32::Hasher,
     written: u64,
+}
+
+impl Drop for OutputFile {
+    fn drop(&mut self) {
+        if self.writer.take().is_some() {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
 }
 
 impl OutputFile {
@@ -358,14 +378,18 @@ impl OutputFile {
             .create_new(true)
             .open(path)?;
         Ok(Self {
-            writer: std::io::BufWriter::with_capacity(1 << 20, file),
+            writer: Some(std::io::BufWriter::with_capacity(1 << 20, file)),
+            path: path.to_path_buf(),
             hasher: zipfast::crc32::Hasher::new(),
             written: 0,
         })
     }
 
     fn put(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        self.writer.write_all(bytes)?;
+        self.writer
+            .as_mut()
+            .ok_or(std::io::ErrorKind::BrokenPipe)?
+            .write_all(bytes)?;
         self.hasher.update(bytes);
         self.written += bytes.len() as u64;
         Ok(())
@@ -373,7 +397,10 @@ impl OutputFile {
 
     /// Flushes and checks that exactly `want` bytes were written; gives their CRC32.
     fn finish(&mut self, want: u64) -> std::io::Result<u32> {
-        self.writer.flush()?;
+        self.writer
+            .as_mut()
+            .ok_or(std::io::ErrorKind::BrokenPipe)?
+            .flush()?;
         if self.written != want {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
@@ -386,10 +413,9 @@ impl OutputFile {
         Ok(self.hasher.clone().finalize())
     }
 
-    fn into_file(self) -> File {
-        // `finish` flushed it: nothing is left to write
-        let (file, _) = self.writer.into_parts();
-        file
+    fn into_file(mut self) -> Option<File> {
+        // `finish` flushed it: nothing is left to write; the file now belongs to the caller
+        self.writer.take().map(|w| w.into_parts().0)
     }
 }
 
@@ -501,6 +527,9 @@ impl CbcStream<'_> {
 }
 
 #[allow(clippy::too_many_arguments)]
+// OPEN ITEM (zipfast): the CBC stream logic of a compressed RAR5 AES restart (IV from the block
+// before the first one fetched, chaining across reads, the keyed CRC32 tweak) lives here on
+// zipfast's primitives; zipfast should take it (a decrypting source for `complete_rar5`).
 fn rar5(
     backup: &mut Backup<'_>,
     reads: &Reads,
@@ -682,10 +711,13 @@ fn lzma2(
         return Err("the restart plan is not an LZMA2 one".into());
     };
     let packed_len: u64 = folder.pack_sizes.iter().sum();
-    let rest = (packed_len - plan.fetch_from) + (folder.unpacked_size - folder_target);
+    // held at once: the packed rest, the decoded rest and the dictionary's window
+    let rest = (packed_len - plan.fetch_from)
+        + (folder.unpacked_size - folder_target)
+        + (folder_target - donor.start.min(folder_target));
     if rest > LZMA2_MAX_REST {
         return Err(format!(
-            "the rest of its LZMA2 folder ({} MB packed and unpacked) is more than a restart holds",
+            "the rest of its LZMA2 folder ({} MB packed, unpacked and window) is more than a restart holds",
             rest >> 20
         ));
     }

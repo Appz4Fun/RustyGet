@@ -10521,6 +10521,11 @@ impl CrossPackRepairSession {
                             && compressed_layer
                             && self.dead_nzb_id > 0
                             && self.is_video_set(repair_set_idx)
+                            // only for dead volumes (a dead tail): scattered holes are left to
+                            // donors that lend by range, which a restart from the first hole
+                            // would read nearly whole for (donor order: twins, range alts, then
+                            // restarted or whole alts)
+                            && self.has_pending_dead_fills()
                             && crate::restartlend::earlier(self.dead_nzb_id, &restart_key).is_none()
                             && !env_cell.borrow_mut().is_stopped()
                         {
@@ -10571,7 +10576,11 @@ impl CrossPackRepairSession {
                                 }
                             }
                             env_cell.borrow_mut().emit_message_bytes(TargetMessageKind::Info, &msg);
-                            crate::restartlend::keep(self.dead_nzb_id, &restart_key, result);
+                            // A read that failed (an article the backup lacks, a timeout) is no
+                            // verdict on the backup: a later run tries again.
+                            if !result.as_ref().is_err_and(|why| crate::restartlend::transient(why)) {
+                                crate::restartlend::keep(self.dead_nzb_id, &restart_key, result);
+                            }
                             set_compressed[set_index] = restart_maps[set_index].is_none();
                         }
                         let can_decompress =

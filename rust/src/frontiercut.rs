@@ -12,24 +12,40 @@
 //! end, the way it lends the dead tail of a primary that died. Nothing before the frontier is
 //! fetched again; the holes the primary had before it are borrowed as before.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-fn cut_set() -> MutexGuard<'static, HashSet<i32>> {
-    static SET: OnceLock<Mutex<HashSet<i32>>> = OnceLock::new();
+/// Cut downloads, each with the alt it was cut for.
+fn cut_set() -> MutexGuard<'static, HashMap<i32, i32>> {
+    static SET: OnceLock<Mutex<HashMap<i32, i32>>> = OnceLock::new();
     SET.get_or_init(Default::default)
         .lock()
         .unwrap_or_else(|e| e.into_inner())
 }
 
-/// Cuts download `nzb_id` at its frontier. True when it was not cut already.
-pub fn cut(nzb_id: i32) -> bool {
-    nzb_id > 0 && cut_set().insert(nzb_id)
+/// Cuts download `nzb_id` at its frontier for alt `alt_id`, the copy proven to hold its video
+/// (equal inner keys) that lends the rest. True when it was not cut already.
+pub fn cut(nzb_id: i32, alt_id: i32) -> bool {
+    if nzb_id <= 0 || alt_id <= 0 {
+        return false;
+    }
+    let mut set = cut_set();
+    if set.contains_key(&nzb_id) {
+        return false;
+    }
+    set.insert(nzb_id, alt_id);
+    true
 }
 
 /// Whether download `nzb_id` is cut: its data articles not fetched yet are not fetched.
 pub fn is_cut(nzb_id: i32) -> bool {
-    cut_set().contains(&nzb_id)
+    cut_set().contains_key(&nzb_id)
+}
+
+/// The alt download `nzb_id` was cut for: only that copy keeps the cut (another backup the
+/// failover order picks later was never proven to hold the video).
+pub fn cut_for(nzb_id: i32) -> Option<i32> {
+    cut_set().get(&nzb_id).copied()
 }
 
 /// Forgets the cut of download `nzb_id` (it left the queue, failed over, or starts over).
@@ -43,11 +59,13 @@ mod tests {
     fn a_cut_holds_until_forgotten() {
         let id = 0x7ffe_0001;
         assert!(!super::is_cut(id));
-        assert!(super::cut(id));
-        assert!(!super::cut(id), "cut once");
+        assert!(super::cut(id, 7));
+        assert!(!super::cut(id, 8), "cut once");
         assert!(super::is_cut(id));
+        assert_eq!(super::cut_for(id), Some(7), "for the alt it was cut for");
         super::forget(id);
         assert!(!super::is_cut(id));
-        assert!(!super::cut(0), "no download 0");
+        assert!(!super::cut(0, 7), "no download 0");
+        assert!(!super::cut(id, 0), "no alt 0");
     }
 }

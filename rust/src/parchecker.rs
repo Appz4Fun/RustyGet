@@ -351,7 +351,7 @@ struct DeferredArticles {
 }
 
 /// At most this many bytes wait for the back-fill thread ([`ActiveStreamingSession::backfill_held`]).
-const HELD_BACKFILL_LIMIT: u64 = 64 << 20;
+pub(crate) const HELD_BACKFILL_LIMIT: u64 = 64 << 20;
 
 /// At most this many captured-article marks and stashed articles per session.
 const LIVE_MARK_LIMIT: usize = 65536;
@@ -897,25 +897,31 @@ impl ActiveStreamingSession {
             .slice_size()
             .min(self.file_lengths.get(id).copied().unwrap_or(0))
             .max(1);
-        let mut runs: Vec<(u64, Vec<u8>)> = Vec::new();
-        for (offset, bytes) in sorted {
-            match runs.last_mut() {
-                Some((start, run)) if *start + run.len() as u64 == offset => {
-                    run.extend_from_slice(bytes);
+        // Run boundaries first (indices into `sorted`), so only runs that hold a whole slice
+        // and fit the room left are copied.
+        let mut spans: Vec<(usize, usize, u64)> = Vec::new(); // first, end (exclusive), bytes
+        for (i, &(offset, bytes)) in sorted.iter().enumerate() {
+            match spans.last_mut() {
+                Some((first, end, len)) if sorted[*first].0 + *len == offset => {
+                    *end = i + 1;
+                    *len += bytes.len() as u64;
                 }
-                _ => runs.push((offset, bytes.to_vec())),
+                _ => spans.push((i, i + 1, bytes.len() as u64)),
             }
         }
         let mut held = self.held_backfill.lock().unwrap_or_else(|e| e.into_inner());
         let mut kept = 0u64;
-        for (start, run) in runs {
-            let len = run.len() as u64;
+        for (first, end, len) in spans {
             if len < floor || held.1 + len > HELD_BACKFILL_LIMIT {
                 continue;
             }
+            let mut run = Vec::with_capacity(len as usize);
+            for &(_, bytes) in &sorted[first..end] {
+                run.extend_from_slice(bytes);
+            }
             held.1 += len;
             kept += len;
-            held.0.push((*id, start, run));
+            held.0.push((*id, sorted[first].0, run));
         }
         kept
     }

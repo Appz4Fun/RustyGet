@@ -2347,6 +2347,7 @@ impl RsArticleWriter {
             .filter(|_| !self.proc_raw_article && !self.proc_skip_disk_write)
             .filter(|live| crate::parchecker::streaming_session_wants_recovery_bytes(live.nzb_id));
         let held = std::cell::RefCell::new(Vec::<(u64, Vec<u8>)>::new());
+        let held_bytes = std::cell::Cell::new(0u64);
         let (crc, commit_err, failed_delta, short_copies) = article_writer_process_articles_counted(
             &items,
             total_articles,
@@ -2385,8 +2386,13 @@ impl RsArticleWriter {
                                 &[(offset, content)],
                             );
                         } else if !live.par_file
+                            && held_bytes.get() + content.len() as u64
+                                <= crate::parchecker::HELD_BACKFILL_LIMIT
                             && crate::parchecker::streaming_session_needs_backfill(live.nzb_id)
                         {
+                            // Copied before the segment is freed, at most what the back-fill
+                            // may keep.
+                            held_bytes.set(held_bytes.get() + content.len() as u64);
                             held.borrow_mut().push((offset, content.to_vec()));
                         }
                     }

@@ -95,6 +95,7 @@ impl Drop for Fixture {
 /// volume bytes read.
 fn run(
     vols: &[(String, Vec<u8>)],
+    password: Option<&str>,
     movie: &[u8],
     frontier: u64,
     scratch: &Path,
@@ -124,7 +125,7 @@ fn run(
     let mut backup = Backup {
         first_name: first.as_bytes(),
         sizes: &sizes,
-        password: None,
+        password,
         read: &mut read,
         prefetch: &mut |_: &[(u32, u64, u64)]| {},
     };
@@ -176,13 +177,15 @@ fn rar5_compressed_backup_restarts_near_the_frontier_and_reads_only_the_rest() {
     let vols = fx.volumes("out.part");
     let total: u64 = vols.iter().map(|(_, v)| v.len() as u64).sum();
     let frontier = 4_500_000;
-    let (r, read) = run(&vols, &movie, frontier, &fx.dir);
+    let (r, read) = run(&vols, None, &movie, frontier, &fx.dir);
     let r = r.expect("restarted");
     assert_eq!(r.layer, "RAR5");
     check_decoded(&r, &movie, frontier);
     // the packed bytes from about the frontier's position less the search region, and the
     // headers: well under the whole set
-    assert!(read < total * 2 / 3, "read {read} of {total}");
+    // the member from about the frontier's packed position less the search region (2 MiB),
+    // and the volume headers: well under the whole set
+    assert!(read <= total / 4 + 3_000_000 && read < total, "read {read} of {total}");
     assert_eq!(r.fetched, read);
     let path = r.path.clone();
     drop(r);
@@ -220,7 +223,7 @@ fn lzma2_backup_restarts_at_a_chunk_before_the_frontier() {
     let total: u64 = vols.iter().map(|(_, v)| v.len() as u64).sum();
     // far enough in that the restart's search region (4 MiB) leaves the chunks before it to the walk
     let frontier = 12_000_000;
-    let (r, read) = run(&vols, &movie, frontier, &fx.dir);
+    let (r, read) = run(&vols, None, &movie, frontier, &fx.dir);
     let r = r.expect("restarted");
     assert_eq!(r.layer, "LZMA2");
     check_decoded(&r, &movie, frontier);
@@ -246,7 +249,7 @@ fn a_coder_with_no_restart_point_says_why() {
     assert!(ok);
     std::fs::remove_file(fx.dir.join("movie.mkv")).unwrap();
     let vols = fx.volumes("out.7z.");
-    let (r, _) = run(&vols, &movie, 2_000_000, &fx.dir);
+    let (r, _) = run(&vols, None, &movie, 2_000_000, &fx.dir);
     let why = r.expect_err("BZip2 restarts only at its start");
     assert!(why.contains("restarts only at its start"), "{why}");
     // nothing left behind
@@ -276,8 +279,32 @@ fn a_backup_of_another_size_is_refused_before_any_decoding() {
     std::fs::remove_file(fx.dir.join("movie.mkv")).unwrap();
     let vols = fx.volumes("out.part");
     let other = payload(2_000_001, 17);
-    let (r, _) = run(&vols, &other, 1_500_000, &fx.dir);
+    let (r, _) = run(&vols, None, &other, 1_500_000, &fx.dir);
     assert!(r
         .expect_err("no member of that size")
         .contains("no member of the video's size"));
+}
+
+#[test]
+fn rar5_compressed_aes_backup_is_decrypted_on_the_way() {
+    let Some(rar) = tool(&["rar"]) else { return };
+    let fx = Fixture::new("rar5aes");
+    let movie = payload(6_000_000, 23);
+    std::fs::write(fx.dir.join("movie.mkv"), &movie).unwrap();
+    assert!(std::process::Command::new(rar)
+        .args(["a", "-idq", "-m3", "-ma5", "-md1m", "-hpalt pw 7", "-v1000000b", "out.rar", "movie.mkv"])
+        .current_dir(&fx.dir)
+        .status()
+        .unwrap()
+        .success());
+    std::fs::remove_file(fx.dir.join("movie.mkv")).unwrap();
+    let vols = fx.volumes("out.part");
+    let total: u64 = vols.iter().map(|(_, v)| v.len() as u64).sum();
+    let frontier = 4_500_000;
+    let (r, read) = run(&vols, Some("alt pw 7"), &movie, frontier, &fx.dir);
+    let r = r.expect("restarted under AES");
+    check_decoded(&r, &movie, frontier);
+    assert!(read <= total / 4 + 3_000_000 && read < total, "read {read} of {total}");
+    let (r, _) = run(&vols, None, &movie, frontier, &fx.dir);
+    assert!(r.is_err(), "no password: its headers do not even map");
 }

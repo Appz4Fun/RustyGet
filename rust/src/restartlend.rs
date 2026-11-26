@@ -22,7 +22,8 @@
 //!
 //! What this does not restart, it says why (the failover then starts the backup from its first
 //! byte, as before): another coder (RAR 4.x compressed, ZIP Deflate, 7z BZip2/PPMd/... restart
-//! only at their start), a compressed member under encryption, a later member of a RAR solid
+//! only at their start), 7zAES under LZMA2 (RAR5 AES under compression is decrypted on the
+//! way, its key derived once), a later member of a RAR solid
 //! stream, a member with no CRC32 to prove the output, and an LZMA2 rest larger than
 //! [`LZMA2_MAX_REST`] (zipfast decodes it in one buffer).
 
@@ -212,14 +213,50 @@ pub fn restart(
             ))
         }
     }
-    if restart.encrypted {
-        return Err("its compressed member is encrypted (no restart under encryption yet)".into());
-    }
     let member = &map.members[index];
+    // Under RAR5 AES the packed bytes are decrypted on the way (the key is derived once, from
+    // the member's salt and the password its nzb carries); 7zAES under LZMA2 is not restarted.
+    let cipher = if restart.encrypted {
+        match (&member.cipher, backup.password) {
+            (
+                Some(zipfast::map::CipherParams::Rar5 {
+                    kdf_count,
+                    salt,
+                    iv: Some(iv),
+                    check,
+                    ..
+                }),
+                Some(pw),
+            ) => {
+                let (key, hash_key) =
+                    zipfast::crypto::derive_rar5_key_and_hash_key(pw, *kdf_count, salt, *check)
+                        .ok_or_else(|| {
+                            "its password does not open its compressed member".to_string()
+                        })?;
+                Some(Cbc { key, hash_key, iv: *iv })
+            }
+            (Some(zipfast::map::CipherParams::Rar5 { .. }), None) => {
+                return Err(
+                    "its compressed member is encrypted and its nzb carries no password".into(),
+                );
+            }
+            _ => {
+                return Err(
+                    "its compressed member is encrypted with a cipher a restart does not decrypt (7zAES)"
+                        .into(),
+                )
+            }
+        }
+    } else {
+        None
+    };
+    let keyed = member.checks.as_ref().is_some_and(|c| c.keyed);
+    if keyed && cipher.is_none() {
+        return Err("its member's CRC32 is keyed with a password it was not opened with".into());
+    }
     let want_crc = member
         .checks
         .as_ref()
-        .filter(|c| !c.keyed)
         .and_then(|c| c.crc32)
         .or_else(|| {
             member
@@ -238,7 +275,14 @@ pub fn restart(
         OutputFile::create(&scratch).map_err(|e| format!("cannot create its scratch file: {e}"))?;
     let (from, window_checked) = match restart.layer {
         Layer::Rar5Compressed => rar5(
-            backup, &reads, &map, index, target, frontier, known, &mut out,
+            backup,
+            &reads,
+            &map,
+            index,
+            target,
+            cipher.as_ref(),
+            known,
+            &mut out,
         )?,
         _ => lzma2(
             backup, &reads, &map, index, target, frontier, known, &mut out,
@@ -250,7 +294,13 @@ pub fn restart(
     // The member's CRC32: the download's own output before the restart, then the decoded rest.
     let prefix_crc = crc_of_known(known, from)
         .ok_or_else(|| "the download's own output could not be read".to_string())?;
-    if zipfast::crc32::combine(prefix_crc, decoded_crc, size - from) != want_crc {
+    let crc = zipfast::crc32::combine(prefix_crc, decoded_crc, size - from);
+    // a RAR5 AES member keeps its CRC32 keyed with the password's hash key
+    let crc = match (&cipher, keyed) {
+        (Some(c), true) => zipfast::crypto::rar5_tweak_crc32(crc, &c.hash_key),
+        _ => crc,
+    };
+    if crc != want_crc {
         return Err("the output decoded from the restart failed the member's CRC32".into());
     }
     let fetched = reads.fetched();
@@ -424,6 +474,32 @@ fn read_known(
     Ok(buf)
 }
 
+/// A RAR5 AES member's data key and IV, and the hash key its CRC32 is keyed with.
+struct Cbc {
+    key: [u8; 32],
+    hash_key: [u8; 32],
+    iv: [u8; 16],
+}
+
+/// Decrypts a member's AES-CBC packed stream as it is read: whole blocks, each with the
+/// ciphertext block before it as its IV.
+struct CbcStream<'k> {
+    key: &'k [u8; 32],
+    iv: [u8; 16],
+}
+
+impl CbcStream<'_> {
+    /// Decrypts `ct` (whole blocks) and keeps its last block as the next IV.
+    fn decrypt(&mut self, ct: &[u8]) -> Result<Vec<u8>, String> {
+        let plain = zipfast::crypto::decrypt_cbc(self.key, &self.iv, ct)
+            .ok_or_else(|| "its key is not an AES key".to_string())?;
+        if let Some(last) = ct.len().checked_sub(16).and_then(|at| ct.get(at..)) {
+            self.iv.copy_from_slice(last);
+        }
+        Ok(plain)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn rar5(
     backup: &mut Backup<'_>,
@@ -431,7 +507,7 @@ fn rar5(
     map: &MemberMap,
     index: usize,
     target: u64,
-    frontier: u64,
+    cipher: Option<&Cbc>,
     known: &mut dyn FnMut(u64, &mut [u8]) -> bool,
     out: &mut OutputFile,
 ) -> Result<(u64, bool), String> {
@@ -453,12 +529,38 @@ fn rar5(
             return Err("its member is a later member of a solid stream".into());
         }
         // The packed bytes searched: from the plan's start to `first.end`, adding to what an
-        // earlier, narrower try already read (never read twice).
-        extend_held(backup, reads, &plan, &mut held, first.end)?;
-        let (packed_from, bytes) = held
+        // earlier, narrower try already read (never read twice). Under AES they end on a
+        // block and are decrypted: the block before the first one fetched is its IV (at the
+        // stream's start the member's IV is).
+        let first_end = if cipher.is_some() {
+            first.end & !15
+        } else {
+            first.end
+        };
+        extend_held(backup, reads, &plan, &mut held, first_end)?;
+        let (raw_from, raw) = held
             .as_ref()
             .map(|(f, b)| (*f, b.as_slice()))
             .expect("just read");
+        let mut stream = cipher.map(|c| CbcStream {
+            key: &c.key,
+            iv: c.iv,
+        });
+        let decrypted;
+        let (packed_from, bytes) = match stream.as_mut() {
+            None => (raw_from, raw),
+            Some(cbc) => {
+                let skip = if raw_from == 0 { 0 } else { 16 };
+                if raw.len() < skip || raw_from % 16 != 0 {
+                    return Err("its encrypted packed bytes are not block aligned".into());
+                }
+                if skip == 16 {
+                    cbc.iv.copy_from_slice(&raw[..16]);
+                }
+                decrypted = cbc.decrypt(&raw[skip..])?;
+                (raw_from + skip as u64, decrypted.as_slice())
+            }
+        };
         let known_from = donor.start.min(target);
         let window = read_known(known, known_from, target)?;
         let near = NearOptions {
@@ -468,16 +570,20 @@ fn rar5(
         match complete_rar5(map, &plan, packed_from, bytes, known_from, &window, &near) {
             Ok(mut resume) => {
                 drop(window);
-                let mut sink = |b: &[u8]| -> zipfast::error::Result<()> {
-                    out.put(b).map_err(zipfast::error::Error::from)
+                let mut feed = |decoder: &mut zipfast::rar5::unpack::Unpacker,
+                                plain: &[u8]|
+                 -> Result<(), String> {
+                    let mut sink = |b: &[u8]| -> zipfast::error::Result<()> {
+                        out.put(b).map_err(zipfast::error::Error::from)
+                    };
+                    decoder
+                        .feed(plain, &mut sink)
+                        .map_err(|e| format!("decoding failed: {e}"))
                 };
                 // Feed from the restart: what is held first, then the rest of the member.
                 let skip = (resume.feed_from - packed_from) as usize;
-                resume
-                    .decoder
-                    .feed(&bytes[skip..], &mut sink)
-                    .map_err(|e| format!("decoding failed: {e}"))?;
-                let mut at = packed_from + bytes.len() as u64;
+                feed(&mut resume.decoder, &bytes[skip..])?;
+                let mut at = raw_from + raw.len() as u64;
                 let mut chunk = vec![0u8; FEED_CHUNK];
                 let mut fetched_to = at;
                 while at < member.packed_size {
@@ -488,17 +594,22 @@ fn rar5(
                     }
                     let n = ((member.packed_size - at) as usize).min(chunk.len());
                     read_stream(backup, reads, &plan.spans, at, &mut chunk[..n])?;
-                    resume
-                        .decoder
-                        .feed(&chunk[..n], &mut sink)
-                        .map_err(|e| format!("decoding failed: {e}"))?;
+                    match stream.as_mut() {
+                        None => feed(&mut resume.decoder, &chunk[..n])?,
+                        Some(cbc) => {
+                            let plain = cbc.decrypt(&chunk[..n & !15])?;
+                            feed(&mut resume.decoder, &plain)?;
+                        }
+                    }
                     at += n as u64;
                 }
+                let mut sink = |b: &[u8]| -> zipfast::error::Result<()> {
+                    out.put(b).map_err(zipfast::error::Error::from)
+                };
                 resume
                     .decoder
                     .finish(&mut sink)
                     .map_err(|e| format!("decoding failed: {e}"))?;
-                let _ = frontier;
                 return Ok((resume.output, resume.checked));
             }
             Err(OpenAtError::Resync(_)) if search.is_some() => {

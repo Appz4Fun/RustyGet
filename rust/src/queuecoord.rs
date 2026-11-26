@@ -367,12 +367,15 @@ pub fn alt_covers_lost_articles(
     backup_mismatched: bool,
 ) -> bool {
     use crate::donorkind::DonorKind;
+    // A backup labelled the same video lends while the extraction runs even when a fleet found
+    // it unborrowable by range (its video compressed): zipfast restarts its decoder near the
+    // frontier (`restartlend`). One that cannot be restarted is refused by that try and counts
+    // as mismatched (`backup_mismatched`), and the download fails over then.
     let backup_lends = matches!(
         backup_kind,
         DonorKind::Twin | DonorKind::Borrowable | DonorKind::EncryptedBorrowable
-    )
-        || ((borrow_underway || (extracting && labelled_same_video))
-            && backup_kind != DonorKind::Unborrowable);
+    ) || (extracting && labelled_same_video)
+        || (borrow_underway && backup_kind != DonorKind::Unborrowable);
     // While direct unpack runs, failing over would throw its extraction away and start the
     // backup from its first byte: the download stays however much of it is gone, and every
     // volume it lost is borrowed from the backup, so the extraction carries on with the
@@ -592,6 +595,15 @@ fn backup_continues_extraction(
     nzb: &crate::queuesubsys_host::NzbSnap,
     backup: &crate::queuesubsys_host::NzbSnap,
 ) -> bool {
+    // a primary cut at its frontier (`frontiercut`) has its alt lend the rest while it can
+    if nzb.direct_unpack_status == DirectUnpackStatus::Running
+        && crate::frontiercut::is_cut(nzb.id)
+        && live_borrowing(opts)
+        && crate::restartlend::refusal(nzb.id, &backup.queued_filename).is_none()
+        && !backup_cannot_lend(host, nzb, backup)
+    {
+        return true;
+    }
     nzb.direct_unpack_status == DirectUnpackStatus::Running
         && alt_covers_lost_articles(
             true,
@@ -693,7 +705,9 @@ fn backup_cannot_lend(
     nzb: &crate::queuesubsys_host::NzbSnap,
     backup: &crate::queuesubsys_host::NzbSnap,
 ) -> bool {
-    if !crate::postproc::dead_volume_donor_cannot_lend(nzb.id, &backup.queued_filename) {
+    if !crate::postproc::dead_volume_donor_cannot_lend(nzb.id, &backup.queued_filename)
+        && crate::restartlend::refusal(nzb.id, &backup.queued_filename).is_none()
+    {
         return false;
     }
     let was_kept = was_kept_for_borrowing(nzb.id);
@@ -5129,6 +5143,10 @@ impl NzbgetRsQueueCoordinator {
                         nzb.current_success_articles,
                         failed,
                     ));
+            // A primary cut at its frontier lends from its alt by design (`frontiercut`).
+            let lendable = lendable
+                || (crate::frontiercut::is_cut(nzb.id)
+                    && backup_continues_extraction(host, &opts, &nzb, &backup_nzb));
             // A duplicate whose bytes the running extraction already patched in (a nested or
             // otherwise unlabelled alt the cross-packing repair maps by the video inside) lends:
             // the article-level count of recovered articles misses those bytes.
@@ -7128,13 +7146,20 @@ mod tests {
             true, true, Unknown, Unknown, 952, true, false, true, false
         ));
         // ... or while direct unpack runs if labelled an alt (no par2: the first dead volume
-        // trips the failed-in-a-row check before it ends), but never an unborrowable one, nor
-        // when live borrowing is off.
+        // trips the failed-in-a-row check before it ends), also one a fleet found unborrowable
+        // by range (its video compressed: zipfast restarts it near the frontier) until that
+        // restart is refused (mismatched), but never when live borrowing is off.
         assert!(alt_covers_lost_articles(
             false, true, Borrowable, Unknown, 952, false, true, true, false
         ));
-        assert!(!alt_covers_lost_articles(
+        assert!(alt_covers_lost_articles(
             false, true, Borrowable, Unborrowable, 952, false, true, true, false
+        ));
+        assert!(!alt_covers_lost_articles(
+            false, true, Borrowable, Unborrowable, 952, false, true, true, true
+        ));
+        assert!(!alt_covers_lost_articles(
+            false, true, Borrowable, Unborrowable, 952, false, true, false, false
         ));
         assert!(!alt_covers_lost_articles(
             false, false, Borrowable, Unknown, 952, false, true, true, false
@@ -7150,10 +7175,14 @@ mod tests {
         assert!(alt_covers_lost_articles(
             false, true, Unknown, Borrowable, 0, false, true, false, false
         ));
-        // ... but never from an unborrowable or mismatched backup, an unborrowable download,
-        // or with live borrowing off.
+        // ... but never from an unlabelled unborrowable or a mismatched backup (a compressed
+        // one zipfast could not restart counts as mismatched), an unborrowable download, or
+        // with live borrowing off.
         assert!(!alt_covers_lost_articles(
-            true, true, Borrowable, Unborrowable, 100, false, true, true, false
+            true, true, Borrowable, Unborrowable, 100, false, true, false, false
+        ));
+        assert!(!alt_covers_lost_articles(
+            true, true, Borrowable, Unborrowable, 100, false, true, true, true
         ));
         assert!(!alt_covers_lost_articles(
             true, true, Borrowable, Borrowable, 100, false, true, true, true

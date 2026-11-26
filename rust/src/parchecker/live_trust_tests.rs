@@ -60,7 +60,11 @@ fn fixture(nzb_id: i32, slices: usize, slots: usize, recovery: u32) -> Fixture {
     let index = dir.join("trust.par2");
     std::fs::write(&index, &built.index).unwrap();
     std::fs::write(dir.join("part01.rar"), &data).unwrap();
-    streaming_session_start(
+    // A pool of its own (about 90 MB per session): sessions of these tests running at once
+    // must not use up the shared one other tests take small reservations from.
+    let pool = Arc::new(crate::parlive::BudgetPool::with_size(256 << 20));
+    streaming_session_start_in_pool(
+        &pool,
         nzb_id,
         &index,
         &dir,

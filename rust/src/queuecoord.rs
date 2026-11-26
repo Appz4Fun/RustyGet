@@ -480,6 +480,12 @@ pub fn eval_dead_download(
 /// (`backup_mismatched`, see `postproc::dead_volume_donor_cannot_lend`) lends nothing, whatever
 /// its kind: the download fails over then, instead of downloading to its end first. It is not
 /// called mismatched while another donor lends the dead volumes.
+///
+/// `borrow_underway` is also set once a live repair run matched this backup's video against
+/// the download's own bytes ([`borrow_underway_or_video_confirmed`]): such a backup lends
+/// whatever its label, also in the seconds before direct unpack starts (6790 XB X52: a fast
+/// download fell under its critical health just as direct rename finished, after the backup's
+/// video had matched, and failed over before direct unpack ran).
 #[allow(clippy::too_many_arguments)]
 pub fn alt_covers_lost_articles(
     dead_rate: bool,
@@ -641,6 +647,41 @@ fn backup_is_twin(
         ) == crate::donorkind::DonorKind::Twin
 }
 
+/// True while a live borrow of download `nzb` is under way, or once a live repair run matched
+/// the video of `backup` against the download's own bytes (with no later check finding it
+/// different: `postproc::dead_volume_donor_confirmed`) and no label says the backup holds
+/// another video: that backup lends. This is the match the repair itself reuses
+/// (`streamrepair_coord`: a copy labelled `other` or `DupeVideo=different` never lends
+/// unchecked, and a match against an encrypted download is never recorded).
+fn borrow_underway_or_video_confirmed(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb_id: i32,
+    backup: NzbRef,
+    backup_id: i32,
+) -> bool {
+    let label = |name: &[u8]| host.nzb_get_param(backup, name);
+    borrow_underway_or_confirmed_unless_other(
+        nzb_id,
+        backup_id,
+        crate::streamrepair_coord::other_video_label(
+            label(b"DupeKind").as_deref(),
+            label(crate::dupesearch_coord::VIDEO_PARAM).as_deref(),
+        ),
+    )
+}
+
+/// [`borrow_underway_or_video_confirmed`] with the backup's labels already read:
+/// `backup_other_video` is `streamrepair_coord::other_video_label` of them.
+fn borrow_underway_or_confirmed_unless_other(
+    nzb_id: i32,
+    backup_id: i32,
+    backup_other_video: bool,
+) -> bool {
+    crate::postproc::dead_volume_borrow_underway(nzb_id)
+        || (!backup_other_video
+            && crate::postproc::dead_volume_donor_confirmed(nzb_id, backup_id).is_some())
+}
+
 /// Why `backup` cannot carry on the running (or kept) extraction of `nzb`, which failing
 /// over to it throws away (failover-continue: wherever it can, the backup lends the rest
 /// instead, see [`alt_covers_lost_articles`]). Asked only while an extraction runs.
@@ -746,7 +787,7 @@ fn backup_continues_extraction(
                 host.nzb_get_param(backup.ptr, crate::donorkind::KIND_PARAM).as_deref(),
             ),
             0,
-            crate::postproc::dead_volume_borrow_underway(nzb.id),
+            borrow_underway_or_video_confirmed(host, nzb.id, backup.ptr, backup.id),
             true,
             backup_may_lend_while_extracting(host, backup.ptr),
             backup_cannot_lend(host, nzb, backup),
@@ -2838,9 +2879,15 @@ impl NzbgetRsQueueCoordinator {
             b"DupeSampledOf".as_slice(),
             crate::dupeintake::INNER_PARAM,
             crate::twinfields::INNER_KEY_PARAM,
+            crate::twin::LIVE_VIDEO_PARAM,
         ] {
             host.nzb_set_param(dest_ptr, param, None);
         }
+        // a live video match made on either side's earlier files no longer stands
+        crate::postproc::forget_dead_volume_confirmations_of(dest.id);
+        crate::postproc::forget_dead_volume_confirmations_of(src.id);
+        crate::twin::clear_live_evidence_naming(host, dq_ptr, dest.id);
+        crate::twin::clear_live_evidence_naming(host, dq_ptr, src.id);
 
         merge_dupe_par_params(host, dest_ptr, src_ptr);
         // what the source borrowed moves with its files, like its par2 counts
@@ -2952,6 +2999,10 @@ impl NzbgetRsQueueCoordinator {
         for param in SPLIT_DROPPED_PARAMS {
             host.nzb_set_param(new_nzb_ptr, param, None);
         }
+        // the source lost files: a live video match made on them no longer stands
+        crate::postproc::forget_dead_volume_confirmations_of(src_snap.id);
+        host.nzb_set_param(src_nzb_ptr, crate::twin::LIVE_VIDEO_PARAM, None);
+        crate::twin::clear_live_evidence_naming(host, dq_ptr, src_snap.id);
 
         let new_init_snap = host.nzb_snap(new_nzb_ptr, false);
         let mut sc = pack_merge_split_counters(&src_snap);
@@ -5769,7 +5820,7 @@ impl NzbgetRsQueueCoordinator {
                     ),
                     backup_kind,
                     nzb.health,
-                    crate::postproc::dead_volume_borrow_underway(nzb.id),
+                    borrow_underway_or_video_confirmed(host, nzb.id, backup_nzb.ptr, backup_nzb.id),
                     nzb.direct_unpack_status == DirectUnpackStatus::Running,
                     backup_may_lend_while_extracting(host, backup_nzb.ptr),
                     backup_cannot_lend(host, nzb, &backup_nzb),
@@ -6124,7 +6175,7 @@ impl NzbgetRsQueueCoordinator {
             own_kind,
             backup_kind,
             eval.projected,
-            crate::postproc::dead_volume_borrow_underway(nzb.id),
+            borrow_underway_or_video_confirmed(host, nzb.id, backup_nzb.ptr, backup_nzb.id),
             nzb.direct_unpack_status == DirectUnpackStatus::Running,
             backup_may_lend_while_extracting(host, backup_nzb.ptr),
             backup_cannot_lend(host, &nzb, &backup_nzb),
@@ -7478,7 +7529,7 @@ pub(crate) const PAR_ARTICLES_PARAM: &[u8] = b"DupeParArticles";
 /// The fleet identity a part split off a download does not keep: it is not
 /// another post of the fleet, so neither its labels nor its rank or fleet
 /// membership (`DupeFleetMember` would make it a managed fleet copy forever).
-pub(crate) const SPLIT_DROPPED_PARAMS: [&[u8]; 9] = [
+pub(crate) const SPLIT_DROPPED_PARAMS: [&[u8]; 10] = [
     b"DupeFiles",
     b"DupeKind",
     crate::donorkind::KIND_PARAM,
@@ -7488,6 +7539,7 @@ pub(crate) const SPLIT_DROPPED_PARAMS: [&[u8]; 9] = [
     crate::dupesearch_coord::FLEET_PARAM,
     crate::fleethold::MEMBER_PARAM,
     crate::dupesearch_coord::VIDEO_PARAM,
+    crate::twin::LIVE_VIDEO_PARAM,
 ];
 pub(crate) const PAR_FILES_PARAM: &[u8] = b"DupeParFiles";
 
@@ -7694,11 +7746,49 @@ mod tests {
         assert_eq!(weak_primary_switch(&WeakSwitchFacts { backup_locked: true, ..dune }), WeakSwitch::Stay);
         assert_eq!(weak_primary_switch(&WeakSwitchFacts { extraction_verified: true, ..dune }), WeakSwitch::Stay);
     }
+
+    /// 6790 XB X52: a backup labelled only `container` (no packing kind) whose video a live run
+    /// matched lends, so a fast download that falls under its critical health before direct
+    /// unpack starts is kept instead of failing over; a later mismatch takes that back.
+    #[test]
+    fn a_confirmed_live_video_match_keeps_the_download_before_direct_unpack_starts() {
+        use crate::donorkind::DonorKind;
+        let (nzb, backup) = (2_000_001, 2_000_002);
+        let confirmed = |backup, other| super::borrow_underway_or_confirmed_unless_other(nzb, backup, other);
+        assert!(!confirmed(backup, false));
+        let keep = |confirmed| {
+            super::alt_covers_lost_articles(
+                false, true, DonorKind::Unknown, DonorKind::Unknown, 953, confirmed, false, true, false,
+            )
+        };
+        assert!(!keep(confirmed(backup, false)));
+        crate::postproc::note_dead_volume_donor_confirmed(nzb, backup, 2_000_000_000);
+        assert!(confirmed(backup, false));
+        assert!(keep(confirmed(backup, false)));
+        // a backup labelled another video (`other`, `DupeVideo=different`) never lends on a
+        // stored match: the repair never reuses it either (review of edaa5f25)
+        assert!(!confirmed(backup, true));
+        assert!(!keep(confirmed(backup, true)));
+        let labelled_other = |kind: &[u8], video: &[u8]| {
+            crate::streamrepair_coord::other_video_label(Some(kind), Some(video))
+        };
+        assert!(labelled_other(b"other", b""));
+        assert!(labelled_other(b"container", crate::dupesearch_coord::VIDEO_DIFFERENT));
+        assert!(!labelled_other(b"container", b""));
+        assert!(!labelled_other(b"alt", b""));
+        // a match with another backup proves nothing of this one
+        assert!(!confirmed(backup + 1, false));
+        crate::postproc::forget_dead_volume_donor_confirmed(nzb, backup);
+        assert!(!confirmed(backup, false));
+    }
+
     /// Review of b38a5981: a split-off part drops the fleet's rank and its
     /// membership, so it never stays a managed fleet copy.
     #[test]
     fn a_split_part_leaves_its_fleet() {
         assert!(super::SPLIT_DROPPED_PARAMS.contains(&crate::fleethold::MEMBER_PARAM));
+        // a live match was made on the whole download's video, not on the part's
+        assert!(super::SPLIT_DROPPED_PARAMS.contains(&crate::twin::LIVE_VIDEO_PARAM));
         assert!(super::SPLIT_DROPPED_PARAMS.contains(&crate::dupesearch_coord::FLEET_PARAM));
     }
 

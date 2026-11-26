@@ -2926,18 +2926,60 @@ fn dead_volume_donor_confirmations(
         .unwrap_or_else(|e| e.into_inner())
 }
 
+/// Bumped by every pack merge or split ([`forget_dead_volume_confirmations_of`]), under the
+/// confirmations lock and, at its callers, the queue lock. One counter for all downloads, on
+/// purpose: merge and split come only from user edits, and a run of another download that
+/// loses its match to one simply records it on its next run.
+static DEAD_VOLUME_CONFIRMATION_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// The merge/split generation a repair run captures before it checks a donor: a match it found
+/// is recorded only while no merge or split ran since ([`note_dead_volume_donor_confirmed_at`]),
+/// so a cancelled helper reaped after a merge or split never brings back a match made on the
+/// earlier files (Codex review of 575facfb).
+pub(crate) fn dead_volume_confirmation_generation() -> u64 {
+    DEAD_VOLUME_CONFIRMATION_GENERATION.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Records that donor `donor_id`'s video matched download `nzb_id`'s video of `payload_size`
-/// bytes (see [`dead_volume_donor_confirmed`]).
+/// bytes (see [`dead_volume_donor_confirmed`]). Live runs use
+/// [`note_dead_volume_donor_confirmed_at`].
+#[cfg(test)]
 pub(crate) fn note_dead_volume_donor_confirmed(nzb_id: i32, donor_id: i32, payload_size: i64) {
     if donor_id > 0 {
         dead_volume_donor_confirmations().insert((nzb_id, donor_id), payload_size);
     }
 }
 
+/// [`note_dead_volume_donor_confirmed`] for a match found by a run that captured merge/split
+/// `generation` before its check: records nothing, and returns false, once a merge or split ran
+/// since (the check compared files that changed).
+pub(crate) fn note_dead_volume_donor_confirmed_at(
+    nzb_id: i32,
+    donor_id: i32,
+    payload_size: i64,
+    generation: u64,
+) -> bool {
+    let mut set = dead_volume_donor_confirmations();
+    if donor_id <= 0 || dead_volume_confirmation_generation() != generation {
+        return false;
+    }
+    set.insert((nzb_id, donor_id), payload_size);
+    true
+}
+
 /// Forgets that donor `donor_id`'s video matched download `nzb_id`'s: a later check compared it
 /// in full and found it different.
 pub(crate) fn forget_dead_volume_donor_confirmed(nzb_id: i32, donor_id: i32) {
     dead_volume_donor_confirmations().remove(&(nzb_id, donor_id));
+}
+
+/// Forgets every video match download or donor `nzb_id` takes part in: a pack merge or split
+/// changed its files, so a match made on its earlier files proves nothing of them now.
+pub(crate) fn forget_dead_volume_confirmations_of(nzb_id: i32) {
+    let mut set = dead_volume_donor_confirmations();
+    set.retain(|&(id, donor), _| id != nzb_id && donor != nzb_id);
+    DEAD_VOLUME_CONFIRMATION_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// True when the video of donor `donor_id` matched the one of download `nzb_id` in an earlier
@@ -6723,6 +6765,26 @@ mod dead_volume_case_tests {
             note_dead_volume_donor_identity(id, donor, false);
         }
         assert!(!dead_volume_donor_mismatched(id, donor));
+    }
+
+    /// Codex review of 575facfb: a cancelled repair helper reaped after a pack merge or split
+    /// never records the match it found on the earlier files.
+    #[test]
+    fn a_match_found_before_a_merge_or_split_is_not_recorded_after_it() {
+        let (id, donor) = (-4_242_611, 7_733);
+        let before = dead_volume_confirmation_generation();
+        if note_dead_volume_donor_confirmed_at(id, donor, 9_000, before) {
+            assert_eq!(dead_volume_donor_confirmed(id, donor), Some(9_000));
+        } // else another test's merge/split ran in between: nothing recorded, as intended
+        // the merge or split forgets it and bumps the generation ...
+        forget_dead_volume_confirmations_of(id);
+        assert_eq!(dead_volume_donor_confirmed(id, donor), None);
+        assert_ne!(dead_volume_confirmation_generation(), before);
+        // ... so the stale run's match stays unrecorded
+        assert!(!note_dead_volume_donor_confirmed_at(id, donor, 9_000, before));
+        assert_eq!(dead_volume_donor_confirmed(id, donor), None);
+        assert!(!note_dead_volume_donor_confirmed_at(id, 0, 9_000, dead_volume_confirmation_generation()));
+        forget_dead_volume_donor_confirmed(id, donor);
     }
 
     #[test]

@@ -3336,12 +3336,15 @@ impl NzbgetRsQueueCoordinator {
                 if !crate::liveorder::note_restart(nzb.id, ad.article_ptr) {
                     continue;
                 }
-                // Finished meanwhile, or its body is read and being written: nothing to ask
-                // again (the stop would turn a committed article into a retry).
-                if ad.status() != crate::queuesubsys_host::AD_RUNNING || ad.body_read() {
+                // Finished meanwhile: nothing to ask again.
+                if ad.status() != crate::queuesubsys_host::AD_RUNNING {
                     continue;
                 }
                 let ran = now.saturating_sub(ad.running_since_ms().unwrap_or(now));
+                // Its body read already (decoded and written now): not stopped.
+                if !ad.restart_for_live() {
+                    continue;
+                }
                 let mut msg = b"Asking again for ".to_vec();
                 msg.extend_from_slice(ad.info_name());
                 msg.extend_from_slice(
@@ -3353,7 +3356,6 @@ impl NzbgetRsQueueCoordinator {
                     .as_bytes(),
                 );
                 host.nzb_print_message(f.nzb_ptr, crate::queuesubsys_host::MK_DETAIL, &msg);
-                ad.stop();
             }
         });
     }

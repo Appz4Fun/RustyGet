@@ -2638,7 +2638,14 @@ impl crate::progressive_unpack::VolumeFeed for DirectUnpackFeed {
         // Only once its first article (its headers) is written: a volume whose download dies
         // before any article of it lands is rebuilt (`deadvolume`) with its own
         // layout, which the extraction must read from its start.
-        crate::livewrite::lookup(self.nzb_id, &full).filter(|v| v.written_end(0).is_some())
+        let live = crate::livewrite::lookup(self.nzb_id, &full)?;
+        if live.written_end(0).is_none() {
+            // Asked for already: the article cache writes its first article out now instead of
+            // holding it until the volume is done (see `livewrite::wanted`).
+            live.want(0);
+            return None;
+        }
+        Some(live)
     }
 
     fn wait_repaired(&mut self, is_cancelled: &mut dyn FnMut() -> bool) -> bool {

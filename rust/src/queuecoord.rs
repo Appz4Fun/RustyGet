@@ -7013,16 +7013,15 @@ mod tests {
             raw_article,
             ..GlobalOptsSnap::default()
         };
-        // only a backup lending into the running extraction keeps a download: its kind
-        // is worth waiting for under live borrowing alone
+        // live borrowing: DupeArticleFallback=live with DirectUnpack and no RawArticle
         assert!(super::live_borrowing(&opts(DAF_LIVE, true, false)));
-        // B48/B49 (projectedswap, parlesscritical): DupeArticleFallback=no or stream, no
-        // DirectUnpack, or RawArticle (dupefailoverraw): no kind found later keeps it
         assert!(!super::live_borrowing(&opts(DAF_NONE, true, false)));
         assert!(!super::live_borrowing(&opts(DAF_STREAM, true, false)));
         assert!(!super::live_borrowing(&opts(DAF_LIVE, false, false)));
         assert!(!super::live_borrowing(&opts(DAF_LIVE, true, true)));
-        // the grace: live borrowing, or live stream repair patching the extraction
+        // the grace: live borrowing, or live stream repair patching the extraction; not
+        // with DupeArticleFallback=no (B48/B49 projectedswap, parlesscritical), without
+        // DirectUnpack, or with RawArticle (dupefailoverraw)
         assert!(super::extraction_fed_by_duplicates(&opts(DAF_LIVE, true, false)));
         assert!(super::extraction_fed_by_duplicates(&opts(DAF_STREAM, true, false)));
         assert!(!super::extraction_fed_by_duplicates(&opts(DAF_NONE, true, false)));

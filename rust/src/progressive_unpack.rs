@@ -2157,8 +2157,10 @@ fn create_unique_sibling(target: &Path) -> std::io::Result<(PathBuf, std::fs::Fi
 
 /// The volume the session is parked on and the waker that resumes it.
 /// The volume the session waits on, the waker to call once that changes, and whether a stand-in
-/// handed over with holes still counts as waiting (the copy path waits for the finished one).
-type PendingWait = Arc<Mutex<Option<(PathBuf, Waker, bool)>>>;
+/// handed over with holes still counts as waiting (the copy path waits for the finished one), and
+/// whether the provider asked (a volume the download starts writing then is handed over as being
+/// written) rather than a volume already read while written (see `WrittenSource`).
+type PendingWait = Arc<Mutex<Option<(PathBuf, Waker, bool, bool)>>>;
 
 /// Thread-parking driver around `poll_event`.
 struct Driver<'s> {
@@ -2220,14 +2222,11 @@ impl<'s> Driver<'s> {
         // Woken only for an answer the provider would not wait on again: waking it for one it
         // waits on spins the session until zipfast's wake limit fails it.
         let changed = match pending.as_ref() {
-            Some((path, _, holed_waits)) => {
-                match self
-                    .feed
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .volume(path)
-                {
-                    VolumeView::NotYet => false,
+            Some((path, _, holed_waits, asked)) => {
+                let mut feed = self.feed.lock().unwrap_or_else(|e| e.into_inner());
+                match feed.volume(path) {
+                    // Started being written since: the provider hands it over now.
+                    VolumeView::NotYet => *asked && feed.growing(path).is_some(),
                     VolumeView::Virtual(v) if !v.holes.is_empty() => !*holed_waits,
                     _ => true,
                 }
@@ -2235,7 +2234,7 @@ impl<'s> Driver<'s> {
             None => false,
         };
         if changed {
-            if let Some((_, waker, _)) = pending.take() {
+            if let Some((_, waker, _, _)) = pending.take() {
                 waker.wake();
             }
         }
@@ -2808,7 +2807,11 @@ impl VolumeSource for FeedProvider {
             }
             VolumeView::NotYet => {
                 // Being written: read its articles as they land.
-                if let Some(live) = feed.growing(&path) {
+                let growing = feed.growing(&path);
+                // Asked again once it starts being written, unless it is and could not be read
+                // that way (then only once it finishes).
+                let asked = growing.is_none();
+                if let Some(live) = growing {
                     drop(feed);
                     let damaged = self.written_damaged.clone();
                     let on_finished: OnFinished =
@@ -2835,7 +2838,7 @@ impl VolumeSource for FeedProvider {
                 // The driver asks the feed again while parked and wakes the session when the
                 // volume's state changes.
                 *self.pending.lock().unwrap_or_else(|e| e.into_inner()) =
-                    Some((path, cx.waker().clone(), true));
+                    Some((path, cx.waker().clone(), true, asked));
                 Ok(VolumeAnswer::Wait)
             }
             VolumeView::Missing => Ok(VolumeAnswer::Missing),
@@ -2843,7 +2846,7 @@ impl VolumeSource for FeedProvider {
             // only from volumes on disk, so it waits for the finished volume.
             VolumeView::Virtual(v) if !v.holes.is_empty() => {
                 *self.pending.lock().unwrap_or_else(|e| e.into_inner()) =
-                    Some((path, cx.waker().clone(), true));
+                    Some((path, cx.waker().clone(), true, true));
                 Ok(VolumeAnswer::Wait)
             }
             VolumeView::Virtual(v) => {
@@ -3048,6 +3051,10 @@ struct WrittenSource {
     on_finished: OnFinished,
     /// A persistent session: holes inside member data are answered past the buffer.
     long_holes: bool,
+    /// Bytes were handed to the session from this source.
+    served: bool,
+    /// `done` is a stand-in rebuilt from a duplicate: every byte is read from it.
+    rebuilt: bool,
 }
 
 impl WrittenSource {
@@ -3092,6 +3099,8 @@ impl WrittenSource {
             done: None,
             on_finished,
             long_holes,
+            served: false,
+            rebuilt: false,
         })
     }
 
@@ -3131,6 +3140,8 @@ impl WrittenSource {
 
     /// The download died in this volume and its part was borrowed from a duplicate: read the
     /// rest from the rebuilt volume, which has the volume's layout and length.
+    /// Only before any byte was read from what the download wrote: the stand-in has its own
+    /// layout (rebuilt headers), so the two cannot be mixed in one read.
     fn finish_virtual(&mut self, v: crate::deadvolume::VirtualVolume) -> ProgressiveResult<()> {
         let source = VirtualSource::open(&self.path, v).map_err(|cause| {
             ProgressiveFailure::new(FailureKind::Input {
@@ -3138,9 +3149,15 @@ impl WrittenSource {
                 cause,
             })
         })?;
-        if source.info.length != self.info.length {
-            return Err(ProgressiveFailure::new(FailureKind::Truncated));
+        if self.served || source.info.length != self.info.length {
+            return Err(ProgressiveFailure::new(FailureKind::Input {
+                operation: zipfast::progressive::InputOperation::Read,
+                cause: std::io::Error::other(
+                    "the volume being read as it was written was rebuilt from a duplicate",
+                ),
+            }));
         }
+        self.rebuilt = true;
         // No file of the set: never declared.
         (self.on_finished)(&self.path, &[], true);
         self.live.stop_waiting();
@@ -3183,12 +3200,18 @@ impl RangeSource for WrittenSource {
             e
         };
         loop {
+            if self.rebuilt {
+                if let Some(v) = self.done.as_mut() {
+                    return v.read_at(offset, buf, cx);
+                }
+            }
             // Bytes the writer reported are read from what it wrote, also once the volume is
             // finished (the same file, or the same bytes).
             let n = buf.len().min(self.info.extent.saturating_sub(offset) as usize);
             self.live.sync(&mut self.files, 0, &mut self.synced);
-            match self.files.read_packed(0, offset, &mut buf[..n]) {
+            let unreadable = match self.files.read_packed(0, offset, &mut buf[..n]) {
                 PackedRead::Data(count) => {
+                    self.served = true;
                     self.live.count_live(count as u64);
                     return Ok(RangeRead::Filled { count });
                 }
@@ -3197,11 +3220,16 @@ impl RangeSource for WrittenSource {
                 PackedRead::Hole { .. } if self.done.is_none() && !self.path.is_file() => {
                     return Err(input(std::io::Error::other("cannot read a written article back")))
                 }
-                PackedRead::Hole { .. } | PackedRead::NotYet { .. } => {}
-            }
+                PackedRead::Hole { .. } => true,
+                PackedRead::NotYet { .. } => false,
+            };
             if let Some(v) = self.done.as_mut() {
                 // Never reported (lost, or repaired since): the finished volume's answer.
-                return v.read_at(offset, buf, cx);
+                let read = v.read_at(offset, buf, cx);
+                if matches!(read, Ok(RangeRead::Filled { .. })) {
+                    self.served = true;
+                }
+                return read;
             }
             let view = self.feed.lock().unwrap_or_else(|e| e.into_inner()).volume(&self.path);
             match view {
@@ -3211,24 +3239,27 @@ impl RangeSource for WrittenSource {
                 }
                 VolumeView::NotYet => {
                     let parked = !self.path.is_file() && self.live.wait_for(offset, cx.waker());
-                    if !parked && self.live.written_end(offset).is_some() {
+                    if !parked && !unreadable && self.live.written_end(offset).is_some() {
                         // Written meanwhile.
                         continue;
                     }
                     // Also woken when the feed's answer changes: the finished volume can bring
                     // bytes no article write reported (the end of a file the writer assembles).
                     *self.pending.lock().unwrap_or_else(|e| e.into_inner()) =
-                        Some((self.path.clone(), cx.waker().clone(), true));
+                        Some((self.path.clone(), cx.waker().clone(), true, false));
                     return Ok(RangeRead::NotYet);
                 }
-                VolumeView::Virtual(v) if v.holes.is_empty() => {
+                // A persistent session (its volumes declared NonFile) reads a stand-in whose
+                // borrow is not finished yet, as it does one handed over (`persistent::Provider`);
+                // the copy path waits for it.
+                VolumeView::Virtual(v) if v.holes.is_empty() || (!self.expose_backing && !self.served) => {
                     self.finish_virtual(v)?;
                     continue;
                 }
                 VolumeView::Virtual(_) => {
                     // Its borrow is not finished: woken once the feed's answer changes.
                     *self.pending.lock().unwrap_or_else(|e| e.into_inner()) =
-                        Some((self.path.clone(), cx.waker().clone(), true));
+                        Some((self.path.clone(), cx.waker().clone(), true, false));
                     return Ok(RangeRead::NotYet);
                 }
                 VolumeView::Missing => {
@@ -3238,7 +3269,16 @@ impl RangeSource for WrittenSource {
                     (self.on_finished)(&self.path, &[], true);
                     self.live.stop_waiting();
                     let next = self.live.next_written(offset).unwrap_or(self.info.extent);
-                    let len = next.min(offset + n.max(1) as u64) - offset;
+                    if next <= offset && !unreadable {
+                        // Written meanwhile.
+                        continue;
+                    }
+                    let end = if unreadable {
+                        self.live.written_end(offset).unwrap_or(offset + 1)
+                    } else {
+                        next
+                    };
+                    let len = end.max(offset + 1).min(offset + n.max(1) as u64) - offset;
                     return Ok(RangeRead::Hole { len });
                 }
             }

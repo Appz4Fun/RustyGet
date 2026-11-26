@@ -6768,3 +6768,100 @@ fn a_volume_the_download_never_finished_is_lost_as_damage() {
         "a reader still waits after the end"
     );
 }
+
+/// A volume the download starts writing, then dies in before any byte of it was read, rebuilt
+/// from a duplicate (`deadvolume`): the extraction parked on it reads the stand-in from its
+/// start. Once bytes were read from what the download wrote, a stand-in cannot take over.
+struct DyingFeed {
+    nzb_id: i32,
+    dead: PathBuf,
+    stand_in: Arc<Mutex<Option<crate::deadvolume::VirtualVolume>>>,
+}
+
+impl VolumeFeed for DyingFeed {
+    fn volume(&mut self, path: &Path) -> VolumeView {
+        if path == self.dead {
+            return match self.stand_in.lock().unwrap().clone() {
+                Some(v) => VolumeView::Virtual(v),
+                None => VolumeView::NotYet,
+            };
+        }
+        if path.is_file() {
+            VolumeView::Ready { holes: Vec::new() }
+        } else {
+            VolumeView::Missing
+        }
+    }
+    fn growing(&mut self, path: &Path) -> Option<Arc<crate::livewrite::LiveVolume>> {
+        if path != self.dead || self.stand_in.lock().unwrap().is_some() {
+            return None;
+        }
+        crate::livewrite::lookup(self.nzb_id, crate::fsops::path_to_bytes(path))
+    }
+}
+
+fn dying_volume_run(tag: &str, nzb_id: i32, write_header: bool) -> (Result<zipfast::extract::Summary, Error>, Vec<String>, Vec<u8>, TestDir) {
+    let t = TestDir::new(tag);
+    let data = pattern(400_000);
+    let chunk = 100_000;
+    let vols = rar5_volumes("movie.mkv", &data, chunk);
+    let n = vols.len();
+    for i in [0, 1, 3] {
+        std::fs::write(t.dl().join(volume_name(i, n)), &vols[i]).unwrap();
+    }
+    let dead = t.dl().join(volume_name(2, n));
+    let out = t.dl().join("2.out.tmp");
+    let f = std::fs::File::create(&out).unwrap();
+    f.set_len(vols[2].len() as u64).unwrap();
+    crate::livewrite::register(
+        nzb_id,
+        2,
+        crate::fsops::path_to_bytes(&dead),
+        crate::fsops::path_to_bytes(&out),
+        vols[2].len() as u64,
+        true,
+    );
+    if write_header {
+        use std::os::unix::fs::FileExt;
+        f.write_all_at(&vols[2][..10_000], 0).unwrap();
+        crate::livewrite::written(nzb_id, 2, 0, 10_000);
+    }
+    // The stand-in: the volume's own bytes, its middle in a scratch file.
+    let head = 1_000;
+    let tail = 500;
+    let mid = t.dl().join("borrowed.bin");
+    std::fs::write(&mid, &vols[2][head..vols[2].len() - tail]).unwrap();
+    let v = crate::deadvolume::VirtualVolume {
+        head: vols[2][..head].to_vec(),
+        data: mid,
+        data_len: (vols[2].len() - head - tail) as u64,
+        tail: vols[2][vols[2].len() - tail..].to_vec(),
+        holes: Vec::new(),
+    };
+    let stand_in = Arc::new(Mutex::new(None));
+    let set = stand_in.clone();
+    let rebuilt = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        *set.lock().unwrap() = Some(v);
+    });
+    let feed = DyingFeed { nzb_id, dead, stand_in };
+    let first = t.dl().join(volume_name(0, n));
+    let (r, log) = run(&first, &t.out(), Box::new(feed));
+    rebuilt.join().unwrap();
+    crate::livewrite::forget(nzb_id);
+    (r, log, data, t)
+}
+
+#[test]
+fn a_volume_rebuilt_before_any_byte_was_read_is_read_from_the_stand_in() {
+    let (r, log, data, t) = dying_volume_run("written-rebuilt", -7_320_005, false);
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+}
+
+#[test]
+fn a_volume_rebuilt_after_bytes_were_read_fails_instead_of_mixing_layouts() {
+    let (r, log, _, t) = dying_volume_run("written-rebuilt-late", -7_320_006, true);
+    assert!(r.is_err(), "{log:?}");
+    assert!(!t.out().join("movie.mkv").exists());
+}

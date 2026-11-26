@@ -637,6 +637,9 @@ impl VolumeSource for Provider {
             VolumeView::NotYet => {
                 // Being written: read its articles as they land.
                 let live = self.feed.lock().unwrap_or_else(|e| e.into_inner()).growing(&path);
+                // Asked again once it starts being written, unless it is and could not be read
+                // that way (then only once it finishes).
+                let asked = live.is_none();
                 if let Some(live) = live {
                     let (damaged, saved) = (self.damaged.clone(), self.saved.clone());
                     let pending_repair = self.pending_repair.clone();
@@ -659,7 +662,7 @@ impl VolumeSource for Provider {
                 }
                 *self.pending.lock().unwrap_or_else(|e| e.into_inner()) =
                     // A stand-in with holes is read here: it ends the wait.
-                    Some((path, cx.waker().clone(), false));
+                    Some((path, cx.waker().clone(), false, asked));
                 Ok(VolumeAnswer::Wait)
             }
             VolumeView::Missing => Ok(VolumeAnswer::Missing),

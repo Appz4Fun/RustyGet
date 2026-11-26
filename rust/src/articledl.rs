@@ -777,6 +777,7 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
         })
         .collect();
 
+    let shapes = flush_shapes(&items);
     let hand_off = live.is_some() && !skip_disk_write;
     let (flushed_articles, flushed_size) = flush_cache_then_hand_off(
         &items,
@@ -813,7 +814,7 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
     );
     if direct_write && !skip_disk_write {
         // In their places in the volume: live extraction may read them now (see `livewrite`).
-        for (offset, len) in flushed_ranges(&items, flushed_articles, flushed_size) {
+        for (offset, len) in flushed_ranges(&shapes, flushed_articles, flushed_size) {
             crate::livewrite::written(nzb_id, file_id, offset, len);
         }
     }
@@ -832,30 +833,32 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
     true
 }
 
-/// The (offset, length) of the flushed items written whole, up to the first failed write.
-/// Reads only the items' offsets and sizes: their contents may be freed already.
-fn flushed_ranges(
-    items: &[ArticleWriterFlushItem<'_>],
-    flushed_articles: i32,
-    flushed_size: i64,
-) -> Vec<(u64, u64)> {
-    let written = usize::try_from(flushed_articles).unwrap_or(0).min(items.len());
+/// Each flush item's (offset, size, whether its bytes are all there), taken before the flush
+/// frees the items' contents.
+fn flush_shapes(items: &[ArticleWriterFlushItem<'_>]) -> Vec<(i64, i32, bool)> {
+    items
+        .iter()
+        .map(|item| {
+            let whole = item.segment_content.len() as i64 == i64::from(item.segment_size);
+            (item.segment_offset, item.segment_size, whole)
+        })
+        .collect()
+}
+
+/// The (offset, length) of the flushed items (`shapes`, see `flush_shapes`) written whole, up
+/// to the first failed write.
+fn flushed_ranges(shapes: &[(i64, i32, bool)], flushed_articles: i32, flushed_size: i64) -> Vec<(u64, u64)> {
+    let written = usize::try_from(flushed_articles).unwrap_or(0).min(shapes.len());
     if written == 0 {
         return Vec::new();
     }
-    let all: i64 = items[..written]
-        .iter()
-        .map(|item| i64::from(item.segment_size))
-        .sum();
+    let all: i64 = shapes[..written].iter().map(|s| i64::from(s.1)).sum();
     let good = if all == flushed_size { written } else { written - 1 };
-    items[..good]
+    shapes[..good]
         .iter()
-        .filter(|item| item.segment_content.len() as i64 == i64::from(item.segment_size))
-        .filter_map(|item| {
-            Some((
-                u64::try_from(item.segment_offset).ok()?,
-                u64::try_from(item.segment_size).ok().filter(|&n| n > 0)?,
-            ))
+        .filter(|s| s.2)
+        .filter_map(|&(offset, size, _)| {
+            Some((u64::try_from(offset).ok()?, u64::try_from(size).ok().filter(|&n| n > 0)?))
         })
         .collect()
 }
@@ -4259,14 +4262,14 @@ mod tests {
         let items = vec![item(0, 100, a), item(100, 100, short), item(200, 100, a), item(300, 100, a)];
         // All four flushed, the second without its bytes: it is not reported.
         assert_eq!(
-            super::flushed_ranges(&items, 4, 340),
+            super::flushed_ranges(&super::flush_shapes(&items), 4, 340),
             vec![(0, 100), (200, 100)],
             "a flush short of the sizes drops the last item counted"
         );
-        assert_eq!(super::flushed_ranges(&items, 4, 400), vec![(0, 100), (200, 100), (300, 100)]);
+        assert_eq!(super::flushed_ranges(&super::flush_shapes(&items), 4, 400), vec![(0, 100), (200, 100), (300, 100)]);
         // A write that failed at the third item: the first two counted, nothing after.
-        assert_eq!(super::flushed_ranges(&items, 3, 250), vec![(0, 100)]);
-        assert_eq!(super::flushed_ranges(&items, 0, 0), Vec::<(u64, u64)>::new());
+        assert_eq!(super::flushed_ranges(&super::flush_shapes(&items), 3, 250), vec![(0, 100)]);
+        assert_eq!(super::flushed_ranges(&super::flush_shapes(&items), 0, 0), Vec::<(u64, u64)>::new());
     }
 
     #[test]

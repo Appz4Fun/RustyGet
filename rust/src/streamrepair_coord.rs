@@ -317,7 +317,7 @@ struct DonorSource {
 /// alt once the video inside matches). So a copy labelled `container`, a near twin, a fleet kind alone
 /// or no label lends the later dead volumes unchecked once a run of this download matched its
 /// video; before such a match, every run's own check must match.
-fn other_video_label(twin_label: Option<&[u8]>, video: Option<&[u8]>) -> bool {
+pub(crate) fn other_video_label(twin_label: Option<&[u8]>, video: Option<&[u8]>) -> bool {
     let trimmed = |v: Option<&[u8]>| v.map(|v| cstr::until_nul(v).trim_ascii().to_vec());
     trimmed(twin_label).as_deref() == Some(b"other")
         || trimmed(video).as_deref() == Some(crate::dupesearch_coord::VIDEO_DIFFERENT)
@@ -348,10 +348,20 @@ fn find_queued_or_history(
 /// could only call another container (`container`) becomes an alt of that download while that
 /// download is its primary, with the evidence named in the log (`twin::live_alt`; user
 /// requirement F9). A copy labelled `other` gets no evidence (it holds another video; this
-/// run's snapshot of it was older). Written once per pair.
-fn note_live_video_match(host: &crate::queuesubsys_host::QueueSubsysHost, nzb_id: i32, donor_id: i32) {
+/// run's snapshot of it was older). Written once per pair, and only while no pack merge or
+/// split ran since the run captured `generation` (merge and split bump it under the queue lock
+/// when they clear such evidence: a cancelled helper reaped after one never writes it back).
+fn note_live_video_match(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb_id: i32,
+    donor_id: i32,
+    generation: u64,
+) {
     let evidence = crate::twin::live_video_value(nzb_id);
     let written = host.with_locked_queue(|dq_ptr| {
+        if crate::postproc::dead_volume_confirmation_generation() != generation {
+            return false;
+        }
         let Some((donor, in_history)) = find_queued_or_history(host, dq_ptr, donor_id) else {
             return false;
         };
@@ -2234,6 +2244,9 @@ impl NzbgetRsStreamRepairCtrl {
             *self.fetch_stats.lock().unwrap_or_else(|e| e.into_inner()) =
                 DonorFetchStats::default();
             let donor_started = std::time::Instant::now();
+            // A merge or split from here on changes the files this check compares: its match
+            // is then not recorded (see `postproc::note_dead_volume_donor_confirmed_at`).
+            let confirmation_generation = crate::postproc::dead_volume_confirmation_generation();
             // A match of an earlier run of this download (its video bytes against the
             // download's own) carries over to the dead volumes that have none of the download's
             // bytes left around them, unless a label says the copy holds another video.
@@ -2285,9 +2298,14 @@ impl NzbgetRsStreamRepairCtrl {
                 if let (true, false, Some(size)) =
                     (confirmed, session.donor_differed(), session.video_confirmed_size())
                 {
-                    crate::postproc::note_dead_volume_donor_confirmed(id, donor.id, size);
-                    if !donor.other_video {
-                        note_live_video_match(q.host, id, donor.id);
+                    let recorded = crate::postproc::note_dead_volume_donor_confirmed_at(
+                        id,
+                        donor.id,
+                        size,
+                        confirmation_generation,
+                    );
+                    if recorded && !donor.other_video {
+                        note_live_video_match(q.host, id, donor.id, confirmation_generation);
                     }
                 }
             }

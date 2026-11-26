@@ -10166,12 +10166,16 @@ impl CrossPackRepairSession {
     }
 
     /// The payload size of the video set a match of the last [`Self::process_donor`] call was
-    /// for (see [`Self::video_confirmed`]).
+    /// for (see [`Self::video_confirmed`]). None for an encrypted download: its check compares
+    /// ciphertext and never says "differs", so [`Self::donor_accepted`] never reuses a match
+    /// there and none is recorded.
     pub fn video_confirmed_size(&self) -> Option<i64> {
         self.video_confirmed
             .then(|| self.video_set())
             .flatten()
-            .and_then(|i| self.repair_sets.get(i)?.map.as_ref().map(ContentMap::inner_size))
+            .and_then(|i| self.repair_sets.get(i)?.map.as_ref())
+            .filter(|m| !m.encrypted())
+            .map(ContentMap::inner_size)
     }
 
     /// Whether a probe verdict lets the donor lend set `repair_set_idx` (see
@@ -19515,6 +19519,16 @@ mod tests {
         session.note_donor_identity(0, DonorCheck::Differs);
         assert!(session.donor_differed());
         assert!(!session.donor_accepted(0, DonorCheck::Inconclusive));
+        // A match is recorded for the plain video's size only: an encrypted download's check
+        // compares ciphertext, nothing reuses it, so nothing is recorded (review of edaa5f25).
+        session.video_confirmed = true;
+        assert_eq!(session.video_confirmed_size(), Some(32768));
+        session.repair_sets[0].map.as_mut().unwrap().run_cryptos_mut().push(RunCrypto {
+            crypto: None,
+            cipher_data_offset: 0,
+            cipher_size: 32768,
+        });
+        assert_eq!(session.video_confirmed_size(), None);
         let _ = std::fs::remove_dir_all(&temp_root);
     }
 

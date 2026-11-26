@@ -1931,6 +1931,8 @@ fn live_written_handoff_stays_within_the_byte_limit() {
     let files = written_copies(&fx, &set);
     let entry = active_streaming_session(id).unwrap();
     entry.article_byte_limit.store(0, Ordering::Release);
+    // Every loan of free ParBuffer is taken already.
+    entry.lent_memory.store(u64::MAX / 4, Ordering::Release);
     for (name, path, bytes) in &files {
         let file_id = entry.session.file_id_by_name(name).unwrap();
         entry.note_written(file_id, path);
@@ -1976,6 +1978,115 @@ fn live_capture_after_its_write_takes_the_kept_bytes() {
     assert_eq!(entry.articles.lock().unwrap().bytes, 0);
     drop(entry);
     streaming_session_forget(id);
+}
+
+/// A cache flush that writes articles before live PAR captured them, past the first byte
+/// limit (about two slices: on 6790 a flush keeps up to hundreds of articles): the write
+/// lends free ParBuffer as a capture would, keeps every article, and the captures take them.
+/// Before, the write kept only what fit the first limit and par-rs read the rest back.
+#[test]
+fn live_flush_before_capture_lends_for_the_kept_bytes() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1909011; // unique: sessions are process-wide
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 * 1024 * 1024)
+        .unwrap();
+    let files = written_copies(&fx, &set);
+    let entry = active_streaming_session(id).unwrap();
+    entry.article_byte_limit.store(1000, Ordering::Release);
+    for (name, _, bytes) in &files {
+        let items: Vec<(u64, &[u8])> = bytes
+            .chunks(1000)
+            .enumerate()
+            .map(|(i, chunk)| ((i * 1000) as u64, chunk))
+            .collect();
+        streaming_session_articles_written(id, (None, name, &[]), true, &items);
+    }
+    assert!(entry.lent_memory.load(Ordering::Relaxed) > 0, "the write lent ParBuffer");
+    assert_eq!(entry.metrics.stash_refusals.load(Ordering::Relaxed), 0);
+    for (name, path, bytes) in &files {
+        defer_uncached(id, name, path, bytes, (0, bytes.len()), 1000);
+    }
+    streaming_session_drain_articles(id).unwrap().unwrap();
+    let status = streaming_session_status(id).unwrap();
+    assert_eq!(status.verified, status.total);
+    assert_eq!(streaming_session_io_stats(id).unwrap().source_bytes_read, 0);
+    assert_eq!(entry.metrics.committed_articles.load(Ordering::Relaxed), 0);
+    assert_eq!(entry.articles.lock().unwrap().bytes, 0);
+    let line = entry.io_stats_line(id);
+    assert!(line.contains("0 not kept at write (no room)"), "{line}");
+    drop(entry);
+    streaming_session_forget(id);
+}
+
+/// Articles written before the job's live session started (the par2 index arrives first and
+/// is parsed off the queue) are kept for it: the catch-up capture finds them gone from the
+/// cache and takes the kept bytes, so par-rs reads nothing back. Recovery volume articles
+/// written before the session (or before the volume's size was known) join the volume's tee
+/// when it starts, so the completed volume is absorbed from RAM.
+#[test]
+fn live_bytes_written_before_the_session_are_kept_for_it() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1909012; // unique: sessions are process-wide
+    let files = written_copies(&fx, &set);
+    // Before the session: every article of every file is written and kept.
+    for (n, (_, _, bytes)) in files.iter().enumerate() {
+        let items: Vec<(u64, &[u8])> = bytes
+            .chunks(1000)
+            .enumerate()
+            .map(|(i, chunk)| ((i * 1000) as u64, chunk))
+            .collect();
+        presession_keep(id, 100 + n as i32, &items);
+    }
+    let volume = std::fs::read(fx.0.join("testfile.vol01+2.PAR2")).unwrap();
+    presession_keep(id, 200, &[(0, &volume[..4000])]);
+    let total: u64 = files.iter().map(|(_, _, b)| b.len() as u64).sum::<u64>() + 4000;
+    assert_eq!(presession_bytes_for_test(id), total);
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 * 1024 * 1024)
+        .unwrap();
+    // The catch-up capture: no article is in the cache any more.
+    for (n, (name, path, bytes)) in files.iter().enumerate() {
+        let mut offset = 0;
+        while offset < bytes.len() {
+            let end = (offset + 1000).min(bytes.len());
+            streaming_session_defer_committed_article(
+                id,
+                (Some(100 + n as i32), name, &[]),
+                offset as u64,
+                (end - offset) as u64,
+                crc32fast::hash(&bytes[offset..end]),
+                Some(path),
+                || None,
+            )
+            .unwrap()
+            .unwrap();
+            offset = end;
+        }
+    }
+    streaming_session_drain_articles(id).unwrap().unwrap();
+    let status = streaming_session_status(id).unwrap();
+    assert_eq!(status.verified, status.total);
+    assert_eq!(streaming_session_io_stats(id).unwrap().source_bytes_read, 0);
+    // The volume's first article joins its tee once the rest of the volume is written.
+    streaming_session_recovery_bytes_written(
+        id,
+        200,
+        volume.len() as u64,
+        &[(4000, &volume[4000..])],
+    );
+    assert_eq!(presession_bytes_for_test(id), 0, "every kept byte was taken");
+    let entry = active_streaming_session(id).unwrap();
+    assert!(entry.metrics.presession_articles.load(Ordering::Relaxed) > 0);
+    let tee = entry.take_recovery_bytes(200, volume.len() as u64).expect("the whole volume");
+    assert_eq!(tee.bytes, volume);
+    entry.release_recovery_tee(tee);
+    drop(entry);
+    streaming_session_forget(id);
+    // A job whose session never starts: forgetting it drops what was kept.
+    presession_keep(id, 1, &[(0, &[1u8; 10][..])]);
+    presession_forget(id);
+    assert_eq!(presession_bytes_for_test(id), 0);
 }
 
 /// An article written straight to disk (no cache buffer) is kept by the writer's tee

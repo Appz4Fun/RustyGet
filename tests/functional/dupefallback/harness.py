@@ -4449,8 +4449,11 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
             # no DupeKind (TwinCheck without par2 leaves none): the intake's verdict alone
             labels = [('DupeCopyKind', 'unborrowable'), ('DupeVideo', 'same')]
         elif backup == 'rar5m3other':
-            # TwinCheck's DupeKind=other overrides the intake's DupeVideo=same
-            labels = [('DupeCopyKind', 'unborrowable'), ('DupeVideo', 'same'), ('DupeKind', 'other')]
+            # TwinCheck labels it `other` itself: its own par2 set (other files: an alt by par2)
+            # and a video digest (DupeInner) unlike the primary's; the intake's DupeVideo=same
+            # stays on it
+            labels = [('DupeCopyKind', 'unborrowable'), ('DupeVideo', 'same'),
+                      ('DupeInner', 'movie-mkv.00000000000000bb')]
         else:
             labels = [('DupeCopyKind', 'unborrowable')]
     donor_members = []
@@ -4461,6 +4464,10 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
     if backup in ('twin', 'aestwin'):
         t.write_file(os.path.join('data', '%sB/Show.par2' % tag), par)
         donor_members.append(('%sB/Show.par2' % tag, 'Show.par2', len(par), seg, set()))
+    elif backup == 'rar5m3other':
+        bpar = generators.par2_index(donor_vols)
+        t.write_file(os.path.join('data', '%sB/Other.par2' % tag), bpar)
+        donor_members.append(('%sB/Other.par2' % tag, 'Other.par2', len(bpar), donor_seg, set()))
     donor_total = sum(len(d) for _, d in donor_vols)
     off = 0
     _failcont_before.offsets = {}
@@ -4470,6 +4477,9 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
     api = daemon.wait_ready()
     key = 'dupes:show.failcont.' + tag if fleet else tag + '-key'
     daemon.append(api, 'Primary', build_multi_nzb(members, password=primary_password), True, key, 100)
+    if backup == 'rar5m3other':
+        api.editqueue('GroupSetParameter', 0, 'DupeInner=movie-mkv.00000000000000aa',
+                      [g['NZBID'] for g in api.listgroups() if g['NZBName'] == 'Primary'])
     _ds_append(api, 'Backup', build_multi_nzb(donor_members, password=password), key, 90,
                paused=False, params=[{'Name': k, 'Value': v} for k, v in labels])
     if fleet:
@@ -4546,9 +4556,11 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
               _grep_log(t, 'cannot continue the extraction of Primary') >= 1)
     elif backup == 'rar5m3other':
         # refused before any restart: nothing of it lent, no restart tried or refused
+        # (TwinCheck labelled it other: checked, so a wrong setup fails instead of passing)
+        kind = _params(daemon.wait_history(api, 'Backup', timeout=10)).get('DupeKind')
         lent = (_grep_log(t, 'from duplicate Backup') + _grep_log(t, 'from a duplicate; direct unpack reads it')
                 + _grep_log(t, 'Wrote dead volume'))
-        ok = (integ and winner == 'Backup' and failed_over == 1 and lent == 0
+        ok = (integ and winner == 'Backup' and failed_over == 1 and lent == 0 and kind == 'other'
               and _grep_log(t, 'Cannot restart the compressed video') == 0
               and _grep_log(t, 'Restarted the') == 0
               and _grep_log(t, 'cannot continue the extraction of Primary') >= 1)

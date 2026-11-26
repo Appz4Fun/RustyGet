@@ -1049,6 +1049,19 @@ impl NzbgetRsStreamRepairCtrl {
                 same_video_label: row.same_video_label,
             });
         }
+        // Donor order (AGENTS.md: twins, then alts): a copy labelled the same video comes
+        // before the others, and one whose video already failed this download's dead-volume
+        // check goes behind every copy not yet checked. A pass is cut short by each new dead
+        // volume, so by score alone the same mismatched copy was checked pass after pass until
+        // it "could not lend" and the download failed over to it, while the labelled alt behind
+        // it was never tried (functional `deadvolumetwolenders`).
+        let own_id = q.host.nzb_snap(nzb_ptr, false).id;
+        donors.sort_by_key(|d| {
+            (
+                crate::postproc::dead_volume_donor_mismatch_seen(own_id, &d.queued_filename),
+                !d.same_video_label,
+            )
+        });
 
         // A live pass with no duplicate to borrow from leaves its files
         // unattempted, so a backup added later (a fleet member, DupeWatch)

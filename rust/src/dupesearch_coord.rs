@@ -1688,6 +1688,17 @@ impl DonorServerExchange for NntpHealthTransportShared {
             }
 
             let mut wait_start = host_now(ctx, host_cb);
+            // while a fleet is being probed, a slot of the probe reads first:
+            // its connection may be one of the probe floor's
+            let Ok(_slot) = crate::fleetprobe::stat_slot(|| {
+                http_stopped() || host_now(ctx, host_cb) - wait_start > 10
+            }) else {
+                return Err(DonorExchangeError {
+                    answers: Vec::new(),
+                    busy: true,
+                });
+            };
+            wait_start = host_now(ctx, host_cb);
             let ids = self.server_ids.lock().unwrap_or_else(|e| e.into_inner()).clone();
             // servers of this backbone whose connect failed during this exchange
             let mut failed: Vec<i32> = Vec::new();
@@ -1925,7 +1936,8 @@ fn fetch_any_article_via_host(
     };
     let ctx_addr = host_ctx as usize;
     // no more probe reads at once than the light connections and the probe
-    // floor allow (#703, fleetprobe::probe_reads), whatever reads them at once (each copy's probe reads several): a read
+    // floor allow (#703, fleetprobe::probe_reads), whatever reads them at
+    // once (each copy's probe reads several): a read
     // past that waits for one to end instead of polling for a connection
     #[cfg(unix)]
     let Some(_slot) = crate::light_pool::PROBE_READS.take(
@@ -6597,11 +6609,14 @@ struct FleetOutEntry {
 }
 
 impl FleetOutEntry {
-    /// The copy is the fleet's primary (QUEUED): a reason it had as a backup
-    /// (a weak copy's "weak: N% ... kept as a donor") no longer holds.
+    /// The copy is the fleet's primary (QUEUED): the reason it had as a weak
+    /// backup ("weak: N% ... kept as a donor", [`fleet_added_status`]) no
+    /// longer holds; any other reason stays.
     fn promote(&mut self) {
         self.status = b"QUEUED".to_vec();
-        self.reason.clear();
+        if self.reason.starts_with(b"weak:") {
+            self.reason.clear();
+        }
     }
 }
 
@@ -7059,6 +7074,8 @@ pub unsafe fn fleet_append(
     if dupe_key.is_empty() {
         dupe_key = make_dupe_key(&members[0].name);
     }
+    // its probe requests keep the probe floor beside a saturating download
+    let _probing = crate::fleetprobe::FleetProbing::start();
 
     // Copies grouped by their name (a drop in the web UI or into NzbDir, or the
     // daemon's join: DupeKey dupes:<normalized name>) are probed with about
@@ -8857,6 +8874,11 @@ mod tests {
         assert_eq!(entry.status, b"QUEUED");
         assert!(entry.reason.is_empty());
         assert_eq!(entry.alive, 40, "its alive share stays");
+        // another reason is kept
+        entry.status = b"BACKUP".to_vec();
+        entry.reason = b"held: the program stopped before the probe ended".to_vec();
+        entry.promote();
+        assert_eq!(entry.reason, b"held: the program stopped before the probe ended");
     }
 
     /// B1c: the primary starts as soon as a copy is proven healthy, the

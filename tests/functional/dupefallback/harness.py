@@ -13221,7 +13221,8 @@ def scenario_fleetprobebusy(daemon, t):
     kind probes overlapped (their lengths add up to more than the span they
     took; before, one ran after another), the reserve was 1 when the fleet
     came, the download was still running at the primary's release and kept
-    going (no zero-rate stretch over 3 s) and the fleet's primary completes."""
+    going (no zero-rate stretch over 3 s, its mean rate during the probe at
+    least 75% of the rate before) and the fleet's primary completes."""
     rel = 'Speed.Movie.2024.1080p.WEB-DL.x264-GRP'
     key = 'dupes:speed.movie.2024.1080p.web.dl.x264.grp'
     data = _payload(1_200_000, 16611)
@@ -13305,7 +13306,10 @@ def scenario_fleetprobebusy(daemon, t):
     avg = lambda xs: sum(xs) / len(xs) if xs else 0
     ok = (len(items) == len(names) and len(kind_ms) == len(names) and len(stat_ms) == len(names) and
           probed_s is not None and released_s is not None and done is not None and
-          light_at_add == 1 and load_running and longest_zero <= 3.0 and overlapped)
+          light_at_add == 1 and load_running and longest_zero <= 3.0 and overlapped and
+          # the download kept its speed while the probe ran (the floor takes
+          # idle connections only)
+          avg(during) >= 0.75 * avg(before))
     secs = lambda x: 'none' if x is None else '%.1fs' % x
     return ('fleetprobebusy', ok, 'light_at_add=%d released_in=%s probed_in=%s kind_ms=%s (median %s, sum %.1fs '
             'over a %.1fs span: overlapped=%s) stat_ms=%s rate_before=%.0f KB/s rate_during_probe=%.0f KB/s '

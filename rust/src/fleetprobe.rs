@@ -13,12 +13,16 @@
 //!
 //! While downloads want every connection, the light reserve shrinks to one
 //! connection per server, which used to probe a whole fleet one read at a
-//! time (122 s to the primary on 6790 with a busy queue). Probe requests keep
-//! a floor of [`PROBE_READ_FLOOR`] at once per server ([`probe_reads`]): the
-//! light connections, plus idle connections of the probe share the main pool
+//! time (122 s to the primary on 6790 with a busy queue). While a fleet is
+//! being probed ([`FleetProbing`]), its requests keep a floor of
+//! [`PROBE_READ_FLOOR`] at once per server ([`probe_reads`]): the light
+//! connections, plus idle connections of the probe share the main pool
 //! already grants them, taken even while a download was refused one (never a
-//! connection a download holds). A flaky server stays at one, a server with
-//! few connections at its light count.
+//! connection a download holds). Every request on the floor, a BODY read or a
+//! STAT exchange, holds a slot of [`crate::light_pool::PROBE_READS`], so the
+//! slots never outnumber the connections the floor allows. A flaky server
+//! stays at one, a server with few connections at its light count; with no
+//! fleet being probed (a duplicate search's checks) nothing changes.
 
 /// How long one probe request may wait for the server, in seconds.
 pub const PROBE_IO_TIMEOUT_SEC: i32 = 5;
@@ -32,6 +36,31 @@ pub fn probe_share(max_connections: i32) -> usize {
 /// The probe requests a server keeps at once while downloads want every
 /// connection and its light reserve shrank to one.
 pub const PROBE_READ_FLOOR: i32 = 5;
+
+/// Fleets being probed now ([`FleetProbing`]).
+static FLEETS_PROBING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Marks a fleet as being probed while it lives: its probe requests (and any
+/// other probe request meanwhile) get the [`PROBE_READ_FLOOR`].
+pub struct FleetProbing(());
+
+impl FleetProbing {
+    pub fn start() -> Self {
+        FLEETS_PROBING.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        FleetProbing(())
+    }
+}
+
+impl Drop for FleetProbing {
+    fn drop(&mut self) {
+        FLEETS_PROBING.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Whether a fleet is being probed now.
+pub fn fleet_probing() -> bool {
+    FLEETS_PROBING.load(std::sync::atomic::Ordering::SeqCst) > 0
+}
 
 /// The probe requests one server may have at once: its light connections
 /// (`light`), raised to [`PROBE_READ_FLOOR`] with check connections of its
@@ -62,18 +91,43 @@ pub fn probe_check_floor(light: i32, max_connections: i32, flaky: bool) -> usize
 
 /// How many probe reads to run at once out of at most `max`
 /// ([`crate::light_pool::parallel_jobs`] with the [`probe_reads`] of the
-/// primary servers now): the rest queue instead of polling for a connection.
+/// primary servers now while a fleet is being probed, else with their light
+/// connections): the rest queue instead of polling for a connection.
 #[cfg(unix)]
 pub fn probe_reads_now(max: usize) -> usize {
-    let reads = crate::net::active_server_pool().map_or(0, |p| p.primary_probe_reads());
+    let floor = fleet_probing();
+    let reads = crate::net::active_server_pool().map_or(0, |p| {
+        if floor {
+            p.primary_probe_reads()
+        } else {
+            p.primary_light_connections()
+        }
+    });
     crate::light_pool::parallel_jobs(max, reads)
+}
+
+/// A slot of [`crate::light_pool::PROBE_READS`] for a STAT exchange while a
+/// fleet is being probed (none needed otherwise: the exchange takes no
+/// connection past the usual one), so its connection on the probe floor is
+/// counted with the BODY reads'. `Err(())` when `give_up()` said so first.
+#[cfg(unix)]
+pub fn stat_slot(
+    give_up: impl Fn() -> bool,
+) -> Result<Option<crate::light_pool::ReadSlot<'static>>, ()> {
+    if !fleet_probing() {
+        return Ok(None);
+    }
+    crate::light_pool::PROBE_READS
+        .take(|| probe_reads_now(usize::MAX), give_up)
+        .map(Some)
+        .ok_or(())
 }
 
 /// A free connection of `srv` for a probe request, or null when none is
 /// free: a light connection first, else a check connection of the main pool
-/// while the probes hold less than their share of it (up to
-/// [`probe_check_floor`] of them even while downloads want every
-/// connection). THE place probe requests get connections.
+/// while the probes hold less than their share of it (while a fleet is being
+/// probed, up to [`probe_check_floor`] of them even while downloads want
+/// every connection). THE place probe requests get connections.
 #[cfg(unix)]
 pub fn probe_connection(
     pool: &crate::net::NzbgetRsServerPool,
@@ -90,7 +144,11 @@ pub fn probe_connection(
     if !downloads_held && srv.check_in_use.load(Ordering::SeqCst) >= probe_share(srv.max_connections) {
         return std::ptr::null_mut();
     }
-    pool.get_probe_connection(srv)
+    if fleet_probing() {
+        pool.get_probe_connection(srv)
+    } else {
+        pool.get_check_connection(srv)
+    }
 }
 
 /// Shortens a probe connection's request timeout once it is connected (a
@@ -296,5 +354,13 @@ mod tests {
         assert_eq!(probe_reads(0, 60, false), 0);
         assert_eq!(crate::light_pool::parallel_jobs(16, probe_reads(0, 60, false)), 16);
         assert_eq!(crate::light_pool::parallel_jobs(16, probe_reads(1, 60, false)), 5);
+        // the floor holds only while a fleet is being probed
+        let before = fleet_probing();
+        {
+            let _a = FleetProbing::start();
+            let _b = FleetProbing::start();
+            assert!(fleet_probing());
+        }
+        assert_eq!(fleet_probing(), before);
     }
 }

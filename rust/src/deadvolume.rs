@@ -484,18 +484,28 @@ fn data_end(path: &[u8]) -> Option<(u64, u64, bool, bool)> {
 /// must), from a sibling that ends alike: its file going on too, its end block saying another
 /// volume follows, the same length behind its data. True when written.
 pub fn restore_tail_from_sibling(path: &[u8], holes: &[(u64, u64)], sibling: &[u8]) -> bool {
+    restore_tail_from_sibling_checked(path, holes, sibling).unwrap_or(false)
+}
+
+/// [`restore_tail_from_sibling`] telling a write that failed part way (`Err`: the volume may
+/// hold some of the new bytes) from one that did not apply (`Ok(false)`: nothing written).
+fn restore_tail_from_sibling_checked(
+    path: &[u8],
+    holes: &[(u64, u64)],
+    sibling: &[u8],
+) -> std::io::Result<bool> {
     use std::io::{Read, Seek, SeekFrom, Write};
     let Some((end, len, true, _)) = data_end(path) else {
-        return false;
+        return Ok(false);
     };
     if holes.is_empty() || holes.iter().any(|&(s, e)| s < end || e > len || s >= e) {
-        return false;
+        return Ok(false);
     }
     let Some((s_end, s_len, true, true)) = data_end(sibling) else {
-        return false;
+        return Ok(false);
     };
     if s_len - s_end != len - end {
-        return false;
+        return Ok(false);
     }
     let tail = (|| -> std::io::Result<Vec<u8>> {
         let mut f = std::fs::File::open(crate::fsops::path(sibling))?;
@@ -505,7 +515,7 @@ pub fn restore_tail_from_sibling(path: &[u8], holes: &[(u64, u64)], sibling: &[u
         Ok(buf)
     })();
     let Ok(tail) = tail else {
-        return false;
+        return Ok(false);
     };
     (|| -> std::io::Result<()> {
         let mut f = std::fs::OpenOptions::new()
@@ -517,7 +527,7 @@ pub fn restore_tail_from_sibling(path: &[u8], holes: &[(u64, u64)], sibling: &[u
         }
         f.flush()
     })()
-    .is_ok()
+    .map(|()| true)
 }
 
 /// Checks a rebuilt volume with the regular header reader: it has to read as volume `index`
@@ -1211,6 +1221,38 @@ pub const HEAD_TAIL_SCAN: u64 = 1 << 17;
 /// (no quick-open record, a recovery record, a comment or anything else in front).
 pub fn rar5_head_from_tail(tail: &[u8], file_size: u64, index: usize) -> Option<Vec<u8>> {
     rar5::head_from_tail(tail, file_size, index)
+}
+
+/// [`restore_tail_from_sibling`] through the live-PAR write guard of the download folder
+/// holding `path`, as [`restore_head_guarded`]: refused while a live repair owns the volume,
+/// and a live session reading it re-checks the rewritten range from disk (otherwise the
+/// file's identity changes and live PAR stops). True when written.
+pub fn restore_tail_from_sibling_guarded(path: &[u8], holes: &[(u64, u64)], sibling: &[u8]) -> bool {
+    let os = crate::fsops::path(path);
+    let file = std::path::Path::new(&os);
+    let Some(parent) = file.parent() else {
+        return false;
+    };
+    let Ok(context) = crate::parlive::donor_write_context(parent, file) else {
+        return false;
+    };
+    let live = context.watched_by_live_par();
+    // A write that failed part way is an I/O error: `perform_io` stops live PAR for it. One
+    // that did not apply wrote nothing (NotFound leaves live PAR's sources valid).
+    let written = context
+        .perform_io(|| match restore_tail_from_sibling_checked(path, holes, sibling)? {
+            true => Ok(()),
+            false => Err(std::io::ErrorKind::NotFound.into()),
+        })
+        .is_ok();
+    if written {
+        let start = holes.iter().map(|&(s, _)| s).min().unwrap_or(0);
+        let end = holes.iter().map(|&(_, e)| e).max().unwrap_or(start);
+        if !(live && context.range_replaced(start, end - start)) {
+            context.invalidate_identity();
+        }
+    }
+    written
 }
 
 /// Writes the first bytes of RAR5 volume `path`, number `index` (from 0), back from its own
@@ -2275,6 +2317,13 @@ mod tests {
         assert_eq!(data_end(&two), Some((end, len, true, true)));
         let (ok, _, files) = crate::rarreader::read_volume_file(&two, b"", false);
         assert!(ok && files.len() == 1);
+        // The same through the live-PAR write guard (stream repair's path): written alike,
+        // and a volume it does not apply to is left alone.
+        std::fs::write(crate::fsops::path(&two), &damaged).unwrap();
+        assert!(!restore_tail_from_sibling_guarded(&two, &[hole], &last));
+        assert_eq!(std::fs::read(crate::fsops::path(&two)).unwrap(), damaged);
+        assert!(restore_tail_from_sibling_guarded(&two, &[hole], &one));
+        assert_eq!(std::fs::read(crate::fsops::path(&two)).unwrap(), restored);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

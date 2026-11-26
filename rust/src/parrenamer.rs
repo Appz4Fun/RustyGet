@@ -211,6 +211,51 @@ pub fn execute_all(
     on_register_parred: &mut dyn FnMut(&[u8]),
     on_register_renamed: &mut dyn FnMut(&[u8], &[u8]),
 ) -> State {
+    execute_all_known(
+        info_name,
+        dest_dir,
+        ignore_ext,
+        detect_missing,
+        &[],
+        is_stopped,
+        on_progress,
+        on_message,
+        on_register_parred,
+        on_register_renamed,
+    )
+}
+
+/// The MD5 of a file's first 16 KiB from the queue's `hash16k` (32 hex digits, as the
+/// article analyzer stores it). None for anything else.
+pub fn parse_hash16k(hex: &[u8]) -> Option<[u8; 16]> {
+    if hex.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    for (i, pair) in hex.chunks(2).enumerate() {
+        let digit = |b: u8| (b as char).to_digit(16);
+        out[i] = u8::try_from(digit(pair[0])? * 16 + digit(pair[1])?).ok()?;
+    }
+    Some(out)
+}
+
+/// [`execute_all`] with the first-16-KiB MD5s the download already computed (`known`: file
+/// name in `dest_dir`, hash), handed to par-rs (`ParRenamer::set_known_hash16k`) so it
+/// identifies those files without reading them. The key is `dest_dir` joined with the name,
+/// exactly the path the renamer lists; a name it does not list is simply read as before.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_all_known(
+    info_name: &[u8],
+    dest_dir: &[u8],
+    ignore_ext: &[u8],
+    detect_missing: bool,
+    known: &[(Vec<u8>, [u8; 16])],
+    is_stopped: &mut dyn FnMut() -> bool,
+    on_progress: &mut dyn FnMut(&[u8], i32),
+    on_message: &mut dyn FnMut(Kind, &[u8]),
+    on_register_parred: &mut dyn FnMut(&[u8]),
+    on_register_renamed: &mut dyn FnMut(&[u8], &[u8]),
+) -> State {
     use par_rs::renamer::{ParRenamer, RenamerEvent, RenamerOptions};
 
     on_progress(&[b"Checking renamed files for ", info_name].concat(), 0);
@@ -252,7 +297,11 @@ pub fn execute_all(
         _ => {}
     };
 
-    let renamer = ParRenamer::new(bytes_to_path_buf(dest_dir), options);
+    let mut renamer = ParRenamer::new(bytes_to_path_buf(dest_dir), options);
+    let root = bytes_to_path_buf(dest_dir);
+    for (name, hash) in known {
+        renamer.set_known_hash16k(root.join(bytes_to_path_buf(name)), *hash);
+    }
     match renamer.run_with_stop(is_stopped, &mut events) {
         Ok(report) => State {
             renamed_count: i32::try_from(report.renamed_count()).unwrap_or(i32::MAX),
@@ -367,6 +416,90 @@ mod tests {
         let listed =
             list_parred_files(&parchecker_dir.join("testfile.par2"), 16 * 1024 * 1024).unwrap();
         assert_eq!(listed.len(), 2);
+    }
+
+    /// A normal download: every data file came down whole, so its first-16-KiB MD5 is known
+    /// from its first article. par-rename identifies the files from those hashes without
+    /// their 16 KiB read: here they cannot be read at all (mode 000), and still every one is
+    /// renamed. Without the hashes the same run fails to read them.
+    #[cfg(unix)]
+    #[test]
+    fn par_rename_reads_no_data_file_whose_hash16k_is_known() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root reads mode-000 files: the check below would prove nothing
+        }
+        let src =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/testdata/parchecker");
+        let run = |tag: &str, with_hashes: bool| -> (State, Vec<Vec<u8>>) {
+            let work = std::env::temp_dir()
+                .join(format!("rustyget-known16k-{}-{tag}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&work);
+            std::fs::create_dir_all(&work).unwrap();
+            for entry in std::fs::read_dir(&src).unwrap() {
+                let entry = entry.unwrap();
+                std::fs::copy(entry.path(), work.join(entry.file_name())).unwrap();
+            }
+            // Obfuscated names, as posted, and the hashes the download computed.
+            let mut known = Vec::new();
+            for (real, posted) in [("testfile.dat", "a1b2c3"), ("testfile.nfo", "d4e5f6")] {
+                let bytes = std::fs::read(work.join(real)).unwrap();
+                let hash: [u8; 16] = Md5::digest(&bytes[..bytes.len().min(16384)]).into();
+                let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+                assert_eq!(parse_hash16k(hex.as_bytes()), Some(hash));
+                std::fs::rename(work.join(real), work.join(posted)).unwrap();
+                std::fs::set_permissions(work.join(posted), std::fs::Permissions::from_mode(0))
+                    .unwrap();
+                known.push((posted.as_bytes().to_vec(), hash));
+            }
+            let mut errors = Vec::new();
+            let state = execute_all_known(
+                b"test",
+                work.to_string_lossy().as_bytes(),
+                b"",
+                false,
+                if with_hashes { &known } else { &[] },
+                &mut || false,
+                &mut |_, _| {},
+                &mut |kind, text| {
+                    if matches!(kind, Kind::Error) {
+                        errors.push(text.to_vec());
+                    }
+                },
+                &mut |_| {},
+                &mut |_, _| {},
+            );
+            for name in ["a1b2c3", "d4e5f6", "testfile.dat", "testfile.nfo"] {
+                let _ = std::fs::set_permissions(
+                    work.join(name),
+                    std::fs::Permissions::from_mode(0o644),
+                );
+            }
+            let _ = std::fs::remove_dir_all(&work);
+            (state, errors)
+        };
+        // par-rs still opens every file once in its par2 pass to look at the first packet
+        // header (64 bytes; "Could not open file" here). The 16 KiB identity read ("Could
+        // not read file") is what the known hashes remove.
+        let reads16k = |errors: &[Vec<u8>]| {
+            errors
+                .iter()
+                .filter(|e| e.starts_with(b"Could not read file"))
+                .count()
+        };
+        let (state, errors) = run("known", true);
+        assert_eq!(
+            state.renamed_count, 2,
+            "both files identified from their known hashes"
+        );
+        assert_eq!(reads16k(&errors), 0, "no 16 KiB read: {errors:?}");
+        let (state, errors) = run("unknown", false);
+        assert_eq!(state.renamed_count, 0);
+        assert_eq!(
+            reads16k(&errors),
+            2,
+            "without the hashes the renamer reads each file's first 16 KiB"
+        );
     }
 
     #[test]

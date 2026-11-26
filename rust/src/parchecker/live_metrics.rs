@@ -22,6 +22,13 @@ pub(super) struct LiveMetricCounters {
     pub written_handoffs: AtomicU64,
     /// Obfuscated queue files bound to their par2 file by their first article's 16k hash.
     pub bound_by_first_article: AtomicU64,
+    /// Verified slices folded into recovery slots added later from bytes still in RAM
+    /// (`backfill_from_bytes`), not re-read from disk.
+    pub ram_backfilled_slices: AtomicU64,
+    /// Recovery volumes absorbed from the bytes RustyGet wrote (`on_recovery_volume_bytes`),
+    /// and their bytes: never read back.
+    pub recovery_volumes_from_ram: AtomicU64,
+    pub recovery_bytes_from_ram: AtomicU64,
     pub writer_wait_ns: AtomicU64,
     pub operation_wait_ns: AtomicU64,
     report_sequence: AtomicU64,
@@ -125,13 +132,18 @@ impl ActiveStreamingSession {
         let replay = self.catchup_source_bytes.load(Ordering::Relaxed);
         let mb = |bytes: u64| format!("{:.1}", bytes as f64 / (1024.0 * 1024.0));
         format!(
-            "Live PAR (job {nzb_id}) I/O: source_bytes_read {} MB (par-rs {} MB, RustyGet replay {} MB), backfill_bytes_read {} MB, recovery_bytes_read {} MB, ram_bytes_verified {} MB; {} cache miss(es), {} article(s) read from their file by par-rs, {} waited for the cache flush, {} still waiting, {} handed over with the bytes written, {} taken from bytes kept at write, {} file(s) matched by their first article",
+            "Live PAR (job {nzb_id}) I/O: source_bytes_read {} MB (par-rs {} MB, RustyGet replay {} MB), backfill_bytes_read {} MB, recovery_bytes_read {} MB, target_verification_bytes_read {} MB, ram_bytes_verified {} MB, ram_backfilled_slices {}, recovery volumes from RAM {} ({} MB), trusted slice checks {}; {} cache miss(es), {} article(s) read from their file by par-rs, {} waited for the cache flush, {} still waiting, {} handed over with the bytes written, {} taken from bytes kept at write, {} file(s) matched by their first article",
             mb(io.source_bytes_read.saturating_add(replay)),
             mb(io.source_bytes_read),
             mb(replay),
             mb(io.backfill_bytes_read),
             mb(io.recovery_bytes_read),
+            mb(io.target_verification_bytes_read),
             mb(io.ram_bytes_verified),
+            self.metrics.ram_backfilled_slices.load(Ordering::Relaxed),
+            self.metrics.recovery_volumes_from_ram.load(Ordering::Relaxed),
+            mb(self.metrics.recovery_bytes_from_ram.load(Ordering::Relaxed)),
+            if self.trust_revoked.load(Ordering::Relaxed) { "off" } else { "on" },
             self.metrics.cache_misses.load(Ordering::Relaxed),
             self.metrics.committed_articles.load(Ordering::Relaxed),
             self.metrics.awaited_commits.load(Ordering::Relaxed),

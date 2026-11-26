@@ -869,12 +869,51 @@ pub fn article_writer_process_articles(
     direct_write: bool,
     skip_disk_write: bool,
     is_yenc: bool,
+    position_fn: impl FnMut() -> i64,
+    seek_fn: impl FnMut(i64) -> bool,
+    write_fn: impl FnMut(&[u8]) -> i64,
+    discard_fn: impl FnMut(usize),
+    log_err_fn: impl FnMut(&[u8]),
+) -> (u32, bool, i32) {
+    let (crc, commit_error, failed_delta, _) = article_writer_process_articles_counted(
+        items,
+        total_articles_count,
+        info_filename,
+        final_output_path,
+        raw_article,
+        direct_write,
+        skip_disk_write,
+        is_yenc,
+        position_fn,
+        seek_fn,
+        write_fn,
+        discard_fn,
+        log_err_fn,
+    );
+    (crc, commit_error, failed_delta)
+}
+
+/// [`article_writer_process_articles`], also counting article temporaries (DirectWrite off)
+/// whose copy into the output came out short (a read or write error the historical path
+/// ignores): their range holds zeros or partial bytes although the article downloaded, so
+/// live PAR's verified slices are no proof of the file any more.
+#[allow(clippy::too_many_arguments)]
+pub fn article_writer_process_articles_counted(
+    items: &[ArticleWriterProcessItem<'_>],
+    total_articles_count: usize,
+    info_filename: &[u8],
+    final_output_path: &[u8],
+    raw_article: bool,
+    direct_write: bool,
+    skip_disk_write: bool,
+    is_yenc: bool,
     mut position_fn: impl FnMut() -> i64,
     mut seek_fn: impl FnMut(i64) -> bool,
     mut write_fn: impl FnMut(&[u8]) -> i64,
     mut discard_fn: impl FnMut(usize),
     mut log_err_fn: impl FnMut(&[u8]),
-) -> (u32, bool, i32) {
+) -> (u32, bool, i32, i32) {
+    let mut short_copies: i32 = 0;
     let mut crc: u32 = 0;
     let mut first_article = true;
     let mut commit_error = false;
@@ -982,20 +1021,29 @@ pub fn article_writer_process_articles(
                 commit_error = true;
             }
         } else if !raw_article && !direct_write && !skip_disk_write {
+            // Overlapping parts land at the current position, not their own offset: as
+            // untrustworthy for live PAR as a short copy.
+            if item.segment_offset > -1 && position_fn() != item.segment_offset {
+                short_copies += 1;
+            }
             if let Some(mut infile) = item
                 .result_filename
                 .filter(|p| crate::fsops::file_exists(p, &crate::fsops::posix_stat))
                 .and_then(|rf| std::fs::File::open(crate::fsops::path(rf)).ok())
             {
+                let mut copied: i64 = 0;
                 loop {
                     match std::io::Read::read(&mut infile, &mut io_buf) {
                         Ok(0) => break,
                         Ok(cnt) => {
-                            let _ = write_fn(&io_buf[..cnt]);
+                            copied += write_fn(&io_buf[..cnt]).max(0);
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                         Err(_) => break,
                     }
+                }
+                if copied != i64::from(item.segment_size) {
+                    short_copies += 1;
                 }
             } else {
                 failed_delta += 1;
@@ -1046,7 +1094,7 @@ pub fn article_writer_process_articles(
         }
     }
 
-    (crc, commit_error, failed_delta)
+    (crc, commit_error, failed_delta, short_copies)
 }
 
 /// Cached article descriptor for `article_writer_flush_cache`.
@@ -1183,6 +1231,11 @@ pub fn article_writer_flush_cache(
 
 /// Daemon cache commit with live repair ownership. Callbacks run after the permit drops.
 /// The public legacy wrapper above retains its historical commit/error behavior.
+///
+/// `not_written` names each item counted (and discarded) without being written: one whose
+/// target live PAR has certified already. Its bytes never reached the file, so they must not
+/// be reported to live PAR as written.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn article_writer_flush_cache_guarded(
     items: &[ArticleWriterFlushItem<'_>],
     direct_write: bool,
@@ -1191,6 +1244,7 @@ pub(crate) fn article_writer_flush_cache_guarded(
     context: &crate::parlive::SourceWriteContext,
     mut should_stop: impl FnMut() -> bool,
     mut discard: impl FnMut(usize),
+    mut not_written: impl FnMut(usize),
     mut log_error: impl FnMut(&[u8]),
 ) -> (i32, i64) {
     use std::io::{Seek, SeekFrom, Write};
@@ -1213,6 +1267,7 @@ pub(crate) fn article_writer_flush_cache_guarded(
                 // A sealed target already contains certified bytes. Drop stale cache data.
                 count += 1;
                 size += i64::from(item.segment_size);
+                not_written(index);
                 discard(index);
                 continue;
             }
@@ -1987,6 +2042,63 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// DirectWrite off: an article temporary copied into the output short (here a write that
+    /// stops part way) is counted, so live PAR stops trusting its verified slices. A whole copy
+    /// counts nothing.
+    #[test]
+    fn a_short_article_temporary_copy_is_counted() {
+        let dir = std::env::temp_dir().join(format!("rustyget-short-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("file.001");
+        let b = dir.join("file.002");
+        std::fs::write(&a, vec![1u8; 100]).unwrap();
+        std::fs::write(&b, vec![2u8; 100]).unwrap();
+        let (a_name, b_name) = (a.to_string_lossy().into_owned(), b.to_string_lossy().into_owned());
+        let item = |offset: i64, part: i32, name: &'static str| ArticleWriterProcessItem {
+            segment_offset: offset,
+            segment_size: 100,
+            crc: 0,
+            part_number: part,
+            dupe_fallback_round: 0,
+            segment_content: None,
+            result_filename: Some(name.as_bytes()),
+        };
+        let a_static: &'static str = Box::leak(a_name.into_boxed_str());
+        let b_static: &'static str = Box::leak(b_name.into_boxed_str());
+        let items = [item(0, 1, a_static), item(100, 2, b_static)];
+        let run = |budget: i64| {
+            let pos = std::cell::Cell::new(0i64);
+            let mut left = budget;
+            article_writer_process_articles_counted(
+                &items,
+                2,
+                b"NZB/file",
+                b"/tmp/file",
+                false,
+                false,
+                false,
+                false,
+                || pos.get(),
+                |_| true,
+                |buf| {
+                    let n = (buf.len() as i64).min(left);
+                    left -= n;
+                    pos.set(pos.get() + n);
+                    n
+                },
+                |_| {},
+                |_| {},
+            )
+        };
+        let (_, commit_error, failed_delta, short) = run(200);
+        assert!(!commit_error);
+        assert_eq!((failed_delta, short), (0, 0), "whole copies count nothing");
+        let (_, _, _, short) = run(150);
+        assert_eq!(short, 1, "the second temporary was copied short");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn live_preallocation_cannot_truncate_certified_bytes() {
         use std::os::unix::ffi::OsStrExt;
@@ -2051,6 +2163,7 @@ mod tests {
         std::fs::write(&path, b"repaired").unwrap();
         lease.publish(&[(40, 0)], || ()).unwrap();
         let mut discarded = Vec::new();
+        let mut skipped = Vec::new();
         let items = [ArticleWriterFlushItem {
             segment_offset: 0,
             segment_size: 8,
@@ -2065,10 +2178,12 @@ mod tests {
             &context,
             || false,
             |idx| discarded.push(idx),
+            |idx| skipped.push(idx),
             |_| panic!("certified discard is expected"),
         );
         assert_eq!(result, (1, 8));
         assert_eq!(discarded, [0]);
+        assert_eq!(skipped, [0], "a certified drop is reported as not written");
         assert_eq!(std::fs::read(&path).unwrap(), b"repaired");
         assert!(gate.is_current_generation(generation));
         crate::parlive::forget_download_writes(-1900230);
@@ -2101,6 +2216,7 @@ mod tests {
             &context,
             || false,
             |_| assert_eq!(gate.status().active_writers, 0),
+            |_| panic!("a failed write is not a certified drop"),
             |_| {
                 assert_eq!(gate.status().active_writers, 0);
                 assert!(!gate.is_current_generation(generation));

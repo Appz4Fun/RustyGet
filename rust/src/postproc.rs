@@ -5791,21 +5791,40 @@ impl NzbgetRsPostJob {
         let parcheck_enabled = crate::ffi::build_parcheck_enabled();
         let tls_enabled = !crate::ffi::build_tls_disabled();
 
-        let (nzb_name, dest_dir, final_dir, password, par_ignore_ext, unpack_ignore_ext, unpack_status) =
-            host.with_locked_queue(|_| {
+        let (
+            (nzb_name, dest_dir, final_dir, password, par_ignore_ext, unpack_ignore_ext, unpack_status),
+            known_hash16k,
+        ) = host.with_locked_queue(|_| {
                 let n = self.nzb_ptr(host);
                 let ns = host.nzb_snap(n, false);
+                // The first-16-KiB MD5 of every file downloaded whole, as its first article
+                // gave it: par-rename identifies those without reading them.
+                // (The analyzer sets hash16k only for a first article whose NZB size is at
+                // least 16 KiB, or a file's only article: the MD5 of min(16 KiB, file size),
+                // except for a first article that decodes to just under 16 KiB, where the
+                // hash is short and par-rename misses the file as DirectRename already does.)
+                // A name two completed files share is left to the renamer's own read.
+                let mut known: Vec<(Vec<u8>, [u8; 16])> = (0..host.nzb_completed_files_len(n))
+                    .map(|i| host.nzb_completed_file_at(n, i))
+                    .filter(|f| f.status == crate::queuesubsys_host::CF_SUCCESS && !f.par_file)
+                    .filter_map(|f| Some((f.filename, crate::parrenamer::parse_hash16k(&f.hash16k)?)))
+                    .collect();
+                let names: Vec<Vec<u8>> = known.iter().map(|(name, _)| name.clone()).collect();
+                known.retain(|(name, _)| names.iter().filter(|other| *other == name).count() == 1);
                 let password = host.nzb_get_param(n, b"*Unpack:Password").unwrap_or_default();
                 let opts = crate::options::active_options();
                 let opt = |id| opts.as_ref().map_or(&b""[..], |o| o.str_bytes(id)).to_vec();
                 (
-                    trunc_1023(ns.name),
-                    ns.dest_dir,
-                    ns.final_dir,
-                    cstr::until_nul(&password).to_vec(),
-                    opt(OptStr::ParIgnoreExt),
-                    opt(OptStr::UnpackIgnoreExt),
-                    ns.unpack_status,
+                    (
+                        trunc_1023(ns.name),
+                        ns.dest_dir,
+                        ns.final_dir,
+                        cstr::until_nul(&password).to_vec(),
+                        opt(OptStr::ParIgnoreExt),
+                        opt(OptStr::UnpackIgnoreExt),
+                        ns.unpack_status,
+                    ),
+                    known,
                 )
             });
 
@@ -5832,11 +5851,16 @@ impl NzbgetRsPostJob {
                     crate::cleanup::rename_eval_par_config(unpack_status, final_dir.is_empty());
                 let target_dir = if use_final { &final_dir } else { &dest_dir };
                 let mut renamed_to: Vec<Vec<u8>> = Vec::new();
-                let state = crate::parrenamer::execute_all(
+                // The hashes name files in the download folder; the final folder after an
+                // unpack holds other files.
+                let known: &[(Vec<u8>, [u8; 16])] =
+                    if use_final { &[] } else { &known_hash16k };
+                let state = crate::parrenamer::execute_all_known(
                     &nzb_name,
                     target_dir,
                     &par_ignore_ext,
                     detect_missing,
+                    known,
                     &mut || self.is_stopped(host),
                     &mut |label: &[u8], stage: i32| self.set_progress(host, label, stage),
                     &mut |mk: crate::parrenamer::Kind, text: &[u8]| {

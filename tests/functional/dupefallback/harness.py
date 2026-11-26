@@ -13217,10 +13217,11 @@ def scenario_fleetprobebusy(daemon, t):
     server from the probe share (idle connections only, never one a download
     holds). Logged for the PR's before/after table: each copy's kind probe
     time, the time to the primary's release and the download rate before
-    and during the probe. Passes when every copy was probed, a copy's reads
-    overlapped (one took less than N x 300 ms for N reads), the reserve was
-    1 when the fleet came, the download kept going (no zero-rate stretch of
-    more than 3 s while the probe ran) and the fleet's primary completes."""
+    and during the probe. Passes when every copy was probed, the copies'
+    kind probes overlapped (their lengths add up to more than the span they
+    took; before, one ran after another), the reserve was 1 when the fleet
+    came, the download was still running at the primary's release and kept
+    going (no zero-rate stretch over 3 s) and the fleet's primary completes."""
     rel = 'Speed.Movie.2024.1080p.WEB-DL.x264-GRP'
     key = 'dupes:speed.movie.2024.1080p.web.dl.x264.grp'
     data = _payload(1_200_000, 16611)
@@ -13252,48 +13253,66 @@ def scenario_fleetprobebusy(daemon, t):
                      daemon=True).start()
     during = []
     released_s = None
+    probed_s = None
     zero_since = None
     longest_zero = 0.0
+    load_running = False
     items = []
     deadline = time.time() + 180
-    while time.time() < deadline:
+    while time.time() < deadline and (released_s is None or probed_s is None):
+        groups = api.listgroups()
         r = rate()
-        during.append(r)
         now = time.time()
         if r == 0:
             zero_since = zero_since or now
             longest_zero = max(longest_zero, now - zero_since)
         else:
             zero_since = None
-        items = _queued(api, key)
+        mine = [g for g in groups if g.get('DupeKey', '').lower() == key]
+        if mine:
+            items = mine
         if released_s is None and any(_params(g).get('DupeHeld') != 'yes' and
-                                      _params(g).get('DupeProbing') != 'yes' for g in items):
+                                      _params(g).get('DupeProbing') != 'yes' for g in mine):
             released_s = now - start
-        if (len(items) >= len(names) and released_s is not None and
-                not any(_params(g).get('DupeProbing') == 'yes' for g in items)):
-            break
+            load_running = any(g.get('NZBName') == 'BusyLoad' for g in groups)
+        # every copy's kind probe and STAT check logged (the primary may
+        # finish, and its fleet leave the queue, before the last one ends)
+        if probed_s is None and _grep_log(t, 'Fleet kind probe of ') >= len(names) and \
+                _grep_log(t, 'Fleet probe of ') >= len(names):
+            probed_s = now - start
+        if probed_s is None:
+            during.append(r)
         time.sleep(0.25)
-    probed_s = time.time() - start
     load_left = [g for g in api.listgroups() if g.get('NZBName') == 'BusyLoad']
     log = t.read_file('nzbget.log').decode(errors='replace')
     kind_ms = {m.group(1): int(m.group(2)) for m in
                re.finditer(r'Fleet kind probe of (\S+?)(?:\.nzb)?: (\d+) ms', log)}
-    kind_reads = [(int(m.group(1)), int(m.group(2))) for m in
-                  re.finditer(r'Fleet kind probe of \S+?: (\d+) ms, (\d+) article', log)]
+    # each kind probe's end (the log line's second) and length: the probes
+    # overlapped when their lengths add up to more than the span from the
+    # first start to the last end (plus a second for the log's resolution)
+    ends = [(time.mktime(time.strptime(m.group(1), '%a %b %d %H:%M:%S %Y')), int(m.group(2)) / 1000.0)
+            for m in re.finditer(r'^(\w{3} \w{3} +\d+ [\d:]+ \d{4})\t.*Fleet kind probe of \S+?: (\d+) ms',
+                                 log, re.M)]
+    span = max(e for e, _ in ends) - min(e - d for e, d in ends) if ends else 0.0
+    kind_sum = sum(d for _, d in ends)
+    overlapped = bool(ends) and kind_sum > span + 1.0
+    stat_ms = {m.group(1): int(m.group(2)) for m in re.finditer(r'Fleet probe of (\S+?)(?:\.nzb)?: (\d+) ms', log)}
     # the rest of the download only slows the end of the test down
     for g in load_left:
         api.editqueue('GroupFinalDelete', 0, '', [g['NZBID']])
     done = _wait_key_success(api, key, timeout=240)
     kinds = sorted(kind_ms.values())
     avg = lambda xs: sum(xs) / len(xs) if xs else 0
-    ok = (len(items) == len(names) and len(kind_ms) == len(names) and done is not None and
-          light_at_add == 1 and bool(load_left) and longest_zero <= 3.0 and
-          any(ms < reads * 300 for ms, reads in kind_reads))
-    return ('fleetprobebusy', ok, 'light_at_add=%d released_in=%s probed_in=%.1fs kind_ms=%s (median %s) '
-            'rate_before=%.0f KB/s rate_during=%.0f KB/s longest_zero=%.1fs load_running=%s done=%s' % (
-                light_at_add, released_s is not None and '%.1fs' % released_s, probed_s, kind_ms,
-                kinds[len(kinds) // 2] if kinds else None, avg(before) / 1024, avg(during) / 1024,
-                longest_zero, bool(load_left), done and done['NZBName']))
+    ok = (len(items) == len(names) and len(kind_ms) == len(names) and len(stat_ms) == len(names) and
+          probed_s is not None and released_s is not None and done is not None and
+          light_at_add == 1 and load_running and longest_zero <= 3.0 and overlapped)
+    secs = lambda x: 'none' if x is None else '%.1fs' % x
+    return ('fleetprobebusy', ok, 'light_at_add=%d released_in=%s probed_in=%s kind_ms=%s (median %s, sum %.1fs '
+            'over a %.1fs span: overlapped=%s) stat_ms=%s rate_before=%.0f KB/s rate_during_probe=%.0f KB/s '
+            'longest_zero=%.1fs load_running=%s done=%s' % (
+                light_at_add, secs(released_s), secs(probed_s), kind_ms,
+                kinds[len(kinds) // 2] if kinds else None, kind_sum, span, overlapped, stat_ms,
+                avg(before) / 1024, avg(during) / 1024, longest_zero, load_running, done and done['NZBName']))
 
 
 def scenario_fleetslowprobe(daemon, t):

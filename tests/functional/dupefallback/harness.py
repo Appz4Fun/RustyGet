@@ -1054,6 +1054,19 @@ def _payload(size, seed):
         bytes(bytearray(r.getrandbits(8) for _ in range(size)))
 
 
+def _text_payload(size, seed):
+    """``size`` bytes of compressible text (words drawn from a small
+    vocabulary): an LZMA2 or RAR coder packs it into compressed chunks and
+    blocks, not stored ones."""
+    r = random.Random(seed)
+    words = [bytes(r.choice(b'abcdefghijklmnopqrstuvwxyz') for _ in range(r.randint(2, 9)))
+             for _ in range(4000)]
+    out = bytearray()
+    while len(out) < size:
+        out += b' '.join(r.choice(words) for _ in range(12)) + b'.\n'
+    return bytes(out[:size])
+
+
 def _place_copy(target, subdir, data, filename='file.bin'):
     """Write a payload copy under data/<subdir>/<filename> and return the
     served path (relative to the nserv data dir)."""
@@ -4181,7 +4194,7 @@ def _failcont_bytes(ids, prefix):
     return served, count, again, par_again
 
 
-def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKind'):
+def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKind', primary='store'):
     """The ultimate goal (extract while downloading, 2026-11-25): a stored rar
     set of movie.mkv extracts while it downloads, and the primary dies at
     ``die`` (a fraction of its data: every article from there on is gone). Its
@@ -4193,8 +4206,23 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
       volume and article sizes), lent by the bytes of the video inside;
     - ``aes``: the same movie in a RAR5 store set with encrypted headers, the
       password in the backup's nzb;
-    - ``compressed``: the same movie compressed (rar -m3): it cannot lend live,
-      so the primary fails over to it as before, with the reason logged;
+    - ``compressed``: the same movie compressed (rar -m3), labelled
+      ``unborrowable`` by a fleet: it cannot lend live, so the primary fails
+      over to it as before, with the reason logged;
+    - ``rar5m3``: the same movie compressed (rar -m3, RAR5), labelled ``alt``:
+      zipfast restarts its decoder near the frontier with the primary's own
+      output as the window (``open_at`` + ``complete_rar5``, held plaintext),
+      so it lends only what lies past the frontier and a search region;
+    - ``lzma2``: the same (compressible) movie in a 7z LZMA2 set, labelled
+      ``alt``: restarted at an LZMA2 chunk before the frontier
+      (``complete_lzma2``) with the primary's output as the dictionary;
+    - ``norestart``: the same movie in a 7z BZip2 set, labelled ``alt``: no
+      restart point inside the member (``StartOnly``), so the primary fails
+      over to it, with the reason logged;
+    - ``aestwin`` / ``aesalt`` (with ``primary='aes'``): the primary itself is
+      a RAR5 store set with encrypted headers and data (password in its nzb);
+      its backup is a twin (the same encrypted volumes) or an alt (another
+      RAR5 AES store set with other volume sizes and another password);
     - ``other``: another video of the same size in another stored rar set,
       labelled ``container`` (another container, the video inside not
       verified): it never lends a byte (no earlier confirmation stands in for
@@ -4210,14 +4238,24 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
     labels a twin the way TwinCheck does, with no fleet kind."""
     if not generators.HAVE_RAR:
         return (name, None, 'SKIP: rar not installed')
-    tag = 'fc' + backup[0]
+    if backup in ('lzma2', 'norestart') and not generators.HAVE_7Z:
+        return (name, None, 'SKIP: 7z not installed')
+    tag = 'fc' + {'aestwin': 'w', 'aesalt': 'x', 'rar5m3': 'm', 'lzma2': 'l', 'norestart': 'n'}.get(
+        backup, backup[0])
     password = 'fleet-pw 9' if backup == 'aes' else None
+    primary_password = 'prim-pw 3' if primary == 'aes' else None
+    if backup == 'aestwin':
+        password = primary_password
+    elif backup == 'aesalt':
+        password = 'alt-pw 7'
     seg = 50_000
-    movie = _payload(15_000_000, 25110)
+    # a 7z LZMA2 coder stores incompressible chunks raw (borrowed by range, not restarted):
+    # its movie compresses, so the frontier lies in LZMA chunks
+    movie = _text_payload(15_000_000, 25110) if backup == 'lzma2' else _payload(15_000_000, 25110)
     # RAR5, as current releases are: a dead last volume of a RAR 1.5-4 set cannot be rebuilt
     # (its header stores the whole file's checksum; deadvolume::synthesize_frame)
     with tempfile.TemporaryDirectory(prefix='fc-') as workdir:
-        vols = generators.rar5_store_volumes_hp('movie.mkv', movie, 1_000_000, None, workdir)
+        vols = generators.rar5_store_volumes_hp('movie.mkv', movie, 1_000_000, primary_password, workdir)
     total = sum(len(v) for v in vols)
     cut = int(total * die)
     names = ['Show.part%02d.rar' % (i + 1) for i in range(len(vols))]
@@ -4233,7 +4271,7 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
     t.write_file(os.path.join('data', '%sA/Show.par2' % tag), par)
     members.append(('%sA/Show.par2' % tag, 'Show.par2', len(par), seg, set()))
     labels = []
-    if backup == 'twin':
+    if backup in ('twin', 'aestwin'):
         # a repost: the same files under the same names
         donor_vols = list(zip(names, vols))
         donor_seg = seg
@@ -4246,9 +4284,22 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
         # as a fleet's intake and TwinCheck label it (another container, the same video)
         labels = ([('DupeCopyKind', 'borrowable'), ('DupeVideo', 'same'), ('DupeKind', 'alt')]
                   if backup == 'alt' else [('DupeKind', 'container')])
+    elif backup in ('lzma2', 'norestart'):
+        with tempfile.TemporaryDirectory(prefix='fc-') as workdir:
+            with open(os.path.join(workdir, 'movie.mkv'), 'wb') as f:
+                f.write(movie)
+            import subprocess as _sp
+            _sp.run([generators.SEVENZIP_PATH, 'a', '-bd', '-m0=' + ('LZMA2' if backup == 'lzma2' else 'BZip2'),
+                     '-v5000000b', 'out.7z', 'movie.mkv'], cwd=workdir, check=True, capture_output=True)
+            outs = sorted(n for n in os.listdir(workdir) if n.startswith('out.7z.'))
+            enc = [open(os.path.join(workdir, n), 'rb').read() for n in outs]
+        donor_vols = [('Other.7z.%03d' % (i + 1), d) for i, d in enumerate(enc)]
+        donor_seg = 100_000
+        # labelled the way TwinCheck labels another container holding the same video
+        labels = [('DupeVideo', 'same'), ('DupeKind', 'alt')]
     else:
         with tempfile.TemporaryDirectory(prefix='fc-') as workdir:
-            if backup == 'aes':
+            if backup in ('aes', 'aesalt'):
                 enc = generators.rar5_store_volumes_hp('movie.mkv', movie, 5_000_000, password, workdir)
             else:
                 with open(os.path.join(workdir, 'movie.mkv'), 'wb') as f:
@@ -4261,15 +4312,19 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
                 enc = [open(os.path.join(workdir, n), 'rb').read() for n in outs]
         donor_vols = [('Other.part%d.rar' % (i + 1), d) for i, d in enumerate(enc)]
         donor_seg = 100_000
-        labels = ([('DupeCopyKind', 'borrowable-encrypted'), ('DupeLocked', 'yes'), ('DupeVideo', 'same'),
-                   ('DupeKind', 'alt')]
-                  if backup == 'aes' else [('DupeCopyKind', 'unborrowable')])
+        if backup in ('aes', 'aesalt'):
+            labels = [('DupeCopyKind', 'borrowable-encrypted'), ('DupeLocked', 'yes'), ('DupeVideo', 'same'),
+                      ('DupeKind', 'alt')]
+        elif backup == 'rar5m3':
+            labels = [('DupeVideo', 'same'), ('DupeKind', 'alt')]
+        else:
+            labels = [('DupeCopyKind', 'unborrowable')]
     donor_members = []
     for vname, data in donor_vols:
         rel = '%sB/%s' % (tag, vname)
         t.write_file(os.path.join('data', rel), data)
         donor_members.append((rel, vname, len(data), donor_seg, set()))
-    if backup == 'twin':
+    if backup in ('twin', 'aestwin'):
         t.write_file(os.path.join('data', '%sB/Show.par2' % tag), par)
         donor_members.append(('%sB/Show.par2' % tag, 'Show.par2', len(par), seg, set()))
     donor_total = sum(len(d) for _, d in donor_vols)
@@ -4280,7 +4335,7 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
         off += len(data)
     api = daemon.wait_ready()
     key = 'dupes:show.failcont.' + tag if fleet else tag + '-key'
-    daemon.append(api, 'Primary', build_multi_nzb(members), True, key, 100)
+    daemon.append(api, 'Primary', build_multi_nzb(members, password=primary_password), True, key, 100)
     _ds_append(api, 'Backup', build_multi_nzb(donor_members, password=password), key, 90,
                paused=False, params=[{'Name': k, 'Value': v} for k, v in labels])
     if fleet:
@@ -4315,17 +4370,27 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
     # cut (the one straddling it; the one holding the bytes the first check of
     # its video compares with the primary's, which under AES also gives the
     # IV block)
-    header_articles = len(donor_vols) * (2 if backup == 'aes' else 1)
-    if backup == 'twin':
+    header_articles = len(donor_vols) * (2 if backup in ('aes', 'aesalt') else 1)
+    if backup in ('twin', 'aestwin'):
         # one for one: only the articles past the frontier, one straddling it
         header_articles = 0
     b_budget = int(donor_total * (1 - die)) + (header_articles + 2) * donor_seg
-    b_before = _failcont_before(ids, tag + 'B/', cut, seg) if backup == 'twin' else 0
+    if backup == 'rar5m3':
+        # a restart lands at a block start before the frontier: the plan fetches from the
+        # estimate less a search region (zipfast SEED_SEARCH, 2 MiB) and a block
+        b_budget += 3_000_000
+    elif backup == 'lzma2':
+        # the chunk framing is walked from the folder's start (every chunk header before
+        # the frontier: each article before it is read once for them), then the folder
+        # from the restart chunk to its end; never twice, never extracted from its start
+        b_budget = donor_total
+    b_before = _failcont_before(ids, tag + 'B/', cut, seg) if backup in ('twin', 'aestwin') else 0
     # Known residual: before TwinCheck labels an alt (another container), the whole-file pass
     # may sample one of its volumes of about a damaged volume's size; a sample batch it cancels
     # drops the articles in flight, which the borrow then fetches again (two at most here).
-    b_again_ok = 0 if backup == 'twin' else 2
-    if backup == 'compressed':
+    # A restarted (compressed) alt is read by its decoder only: never twice.
+    b_again_ok = 0 if backup in ('twin', 'aestwin', 'rar5m3', 'lzma2') else 2
+    if backup in ('compressed', 'norestart'):
         ok = (integ and winner == 'Backup' and failed_over == 1 and
               _grep_log(t, 'cannot continue the extraction of Primary') >= 1)
     elif backup == 'other':
@@ -4403,6 +4468,26 @@ def scenario_failcont_fleetaes(daemon, t):
 
 def scenario_failcont_compressed(daemon, t):
     return _failcont(daemon, t, 'failcont_compressed', 'compressed', 0.50)
+
+
+def scenario_failcont_aestwin(daemon, t):
+    return _failcont(daemon, t, 'failcont_aestwin', 'aestwin', 0.50, primary='aes')
+
+
+def scenario_failcont_aesalt(daemon, t):
+    return _failcont(daemon, t, 'failcont_aesalt', 'aesalt', 0.50, primary='aes')
+
+
+def scenario_failcont_rar5m3(daemon, t):
+    return _failcont(daemon, t, 'failcont_rar5m3', 'rar5m3', 0.50)
+
+
+def scenario_failcont_lzma2(daemon, t):
+    return _failcont(daemon, t, 'failcont_lzma2', 'lzma2', 0.50)
+
+
+def scenario_failcont_norestart(daemon, t):
+    return _failcont(daemon, t, 'failcont_norestart', 'norestart', 0.50)
 
 
 def scenario_failcont_twinlabel(daemon, t):
@@ -14389,6 +14474,11 @@ SCENARIOS = {
     'failcont_aes50': scenario_failcont_aes50,
     'failcont_aes90': scenario_failcont_aes90,
     'failcont_compressed': scenario_failcont_compressed,
+    'failcont_aestwin': scenario_failcont_aestwin,
+    'failcont_aesalt': scenario_failcont_aesalt,
+    'failcont_rar5m3': scenario_failcont_rar5m3,
+    'failcont_lzma2': scenario_failcont_lzma2,
+    'failcont_norestart': scenario_failcont_norestart,
     'failcont_othervideo': scenario_failcont_othervideo,
     'failcont_twinlabel': scenario_failcont_twinlabel,
     'failcont_fleettwin': scenario_failcont_fleettwin,
@@ -14830,6 +14920,11 @@ SCENARIO_OPTIONS = {
     'failcont_aes50': PROD_OPTIONS + ['DownloadRate=4000'],
     'failcont_aes90': PROD_OPTIONS + ['DownloadRate=4000'],
     'failcont_compressed': PROD_OPTIONS + ['DownloadRate=4000'],
+    'failcont_aestwin': PROD_OPTIONS + ['DownloadRate=4000'],
+    'failcont_aesalt': PROD_OPTIONS + ['DownloadRate=4000'],
+    'failcont_rar5m3': PROD_OPTIONS + ['DownloadRate=4000'],
+    'failcont_lzma2': PROD_OPTIONS + ['DownloadRate=4000'],
+    'failcont_norestart': PROD_OPTIONS + ['DownloadRate=4000'],
     'failcont_othervideo': PROD_OPTIONS + ['DownloadRate=4000'],
     'failcont_twinlabel': PROD_OPTIONS + ['DownloadRate=4000'],
     'failcont_fleettwin': PROD_OPTIONS + ['DownloadRate=4000'],

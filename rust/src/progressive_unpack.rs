@@ -700,6 +700,8 @@ where
             version_naming: Default::default(),
             preexisting_links: Default::default(),
             refused_link_placeholder: false,
+            restart_from_first_volume: false,
+            replace_placed_links: false,
         },
         first_name,
     );

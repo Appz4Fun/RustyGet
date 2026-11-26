@@ -821,7 +821,7 @@ impl ArticleFetcher {
     pub fn fetch(&self, message_id: &[u8], groups: &[Vec<u8>]) -> FetchedArticle {
         #[cfg(unix)]
         if let Some((work, priority)) = self.host.shared_work() {
-            if let Some(shared) = crate::nntprs_pool::shared() {
+            if let Some(mut shared) = crate::nntprs_pool::shared() {
                 // temporary failures (a server turning connections away, a read
                 // that timed out) are tried again after a growing wait, as the
                 // per-connection fetch did; a 430 or a bad copy is final
@@ -832,6 +832,11 @@ impl ArticleFetcher {
                 let blocked_budget = crate::net::active_server_pool().map_or(10, |p| p.retry_interval().max(1)) + 5;
                 let mut blocked_waited = 0;
                 loop {
+                    // a config reload retires the pool this fetch began on: try
+                    // again on the current one (a retired pool says Unavailable)
+                    if let Some(now) = crate::nntprs_pool::shared() {
+                        shared = now;
+                    }
                     let got = self.fetch_pooled(&shared, work, priority, message_id, None);
                     if got.success || !got.transient || self.is_stopped() {
                         return got;
@@ -1116,8 +1121,17 @@ impl ArticleFetcher {
             }
         }
         let wait_done = FinishWait(wait.clone());
+        // A fetch that follows another caller's read of the same article
+        // (nntp-rs single flight) never hears started(), so it would count as
+        // waiting for all of that read and hide a stalled stream from the
+        // watchdog. A counted fetch (stream repair) therefore reads on its own,
+        // as the per-server path did: a skip list naming no server makes
+        // nntp-rs go to the network (the body still lands in the shared cache
+        // for later borrows). OPEN ITEM: a follower signal from nntp-rs.
+        let skip_servers = if wait.is_some() { vec![usize::MAX] } else { Vec::new() };
         let attempts = crate::nntprs_pool::AttemptLog::default();
         let opts = nntp_rs::FetchOptions {
+            skip_servers,
             cancel: Some(self.cancel.clone()),
             // no deadline for the whole fetch (a slot wait plus a paced body can
             // be long under a speed limit); each read waits at most ArticleTimeout
@@ -1140,7 +1154,7 @@ impl ArticleFetcher {
                 .map(|s| s.name.to_bytes().to_vec())
                 .unwrap_or_default();
             let line = match &a.outcome {
-                crate::nntprs_pool::Seen::Missing => {
+                crate::nntprs_pool::Seen::Missing | crate::nntprs_pool::Seen::Removed => {
                     let mut l = b"Stream repair: article ".to_vec();
                     l.extend_from_slice(msg_slice);
                     l.extend_from_slice(b" not available on ");
@@ -1181,8 +1195,11 @@ impl ArticleFetcher {
             }
             Err(nntp_rs::Error::NotFound) => {
                 result.not_found_430 = recs.iter().any(|r| r.outcome == crate::nntprs_pool::Seen::Missing);
+                // only on the current pool: a fetch that finished on a retired
+                // one must not mark the new servers' articles missing
                 if !self.is_stopped()
                     && only_server.is_none()
+                    && crate::nntprs_pool::shared().is_some_and(|now| std::ptr::eq(&*now, shared))
                     && crate::nntprs_pool::missing_everywhere(shared, &recs)
                 {
                     note_missing_everywhere(message_id);

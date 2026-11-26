@@ -320,8 +320,12 @@ pub fn identified_groups(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Seen {
     Have,
-    /// `430`/`423`/`451`.
+    /// `430`/`423`: proof the server (and its backend) lacks the article.
     Missing,
+    /// `451`: removed, or a proxy whose backend timed out. Not found on
+    /// this server for the attempt, but no 430 proof (as the per-server
+    /// download took it: not found, not a backbone-wide miss).
+    Removed,
     /// A reseller could not reach its backend; says nothing about the article.
     Unreachable(String),
     /// Any other failure, as text.
@@ -409,7 +413,8 @@ impl nntp_rs::Observer for LogObserver {
         }
         let (outcome, fail) = match &a.outcome {
             Outcome::Have { .. } => (Seen::Have, None),
-            Outcome::Missing { .. } => (Seen::Missing, None),
+            Outcome::Missing { removed: false } => (Seen::Missing, None),
+            Outcome::Missing { removed: true } => (Seen::Removed, None),
             Outcome::Unreachable(t) => (Seen::Unreachable((*t).to_string()), None),
             Outcome::Failed(e) => {
                 let kind = match e {

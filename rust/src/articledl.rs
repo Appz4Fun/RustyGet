@@ -4122,6 +4122,7 @@ impl NzbgetRsArticleDownloader {
                     if !host.is_stopped()
                         && rejected.is_empty()
                         && only_server.is_none()
+                        && crate::nntprs_pool::shared().is_some_and(|now| std::ptr::eq(&*now, &*shared))
                         && crate::nntprs_pool::missing_everywhere(shared, &recs)
                     {
                         crate::articlefetcher::note_missing_everywhere(&w.message_id);
@@ -4285,6 +4286,23 @@ impl NzbgetRsArticleDownloader {
                             ]),
                         );
                     }
+                    AD_NOT_FOUND
+                }
+                (Seen::Removed, _) => {
+                    // a 451: not found here, as the per-server download took it,
+                    // but no 430 (no backbone-wide miss, not the last-430 mark)
+                    let reply = a.reply.as_deref().unwrap_or("451 Article removed");
+                    host.log(
+                        MK_DETAIL,
+                        &join_c_slices(&[
+                            b"Article ",
+                            &self.info_name,
+                            b" @ ",
+                            &conn_name,
+                            b" failed, could not fetch article: ",
+                            reply.as_bytes(),
+                        ]),
+                    );
                     AD_NOT_FOUND
                 }
                 (Seen::Unreachable(text), _) => {

@@ -1211,8 +1211,9 @@ pub fn should_park_dead_without_backup(
 
 /// Determines whether `QueueCoordinator::CheckParDamage` should wait for duplicate article borrowing before failing over.
 ///
-/// It waits for `failover_sample` lost articles tried for borrowing only while the download
-/// still has that many data articles left to try (`untried`): lost articles count only once the par2
+/// It waits for `failover_sample` lost articles tried for borrowing only while that many can
+/// still come (`untried`: the lost articles expected among the data articles left, see
+/// [`expected_lost`]): lost articles count only once the par2
 /// damage is known (before, they wait for par-check), so a download whose damage turned up
 /// late may never reach the sample, and it would download to its end and fail par-repair
 /// before any failover (functional `pardamageborrow` with 4 connections counted 30 to 35 of
@@ -1242,6 +1243,17 @@ pub fn should_wait_for_borrowing_on_par_damage(
     } else {
         false
     }
+}
+
+/// How many of `untried` articles are expected to be lost, at the rate the `tried_ok` +
+/// `tried_failed` articles so far were (rounded up; all of them before anything was tried).
+pub fn expected_lost(untried: i32, tried_ok: i32, tried_failed: i32) -> i32 {
+    let tried = i64::from(tried_ok.max(0)) + i64::from(tried_failed.max(0));
+    if tried == 0 {
+        return untried.max(0);
+    }
+    let lost = i64::from(untried.max(0)) * i64::from(tried_failed.max(0));
+    ((lost + tried - 1) / tried) as i32
 }
 
 /// Formats PAR damage summary string for `QueueCoordinator::CheckParDamage`.
@@ -5657,9 +5669,22 @@ impl NzbgetRsQueueCoordinator {
             return false;
         }
         let attempted = nzb.dupe_attempted_articles + nzb.dupe_unsourced_articles;
-        // (walks the files: only while the sample is not reached)
+        // (walks the files only while the sample is not reached) the lost articles still to
+        // come, at the rate the data articles tried so far were lost
         let untried = if (DUPE_FAILOVER_SAMPLE / 2..DUPE_FAILOVER_SAMPLE).contains(&attempted) {
-            Self::untried_articles(host, nzb)
+            expected_lost(
+                Self::untried_articles(host, nzb),
+                data_articles(
+                    nzb.current_success_articles,
+                    nzb.current_success_size,
+                    nzb.par_current_success_size,
+                ),
+                data_articles(
+                    nzb.current_failed_articles,
+                    nzb.current_failed_size,
+                    nzb.par_current_failed_size,
+                ),
+            )
         } else {
             0
         };
@@ -5767,7 +5792,10 @@ impl NzbgetRsQueueCoordinator {
         (0..host.nzb_file_len(nzb.ptr))
             .map(|i| host.file_snap(host.nzb_file_at(nzb.ptr, i)))
             .filter(|f| !f.paused && !f.deleted && !crate::dupefallback::file_is_par_snap(f))
-            .map(|f| (f.total_articles - f.success_articles - f.failed_articles - f.missed_articles).max(0))
+            .map(|f| {
+                (f.total_articles - f.success_articles - f.failed_articles - f.missed_articles)
+                    .max(0)
+            })
             .fold(0i32, i32::saturating_add)
     }
 
@@ -6989,6 +7017,15 @@ mod tests {
         // fleet intake still reading the copy's video holds it all the same
         assert!(!unclassified(DonorKind::Unknown, true, parked, parked + 2, false, true));
         assert!(unclassified(DonorKind::Unknown, true, parked, parked + 2, true, true));
+    }
+
+    #[test]
+    fn lost_articles_expected_at_the_rate_so_far() {
+        assert_eq!(super::expected_lost(120, 255, 45), 18);
+        assert_eq!(super::expected_lost(10, 85, 15), 2);
+        assert_eq!(super::expected_lost(0, 85, 15), 0);
+        assert_eq!(super::expected_lost(40, 0, 0), 40);
+        assert_eq!(super::expected_lost(40, 100, 0), 0);
     }
 
     #[test]

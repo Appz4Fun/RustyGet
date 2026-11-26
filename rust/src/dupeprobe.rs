@@ -208,7 +208,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const CONNECTION_WAIT_SEC: i64 = 10;
 
-/// How long a dead-pick probe waiting for a connection holds its download back (see
+/// How long (in whole seconds, so up to just under one more) a dead-pick probe waiting for a
+/// connection holds its download back (see
 /// [`probe_waiting_for_connection`]): enough for the articles the download has under way to
 /// finish and free a connection, so a probe that still gets none later polls for it beside the
 /// download, as before.
@@ -526,6 +527,7 @@ impl NzbgetRsDupeProbe {
     ) -> (bool, ServerResult) {
         let mut result = ServerResult::default();
         if pool.server_by_id(server_id).is_none() {
+            self.end_connection_wait();
             return (false, result);
         }
 

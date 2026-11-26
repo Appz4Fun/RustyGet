@@ -62,7 +62,7 @@ pub const FLEET_PARAM: &[u8] = b"DupeFleet";
 /// `different` when a later re-check found another video in a copy it could
 /// not drop. A copy found carrying another video at intake is dropped.
 pub const VIDEO_PARAM: &[u8] = b"DupeVideo";
-const VIDEO_DIFFERENT: &[u8] = b"different";
+pub(crate) const VIDEO_DIFFERENT: &[u8] = b"different";
 
 fn video_param_value(same: bool) -> &'static [u8] {
     if same { b"same" } else { b"unverified" }

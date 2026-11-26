@@ -915,6 +915,44 @@ pub fn verify_alt_keyed(
     }
 }
 
+/// Evidence a live borrow left on a copy (see [`live_video_value`]): its video, read through
+/// the one payload map, matched the bytes of the download it lent to.
+pub const LIVE_VIDEO_PARAM: &[u8] = b"DupeLiveVideo";
+
+/// `same:<download NZBID>`: the value of [`LIVE_VIDEO_PARAM`] for a copy whose video a live
+/// borrow of that download compared with the download's own bytes and found the same.
+pub fn live_video_value(download_id: i32) -> Vec<u8> {
+    format!("same:{download_id}").into_bytes()
+}
+
+/// TwinCheck's kind for a copy that a live borrow of `primary_id` proved holds the same video
+/// ([`LIVE_VIDEO_PARAM`] names that download): another container whose video is not verified
+/// yet (`container`, or no kind: no par2 lists or samples to compare) becomes an `alt`
+/// (AGENTS.md: a container copy becomes an alt once the video inside is proven to match). A
+/// copy the fleet intake found carrying another video (`other`) stays one, a twin or near twin
+/// keeps its label, and evidence about another download proves nothing here. Returns the kind
+/// and whether the live evidence made it.
+pub fn live_alt(kind: Vec<u8>, live_param: &[u8], primary_id: i32) -> (Vec<u8>, bool) {
+    let proven =
+        primary_id > 0 && crate::cstr::until_nul(live_param).trim_ascii() == live_video_value(primary_id);
+    if proven && (kind.is_empty() || kind == b"container") {
+        (b"alt".to_vec(), true)
+    } else {
+        (kind, false)
+    }
+}
+
+/// The log line for a copy a live borrow proved an alt ([`live_alt`]).
+pub fn format_live_alt_message(nzb_name: &[u8], primary_name: &[u8]) -> Vec<u8> {
+    let mut out = nzb_name.to_vec();
+    out.extend_from_slice(b" is an alt of ");
+    out.extend_from_slice(primary_name);
+    out.extend_from_slice(
+        b" (another container, the same video inside: a live borrow matched its video bytes with the download's own)",
+    );
+    out
+}
+
 /// A `DupeSampled` re-RAR or same-files verdict: identical bytes already
 /// show the same files inside, so its alt label needs no further check.
 pub fn is_proven_alt(sampleable: bool, sampled_now: bool, sampled_val: &[u8]) -> bool {
@@ -1253,6 +1291,7 @@ struct TwinQueueItem {
     kind_param: Vec<u8>,
     inner_param: Vec<u8>,
     inner_key_param: Vec<u8>,
+    live_param: Vec<u8>,
 }
 
 #[cfg(unix)]
@@ -1320,6 +1359,7 @@ fn run_service_work_locked(
         let inner_key_param = qh
             .nzb_get_param(nzb_ptr, crate::twinfields::INNER_KEY_PARAM)
             .unwrap_or_default();
+        let live_param = qh.nzb_get_param(nzb_ptr, LIVE_VIDEO_PARAM).unwrap_or_default();
         let item = TwinQueueItem {
             nzb_ptr,
             id,
@@ -1342,6 +1382,7 @@ fn run_service_work_locked(
             kind_param,
             inner_param,
             inner_key_param,
+            live_param,
         };
         keys.entry(key).or_default().push(item);
     };
@@ -1492,13 +1533,25 @@ fn run_service_work_locked(
                     &item.inner_key_param,
                 )
             };
+            // a live borrow that matched the video proves what par2 lists and samples could not
+            let (resolved_kind, live) = if is_primary || !item.is_dupe {
+                (resolved_kind, false)
+            } else {
+                live_alt(
+                    resolved_kind,
+                    &item.live_param,
+                    primary_usize.map_or(0, |pi| items[pi].id),
+                )
+            };
             if item.kind_param != resolved_kind {
                 qh.nzb_set_param(item.nzb_ptr, b"DupeKind", Some(&resolved_kind));
                 if !resolved_kind.is_empty() {
                     let p_name = primary_usize
                         .map(|pi| items[pi].name.as_slice())
                         .unwrap_or(&[]);
-                    let msg = if rerar && resolved_kind == b"alt" {
+                    let msg = if live {
+                        format_live_alt_message(&item.name, p_name)
+                    } else if rerar && resolved_kind == b"alt" {
                         format_rerar_message(&item.name, p_name, &item.sampled_param)
                     } else {
                         format_twin_kind_message(&item.name, p_name, &resolved_kind, by_par2)
@@ -2302,6 +2355,32 @@ mod tests {
     use super::*;
     use par_rs::packet::{TYPE_FILEDESC as TYPE_FILE_DESC, TYPE_MAIN};
     use std::collections::BTreeSet;
+
+    /// A live borrow that matched the video against the download's own bytes makes a
+    /// `container` copy (or one TwinCheck could not compare) an alt of that download only:
+    /// never of another primary, never over `other`, never in place of a twin label.
+    #[test]
+    fn live_video_match_makes_a_container_an_alt_of_that_download() {
+        let ev = live_video_value(1873);
+        assert_eq!(ev, b"same:1873");
+        assert_eq!(live_alt(b"container".to_vec(), &ev, 1873), (b"alt".to_vec(), true));
+        assert_eq!(live_alt(Vec::new(), &ev, 1873), (b"alt".to_vec(), true));
+        // stored values may carry the host's NUL
+        assert_eq!(live_alt(b"container".to_vec(), b"same:1873\0", 1873), (b"alt".to_vec(), true));
+        // evidence about another download, or none
+        assert_eq!(live_alt(b"container".to_vec(), &ev, 1874), (b"container".to_vec(), false));
+        assert_eq!(live_alt(b"container".to_vec(), b"", 1873), (b"container".to_vec(), false));
+        assert_eq!(live_alt(b"container".to_vec(), &ev, 0), (b"container".to_vec(), false));
+        // another video found by the intake stays another video; twins keep their label
+        assert_eq!(live_alt(b"other".to_vec(), &ev, 1873), (b"other".to_vec(), false));
+        assert_eq!(live_alt(b"twin".to_vec(), &ev, 1873), (b"twin".to_vec(), false));
+        assert_eq!(live_alt(b"twin:2/3".to_vec(), &ev, 1873), (b"twin:2/3".to_vec(), false));
+        assert_eq!(live_alt(b"alt".to_vec(), &ev, 1873), (b"alt".to_vec(), false));
+        assert_eq!(
+            format_live_alt_message(b"B", b"A"),
+            b"B is an alt of A (another container, the same video inside: a live borrow matched its video bytes with the download's own)"
+        );
+    }
 
     /// The service coordinator counts intervals in seconds; a millisecond
     /// value here left the twin check idle for hours after its first round.

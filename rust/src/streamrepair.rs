@@ -6385,8 +6385,12 @@ pub enum DonorFetchOrigin {
 
 /// What a donor's fetched articles were used for: by origin (single, read batch, wave), how
 /// many were fetched and how many left the cache (or the borrow ended) without a byte read,
-/// and how many were fetched again after the cache had dropped them. A borrow that fetches
+/// and how many were needed again after the cache had dropped them. A borrow that fetches
 /// much more than it recovers tells here which path asks for the spare articles.
+/// "Fetched" counts what reached the member, from the server or from the coordinator's memory
+/// of recent articles alike: an article needed again is served from that memory while it
+/// still holds it (the fetch cost line counts those apart, `taken from memory`), so it is not
+/// necessarily downloaded twice (on 6790, A50's 4 such articles all came from memory).
 /// Articles that came back failed count as fetched but never as "never read" (they were
 /// wanted); articles a cancelled batch dropped before delivery are not counted at all.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -6422,7 +6426,7 @@ impl DonorArticleUse {
         let [s, r, w] = self.fetched;
         let [us, ur, uw] = self.unread;
         format!(
-            "{} article(s) fetched ({w} by wave, {r} by read, {s} single), {} never read ({uw} by wave, {ur} by read, {us} single; {} just before a read part, {} just after, {} alone), {} fetched again after the cache dropped them",
+            "{} article(s) fetched ({w} by wave, {r} by read, {s} single), {} never read ({uw} by wave, {ur} by read, {us} single; {} just before a read part, {} just after, {} alone), {} needed again after the cache dropped them",
             self.total_fetched(),
             us.saturating_add(ur).saturating_add(uw),
             self.unread_before,
@@ -17969,7 +17973,7 @@ mod tests {
         assert!(src.read_with_transport(&mut transport, 1040, &mut one).is_ok());
         let u = src.take_article_use();
         assert!(u.again >= 1, "{u:?}");
-        assert!(u.summary().contains("fetched again"));
+        assert!(u.summary().contains("needed again after the cache dropped them"));
 
         // A part that comes back failed was wanted: fetched, never "never read".
         transport.parts[30].success = false;

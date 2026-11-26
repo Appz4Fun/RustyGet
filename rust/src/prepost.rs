@@ -1618,7 +1618,7 @@ impl NzbgetRsPrePostProcessor {
         } else if action == ASPECT_URL_FAILED {
             self.nzb_completed(host, dq_ptr, nzb_ptr, true);
         } else if action == crate::queuesubsys_host::ASPECT_LIVE_HEAD {
-            self.live_head_written(host, dq_ptr, nzb_ptr);
+            self.live_head_written(host, nzb_ptr);
         } else if action == ASPECT_FILE_COMPLETED || action == ASPECT_FILE_DELETED {
             if action == ASPECT_FILE_COMPLETED {
                 self.file_downloaded(host, dq_ptr, nzb_ptr, file_ptr);
@@ -1874,6 +1874,20 @@ impl NzbgetRsPrePostProcessor {
         stages
     }
 
+    /// Whether a finished job's unpack would find no unpack slot now (`unpackslots`): slots
+    /// held, an active download's extraction waiting for one, and jobs already in their unpack
+    /// stage leave none. A direct unpack waiting for a volume (a paused download's, say) holds
+    /// none and keeps no job waiting.
+    fn unpack_slot_lacking(&self, host: &crate::queuesubsys_host::QueueSubsysHost) -> bool {
+        let unpacking = self
+            .active_job_stages(host)
+            .iter()
+            .filter(|&&s| s == PostStage::Unpacking)
+            .count();
+        let starting = unpacking.saturating_sub(crate::unpackslots::post_users());
+        !crate::unpackslots::room_for_finished(starting)
+    }
+
     fn can_run_more_jobs(&self, host: &crate::queuesubsys_host::QueueSubsysHost) -> (bool, bool) {
                 let stages = self.active_job_stages(host);
         let opts = host.opts();
@@ -1935,7 +1949,7 @@ impl NzbgetRsPrePostProcessor {
             });
         }
 
-        let has_active_unpack = self.has_active_unpack(host, dq_ptr, true);
+        let has_active_unpack = self.unpack_slot_lacking(host);
         let pause_post = host.opts().pause_post_process;
         let idx = pick_next_post_job(&cands, allow_par, has_active_unpack, pause_post);
         if idx >= 0 {
@@ -2415,7 +2429,7 @@ impl NzbgetRsPrePostProcessor {
         }
 
         if dec.unpack != 0 {
-            if self.has_active_unpack(host, dq_ptr, true) {
+            if self.unpack_slot_lacking(host) {
                 host.post_set_int(post_ptr, POST_INT_NEED_UNPACK, 1);
                 return;
             }
@@ -2554,7 +2568,6 @@ impl NzbgetRsPrePostProcessor {
     fn live_head_written(
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
-        dq_ptr: usize,
         nzb_ptr: NzbRef,
     ) {
         let opts = host.opts();
@@ -2568,8 +2581,8 @@ impl NzbgetRsPrePostProcessor {
             nzb.direct_rename_status,
             nzb.has_unpack_thread,
         );
-        if act != 1 || !self.can_run_more_jobs(host).0 || self.has_active_unpack(host, dq_ptr, true)
-        {
+        // (direct unpack waits for an unpack slot itself, see `unpackslots`)
+        if act != 1 {
             return;
         }
         let want_unpack = host
@@ -2672,9 +2685,11 @@ impl NzbgetRsPrePostProcessor {
             let file = host.file_snap(file_ptr);
             if (crate::filetypes::is_rar_file(&file.filename)
                 || crate::livefeed::is_live_volume(&file.filename))
-                && self.can_run_more_jobs(host).0
-                && !self.has_active_unpack(host, dq_ptr, true)
             {
+                // It starts whatever else extracts or post-processes: the extraction waits for
+                // an unpack slot itself (`unpackslots`), an active download's first. A paused
+                // download's extraction waiting for a volume holds none, so it never keeps a
+                // new download from extracting while it downloads.
                 let unpack_param = host.nzb_get_param(nzb_ptr, b"*Unpack:");
                 let want_unpack = unpack_param
                     .as_ref()

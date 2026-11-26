@@ -565,16 +565,18 @@ What made a dead tail fail before, now fixed:
   `CrossPackRepairSession::set_donor_known_same`); a check that compares in
   full and differs still refuses it. The match itself is the proof: it
   compared the backup's video, reached through the payload map, with the
-  download's own bytes. So it carries over whatever the backup's label, unless
-  a label says it holds another video (TwinCheck `other`, or the intake's
-  `DupeVideo=different`): a `container` copy (par2 checksums differ, nothing
-  read the video inside both copies) is an alt once its video matched (F9).
-  The match is recorded on the backup as `DupeLiveVideo=same:<NZBID>`, and a
-  `container` backup (or one TwinCheck could not compare) is labelled an
-  `alt` of that download: "B is an alt of A (another container, the same
-  video inside: a live borrow matched its video bytes with the download's
-  own)". TwinCheck keeps that label while the download is its primary
-  (`twin::live_alt`). On #715 the carry-over still needed a twin/alt label,
+  download's own bytes at the same video offsets (a video of the download's
+  exact size), the kind of proof the intake's `DupeInner` digests give. So it
+  carries over whatever the backup's label, unless a label says it holds
+  another video (TwinCheck `other`, or the intake's `DupeVideo=different`): a
+  `container` copy (par2 checksums differ, nothing read the video inside both
+  copies) is an alt once its video matched (F9). The match is recorded on the
+  backup as `DupeLiveVideo=same:<NZBID>` and TwinCheck is nudged; while that
+  download is its primary, TwinCheck labels a `container` backup an `alt`:
+  "B is an alt of A (another container, the same video inside: a live borrow
+  matched its video bytes with the download's own)" (`twin::live_alt`). A
+  copy with no kind yet keeps none (it may be a twin whose sample is still
+  pending). On #715 the carry-over still needed a twin/alt label,
   and the real XB copy 05 on 6790 (an AES RAR5 alt labelled `container`)
   lent only the first dead volume before every later one was refused.
 - A dead volume's headers are rebuilt from a sibling; the nearest sibling may

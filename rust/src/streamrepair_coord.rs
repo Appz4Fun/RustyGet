@@ -310,10 +310,11 @@ struct DonorSource {
 /// (the fleet intake read both videos and they differ) or the intake's `DupeVideo=different`.
 ///
 /// Any other label lets a match carry over (failover-continue): the match is a check of the
-/// copy's video bytes, reached through the one payload map, against the download's own bytes,
-/// and that check is the proof that the copy holds the same video (AGENTS.md: other par2
-/// checksums prove only another container; a `container` copy becomes an alt once the video
-/// inside is proven to match). So a copy labelled `container`, a near twin, a fleet kind alone
+/// copy's video bytes, reached through the one payload map, against the download's own bytes at
+/// the same video offsets (a video of the download's exact size), and that check is the proof
+/// that the copy holds the same video (AGENTS.md: other par2 checksums prove only another
+/// container, never another video; user requirement F9: another container becomes a borrowable
+/// alt once the video inside matches). So a copy labelled `container`, a near twin, a fleet kind alone
 /// or no label lends the later dead volumes unchecked once a run of this download matched its
 /// video; before such a match, every run's own check must match.
 fn other_video_label(twin_label: Option<&[u8]>, video: Option<&[u8]>) -> bool {
@@ -343,45 +344,41 @@ fn find_queued_or_history(
 
 /// Leaves on donor `donor_id` the evidence that a live borrow of download `nzb_id` compared the
 /// donor's video, read through the payload map, with the download's own bytes and found it the
-/// same ([`crate::twin::LIVE_VIDEO_PARAM`]), and labels a copy TwinCheck could only call another
-/// container (`container`, or no kind yet) an alt of that download, saying how that was proven
-/// (AGENTS.md: a container copy becomes an alt once the video inside is proven to match).
-/// TwinCheck keeps the label while that download is its primary (`twin::live_alt`). A twin, a
-/// near twin and a copy labelled `other` keep their labels. Written once per pair.
+/// same ([`crate::twin::LIVE_VIDEO_PARAM`]), and nudges TwinCheck, which labels the copy: one it
+/// could only call another container (`container`) becomes an alt of that download while that
+/// download is its primary, with the evidence named in the log (`twin::live_alt`; user
+/// requirement F9). A copy labelled `other` gets no evidence (it holds another video; this
+/// run's snapshot of it was older). Written once per pair.
 fn note_live_video_match(host: &crate::queuesubsys_host::QueueSubsysHost, nzb_id: i32, donor_id: i32) {
     let evidence = crate::twin::live_video_value(nzb_id);
-    host.with_locked_queue(|dq_ptr| {
+    let written = host.with_locked_queue(|dq_ptr| {
         let Some((donor, in_history)) = find_queued_or_history(host, dq_ptr, donor_id) else {
-            return;
+            return false;
         };
         let param = |name: &[u8]| {
             host.nzb_get_param(donor, name)
                 .map(|v| cstr::until_nul(&v).trim_ascii().to_vec())
                 .unwrap_or_default()
         };
-        if param(crate::twin::LIVE_VIDEO_PARAM) == evidence {
-            return;
+        if param(crate::twin::LIVE_VIDEO_PARAM) == evidence
+            || other_video_label(
+                Some(&param(b"DupeKind")),
+                Some(&param(crate::dupesearch_coord::VIDEO_PARAM)),
+            )
+        {
+            return false;
         }
         host.nzb_set_param(donor, crate::twin::LIVE_VIDEO_PARAM, Some(&evidence));
-        let (kind, live) = crate::twin::live_alt(param(b"DupeKind"), &evidence, nzb_id);
-        if live {
-            host.nzb_set_param(donor, b"DupeKind", Some(&kind));
-            let download_name = find_queued_or_history(host, dq_ptr, nzb_id)
-                .map(|(n, _)| cstr::until_nul(&host.nzb_snap(n, false).name).to_vec())
-                .unwrap_or_default();
-            let donor_name = cstr::until_nul(&host.nzb_snap(donor, false).name).to_vec();
-            host.nzb_print_message(
-                donor,
-                crate::queuesubsys_host::MK_INFO,
-                &crate::twin::format_live_alt_message(&donor_name, &download_name),
-            );
-        }
         host.nzb_set_int(donor, crate::queuesubsys_host::NZB_INT_CHANGED, 1);
         if in_history {
             host.dq_history_changed(dq_ptr);
         }
         host.dq_save(dq_ptr);
+        true
     });
+    if written {
+        crate::twin::nudge_and_wake_active();
+    }
 }
 
 /// Whether TwinCheck's labels prove a copy's files differ from this download's: `container`

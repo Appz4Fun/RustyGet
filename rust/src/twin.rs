@@ -927,15 +927,18 @@ pub fn live_video_value(download_id: i32) -> Vec<u8> {
 
 /// TwinCheck's kind for a copy that a live borrow of `primary_id` proved holds the same video
 /// ([`LIVE_VIDEO_PARAM`] names that download): another container whose video is not verified
-/// yet (`container`, or no kind: no par2 lists or samples to compare) becomes an `alt`
-/// (AGENTS.md: a container copy becomes an alt once the video inside is proven to match). A
-/// copy the fleet intake found carrying another video (`other`) stays one, a twin or near twin
-/// keeps its label, and evidence about another download proves nothing here. Returns the kind
-/// and whether the live evidence made it.
+/// yet (`container`) becomes an `alt`. The live check read the copy's video through the payload
+/// map and compared it with the download's own bytes at the same video offsets (a video of the
+/// download's exact size), the kind of proof the intake's `DupeInner` digests give (user
+/// requirement F9: another container becomes a borrowable alt once the video inside matches).
+/// No kind yet stays no kind (nothing showed another container: it may be a twin whose sample
+/// is pending), a copy the intake found carrying another video (`other`) stays one, a twin or
+/// near twin keeps its label, and evidence about another download proves nothing here. Returns
+/// the kind and whether the live evidence made it.
 pub fn live_alt(kind: Vec<u8>, live_param: &[u8], primary_id: i32) -> (Vec<u8>, bool) {
     let proven =
         primary_id > 0 && crate::cstr::until_nul(live_param).trim_ascii() == live_video_value(primary_id);
-    if proven && (kind.is_empty() || kind == b"container") {
+    if proven && kind == b"container" {
         (b"alt".to_vec(), true)
     } else {
         (kind, false)
@@ -2357,14 +2360,15 @@ mod tests {
     use std::collections::BTreeSet;
 
     /// A live borrow that matched the video against the download's own bytes makes a
-    /// `container` copy (or one TwinCheck could not compare) an alt of that download only:
-    /// never of another primary, never over `other`, never in place of a twin label.
+    /// `container` copy an alt of that download only: never of another primary, never over
+    /// `other`, never in place of a twin label, never for a copy with no kind yet.
     #[test]
     fn live_video_match_makes_a_container_an_alt_of_that_download() {
         let ev = live_video_value(1873);
         assert_eq!(ev, b"same:1873");
         assert_eq!(live_alt(b"container".to_vec(), &ev, 1873), (b"alt".to_vec(), true));
-        assert_eq!(live_alt(Vec::new(), &ev, 1873), (b"alt".to_vec(), true));
+        // no kind yet: nothing showed another container (it may be a twin whose sample is pending)
+        assert_eq!(live_alt(Vec::new(), &ev, 1873), (Vec::new(), false));
         // stored values may carry the host's NUL
         assert_eq!(live_alt(b"container".to_vec(), b"same:1873\0", 1873), (b"alt".to_vec(), true));
         // evidence about another download, or none

@@ -2341,6 +2341,7 @@ impl NzbgetRsQueueCoordinator {
             b"DupeSampledOf".as_slice(),
             crate::dupeintake::INNER_PARAM,
             crate::twinfields::INNER_KEY_PARAM,
+            crate::twin::LIVE_VIDEO_PARAM,
         ] {
             host.nzb_set_param(dest_ptr, param, None);
         }
@@ -6471,7 +6472,7 @@ pub(crate) const PAR_ARTICLES_PARAM: &[u8] = b"DupeParArticles";
 /// The fleet identity a part split off a download does not keep: it is not
 /// another post of the fleet, so neither its labels nor its rank or fleet
 /// membership (`DupeFleetMember` would make it a managed fleet copy forever).
-pub(crate) const SPLIT_DROPPED_PARAMS: [&[u8]; 9] = [
+pub(crate) const SPLIT_DROPPED_PARAMS: [&[u8]; 10] = [
     b"DupeFiles",
     b"DupeKind",
     crate::donorkind::KIND_PARAM,
@@ -6481,6 +6482,7 @@ pub(crate) const SPLIT_DROPPED_PARAMS: [&[u8]; 9] = [
     crate::dupesearch_coord::FLEET_PARAM,
     crate::fleethold::MEMBER_PARAM,
     crate::dupesearch_coord::VIDEO_PARAM,
+    crate::twin::LIVE_VIDEO_PARAM,
 ];
 pub(crate) const PAR_FILES_PARAM: &[u8] = b"DupeParFiles";
 
@@ -6628,6 +6630,8 @@ mod tests {
     #[test]
     fn a_split_part_leaves_its_fleet() {
         assert!(super::SPLIT_DROPPED_PARAMS.contains(&crate::fleethold::MEMBER_PARAM));
+        // a live match was made on the whole download's video, not on the part's
+        assert!(super::SPLIT_DROPPED_PARAMS.contains(&crate::twin::LIVE_VIDEO_PARAM));
         assert!(super::SPLIT_DROPPED_PARAMS.contains(&crate::dupesearch_coord::FLEET_PARAM));
     }
 

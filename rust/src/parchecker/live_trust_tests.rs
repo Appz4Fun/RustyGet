@@ -785,3 +785,40 @@ fn a_rebuilt_slice_that_cannot_be_rechecked_puts_the_full_check_back() {
     assert!(with_live_entry(f.nzb_id, &entry, |e| e.recheck_rebuilt(f.nzb_id, id)).is_err());
     assert_eq!(streaming_session_trusts_slices(f.nzb_id), Some(false));
 }
+
+/// The end repair of a file with a slice rebuilt ahead certifies it once: afterwards the file
+/// is no end-repair target any more, so the repair does not run again (and hold
+/// post-processing back) while the download waits for it.
+#[test]
+fn a_file_rebuilt_ahead_is_certified_once_by_the_end_repair() {
+    let f = fixture(0x7a75_0013, 16, 2, 2);
+    let path = f.dir.join("part01.rar");
+    let mut disk = f.data.clone();
+    disk[6 * SLICE..7 * SLICE].fill(0);
+    std::fs::write(&path, &disk).unwrap();
+    assert!(feed_with_loss(&f, 6).is_some());
+    let entry = active_streaming_session(f.nzb_id).unwrap();
+    let id = file_id(f.nzb_id);
+    with_live_entry(f.nzb_id, &entry, |e| e.recheck_rebuilt(f.nzb_id, id)).unwrap();
+    assert_eq!(
+        streaming_session_download_end_targets(f.nzb_id),
+        Some(vec![b"part01.rar".to_vec()])
+    );
+    let request = streaming_session_prepare_repair(
+        f.nzb_id,
+        vec![crate::parlive::WriterTarget {
+            file_id: 42,
+            path: path.clone(),
+        }],
+        crate::parlive::reserve_control(f.nzb_id, 4096, 500 << 20).unwrap(),
+    )
+    .unwrap();
+    let lease = request.acquire().unwrap();
+    let (report, released) = lease
+        .repair_and_publish(|verified| verified.len(), || ())
+        .unwrap();
+    assert!(report.repaired_slices.is_empty(), "nothing left to rebuild");
+    assert_eq!(released, 1, "certified");
+    assert_eq!(streaming_session_download_end_targets(f.nzb_id), None);
+    assert_eq!(std::fs::read(&path).unwrap(), f.data);
+}

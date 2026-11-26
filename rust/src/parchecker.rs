@@ -5149,6 +5149,16 @@ impl TargetWriteLease {
                 Ok(released)
             })
             .map_err(|_| RepairError::Cancelled)??;
+        // Certified now: a file with slices rebuilt ahead is no end-repair target any more
+        // (`streaming_session_download_end_targets`), or the end repair would run again.
+        {
+            let mut rebuilt = entry.rebuilt_files.lock().unwrap_or_else(|e| e.into_inner());
+            for (queue_id, par_id) in &ids {
+                if verified.contains(queue_id) {
+                    rebuilt.remove(par_id);
+                }
+            }
+        }
         entry.emit_live_metrics(nzb_id, "repair_complete");
         Ok((report, released))
     }

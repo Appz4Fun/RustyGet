@@ -10463,8 +10463,18 @@ impl CrossPackRepairSession {
                         // the download (decompression allowed) only a restart's output is reused:
                         // the backup is not downloaded and extracted whole for what it already
                         // decoded.
+                        // (and only when it covers every hole left: holes before its restart point
+                        // still take the whole extraction)
+                        let first_hole = self.repair_sets[repair_set_idx]
+                            .inner_holes
+                            .iter()
+                            .map(|h| h.offset)
+                            .min();
                         let earlier = crate::restartlend::earlier(self.dead_nzb_id, &restart_key)
-                            .filter(|e| !allow_decompress || e.is_ok());
+                            .filter(|e| match e {
+                                Ok(r) => !allow_decompress || first_hole.is_none_or(|o| o as u64 >= r.from),
+                                Err(_) => !allow_decompress,
+                            });
                         if let Some(earlier) = earlier {
                             set_tried[set_index] = true;
                             set_compressed[set_index] = earlier.is_err();

@@ -754,9 +754,10 @@ fn backup_continues_extraction(
 }
 
 /// Whether `backup_ptr` carries a label that makes keeping a running extraction for it worth it:
-/// a twin TwinCheck proved (`DupeKind=twin`), the same video in another container, or another
+/// a twin TwinCheck proved (`DupeKind=twin`), the same video in another container, another
 /// container whose video is not verified yet (`container`; see
-/// `donorkind::unknown_kind_is_labelled_alt`). Not proof of the same video: each borrow checks
+/// `donorkind::unknown_kind_is_labelled_alt`), or a compressed copy the fleet intake found the
+/// same video (`DupeCopyKind=unborrowable`, `DupeVideo=same`: restarted by `restartlend`). Not proof of the same video: each borrow checks
 /// the video before it lends.
 pub(crate) fn backup_may_lend_while_extracting(
     host: &crate::queuesubsys_host::QueueSubsysHost,

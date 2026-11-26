@@ -4412,7 +4412,8 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
             labels = [('DupeCopyKind', 'borrowable-encrypted'), ('DupeLocked', 'yes'), ('DupeVideo', 'same'),
                       ('DupeKind', 'alt')]
         elif backup in ('rar5m3', 'rar5m3aes'):
-            labels = [('DupeCopyKind', 'unborrowable'), ('DupeVideo', 'same'), ('DupeKind', 'alt')]
+            # no DupeKind (TwinCheck without par2 leaves none): the intake's verdict alone
+            labels = [('DupeCopyKind', 'unborrowable'), ('DupeVideo', 'same')]
         else:
             labels = [('DupeCopyKind', 'unborrowable')]
     donor_members = []

@@ -3967,6 +3967,9 @@ impl NzbgetRsArticleDownloader {
             let mut failed_servers: Vec<usize> = Vec::with_capacity(servers_cap);
             // backbones that answered 430 for this article (see `BackboneMiss`)
             let mut missing: Vec<BackboneMiss> = Vec::new();
+            // a server or backbone change meanwhile voids those 430s
+            let missing_epoch = crate::articlefetcher::missing_epoch();
+            let mut missing_epoch_seen = missing_epoch;
             // every server asked answered 430 (none failed another way)
             let mut asked_430 = 0u32;
             let mut only_430 = true;
@@ -4033,6 +4036,10 @@ impl NzbgetRsArticleDownloader {
             };
 
             loop {
+                if crate::articlefetcher::missing_epoch() != missing_epoch_seen {
+                    missing_epoch_seen = crate::articlefetcher::missing_epoch();
+                    missing.clear();
+                }
                 let (stopped, _, _, _, _, _, _) = runtime_flags();
                 if stopped {
                     break;
@@ -4411,7 +4418,7 @@ impl NzbgetRsArticleDownloader {
                                 )
                             })
                         {
-                            crate::articlefetcher::note_missing_everywhere(&w.message_id);
+                            crate::articlefetcher::note_missing_everywhere_since(&w.message_id, missing_epoch);
                         }
                         status = AD_FAILED;
                         break;

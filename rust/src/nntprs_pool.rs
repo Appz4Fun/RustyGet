@@ -213,37 +213,54 @@ pub fn identified_groups(
 #[cfg(unix)]
 pub fn spawn_identification(pool: &std::sync::Arc<crate::net::NzbgetRsServerPool>) {
     // one run at a time: a request while one runs makes it run again for the
-    // pool active then, instead of a second probe borrowing more connections
-    if IDENTIFYING.swap(true, Ordering::SeqCst) {
-        AGAIN.store(true, Ordering::SeqCst);
-        return;
+    // pool active then, instead of a second probe borrowing more connections.
+    // Recording a request and the worker going idle happen under one lock, so
+    // no request is lost between the worker's last check and its exit.
+    {
+        let mut st = ID_STATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if st.running {
+            st.again = true;
+            return;
+        }
+        st.running = true;
+        st.again = false;
     }
     let first = (std::sync::Arc::downgrade(pool), pool.generation());
     let spawned = std::thread::Builder::new().name("backend-id".into()).spawn(move || {
-        let mut job = Some(first);
-        while let Some((weak, generation)) = job.take() {
+        let (mut weak, mut generation) = first;
+        loop {
             identify(weak, generation);
-            if AGAIN.swap(false, Ordering::SeqCst) {
-                job = crate::net::active_server_pool().map(|p| (std::sync::Arc::downgrade(&p), p.generation()));
-            }
-        }
-        IDENTIFYING.store(false, Ordering::SeqCst);
-        // a request between the last check and the store above
-        if AGAIN.swap(false, Ordering::SeqCst) {
-            if let Some(p) = crate::net::active_server_pool() {
-                spawn_identification(&p);
+            // the worker stays `running` until it finds no request under the lock
+            loop {
+                let mut st = ID_STATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                if !st.again {
+                    st.running = false;
+                    return;
+                }
+                st.again = false;
+                drop(st);
+                if let Some(p) = crate::net::active_server_pool() {
+                    (weak, generation) = (std::sync::Arc::downgrade(&p), p.generation());
+                    break;
+                }
             }
         }
     });
     if spawned.is_err() {
-        IDENTIFYING.store(false, Ordering::SeqCst);
+        ID_STATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).running = false;
     }
 }
 
+/// Backend identification's worker: one at a time (`running`), and whether
+/// a request came while it ran (`again`).
 #[cfg(unix)]
-static IDENTIFYING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+struct IdState {
+    running: bool,
+    again: bool,
+}
+
 #[cfg(unix)]
-static AGAIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static ID_STATE: std::sync::Mutex<IdState> = std::sync::Mutex::new(IdState { running: false, again: false });
 
 /// Held connections, as addresses (only compared by `free_connection`),
 /// shared by the probe thread and its starter so whichever ends up with them

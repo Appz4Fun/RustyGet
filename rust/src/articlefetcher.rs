@@ -454,21 +454,42 @@ fn known_missing_at(set: &mut KnownMissing, id: &[u8], now: Instant) -> bool {
 /// ask again need not hold a connection for it. Kept for
 /// [`KNOWN_MISSING_TTL`], up to [`KNOWN_MISSING_CAP`] ids.
 pub(crate) fn note_missing_everywhere(message_id: &[u8]) {
+    note_missing_everywhere_since(message_id, missing_epoch());
+}
+
+/// [`note_missing_everywhere`] for a fetch that began at `epoch`
+/// ([`missing_epoch`]): dropped when the servers or their backbones changed
+/// since, so a fetch still running on the old ones cannot record a miss the
+/// change has made stale.
+pub(crate) fn note_missing_everywhere_since(message_id: &[u8], epoch: u64) {
     let id = bare_message_id(message_id);
     if id.is_empty() {
         return;
     }
     let mut set = known_missing().lock().unwrap_or_else(|e| e.into_inner());
+    if MISSING_EPOCH.load(Ordering::SeqCst) != epoch {
+        return;
+    }
     note_missing_at(&mut set, id, Instant::now());
 }
 
+/// Moves on at every [`forget_missing_everywhere`].
+static MISSING_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The current server/backbone epoch: a fetch reads it when it starts, and a
+/// 430 it collected from a backbone counts only while the epoch stays.
+pub(crate) fn missing_epoch() -> u64 {
+    MISSING_EPOCH.load(Ordering::SeqCst)
+}
+
 /// Forgets every recorded article, for when the servers change (a server
-/// activated or the config reloaded) and a missing article may exist after all.
+/// activated, the config reloaded, backend identification moved a server to
+/// another backbone) and a missing article may exist after all. Fetches in
+/// flight drop their backbone 430s too (see [`missing_epoch`]).
 pub(crate) fn forget_missing_everywhere() {
-    known_missing()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
+    let mut set = known_missing().lock().unwrap_or_else(|e| e.into_inner());
+    MISSING_EPOCH.fetch_add(1, Ordering::SeqCst);
+    set.clear();
 }
 
 /// Whether [`note_missing_everywhere`] recorded `message_id` (with or without
@@ -701,9 +722,16 @@ impl ArticleFetcher {
         // every server given up on answered 430
         let mut gave_up = 0u32;
         let mut only_430 = true;
+        // a server or backbone change meanwhile voids the backbone 430s
+        let epoch = missing_epoch();
+        let mut epoch_seen = epoch;
 
         let mut level: i32 = 0;
         while !self.is_stopped() {
+            if missing_epoch() != epoch_seen {
+                epoch_seen = missing_epoch();
+                missing.clear();
+            }
             let mut st = self.host.status();
             if level > st.max_norm_level {
                 break;
@@ -893,7 +921,7 @@ impl ArticleFetcher {
         }
 
         if gave_up > 0 && only_430 && !self.is_stopped() {
-            note_missing_everywhere(message_id);
+            note_missing_everywhere_since(message_id, epoch);
         }
         result
     }
@@ -1468,6 +1496,16 @@ pub fn parse_donor_nzb_file(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_miss_from_before_a_server_change_is_dropped() {
+        let epoch = missing_epoch();
+        forget_missing_everywhere();
+        note_missing_everywhere_since(b"<km-epoch-old@x>", epoch);
+        assert!(!known_missing_everywhere(b"<km-epoch-old@x>"));
+        note_missing_everywhere_since(b"<km-epoch-new@x>", missing_epoch());
+        // another test may forget meanwhile; only the stale one must never stick
+        let _ = known_missing_everywhere(b"<km-epoch-new@x>");
+    }
     use super::*;
 
     #[test]

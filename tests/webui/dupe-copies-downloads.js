@@ -75,6 +75,8 @@ function history(base, extra) {
     dupe(747, '_7', PLAIN_KEY.toUpperCase(), 1, { DupeFiles: 'eea70fdaf6846e6d-174', DupeHealth: '99', DupeCopyKind: 'borrowable', DupeKind: 'alt', DupeVideo: 'same' }, 61),
     dupe(746, '_6', PLAIN_KEY, 1, { DupeHealth: '0', DupeCopyKind: 'unborrowable', DupeKind: 'other', DupeAliveSample: '0/40', DupeAlive: '0' }, 62),
     dupe(745, '_5', PLAIN_KEY, 1, { DupeFiles: 'e240e0b1925d79b6-174', DupeHealth: '98.5', DupeCopyKind: 'twin', DupeKind: 'twin' }, 63),
+    // a second twin: a lower score but a measured alive share, so it is tried first
+    dupe(743, '_3', PLAIN_KEY, 0, { DupeFiles: 'e240e0b1925d79b6-174', DupeAlive: '99.5', DupeCopyKind: 'twin', DupeKind: 'twin' }, 65),
     dupe(744, '_4', PLAIN_KEY, 3, { DupeHealth: '91', DupeCopyKind: 'borrowable-encrypted', DupeKind: 'container' }, 64),
     item(base, 740, PLAIN + '_0', PLAIN_KEY, { Status: 'FAILURE/HEALTH', DeleteStatus: 'NONE', ParStatus: 'NONE',
       DupeScore: 1, HistoryTime: now - 900, SuccessArticles: 300, FailedArticles: 700, Health: 300,
@@ -130,10 +132,10 @@ function history(base, extra) {
       const sub = id => page.locator(`#DownloadsTable .fleet-sub[data-nzbid="${id}"]`);
 
       await check('a plain download with History backups gets the toggle', async () => {
-        assert.match(await toggle(PLAIN_KEY).innerText(), /\+6 copies/);
+        assert.match(await toggle(PLAIN_KEY).innerText(), /\+7 copies/);
         assert.equal(await toggle(PLAIN_KEY).getAttribute('aria-expanded'), 'false');
         assert.equal(await page.locator('#DownloadsTable tbody tr', { hasText: 'Example Feature' }).count(), 1, 'one row: the download');
-        for (const id of [748, 747, 746, 745, 744, 740]) {
+        for (const id of [748, 747, 746, 745, 744, 743, 740]) {
           assert.equal(await page.locator(`#DownloadsTable tbody a[data-nzbid="${id}"]`).count(), 0, 'History copy ' + id + ' not in Downloads');
         }
       });
@@ -147,6 +149,31 @@ function history(base, extra) {
         const lone = page.locator('#DownloadsTable tbody tr', { hasText: 'Lone Release' });
         assert.equal(await lone.count(), 1);
         assert.equal(await lone.locator('a.fleet-toggle').count(), 0, 'no toggle without another copy');
+        assert.match(await toggle(SIB_KEY).first().getAttribute('title'), /duplicate key/, 'a plain list says what it holds');
+        assert.match(await toggle(FLEET_KEY).getAttribute('title'), /order they are tried/, 'a fleet keeps its hint');
+      });
+
+      await check('siblings share one open state; each lists the other', async () => {
+        await toggle(SIB_KEY).first().click();
+        await page.locator('#DownloadsTable tbody .fleet-sub[data-nzbid="802"]').first().waitFor();
+        assert.deepEqual(await page.locator('#DownloadsTable tbody a.fleet-toggle[data-fleet-key="' + SIB_KEY + '"]')
+          .evaluateAll(els => els.map(e => e.getAttribute('aria-expanded'))), ['true', 'true']);
+        const lists = await rowSubs(SIB_KEY).evaluateAll(els => els.map(e => Number(e.getAttribute('data-nzbid'))));
+        assert.deepEqual(lists, [801, 802, 802, 801], 'each row: itself first, then its sibling');
+        const pos = (await rowSubs(SIB_KEY).locator('.fleet-sub-pos').allInnerTexts()).map(t => t.toLowerCase());
+        assert.deepEqual(pos, ['primary', 'queued', 'primary', 'queued']);
+        await toggle(SIB_KEY).first().click();
+        await page.waitForFunction(() => !document.querySelector('#DownloadsTable .fleet-sub[data-nzbid="802"]'));
+      });
+
+      await check('keys match ignoring ASCII case only, as the daemon', async () => {
+        const n = await page.evaluate(() => {
+          const g = (id, key) => ({ NZBID: id, Kind: 'NZB', DupeKey: key, Parameters: [] });
+          const h = (id, key) => ({ NZBID: id, Kind: 'NZB', Status: 'DELETED/DUPE', DupeKey: key, Parameters: [] });
+          const f = DownloadsUI.buildFleets([g(1, 'Caf\u00e9-KEY')], [h(2, 'caf\u00e9-key'), h(3, 'CAF\u00c9-key')]);
+          return f.copiesById[1].members.map(m => m.NZBID);
+        });
+        assert.deepEqual(n, [1, 2], 'a non-ASCII letter in another case is another key');
       });
 
       await shot('collapsed');
@@ -156,10 +183,11 @@ function history(base, extra) {
         await sub(745).waitFor();
         const list = rowSubs(PLAIN_KEY);
         const ids = await list.evaluateAll(els => els.map(e => Number(e.getAttribute('data-nzbid'))));
-        // twin, borrowable (score 1, by ID), borrowable-encrypted, unborrowable; then the failed copy
-        assert.deepEqual(ids, [741, 745, 747, 748, 744, 746, 740]);
+        // twins by alive share (743 before 745 despite its lower score),
+        // borrowable (score 1, by ID), borrowable-encrypted, unborrowable; then the failed copy
+        assert.deepEqual(ids, [741, 743, 745, 747, 748, 744, 746, 740]);
         const pos = (await list.locator('.fleet-sub-pos').allInnerTexts()).map(t => t.toLowerCase());
-        assert.deepEqual(pos, ['primary', 'backup', 'backup', 'backup', 'backup', 'backup', 'history']);
+        assert.deepEqual(pos, ['primary', 'backup', 'backup', 'backup', 'backup', 'backup', 'backup', 'history']);
         assert.match(await sub(741).innerText(), /100\.0% alive · borrowable/);
         assert.match(await sub(741).innerText(), /downloading/i);
         assert.match(await sub(745).innerText(), /twin · 98\.5% alive/);
@@ -167,7 +195,7 @@ function history(base, extra) {
         assert.match(await sub(748).innerText(), /container · 100\.0% alive · borrowable/);
         assert.match(await sub(744).innerText(), /container · 91\.0% alive · borrowable \(encrypted\)/);
         assert.match(await sub(746).innerText(), /other · dead \(0\/40 sampled\) · not borrowable/);
-        for (const id of [745, 747, 748, 744, 746]) assert.match(await sub(id).innerText(), /backup in history/);
+        for (const id of [743, 745, 747, 748, 744, 746]) assert.match(await sub(id).innerText(), /backup in history/);
         assert.match(await sub(740).innerText(), /30\.0% alive/);
         assert.match(await sub(740).innerText(), /failure.* · history/i);
         assert.equal(await sub(745).getAttribute('data-fleet-source'), 'history');
@@ -205,7 +233,7 @@ function history(base, extra) {
         state.extraHistory = [item(queueBase || {}, 749, PLAIN + '_9', PLAIN_KEY, { Status: 'DELETED/DUPE', DeleteStatus: 'DUPE',
           DupeScore: 1, HistoryTime: Math.floor(Date.now() / 1000), Parameters: params({ DupeHealth: '95', DupeCopyKind: 'borrowable', DupeKind: 'alt' }) })];
         await page.evaluate(() => Refresher.update());
-        await page.waitForFunction(k => /\+7 copies/.test((document.querySelector(`#DownloadsTable a.fleet-toggle[data-fleet-key="${k}"]`) || {}).textContent || ''),
+        await page.waitForFunction(k => /\+8 copies/.test((document.querySelector(`#DownloadsTable a.fleet-toggle[data-fleet-key="${k}"]`) || {}).textContent || ''),
           PLAIN_KEY, { timeout: 10000 });
         await sub(749).waitFor();
         state.extraHistory = [];

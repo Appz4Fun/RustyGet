@@ -5938,6 +5938,10 @@
     "message": "Show or hide the other copies of this release, in the order they are tried if the primary fails",
     "description": "Tooltip of a fleet's toggle in Downloads."
   },
+  "fleet_toggle_hint_copies": {
+    "message": "Show or hide the other copies with this duplicate key: backups in History are the ones failover and borrowing take",
+    "description": "Tooltip of the toggle in Downloads for a download that is no fleet but has other copies under its duplicate key."
+  },
   "fleet_pos_primary": {
     "message": "primary",
     "description": "A fleet member's place: the copy downloading now."

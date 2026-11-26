@@ -1090,23 +1090,25 @@ var DownloadsUI = (new function($)
 				// the download itself first, its queued siblings in queue order,
 				// then the copies in History
 				var members = [g].concat(queued.filter(function(o) { return o !== g; }), hist);
-				copiesById[g.NZBID] = { key: key, members: members, leader: g, probing: false };
+				copiesById[g.NZBID] = { key: key, members: members, leader: g, probing: false, plain: true };
 			});
 		});
 		return { byKey: byKey, byId: byId, copiesById: copiesById };
 	}
 
-	// the DupeKey a copy is matched by, lowercased; '' for none or a URL
+	// the DupeKey a copy is matched by, ASCII letters lowercased (the daemon
+	// folds ASCII case only, queuecoord.rs strcasecmp_bytes); '' for none or a URL
 	this.copyKey = function(item)
 	{
 		var key = String(item.DupeKey || '');
-		return key && item.Kind !== 'URL' ? key.toLowerCase() : '';
+		return key && item.Kind !== 'URL' ? key.replace(/[A-Z]/g, function(c) { return c.toLowerCase(); }) : '';
 	}
 
 	// History's NZB copies of the queued keys, by key, in the order they are
 	// listed: DELETED/DUPE backups first (the copies failover and donor search
-	// take), ranked as dupefallback.rs compare_donor_ranks ranks donors (twin,
-	// then DupeCopyKind, then score, then ID); then every other History copy,
+	// take), ranked as dupefallback.rs compare_donor_ranks ranks donors (twins
+	// first, by alive share; the others by DupeCopyKind; then score, then ID);
+	// then every other History copy,
 	// newest first. Each copy is marked `inHistory`.
 	this.historyCopies = function(history, queuedByKey)
 	{
@@ -1133,10 +1135,20 @@ var DownloadsUI = (new function($)
 				if (ba !== bb) return ba - bb;
 				if (ba === 1) return (b.HistoryTime || 0) - (a.HistoryTime || 0) || b.NZBID - a.NZBID;
 				var ra = donorRank(a), rb = donorRank(b);
-				return ra - rb || (b.DupeScore || 0) - (a.DupeScore || 0) || a.NZBID - b.NZBID;
+				if (ra !== rb) return ra - rb;
+				// twins by alive share (DupeAlive, dupecoord.rs alive_permille_host)
+				if (ra === 0 && alivePermille(a) !== alivePermille(b)) return alivePermille(b) - alivePermille(a);
+				return (b.DupeScore || 0) - (a.DupeScore || 0) || a.NZBID - b.NZBID;
 			});
 		});
 		return out;
+	}
+
+	// DupeAlive in permille, -1 when not measured
+	function alivePermille(item)
+	{
+		var v = parseFloat(DownloadsUI.parameterValue(item.Parameters, 'DupeAlive'));
+		return isNaN(v) ? -1 : Math.round(Math.min(Math.max(v, 0), 100) * 10);
 	}
 
 	// a copy waiting in History as a backup (failover and donor search take it)
@@ -1420,7 +1432,8 @@ var DownloadsUI = (new function($)
 		var open = isFleetOpen(fleet.key);
 		var others = fleet.members.length - 1;
 		var html = ' <a href="#" class="fleet-toggle' + (open ? ' is-open' : '') + '" data-fleet-key="' + Util.textToAttr(fleet.key) +
-			'" role="button" aria-expanded="' + (open ? 'true' : 'false') + '" title="' + Util.textToAttr(I18n.translate('fleet_toggle_hint')) + '">' +
+			'" role="button" aria-expanded="' + (open ? 'true' : 'false') + '" title="' +
+			Util.textToAttr(I18n.translate(fleet.plain ? 'fleet_toggle_hint_copies' : 'fleet_toggle_hint')) + '">' +
 			'<i class="material-icon" aria-hidden="true">' + (open ? 'expand_more' : 'chevron_right') + '</i>' +
 			Util.textToHtml(I18n.translate(others === 1 ? 'fleet_toggle_copy' : 'fleet_toggle_copies', String(others))) +
 			(fleet.probing ? ' · ' + Util.textToHtml(I18n.translate('fleet_state_probing')) : '') + '</a>';

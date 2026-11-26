@@ -591,18 +591,91 @@ What made a dead tail fail before, now fixed:
   files (a repost in other article sizes is `borrowable` too), so those
   copies keep the whole-file pass, which samples before it copies.
 
+### Compressed backups restart near the frontier (zipfast 5d16110f, 2026-11-26)
+
+A backup whose video is compressed (RAR5 methods 1-5, with or without AES;
+7z LZMA2) has no byte of the video at a fixed place, so it used to fail the
+download over: the backup was downloaded and extracted from its first byte.
+Now zipfast restarts its decoder near the frontier (`rust/src/restartlend.rs`,
+`map::open_at` with `Seed::HeldPlaintext`, then `complete_rar5` or
+`complete_lzma2`):
+
+- the backup's member map is built from its header articles; the member of
+  the video's size is planned at the first missing byte less 256 KiB;
+- RAR5: only the packed bytes from the estimated position less a 2 MiB search
+  region to the member's end are fetched (the search widens once to a
+  guarded restart's reach when none is found); the download's own output
+  before the frontier fills the decoder's window. Under AES the key is derived
+  once from the member's salt and the password the backup's nzb carries, and
+  the packed bytes are decrypted on the way (the block before the first one
+  fetched is the IV);
+- LZMA2: the chunk headers are walked from the folder's start up to the bytes
+  the restart fetches (a walk is the only proof of where chunks start, so each
+  article before them is read once), then the folder from the restart chunk
+  to its end (`FetchFrom` and `NeedMore` handled); the download's output is
+  the dictionary. zipfast decodes that rest in one buffer, so a rest over
+  768 MB packed and unpacked falls back;
+- before anything is lent, the whole member is proven by its CRC32 (keyed
+  under RAR5 AES): the download's own output before the restart and the
+  decoded rest together. The decoded rest is kept in a scratch file beside the
+  download and mapped as a bare file by `ContentMapper::build_map_with_tls`,
+  so the dead-volume borrow lends the video's bytes from it exactly as from a
+  stored alt (the output decoded again between the restart and the frontier
+  is what its check compares). Each restart is tried once per download and
+  backup set; later borrow runs lend from the same scratch file.
+
+A coder with no restart point inside the member (RAR 4.x compressed, ZIP
+Deflate, 7z BZip2/PPMd/...), 7zAES under LZMA2, a later member of a RAR solid
+stream or a member without a CRC32 is refused with its reason, and the
+download fails over as before.
+
+zipfast #288's `fill_lost` is not used: no RustyGet path holds plaintext for a
+lost range of a feed-decoded member that is not the repaired volume's own
+bytes (repairs patch packed bytes, which a stored layer reads once more and a
+compressed one must decode anyway). It becomes useful once a compressed 7z
+download's dead tail can take an alt's plaintext (OPEN ITEM: stream repair maps
+no compressed target). #289's `set_open_iv` and `FeedKeys` are not needed
+either: an AES twin's articles swap in one for one (nothing before the
+frontier is read, `failcont_aestwin`), and a restart derives its key once.
+#291 (`replace_placed_links`) and #286 (`restart_from_first_volume`) stay off:
+RustyGet always starts a RAR set at its first volume, and 7z extraction keeps
+7-Zip's refusal of a link placed over a link. #292 (`keep_broken`,
+`attempt_continued_members`) stays off.
+
 When the backup cannot continue a running extraction, the download fails
 over as before, and the log says why first: "Backup B cannot continue the
 extraction of A: <reason>; failing over starts it from its first byte"
-(its video failed the check or is held compressed, live borrowing off,
-nothing showing it is the same video).
+(its video failed the check, it cannot be restarted near the frontier with
+zipfast's reason, live borrowing off, nothing showing it is the same video).
+
+### A weak primary continues at its frontier (frontiercut)
+
+The fleet's weak-primary switch (#724) failed a weak primary over to a held
+alt of the same video while little of it came, which threw away what the
+primary had downloaded and extracted and fetched it again from the alt. When
+the primary's extraction runs and the alt can lend live (stored, AES store,
+or compressed where zipfast restarts), the switch now cuts the primary at its
+frontier instead (`rust/src/frontiercut.rs`): every data article it has not
+fetched yet is answered "not found" at once, without a server, its remaining
+volumes go dead, and the alt lends them from the frontier to the end
+(failover-continue). The log says "Continuing A at its frontier from alt B".
+A cut primary is kept by the dead-download, health and par-damage checks while
+the alt can lend; one the alt turns out unable to lend (a check finds its
+video different, or its restart is refused) fails over as before.
 
 Tests: functional `failcont_{twin,alt,aes}{25,50,90}` (the primary dies at
 25, 50 and 90% of its data), `failcont_fleet{twin,alt,aes}` (the backup held
 in the queue by its fleet), `failcont_twinlabel` (a twin known only from
 TwinCheck's label), `failcont_othervideo` (another video labelled
-`container` never lends a byte) and `failcont_compressed` (the clean
-fallback).
+`container` never lends a byte), `failcont_compressed` (a backup a fleet
+labelled unborrowable: the clean fallback), `failcont_rar5m3` and
+`failcont_rar5m3aes` (a RAR5 -m3 alt, plain and with `-hp`, restarted near
+the frontier), `failcont_lzma2` (a 7z LZMA2 alt), `failcont_norestart` (a 7z
+BZip2 alt: no restart point, the fallback with its reason), `failcont_aestwin`
+(an AES download with an AES twin) and `failcont_aesalt` (an AES download
+with an AES alt: the fallback, see the limits), and `weakswitch{alt,aes,m3}`
+(a weak fleet primary continued at its frontier from a stored, AES or -m3
+alt; the bytes fetched stay under what a switch from zero costs).
 Each continuing scenario checks the movie's bytes, that direct unpack of the
 primary succeeded and was used (never cancelled, never run for the backup),
 that no data article was fetched twice, that a twin served no article before
@@ -614,10 +687,15 @@ Limits: an alt in a fleet grouped by name whose video the intake did not
 read (labelled `container`) must match in every borrow run, so its dead
 tail is lent only while the download's own bytes still border the holes;
 a dead last volume of a RAR 1.5-4 set is not rebuilt (its header
-carries the whole file's checksum); compressed backups fall back to a full
-failover until zipfast's `fill_lost` (#288) and `open_at` for compressed
-members are wired in; TwinCheck still reads the download's own par2 index
-from the server once more.
+carries the whole file's checksum); an encrypted download's dead volumes
+are not rebuilt from an alt (OPEN ITEM: their headers and data would have to
+be encrypted again under its own key; an AES twin lends one for one, and a
+plain download takes an AES alt); a compressed download's dead tail takes no
+alt's plaintext (OPEN ITEM, see `fill_lost` above); a compressed alt is
+restarted at the download's first missing byte, so scattered holes before the
+frontier make it read about whole (still never twice, and the download's
+extraction is kept); TwinCheck still reads the download's own par2 index from
+the server once more.
 
 ## Done when (acceptance tests)
 

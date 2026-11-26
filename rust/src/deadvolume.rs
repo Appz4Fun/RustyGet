@@ -158,6 +158,24 @@ pub fn plan_with_stop(volumes: &[VolumeState], inner_size: i64) -> (Vec<Plan>, O
 /// header of its own, well over this.
 const LAST_LENGTH_SLACK: i64 = 8;
 
+/// Bytes of a RAR5 end-of-archive block saying no volume follows (CRC32, size, type, flags,
+/// end flags), which closes a set's last volume.
+///
+/// OPEN ITEM (zipfast): RAR5 framing knowledge kept in RustyGet, like the sibling-template
+/// choice in `streamrepair::plan_dead_fills`. Dead-volume planning and header rebuilding (this
+/// module) belong in zipfast (a "frame of volume N from sibling M"
+/// call that also knows a last volume's end block); tracked in
+/// ~/rustyget-requests/library-migration.md. Until zipfast has it, this stays here.
+const RAR5_END_BLOCK_LEN: i64 = 8;
+
+/// How much shorter than a sibling's head plus its part and an end block a set's last RAR5
+/// volume may be: its size fields can take a byte or two fewer. What this relies on: rar writes
+/// the last volume's head like its siblings' (the same records, so within these two bytes). A
+/// last volume whose head lacks a record the sibling's has (a locator) comes out more than two
+/// bytes short and is left dead (par2 or the backup's whole volume restore it), since an empty
+/// member behind the inner file could make up that length.
+const BARE_END_SHORTER: i64 = 2;
+
 /// [`plan_with_stop`], also planning a dead last volume the inner file ends in when
 /// `last_length` (the volume's exact length, from par2) shows it holds that end and nothing
 /// more: a member after it would otherwise be dropped without a word.
@@ -190,7 +208,19 @@ pub fn plan_with_last(
                     return (out, Some(StopReason::MaybeLast { volume }));
                 }
                 let packed = if closes { inner_size - offset } else { g.packed_size };
-                let size = g.data_offset + packed + g.tail_len();
+                let mut size = g.data_offset + packed + g.tail_len();
+                let mut bare_end = false;
+                // A set's last volume may end with just its end block: what follows a middle
+                // sibling's part (a quick-open record, padding to the volume size, as rar 7
+                // writes them) need not be in it. par2's length tells which: exactly that, or a
+                // byte or two shorter, never longer.
+                if closes {
+                    let bare = g.data_offset + packed + RAR5_END_BLOCK_LEN;
+                    if last_length.is_some_and(|len| len <= bare && bare - len <= BARE_END_SHORTER) {
+                        size = bare;
+                        bare_end = true;
+                    }
+                }
                 let encoded_size = *encoded_size;
                 // yEnc's own lines weigh more in a short last volume: a little slack on top.
                 let slack = size / 16 + if closes { 1024 } else { 0 };
@@ -201,7 +231,10 @@ pub fn plan_with_last(
                 if packed <= 0 || offset + packed > inner_size {
                     return (out, Some(StopReason::PastInnerEnd { volume }));
                 }
-                if closes && !last_length.is_some_and(|len| (len - size).abs() <= LAST_LENGTH_SLACK) {
+                if closes
+                    && !bare_end
+                    && !last_length.is_some_and(|len| (len - size).abs() <= LAST_LENGTH_SLACK)
+                {
                     let stop =
                         StopReason::LastNotProven { volume, par2_length: last_length, expected: size };
                     return (out, Some(stop));
@@ -1755,6 +1788,33 @@ mod tests {
         // Bytes past the part's header: not a head that ends in front of a part.
         head.push(0);
         assert_eq!(rar5_part_crc(&head), None);
+    }
+
+    #[test]
+    fn a_dead_last_volume_ends_with_its_end_block_behind_a_padded_sibling() {
+        // rar 7 pads a middle volume to its exact size behind a quick-open record (here 97
+        // bytes behind the part); the set's last volume ends with its 8-byte end block.
+        let v = vec![first(1000, 60, 900), g(1000, 79, 824), DEAD];
+        let inner = 900 + 824 + 300;
+        let bare = Some(79 + 300 + 8);
+        assert_eq!(
+            plan_with_last(&v, inner, bare).0,
+            vec![Plan {
+                index: 2,
+                template: 1,
+                inner_offset: 1724,
+                packed_size: 300,
+                data_offset: 79,
+                last: true,
+            }]
+        );
+        // Size fields a byte or two shorter.
+        assert_eq!(plan_with_last(&v, inner, bare.map(|l| l - BARE_END_SHORTER)).0.len(), 1);
+        // Anything longer leaves room for another member behind the inner file, and anything
+        // much shorter may be a head without the sibling's locator plus such a member: kept dead.
+        assert!(plan_with_last(&v, inner, bare.map(|l| l + 1)).0.is_empty());
+        assert!(plan_with_last(&v, inner, bare.map(|l| l + 40)).0.is_empty());
+        assert!(plan_with_last(&v, inner, bare.map(|l| l - 10)).0.is_empty());
     }
 
     #[test]

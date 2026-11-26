@@ -98,6 +98,8 @@ struct CandSnap {
     dupe_key: Vec<u8>,
     queued_filename: Vec<u8>,
     password: Vec<u8>,
+    other_container: bool,
+    same_video_label: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -290,9 +292,51 @@ impl RepairTarget {
 
 #[derive(Clone, Debug)]
 struct DonorSource {
+    /// The donor's NZBID: unique for the life of the process, unlike its queued nzb file's
+    /// name, which a later copy can reuse.
+    id: i32,
     queued_filename: Vec<u8>,
     info_name: Vec<u8>,
     password: Vec<u8>,
+    /// Labelled as not a twin of this download (see [`other_container`]): its volume files are
+    /// never compared with this download's or copied over them.
+    other_container: bool,
+    /// Labelled as holding the same video (see [`same_video_label`]): only then may a check that
+    /// matched in one run let later runs lend it unchecked.
+    same_video_label: bool,
+}
+
+/// Whether a copy's labels say it holds the same video as the download: TwinCheck's `twin` or
+/// `alt` (checked against the download itself), or a fleet intake that read the video inside
+/// (`DupeVideo=same`). A packing kind alone (`borrowable*`) says nothing of the video, and a
+/// fleet kind `twin` only says the copy is a twin of some member of its fleet, not of this
+/// download; nor does `container`, `other`, a near twin, or no label say it: each run's own
+/// check must match before such a copy lends (failover-continue's carry-over needs both a match
+/// and this label).
+fn same_video_label(_copy_kind: Option<&[u8]>, twin_label: Option<&[u8]>, video: Option<&[u8]>) -> bool {
+    match twin_label.map(<[u8]>::trim_ascii) {
+        Some(b"twin") | Some(b"alt") => true,
+        Some(label) if !label.is_empty() => false,
+        _ => video.map(<[u8]>::trim_ascii) == Some(b"same"),
+    }
+}
+
+/// Whether TwinCheck's labels prove a copy's files differ from this download's: `container`
+/// or `other` (their par2 lists differ), a near twin (`twin:N/M`), or `alt` unless its samples
+/// found the same files cut into other article sizes (`DupeSampled=samefiles`). Container bytes
+/// of such a copy never match this download's and are never compared (AGENTS.md, twins and
+/// alts): the whole-file pass, which copies a donor file over a damaged file of about its size
+/// once sampled bytes agree, leaves it out; only the payload map lends from it, by the bytes of
+/// the video. Fleet kinds and intake verdicts alone do not prove it (a repost of the same files
+/// in other article sizes carries `borrowable` too), so such copies keep the whole-file pass,
+/// which samples before it copies anything.
+fn other_container(twin_label: Option<&[u8]>, sampled: Option<&[u8]>) -> bool {
+    match twin_label.map(<[u8]>::trim_ascii) {
+        Some(b"container") | Some(b"other") => true,
+        Some(label) if label.starts_with(b"twin:") => true,
+        Some(b"alt") => sampled.map(<[u8]>::trim_ascii) != Some(b"samefiles"),
+        _ => false,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -339,18 +383,67 @@ static RECENT_SINGLES: Mutex<std::collections::VecDeque<(Vec<u8>, FetchedDonorAr
 const RECENT_SINGLES_MAX: usize = 64;
 const RECENT_SINGLES_BYTES: usize = 48 << 20;
 
+/// Donor articles a borrow fetched in batches moments ago, kept apart from
+/// [`RECENT_SINGLES`] (the archive headers every run's payload map reads) so a long borrow
+/// does not push those out. An entry is dropped after [`RECENT_BATCHED_TTL`], checked whenever
+/// a repair run plans a batch, keeps an article or ends, or a download leaves the queue: it
+/// serves the check and run right after the one that fetched it.
+static RECENT_BATCHED: Mutex<std::collections::VecDeque<(Vec<u8>, FetchedDonorArticle)>> =
+    Mutex::new(std::collections::VecDeque::new());
+static RECENT_BATCHED_AT: Mutex<std::collections::VecDeque<(Vec<u8>, std::time::Instant)>> =
+    Mutex::new(std::collections::VecDeque::new());
+const RECENT_BATCHED_TTL: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Drops batched articles older than [`RECENT_BATCHED_TTL`].
+pub(crate) fn expire_batched() {
+    let mut at = RECENT_BATCHED_AT.lock().unwrap_or_else(|e| e.into_inner());
+    let mut memo = RECENT_BATCHED.lock().unwrap_or_else(|e| e.into_inner());
+    while at.front().is_some_and(|(_, t)| t.elapsed() > RECENT_BATCHED_TTL) {
+        if let Some((id, _)) = at.pop_front() {
+            memo.retain(|(m, _)| *m != id);
+        }
+    }
+    // Entries the size bound pushed out of the memo have no business here either.
+    at.retain(|(id, _)| memo.iter().any(|(m, _)| m == id));
+}
+
 fn recent_single(msg_id: &[u8]) -> Option<FetchedDonorArticle> {
-    let g = RECENT_SINGLES.lock().unwrap_or_else(|e| e.into_inner());
-    g.iter().find(|(id, _)| id == msg_id).map(|(_, a)| a.clone())
+    for memo in [&RECENT_SINGLES, &RECENT_BATCHED] {
+        let g = memo.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, a)) = g.iter().find(|(id, _)| id == msg_id) {
+            return Some(a.clone());
+        }
+    }
+    None
 }
 
 fn keep_single(msg_id: &[u8], article: FetchedDonorArticle) {
-    if article.data.len() > RECENT_SINGLES_BYTES / 16 {
-        return;
+    keep_in(&RECENT_SINGLES, msg_id, article);
+}
+
+fn keep_batched(msg_id: &[u8], article: FetchedDonorArticle) {
+    // (see `keep_in`)
+    expire_batched();
+    if keep_in(&RECENT_BATCHED, msg_id, article) {
+        let mut at = RECENT_BATCHED_AT.lock().unwrap_or_else(|e| e.into_inner());
+        at.retain(|(id, _)| id.as_slice() != msg_id);
+        at.push_back((msg_id.to_vec(), std::time::Instant::now()));
     }
-    let mut g = RECENT_SINGLES.lock().unwrap_or_else(|e| e.into_inner());
+}
+
+/// Keeps `article` in `memo` (oldest out first, within its count and byte bounds); false when
+/// it was not added (too big, or held already).
+fn keep_in(
+    memo: &Mutex<std::collections::VecDeque<(Vec<u8>, FetchedDonorArticle)>>,
+    msg_id: &[u8],
+    article: FetchedDonorArticle,
+) -> bool {
+    if article.data.len() > RECENT_SINGLES_BYTES / 16 {
+        return false;
+    }
+    let mut g = memo.lock().unwrap_or_else(|e| e.into_inner());
     if g.iter().any(|(id, _)| id == msg_id) {
-        return;
+        return false;
     }
     let mut held: usize = g.iter().map(|(_, a)| a.data.len()).sum();
     while !g.is_empty()
@@ -361,6 +454,38 @@ fn keep_single(msg_id: &[u8], article: FetchedDonorArticle) {
         }
     }
     g.push_back((msg_id.to_vec(), article));
+    true
+}
+
+/// A donor article to fetch: its message-id and its groups.
+type PrefetchId = (Vec<u8>, Arc<Vec<Vec<u8>>>);
+
+/// One article of an open prefetch batch, in delivery order: already held (fetched by an
+/// earlier repair run or check moments ago, so never fetched again), or still to come from
+/// the batch fetcher under this message-id.
+enum PrefetchSlot {
+    Held(FetchedDonorArticle),
+    Fetching(Vec<u8>),
+}
+
+/// The batch to fetch for `ids` (in delivery order) and the delivery plan: articles
+/// [`RECENT_SINGLES`] holds are served from it instead of the network. A borrow run, the
+/// identity check before it and the next run often want the same donor articles (the one
+/// straddling a dead volume's edge, a probe window); each is fetched once.
+fn plan_prefetch(ids: Vec<PrefetchId>) -> (Vec<BatchRequest>, std::collections::VecDeque<PrefetchSlot>) {
+    expire_batched();
+    let mut requests = Vec::with_capacity(ids.len());
+    let mut plan = std::collections::VecDeque::with_capacity(ids.len());
+    for (message_id, groups) in ids {
+        match recent_single(&message_id) {
+            Some(hit) => plan.push_back(PrefetchSlot::Held(hit)),
+            None => {
+                plan.push_back(PrefetchSlot::Fetching(message_id.clone()));
+                requests.push(BatchRequest { message_id, groups });
+            }
+        }
+    }
+    (requests, plan)
 }
 
 /// Fetches of one donor's borrow: how many went one at a time and how many in batches, and
@@ -444,6 +569,10 @@ pub struct NzbgetRsStreamRepairCtrl {
     debug_enabled: bool,
     fetcher: ArticleFetcher,
     batch_fetcher: BatchFetcherPool,
+    /// The delivery order of the open prefetch batch: an article another run of this process
+    /// fetched a moment ago is served from [`RECENT_SINGLES`] in its place; the others come
+    /// from `batch_fetcher`, in order, and are kept there too (see [`PrefetchSlot`]).
+    prefetch_plan: Mutex<std::collections::VecDeque<PrefetchSlot>>,
     timed_out: Arc<AtomicBool>,
     progress_bytes: Arc<AtomicI64>,
     checking_donor: Arc<AtomicI32>,
@@ -453,7 +582,39 @@ pub struct NzbgetRsStreamRepairCtrl {
     watchdog_pair: Arc<(Mutex<bool>, Condvar)>,
 }
 
+impl Drop for NzbgetRsStreamRepairCtrl {
+    fn drop(&mut self) {
+        // One repair run is over. The next run of the download (seconds later, a new controller)
+        // still wants what this one fetched, so only articles past their time go.
+        expire_batched();
+    }
+}
+
 impl NzbgetRsStreamRepairCtrl {
+    /// The next article of the open batch, in delivery order (see [`PrefetchSlot`]): one
+    /// already held is served without the network; one fetched now is kept for a later run.
+    /// Bytes fetched count into `fetch_stats`, held ones do not.
+    fn next_planned_article(&self) -> Option<FetchedDonorArticle> {
+        let slot = self.prefetch_plan.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
+        let message_id = match slot {
+            Some(PrefetchSlot::Held(hit)) => return Some(hit),
+            Some(PrefetchSlot::Fetching(id)) => Some(id),
+            None => None,
+        };
+        let fetched = self.batch_fetcher.next()?;
+        self.fetch_stats.lock().unwrap_or_else(|e| e.into_inner()).bytes += fetched.data.len() as u64;
+        let article = FetchedDonorArticle {
+            success: fetched.success,
+            offset: fetched.offset,
+            file_size: fetched.file_size,
+            data: fetched.data,
+        };
+        if let (true, Some(id)) = (article.success, message_id) {
+            keep_batched(&id, article.clone());
+        }
+        Some(article)
+    }
+
     pub fn new(
         live_mode: bool,
         nzb_id: i32,
@@ -479,6 +640,7 @@ impl NzbgetRsStreamRepairCtrl {
             // batch fetchers that borrow in bulk stay on the main pool
             fetcher: ArticleFetcher::new(crate::light_pool::light(nntp_host)),
             batch_fetcher: BatchFetcherPool::new(nntp_host),
+            prefetch_plan: Mutex::new(std::collections::VecDeque::new()),
             timed_out: Arc::new(AtomicBool::new(false)),
             progress_bytes: Arc::new(AtomicI64::new(0)),
             checking_donor: Arc::new(AtomicI32::new(0)),
@@ -660,6 +822,15 @@ impl NzbgetRsStreamRepairCtrl {
                 password: host
                     .nzb_get_param(cand, b"*Unpack:Password")
                     .map_or_else(Vec::new, |p| cstr::until_nul(&p).to_vec()),
+                other_container: other_container(
+                    host.nzb_get_param(cand, b"DupeKind").as_deref(),
+                    host.nzb_get_param(cand, b"DupeSampled").as_deref(),
+                ),
+                same_video_label: same_video_label(
+                    host.nzb_get_param(cand, crate::donorkind::KIND_PARAM).as_deref(),
+                    host.nzb_get_param(cand, b"DupeKind").as_deref(),
+                    host.nzb_get_param(cand, crate::dupesearch_coord::VIDEO_PARAM).as_deref(),
+                ),
             },
         ))
     }
@@ -802,6 +973,8 @@ impl NzbgetRsStreamRepairCtrl {
             queued_filename: Vec<u8>,
             info_name: Vec<u8>,
             password: Vec<u8>,
+            other_container: bool,
+            same_video_label: bool,
         }
         let mut cand_rows: Vec<CandRow> = Vec::new();
         for (from_history, count) in [(false, queue_count), (true, history_count)] {
@@ -825,6 +998,8 @@ impl NzbgetRsStreamRepairCtrl {
                     queued_filename: cand.queued_filename,
                     info_name: cand.name,
                     password: cand.password,
+                    other_container: cand.other_container,
+                    same_video_label: cand.same_video_label,
                 });
             }
         }
@@ -845,9 +1020,12 @@ impl NzbgetRsStreamRepairCtrl {
                 continue;
             }
             donors.push(DonorSource {
+                id: row.id,
                 queued_filename: row.queued_filename,
                 info_name: row.info_name,
                 password: row.password,
+                other_container: row.other_container,
+                same_video_label: row.same_video_label,
             });
         }
 
@@ -1297,6 +1475,9 @@ impl NzbgetRsStreamRepairCtrl {
             if !any_holes {
                 break;
             }
+            if donor.other_container {
+                continue;
+            }
 
             let Some(donor_nzb) = self.parse_donor(q, &donor.queued_filename, &opts.par_ignore_ext)
             else {
@@ -1394,31 +1575,23 @@ impl NzbgetRsStreamRepairCtrl {
                     let Some(df) = self.donor_files.get(donor_file_index as usize) else {
                         return;
                     };
-                    let mut requests = Vec::with_capacity(part_indices.len());
-                    for &pi in part_indices {
-                        if pi >= 0 {
-                            if let Some(msg_id) = df.article_msg_ids.get(pi as usize) {
-                                requests.push(BatchRequest {
-                                    message_id: msg_id.clone(),
-                                    groups: Arc::clone(&df.groups),
-                                });
-                            }
-                        }
-                    }
+                    let ids = part_indices
+                        .iter()
+                        .filter(|&&pi| pi >= 0)
+                        .filter_map(|&pi| df.article_msg_ids.get(pi as usize))
+                        .map(|id| (id.clone(), Arc::clone(&df.groups)))
+                        .collect();
+                    let (requests, plan) = plan_prefetch(ids);
+                    *self.ctrl.prefetch_plan.lock().unwrap_or_else(|e| e.into_inner()) = plan;
                     self.ctrl.batch_fetcher.begin(requests);
                 }
 
                 fn next_article(&mut self) -> Option<FetchedDonorArticle> {
-                    let fetched = self.ctrl.batch_fetcher.next()?;
-                    Some(FetchedDonorArticle {
-                        success: fetched.success,
-                        offset: fetched.offset,
-                        file_size: fetched.file_size,
-                        data: fetched.data,
-                    })
+                    self.ctrl.next_planned_article()
                 }
 
                 fn cancel_remaining(&mut self) {
+                    self.ctrl.prefetch_plan.lock().unwrap_or_else(|e| e.into_inner()).clear();
                     self.ctrl.batch_fetcher.cancel_remaining();
                 }
 
@@ -1773,47 +1946,43 @@ impl NzbgetRsStreamRepairCtrl {
                     let Some(df) = self.donor_files.get(member_index as usize) else {
                         return;
                     };
-                    let mut requests = Vec::with_capacity(part_indices.len());
-                    for &pi in part_indices {
-                        if pi >= 0 {
-                            if let Some(msg_id) = df.article_msg_ids.get(pi as usize) {
-                                requests.push(BatchRequest {
-                                    message_id: msg_id.clone(),
-                                    groups: Arc::clone(&df.groups),
-                                });
-                            }
-                        }
-                    }
+                    let ids = part_indices
+                        .iter()
+                        .filter(|&&pi| pi >= 0)
+                        .filter_map(|&pi| df.article_msg_ids.get(pi as usize))
+                        .map(|id| (id.clone(), Arc::clone(&df.groups)))
+                        .collect();
+                    let (requests, plan) = plan_prefetch(ids);
                     {
                         let mut st = self.ctrl.fetch_stats.lock().unwrap_or_else(|e| e.into_inner());
                         st.count_batch(requests.len(), false);
                     }
+                    *self.ctrl.prefetch_plan.lock().unwrap_or_else(|e| e.into_inner()) = plan;
                     self.ctrl.batch_fetcher.begin(requests);
                 }
 
                 fn begin_donor_prefetch_multi(&mut self, parts: &[(i32, i32)]) -> bool {
-                    let mut requests = Vec::with_capacity(parts.len());
+                    let mut ids = Vec::with_capacity(parts.len());
                     for &(member, part) in parts {
                         let msg = usize::try_from(member)
                             .ok()
                             .and_then(|m| self.donor_files.get(m))
                             .and_then(|df| {
                                 let id = df.article_msg_ids.get(usize::try_from(part).ok()?)?;
-                                Some(BatchRequest {
-                                    message_id: id.clone(),
-                                    groups: Arc::clone(&df.groups),
-                                })
+                                Some((id.clone(), Arc::clone(&df.groups)))
                             });
                         // Every part must map to a request, or the delivery order would shift.
-                        let Some(request) = msg else {
+                        let Some(id) = msg else {
                             return false;
                         };
-                        requests.push(request);
+                        ids.push(id);
                     }
+                    let (requests, plan) = plan_prefetch(ids);
                     {
                         let mut st = self.ctrl.fetch_stats.lock().unwrap_or_else(|e| e.into_inner());
                         st.count_batch(requests.len(), true);
                     }
+                    *self.ctrl.prefetch_plan.lock().unwrap_or_else(|e| e.into_inner()) = plan;
                     self.ctrl.batch_fetcher.begin(requests);
                     true
                 }
@@ -1823,22 +1992,14 @@ impl NzbgetRsStreamRepairCtrl {
                     // ending during it must still widen it.
                     self.ctrl.widen_when_drained(self.q);
                     let started = std::time::Instant::now();
-                    let fetched = self.ctrl.batch_fetcher.next();
-                    {
-                        let mut st = self.ctrl.fetch_stats.lock().unwrap_or_else(|e| e.into_inner());
-                        st.waited += started.elapsed();
-                        st.bytes += fetched.as_ref().map_or(0, |f| f.data.len() as u64);
-                    }
-                    let fetched = fetched?;
-                    Some(FetchedDonorArticle {
-                        success: fetched.success,
-                        offset: fetched.offset,
-                        file_size: fetched.file_size,
-                        data: fetched.data,
-                    })
+                    let fetched = self.ctrl.next_planned_article();
+                    let mut st = self.ctrl.fetch_stats.lock().unwrap_or_else(|e| e.into_inner());
+                    st.waited += started.elapsed();
+                    fetched
                 }
 
                 fn cancel_donor_prefetch(&mut self) {
+                    self.ctrl.prefetch_plan.lock().unwrap_or_else(|e| e.into_inner()).clear();
                     self.ctrl.batch_fetcher.cancel_remaining();
                 }
 
@@ -1849,18 +2010,17 @@ impl NzbgetRsStreamRepairCtrl {
                     let Some(df) = self.donor_files.get(member_index as usize) else {
                         return;
                     };
-                    let requests: Vec<BatchRequest> = df
+                    let ids = df
                         .article_msg_ids
                         .iter()
-                        .map(|msg_id| BatchRequest {
-                            message_id: msg_id.clone(),
-                            groups: Arc::clone(&df.groups),
-                        })
+                        .map(|msg_id| (msg_id.clone(), Arc::clone(&df.groups)))
                         .collect();
+                    let (requests, plan) = plan_prefetch(ids);
                     {
                         let mut st = self.ctrl.fetch_stats.lock().unwrap_or_else(|e| e.into_inner());
                         st.count_batch(requests.len(), false);
                     }
+                    *self.ctrl.prefetch_plan.lock().unwrap_or_else(|e| e.into_inner()) = plan;
                     self.ctrl.batch_fetcher.begin(requests);
                 }
 
@@ -1946,6 +2106,11 @@ impl NzbgetRsStreamRepairCtrl {
             *self.fetch_stats.lock().unwrap_or_else(|e| e.into_inner()) =
                 DonorFetchStats::default();
             let donor_started = std::time::Instant::now();
+            session.set_donor_known_same(
+                dead_nzb_id
+                    .filter(|_| donor.same_video_label)
+                    .and_then(|id| crate::postproc::dead_volume_donor_confirmed(id, donor.id)),
+            );
             session.process_donor(
                 &donor.queued_filename,
                 &donor.info_name,
@@ -1984,6 +2149,16 @@ impl NzbgetRsStreamRepairCtrl {
                         confirmed,
                     );
                 }
+                // Lends unchecked later only while no check found its video different, and only
+                // when the match was a check of the video itself.
+                if let (true, false, Some(size)) =
+                    (confirmed, session.donor_differed(), session.video_confirmed_size())
+                {
+                    crate::postproc::note_dead_volume_donor_confirmed(id, donor.id, size);
+                }
+            }
+            if let (Some(id), true) = (dead_nzb_id, session.donor_differed()) {
+                crate::postproc::forget_dead_volume_donor_confirmed(id, donor.id);
             }
         }
     }
@@ -3006,29 +3181,68 @@ fn release_completed_holds(dest_dir: &[u8], targets: &[RepairTarget]) {
 mod tests {
     use super::*;
 
+    /// The memos are process-wide: their tests take turns.
+    static MEMO_TESTS: Mutex<()> = Mutex::new(());
+
     #[test]
-    fn a_donor_article_fetched_once_is_kept_for_the_next_wave() {
-        let id = b"<first-article-cache-test@x>".to_vec();
-        assert!(recent_single(&id).is_none());
-        let article = FetchedDonorArticle { success: true, offset: 0, file_size: 10, data: vec![1, 2, 3] };
-        keep_single(&id, article.clone());
-        assert_eq!(recent_single(&id).map(|a| a.data), Some(vec![1, 2, 3]));
-        // Bounded: old ones make way.
-        for i in 0..RECENT_SINGLES_MAX {
-            keep_single(format!("<filler-{i}@x>").as_bytes(), article.clone());
+    fn a_batch_serves_held_articles_without_asking_for_them_again() {
+        let _turn = MEMO_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let held = b"<plan-held@x>".to_vec();
+        let fresh = b"<plan-fresh@x>".to_vec();
+        let article = FetchedDonorArticle { success: true, offset: 0, file_size: 3, data: vec![7, 8, 9] };
+        keep_batched(&held, article);
+        let groups = Arc::new(vec![b"alt.binaries.test".to_vec()]);
+        let (requests, plan) =
+            plan_prefetch(vec![(fresh.clone(), Arc::clone(&groups)), (held.clone(), groups)]);
+        // Only the article not held goes to the network; delivery keeps the asked order.
+        assert_eq!(requests.iter().map(|r| r.message_id.clone()).collect::<Vec<_>>(), vec![fresh.clone()]);
+        assert!(matches!(plan.front(), Some(PrefetchSlot::Fetching(id)) if *id == fresh));
+        assert!(matches!(plan.back(), Some(PrefetchSlot::Held(a)) if a.data == vec![7, 8, 9]));
+        // A batch of many articles never pushes the headers' singles out.
+        let header = b"<plan-header@x>".to_vec();
+        keep_single(&header, FetchedDonorArticle { success: true, offset: 0, file_size: 1, data: vec![1] });
+        for i in 0..RECENT_SINGLES_MAX * 2 {
+            keep_batched(
+                format!("<plan-filler-{i}@x>").as_bytes(),
+                FetchedDonorArticle { success: true, offset: 0, file_size: 1, data: vec![0] },
+            );
         }
-        assert!(recent_single(&id).is_none());
-        assert!(RECENT_SINGLES.lock().unwrap().len() <= RECENT_SINGLES_MAX);
-        // Bounded in bytes too, and a huge article is never kept.
-        let big = FetchedDonorArticle { success: true, offset: 0, file_size: 1, data: vec![0; RECENT_SINGLES_BYTES / 16 + 1] };
-        keep_single(b"<huge@x>", big);
-        assert!(recent_single(b"<huge@x>").is_none());
-        let chunk = FetchedDonorArticle { success: true, offset: 0, file_size: 1, data: vec![0; RECENT_SINGLES_BYTES / 16] };
-        for i in 0..40 {
-            keep_single(format!("<chunk-{i}@x>").as_bytes(), chunk.clone());
-        }
-        let held: usize = RECENT_SINGLES.lock().unwrap().iter().map(|(_, a)| a.data.len()).sum();
-        assert!(held <= RECENT_SINGLES_BYTES);
+        assert!(recent_single(&header).is_some());
+    }
+
+    #[test]
+    fn only_a_label_of_the_same_video_lets_a_confirmation_carry() {
+        assert!(same_video_label(None, Some(b"twin"), None));
+        assert!(same_video_label(None, Some(b"alt"), None));
+        // A fleet kind `twin` is a twin of some fleet member, not necessarily of this download.
+        assert!(!same_video_label(Some(b"twin"), None, None));
+        assert!(same_video_label(Some(b"borrowable"), None, Some(b"same")));
+        // A packing kind alone proves nothing of the video.
+        assert!(!same_video_label(Some(b"borrowable"), None, None));
+        assert!(!same_video_label(Some(b"borrowable"), None, Some(b"unverified")));
+        assert!(!same_video_label(Some(b"borrowable-encrypted"), None, Some(b"differ")));
+        assert!(!same_video_label(Some(b"borrowable-encrypted"), None, None));
+        assert!(same_video_label(Some(b"unknown"), None, Some(b"same")));
+        assert!(!same_video_label(Some(b"borrowable"), Some(b"container"), None));
+        assert!(!same_video_label(Some(b"borrowable"), Some(b"other"), None));
+        assert!(!same_video_label(None, Some(b"twin:2/3"), None));
+        assert!(!same_video_label(Some(b"unknown"), None, None));
+        assert!(!same_video_label(None, None, None));
+    }
+
+    #[test]
+    fn copies_whose_files_differ_are_known_by_twinchecks_labels() {
+        assert!(other_container(Some(b"container"), None));
+        assert!(other_container(Some(b"other"), None));
+        assert!(other_container(Some(b"twin:2/3"), None));
+        assert!(other_container(Some(b"alt"), None));
+        assert!(other_container(Some(b"alt"), Some(b"rerar:2")));
+        // The same files cut into other article sizes: compared as files, after sampling.
+        assert!(!other_container(Some(b"alt"), Some(b"samefiles")));
+        // A proven twin, and copies TwinCheck has not labelled (fleet kinds prove nothing of
+        // the files), keep the whole-file pass.
+        assert!(!other_container(Some(b"twin"), None));
+        assert!(!other_container(None, None));
     }
 
     #[test]

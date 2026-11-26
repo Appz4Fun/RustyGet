@@ -530,6 +530,95 @@ Review fixes (76a80014 review):
   `fleet-downloads.js`) and `docs/rust-migration/dependency-sources.json`
   records its new bytes; the NzbDir summary never cuts a UTF-8 character.
 
+## Failover continues the extraction (failover-continue, 2026-11-25)
+
+The goal: when the primary dies part way and a twin or an alt of the same
+video can take over, the extraction that runs carries on where it is. The
+release is never downloaded or extracted again from its first byte, and
+nothing before the frontier is fetched from the backup (see the limits for
+what is still read twice).
+
+How: the download that extracts stays the one that downloads. What it lost
+from its frontier to the end is lent by the backup, which stays held (fleet)
+or in history and is never downloaded as a whole:
+
+- a twin (proven: its par2 file list agrees, or sampled articles at the same
+  positions are byte-identical) lends its articles one for one through the
+  article fallback;
+- an alt (another stored container, RAR 1.5-4 or RAR5, other volume and
+  article sizes, or AES with the password from its nzb) lends the bytes of the
+  video inside through the payload map (`ContentMapper::build_map_with_tls`):
+  every dead volume to the end of the set is rebuilt around the borrowed bytes
+  and handed to direct unpack as it is borrowed.
+
+What made a dead tail fail before, now fixed:
+
+- After the first borrow run checked the backup's video against the
+  download's own bytes, later runs had nothing of the download's own around a
+  hole to compare (the rest of the set is dead), so the backup was refused as
+  "content identity not confirmed". A backup confirmed once now stays
+  confirmed for that download, for its video only, only when no check of
+  that run found it different, and only for a backup labelled as holding the
+  same video (TwinCheck `twin`/`alt`, or a fleet intake that read the video
+  inside, `DupeVideo=same`; a packing kind alone is not enough, nor a fleet
+  kind `twin`, which is a twin of some fleet member, not necessarily of this
+  download), for the payload size it was made for, and never for an encrypted
+  download (its check cannot tell bytes apart); any other backup must match in
+  every run (`postproc::dead_volume_donor_confirmed`, keyed
+  by the backup's NZBID; `CrossPackRepairSession::set_donor_known_same`); a
+  check that compares in full and differs still refuses it.
+- A dead volume's headers are rebuilt from a sibling; the nearest sibling may
+  have lost its own end block (the volume the primary died in). A sibling laid
+  out alike whose headers and tail all arrived is taken instead.
+- A dead last RAR5 volume: rar 7 pads middle volumes to their size behind a
+  quick-open record, so a sibling's tail is longer than the last volume's end
+  block. par2's length of the last volume is matched against the bare end
+  block too (`deadvolume::plan_with_last`).
+- Donor articles one borrow run, a check or the next run fetched moments ago
+  are served from memory in a batch instead of being fetched again
+  (`streamrepair_coord::plan_prefetch`, for borrow, check and whole-volume
+  batches; batched articles are kept apart from the archive headers so a long
+  borrow never pushes those out). The memory is bounded (64 articles and 48 MB
+  each for batched articles and for header singles,
+  120 s, checked whenever a repair run fetches or ends), so on a large set this narrows
+  refetches rather than ruling them out; the process-wide body cache of
+  nntp-rs is meant to close the rest.
+- A copy whose files TwinCheck proved different (`container`, `other`, a
+  near twin, or `alt` unless its samples found the same files cut into other
+  article sizes) is never compared or copied as whole files (the whole-file
+  pass compared such a copy's volume with a damaged volume of about its size):
+  container bytes of alts never match. Fleet kinds alone prove nothing of the
+  files (a repost in other article sizes is `borrowable` too), so those
+  copies keep the whole-file pass, which samples before it copies.
+
+When the backup cannot continue a running extraction, the download fails
+over as before, and the log says why first: "Backup B cannot continue the
+extraction of A: <reason>; failing over starts it from its first byte"
+(its video failed the check or is held compressed, live borrowing off,
+nothing showing it is the same video).
+
+Tests: functional `failcont_{twin,alt,aes}{25,50,90}` (the primary dies at
+25, 50 and 90% of its data), `failcont_fleet{twin,alt,aes}` (the backup held
+in the queue by its fleet), `failcont_twinlabel` (a twin known only from
+TwinCheck's label), `failcont_othervideo` (another video labelled
+`container` never lends a byte) and `failcont_compressed` (the clean
+fallback).
+Each continuing scenario checks the movie's bytes, that direct unpack of the
+primary succeeded and was used (never cancelled, never run for the backup),
+that no data article was fetched twice, that a twin served no article before
+the frontier, and that the backup served at most what lies past the frontier
+plus its headers and two articles. The fallback scenarios check the release
+completes from the backup and, for another video, that nothing was lent.
+
+Limits: an alt in a fleet grouped by name whose video the intake did not
+read (labelled `container`) must match in every borrow run, so its dead
+tail is lent only while the download's own bytes still border the holes;
+a dead last volume of a RAR 1.5-4 set is not rebuilt (its header
+carries the whole file's checksum); compressed backups fall back to a full
+failover until zipfast's `fill_lost` (#288) and `open_at` for compressed
+members are wired in; TwinCheck still reads the download's own par2 index
+from the server once more.
+
 ## Done when (acceptance tests)
 
 | Done when | Test |

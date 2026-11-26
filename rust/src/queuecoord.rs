@@ -343,7 +343,8 @@ pub fn eval_dead_download(
 /// A backup whose kind is not known yet (an alt nested in another container, say: its first
 /// file is an archive, not the video) lends too once a borrow from it is underway, or while
 /// direct unpack of the download runs (`extracting`) if it was labelled the same video in
-/// another container (`labelled_alt`, see `donorkind::unknown_kind_is_labelled_alt`): the
+/// another container, or a proven twin (`labelled_same_video`, see `backup_may_lend_while_extracting`;
+/// a `container` label counts too, the borrow checks the video): the
 /// first dead volume fails many articles in a row before it ends, which is before any borrow
 /// can start, and failing over then would throw the running extraction away. An unlabelled
 /// backup still fails over.
@@ -362,7 +363,7 @@ pub fn alt_covers_lost_articles(
     projected_permille: i32,
     borrow_underway: bool,
     extracting: bool,
-    labelled_alt: bool,
+    labelled_same_video: bool,
     backup_mismatched: bool,
 ) -> bool {
     use crate::donorkind::DonorKind;
@@ -370,7 +371,7 @@ pub fn alt_covers_lost_articles(
         backup_kind,
         DonorKind::Twin | DonorKind::Borrowable | DonorKind::EncryptedBorrowable
     )
-        || ((borrow_underway || (extracting && labelled_alt))
+        || ((borrow_underway || (extracting && labelled_same_video))
             && backup_kind != DonorKind::Unborrowable);
     // While direct unpack runs, failing over would throw its extraction away and start the
     // backup from its first byte: the download stays however much of it is gone, and every
@@ -384,6 +385,71 @@ pub fn alt_covers_lost_articles(
         && own_kind != DonorKind::Unborrowable
         && backup_lends
         && (extracting || mostly_alive)
+}
+
+/// Why `backup` cannot carry on the running (or kept) extraction of `nzb`, which failing
+/// over to it throws away (failover-continue: wherever it can, the backup lends the rest
+/// instead, see [`alt_covers_lost_articles`]). Asked only while an extraction runs.
+fn cannot_continue_reason(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    opts: &crate::queuesubsys_host::GlobalOptsSnap,
+    nzb: &crate::queuesubsys_host::NzbSnap,
+    backup: &crate::queuesubsys_host::NzbSnap,
+) -> &'static str {
+    use crate::donorkind::DonorKind;
+    let kind = |ptr| {
+        DonorKind::from_param(host.nzb_get_param(ptr, crate::donorkind::KIND_PARAM).as_deref())
+    };
+    if !live_borrowing(opts) {
+        "live borrowing is off (it needs DupeArticleFallback=live, DirectUnpack and no RawArticle)"
+    } else if crate::postproc::dead_volume_donor_cannot_lend(nzb.id, &backup.queued_filename) {
+        "its video failed the check against the download's, or it holds the video compressed"
+    } else if kind(backup.ptr) == DonorKind::Unborrowable {
+        "it holds the video compressed (or encrypted with no password), which live repair cannot lend from"
+    } else if kind(nzb.ptr) == DonorKind::Unborrowable {
+        "the download's own archive cannot be borrowed into"
+    } else if host
+        .nzb_get_param(backup.ptr, b"DupeKind")
+        .is_some_and(|k| k.trim_ascii() == b"other")
+    {
+        "TwinCheck found another video in it"
+    } else if host
+        .nzb_get_param(backup.ptr, b"DupeKind")
+        .is_some_and(|k| k.trim_ascii().starts_with(b"twin:"))
+    {
+        "it is a near twin (only some of its files agree), which proves nothing of the video"
+    } else if kind(backup.ptr) == DonorKind::Unknown && !backup_may_lend_while_extracting(host, backup.ptr) {
+        "nothing shows it holds the same video"
+    } else {
+        "its labels do not show it can lend what lies past the frontier"
+    }
+}
+
+/// Logs why the backup a download fails over to cannot continue its running extraction (see
+/// [`cannot_continue_reason`]): it starts from its first byte. Nothing is logged without a
+/// running extraction (nothing to continue) or without a reason.
+fn note_cannot_continue(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    opts: &crate::queuesubsys_host::GlobalOptsSnap,
+    nzb: &crate::queuesubsys_host::NzbSnap,
+    backup: &crate::queuesubsys_host::NzbSnap,
+) {
+    if nzb.direct_unpack_status != DirectUnpackStatus::Running {
+        return;
+    }
+    let why = cannot_continue_reason(host, opts, nzb, backup);
+    let mut msg = b"Backup ".to_vec();
+    msg.extend_from_slice(&backup.name);
+    msg.extend_from_slice(b" cannot continue the extraction of ");
+    msg.extend_from_slice(&nzb.name);
+    msg.extend_from_slice(b": ");
+    msg.extend_from_slice(why.as_bytes());
+    msg.extend_from_slice(b"; failing over starts it from its first byte");
+    host.nzb_print_message(
+        nzb.ptr,
+        crate::queuesubsys_host::MK_INFO,
+        &crate::releasename::log_name(&msg),
+    );
 }
 
 /// True while direct unpack of `nzb` runs and `backup` can feed the rest of it (see
@@ -408,17 +474,29 @@ fn backup_continues_extraction(
             0,
             crate::postproc::dead_volume_borrow_underway(nzb.id),
             true,
-            backup_labelled_alt(host, backup.ptr),
+            backup_may_lend_while_extracting(host, backup.ptr),
             backup_cannot_lend(host, nzb, backup),
         )
 }
 
-/// Whether `backup_ptr` was labelled the same video in another container (see
-/// `donorkind::unknown_kind_is_labelled_alt`).
-pub(crate) fn backup_labelled_alt(
+/// Whether `backup_ptr` carries a label that makes keeping a running extraction for it worth it:
+/// a twin TwinCheck proved (`DupeKind=twin`), the same video in another container, or another
+/// container whose video is not verified yet (`container`; see
+/// `donorkind::unknown_kind_is_labelled_alt`). Not proof of the same video: each borrow checks
+/// the video before it lends.
+pub(crate) fn backup_may_lend_while_extracting(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     backup_ptr: NzbRef,
 ) -> bool {
+    // A copy TwinCheck proved a twin (`twin`: every par2 file agrees) holds the same files, so
+    // the same video: it lends whatever its fleet kind (none for a plain dupe-key copy). A near
+    // twin (`twin:N/M`, only some files agree) is not a twin and proves nothing of the video.
+    if host
+        .nzb_get_param(backup_ptr, b"DupeKind")
+        .is_some_and(|k| k.trim_ascii() == b"twin")
+    {
+        return true;
+    }
     crate::donorkind::unknown_kind_is_labelled_alt(
         host.nzb_get_param(backup_ptr, crate::donorkind::KIND_PARAM).as_deref(),
         host.nzb_get_param(backup_ptr, b"DupeKind").as_deref(),
@@ -2094,6 +2172,7 @@ impl NzbgetRsQueueCoordinator {
         {
             return;
         }
+        note_cannot_continue(host, &opts, &nzb, &backup_nzb);
         let mut msg = b"Failing over ".to_vec();
         msg.extend_from_slice(&nzb.name);
         msg.extend_from_slice(b" to duplicate ");
@@ -4898,7 +4977,7 @@ impl NzbgetRsQueueCoordinator {
                     nzb.health,
                     crate::postproc::dead_volume_borrow_underway(nzb.id),
                     nzb.direct_unpack_status == DirectUnpackStatus::Running,
-                    backup_labelled_alt(host, backup_nzb.ptr),
+                    backup_may_lend_while_extracting(host, backup_nzb.ptr),
                     backup_cannot_lend(host, nzb, &backup_nzb),
                 ) && (nzb.direct_unpack_status == DirectUnpackStatus::Running
                     || !download_hopeless(
@@ -4928,6 +5007,7 @@ impl NzbgetRsQueueCoordinator {
                     backup_nzb.dupe_score,
                 )
             {
+                note_cannot_continue(host, &opts, &nzb, &backup_nzb);
                 let mut msg = b"Failing over ".to_vec();
                 msg.extend_from_slice(&nzb.name);
                 msg.extend_from_slice(b" to duplicate ");
@@ -5019,6 +5099,7 @@ impl NzbgetRsQueueCoordinator {
                     {
                         g.remove(&nzb.id);
                     }
+                    note_cannot_continue(host, &opts, &nzb, &backup_nzb);
                     let mut msg = b"Failing over ".to_vec();
                     msg.extend_from_slice(&nzb.name);
                     msg.extend_from_slice(b" to duplicate ");
@@ -5150,7 +5231,7 @@ impl NzbgetRsQueueCoordinator {
             eval.projected,
             crate::postproc::dead_volume_borrow_underway(nzb.id),
             nzb.direct_unpack_status == DirectUnpackStatus::Running,
-            backup_labelled_alt(host, backup_nzb.ptr),
+            backup_may_lend_while_extracting(host, backup_nzb.ptr),
             backup_cannot_lend(host, &nzb, &backup_nzb),
         ) {
             if note_kept_for_borrowing(nzb.id) {
@@ -5165,7 +5246,7 @@ impl NzbgetRsQueueCoordinator {
                 );
                 msg.extend_from_slice(&backup_nzb.name);
                 msg.extend_from_slice(
-                    b" holds the same video and lends the lost parts, so the extraction carries on instead of starting over",
+                    b" lends the lost parts (each borrow checks its video first), so the extraction carries on instead of starting over",
                 );
                 host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_INFO, &msg);
             }
@@ -5197,6 +5278,7 @@ impl NzbgetRsQueueCoordinator {
             ) {
                 return;
             }
+            note_cannot_continue(host, &opts, &nzb, &backup_nzb);
             let mut msg = b"Failing over ".to_vec();
             msg.extend_from_slice(&nzb.name);
             msg.extend_from_slice(b" to duplicate ");
@@ -5243,6 +5325,7 @@ impl NzbgetRsQueueCoordinator {
             {
                 return;
             }
+            note_cannot_continue(host, &opts, &nzb, &backup_nzb);
             let mut msg = b"Failing over ".to_vec();
             msg.extend_from_slice(&nzb.name);
             msg.extend_from_slice(b" to duplicate ");
@@ -5411,6 +5494,7 @@ impl NzbgetRsQueueCoordinator {
             return false;
         }
 
+        note_cannot_continue(host, &opts, &nzb, &backup_nzb);
         let mut msg = b"Failing over ".to_vec();
         msg.extend_from_slice(&nzb.name);
         msg.extend_from_slice(b" to duplicate ");

@@ -9480,6 +9480,44 @@ fn plan_dead_fills(
                         break;
                     };
                     let name = volume_name(i as u32 + 1);
+                    // OPEN ITEM (zipfast): RAR volume framing knowledge kept in RustyGet (with
+                    // deadvolume.rs; ~/rustyget-requests/library-migration.md Z-m/Z-p).
+                    // The headers and tail are copied from the sibling: one that lost articles
+                    // there cannot give them (a primary that died part way through a volume lost
+                    // that volume's end block). Another sibling laid out alike (the same size,
+                    // header length and part, so the same RAR5 volume-number length too) gives
+                    // the same frame; the nearest whole one is taken.
+                    let framing_whole = |j: usize| {
+                        let (Some(&m), VolumeState::Readable(g)) = (members_by_index.get(j), &states[j])
+                        else {
+                            return false;
+                        };
+                        let data = g.data_offset..g.data_offset + g.packed_size;
+                        !member_holes.get(m as usize).is_some_and(|holes| {
+                            holes.iter().any(|h| {
+                                h.size > 0 && (h.offset < data.start || h.offset + h.size > data.end)
+                            })
+                        })
+                    };
+                    let template_index = match &states[p.template] {
+                        VolumeState::Readable(t) if !framing_whole(p.template) => {
+                            let alike = |j: usize| {
+                                j != p.template
+                                    && matches!(&states[j], VolumeState::Readable(g2)
+                                        if g2.middle
+                                            && g2.version == t.version
+                                            && g2.size == t.size
+                                            && g2.data_offset == t.data_offset
+                                            && g2.packed_size == t.packed_size)
+                                    && framing_whole(j)
+                            };
+                            (0..states.len())
+                                .filter(|&j| alike(j))
+                                .min_by_key(|&j| j.abs_diff(p.template))
+                                .unwrap_or(p.template)
+                        }
+                        _ => p.template,
+                    };
                     if plans.iter().any(|q| q.index == i) {
                         let scratch = crate::deadvolume::scratch_name(&name);
                         let scratch_path = path_of(&scratch);
@@ -9519,7 +9557,7 @@ fn plan_dead_fills(
                                     offset: 0,
                                     size: p.packed_size,
                                 }];
-                                match (head_lost.get(&i), &states[p.template]) {
+                                match (head_lost.get(&i), &states[template_index]) {
                                     (Some(&size), VolumeState::Readable(t)) => seed_head_lost(
                                         &path_of(&name),
                                         size,
@@ -9535,7 +9573,7 @@ fn plan_dead_fills(
                                             format!(
                                                 " lost its headers: rebuilding them from volume {} \
                                                  and borrowing its {:.1} MB of holes from duplicates",
-                                                p.template + 1,
+                                                template_index + 1,
                                                 stream_repair_bytes_to_mb(total_size(left))
                                             )
                                             .as_bytes(),
@@ -9576,7 +9614,7 @@ fn plan_dead_fills(
                         }));
                         let offered = resumed.is_some().then(|| left.iter().map(|h| h.size).sum());
                         target_holes.push(left);
-                        let template = match states[p.template] {
+                        let template = match states[template_index] {
                             VolumeState::Readable(g) => g,
                             _ => break,
                         };
@@ -9584,8 +9622,8 @@ fn plan_dead_fills(
                             member,
                             target,
                             volume_path: path_of(&name),
-                            template_member: members_by_index[p.template],
-                            template_index: p.template,
+                            template_member: members_by_index[template_index],
+                            template_index,
                             index: i,
                             version: template.version,
                             packed: p.packed_size,
@@ -9791,6 +9829,16 @@ pub struct CrossPackRepairSession {
     /// when its content identity was confirmed, `Some(false)` when a check that compared in
     /// full did not match or its media payload has another size, `None` otherwise.
     donor_identity: Option<bool>,
+    /// Set by the caller before [`Self::process_donor`]: an earlier run of this download
+    /// compared the donor's video against bytes the download holds and found it the same (see
+    /// [`Self::set_donor_known_same`]).
+    donor_known_same: bool,
+    /// The payload size the earlier confirmation was made for.
+    donor_known_size: Option<i64>,
+    /// A check of the video of the donor of the last [`Self::process_donor`] call differed.
+    donor_differed: bool,
+    /// A check of the media set of the donor of the last [`Self::process_donor`] call matched.
+    video_confirmed: bool,
     /// Whether the donor of the last [`Self::process_donor`] call holds its media payload
     /// compressed, which only decompression can lend from (see [`Self::donor_compressed`]).
     donor_compressed: bool,
@@ -10038,6 +10086,10 @@ impl CrossPackRepairSession {
             dead_nzb_id: dead_context.nzb_id.unwrap_or(0),
             materialize_dead: dead_context.materialize,
             donor_identity: None,
+            donor_known_same: false,
+            donor_known_size: None,
+            donor_differed: false,
+            video_confirmed: false,
             donor_compressed: false,
             lzma2_compressed_throughout: false,
             lzma2_other_size: false,
@@ -10065,6 +10117,82 @@ impl CrossPackRepairSession {
         self.donor_identity
     }
 
+    /// Tells the next [`Self::process_donor`] call that an earlier run of this download already
+    /// confirmed the donor's video as the same, by comparing its bytes with bytes the download
+    /// holds (`postproc::dead_volume_donor_confirmed`). A probe that then cannot run in full
+    /// (`DonorCheck::Inconclusive`) still lets it lend: when a primary dies for good, every hole
+    /// after the first runs to the end of the video with nothing of its own left around it to
+    /// compare (failover-continue: the dead tail is borrowed to the end instead of the release
+    /// being downloaded and extracted again from its first byte). A probe that compares in full
+    /// and differs still refuses the donor.
+    pub fn set_donor_known_same(&mut self, known: Option<i64>) {
+        self.donor_known_same = known.is_some();
+        self.donor_known_size = known;
+    }
+
+    /// The payload size of the video set a match of the last [`Self::process_donor`] call was
+    /// for (see [`Self::video_confirmed`]).
+    pub fn video_confirmed_size(&self) -> Option<i64> {
+        self.video_confirmed
+            .then(|| self.video_set())
+            .flatten()
+            .and_then(|i| self.repair_sets.get(i)?.map.as_ref().map(ContentMap::inner_size))
+    }
+
+    /// Whether a probe verdict lets the donor lend set `repair_set_idx` (see
+    /// [`Self::set_donor_known_same`]). An earlier confirmation is about the video only: it
+    /// never stands in for a check of a sample, an extra or another file of the release.
+    fn donor_accepted(&self, repair_set_idx: usize, check: DonorCheck) -> bool {
+        check == DonorCheck::Same
+            || (check == DonorCheck::Inconclusive
+                && self.donor_known_same
+                && !self.donor_differed
+                && self.is_video_set(repair_set_idx)
+                && self.repair_sets.get(repair_set_idx).and_then(|r| r.map.as_ref()).is_some_and(|m| {
+                    // An encrypted download's check never says "differs" (it compares
+                    // ciphertext it cannot tell apart), so nothing stands in for it there; and a
+                    // confirmation is for the payload it was made for, by size.
+                    !m.encrypted() && self.donor_known_size == Some(m.inner_size())
+                }))
+    }
+
+    /// Whether set `repair_set_idx` is the release's video as this run found it (the media
+    /// set): a confirmation is recorded for, and stands in for a check of, that set only.
+    fn is_video_set(&self, repair_set_idx: usize) -> bool {
+        self.video_set() == Some(repair_set_idx)
+    }
+
+    /// The set that holds the release's video: the media set this run found, else (dead volumes
+    /// are borrowed through a set of scratch files of their own, which the media search does
+    /// not see) the mapped set with the largest payload. A sample or side file is never the
+    /// largest payload of a release.
+    fn video_set(&self) -> Option<usize> {
+        let usable = |r: &RepairSetData| r.want.is_none() && r.map.is_some();
+        match self.media_repair_set {
+            Some(media) => self.repair_sets.get(media).filter(|r| usable(r)).map(|_| media),
+            None => self
+                .repair_sets
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| usable(r))
+                .max_by_key(|(_, r)| r.map.as_ref().map_or(0, ContentMap::inner_size))
+                .map(|(i, _)| i),
+        }
+    }
+
+    /// True when a check of the video set itself (not a sample or side file) matched in the last
+    /// [`Self::process_donor`] call.
+    pub fn video_confirmed(&self) -> bool {
+        self.video_confirmed
+    }
+
+    /// True when a check of the donor of the last [`Self::process_donor`] call compared the
+    /// video in full and found it different, even if another window matched: such a donor is
+    /// never recorded as confirmed (see `streamrepair_coord`).
+    pub fn donor_differed(&self) -> bool {
+        self.donor_differed
+    }
+
     /// True when the donor of the last [`Self::process_donor`] call ran without decompression
     /// and holds its media payload compressed (a zip or RAR not stored, or a 7z whose LZMA2 data
     /// has no raw chunks): its bytes cannot be lent until it is decompressed.
@@ -10090,10 +10218,16 @@ impl CrossPackRepairSession {
         {
             return;
         }
+        if check == DonorCheck::Same && self.is_video_set(repair_set_idx) {
+            self.video_confirmed = true;
+        }
         match check {
             DonorCheck::Same => self.donor_identity = Some(true),
-            DonorCheck::Differs if self.donor_identity.is_none() => {
-                self.donor_identity = Some(false)
+            DonorCheck::Differs => {
+                self.donor_differed = true;
+                if self.donor_identity.is_none() {
+                    self.donor_identity = Some(false)
+                }
             }
             _ => {}
         }
@@ -10112,6 +10246,8 @@ impl CrossPackRepairSession {
         env: &mut dyn CrossPackDonorEnv,
     ) {
         self.donor_identity = None;
+        self.donor_differed = false;
+        self.video_confirmed = false;
         self.donor_compressed = false;
         {
             let mut label = b"Cross-packing repair from duplicate ".to_vec();
@@ -10335,7 +10471,7 @@ impl CrossPackRepairSession {
                     )
                 };
                 self.note_donor_identity(repair_set_idx, check);
-                let verified = check == DonorCheck::Same;
+                let verified = self.donor_accepted(repair_set_idx, check);
                 if !verified {
                     let first_donor_name = &donor_members[donor_set.members[0] as usize].name;
                     let inner_name = self.repair_sets[repair_set_idx]
@@ -11416,7 +11552,7 @@ impl CrossPackRepairSession {
             )
         };
         self.note_donor_identity(repair_set_idx, check);
-        let verified = check == DonorCheck::Same;
+        let verified = self.donor_accepted(repair_set_idx, check);
         if !verified {
             skip(env_cell, b"content identity not confirmed");
             return false;
@@ -11710,7 +11846,7 @@ impl CrossPackRepairSession {
             )
         };
         self.note_donor_identity(repair_set_idx, check);
-        let verified = check == DonorCheck::Same;
+        let verified = self.donor_accepted(repair_set_idx, check);
         if !verified {
             let mut msg = b"Skipping decompression of ".to_vec();
             msg.extend_from_slice(set_name);
@@ -19278,6 +19414,56 @@ mod tests {
             assert!(incomplete_client.messages[0]
                 .contains("Show.part01.rar has missing ranges after all listed articles"));
         }
+    }
+
+    #[test]
+    fn an_earlier_confirmation_lends_only_the_video_and_never_over_a_mismatch() {
+        let temp_root = std::env::temp_dir().join(format!("rg-known-same-{}", std::process::id()));
+        std::fs::create_dir_all(&temp_root).unwrap();
+        let inner: Vec<u8> = (0..32768).map(|i| ((i * 73 + 19) & 0xFF) as u8).collect();
+        let mut part1 = inner[..16384].to_vec();
+        part1[4096..5120].fill(0);
+        std::fs::write(temp_root.join("Show.mkv.001"), &part1).unwrap();
+        std::fs::write(temp_root.join("Show.mkv.002"), &inner[16384..]).unwrap();
+        let dest_bytes = crate::fsops::path_to_bytes(&temp_root).to_vec();
+        let member_names: Vec<&[u8]> = vec![b"Show.mkv.001", b"Show.mkv.002"];
+        let targets = vec![CrossPackTargetInput {
+            filename: b"Show.mkv.001".to_vec(),
+            decoded_file_size: 16384,
+            encoded_size: 0,
+            patch_eligible: true,
+            holes: vec![NzbgetRsByteRange { offset: 4096, size: 1024 }],
+            all_articles_failed: false,
+        }];
+        let mut emit = |_: TargetMessageKind, _: &[u8]| {};
+        let mut session =
+            CrossPackRepairSession::new(&dest_bytes, &member_names, &targets, None, true, None, &mut emit, None)
+                .expect("session should map split archive");
+        assert!(session.donor_accepted(0, DonorCheck::Same));
+        assert!(!session.donor_accepted(0, DonorCheck::Inconclusive));
+        assert!(!session.donor_accepted(0, DonorCheck::Differs));
+        session.media_repair_set = Some(0);
+        // A confirmation made for another payload size carries nothing.
+        session.set_donor_known_same(Some(1));
+        assert!(!session.donor_accepted(0, DonorCheck::Inconclusive));
+        session.set_donor_known_same(Some(32768));
+        // Confirmed earlier: a check that cannot run in full lends the video ...
+        assert!(session.donor_accepted(0, DonorCheck::Inconclusive));
+        // ... but a check that compares and differs still refuses it, and the confirmation
+        // never stands in for another set's check.
+        assert!(!session.donor_accepted(0, DonorCheck::Differs));
+        assert!(!session.donor_accepted(1, DonorCheck::Inconclusive));
+        session.media_repair_set = Some(1);
+        assert!(!session.donor_accepted(0, DonorCheck::Inconclusive));
+        // A run that found no media set takes the largest mapped payload (here the only one).
+        session.media_repair_set = None;
+        assert!(session.donor_accepted(0, DonorCheck::Inconclusive));
+        session.media_repair_set = Some(0);
+        // Once a check of this run found the video different, nothing lends unchecked.
+        session.note_donor_identity(0, DonorCheck::Differs);
+        assert!(session.donor_differed());
+        assert!(!session.donor_accepted(0, DonorCheck::Inconclusive));
+        let _ = std::fs::remove_dir_all(&temp_root);
     }
 
     #[test]

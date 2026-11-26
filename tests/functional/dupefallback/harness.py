@@ -4459,8 +4459,11 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
     used_direct = _grep_log(t, 'Using directly unpacked files')
     # an extraction that started over (persistent session falling back) or stopped at a volume
     # read as it was written
+    # (a persistent session refusing a method it does not handle, AES members, falls back before
+    # it wrote anything: no restart)
     restarts = (_grep_log(t, 'cannot continue from its rebuilt copy') +
-                len(re.findall(r'Unrar: progressive direct unpack \((?!volume count)', _log_text(t))))
+                len(re.findall(r'Unrar: progressive direct unpack \((?!volume count)(?![^\n]*UnsupportedMethod)',
+                               _log_text(t))))
     reads = _live_reads(t)
     as_written = reads[0] if reads else 0.0
     # the dying volume, read as it was written, went on from its rebuilt copy

@@ -8729,6 +8729,27 @@ pub fn nothing_arrived(decoded_file_size: i64, holes: &[NzbgetRsByteRange]) -> b
     holes.iter().map(|h| h.size.max(0)).sum::<i64>() >= decoded_file_size
 }
 
+/// Gaps between lost stretches joined into one run by [`holes_form_one_run`]: an article that
+/// came between failed ones.
+const ONE_TAIL_GAP: i64 = 1 << 20;
+
+/// True when `holes` (video offsets) form one run, gaps under [`ONE_TAIL_GAP`] joined.
+fn holes_form_one_run(holes: &[crate::dupefallback::NzbgetRsByteRange]) -> bool {
+    let mut runs: Vec<(i64, i64)> = holes.iter().map(|h| (h.offset, h.offset + h.size)).collect();
+    runs.sort_unstable();
+    let mut it = runs.into_iter();
+    let Some((_, mut end)) = it.next() else {
+        return false;
+    };
+    for (start, stop) in it {
+        if start > end + ONE_TAIL_GAP {
+            return false;
+        }
+        end = end.max(stop);
+    }
+    true
+}
+
 /// Host callback boundary for [`CrossPackRepairSession::process_donor`].
 pub trait CrossPackDonorEnv {
     fn is_stopped(&mut self) -> bool;
@@ -10272,6 +10293,14 @@ impl CrossPackRepairSession {
         self.dead_fills.iter().any(|d| !d.done)
     }
 
+    /// True when repair set `repair_set_idx`'s lost video bytes form one run (gaps under
+    /// [`ONE_TAIL_GAP`] joined): the tail of a volume that died part way, the frontier. A
+    /// restart from there reads what a dead tail would; scattered holes are left to donors
+    /// that lend by range.
+    fn holes_form_one_run(&self, repair_set_idx: usize) -> bool {
+        holes_form_one_run(&self.repair_sets[repair_set_idx].inner_holes)
+    }
+
     /// Records a donor's identity check against repair set `repair_set_idx`: a confirmed one is
     /// never undone by another set of the same donor that did not match, and an inconclusive
     /// one records nothing. Only a check against the media payload counts: a matching sample or
@@ -10531,7 +10560,11 @@ impl CrossPackRepairSession {
                             // donors that lend by range, which a restart from the first hole
                             // would read nearly whole for (donor order: twins, range alts, then
                             // restarted or whole alts)
-                            && self.has_pending_dead_fills()
+                            // (or a primary cut at its frontier for its alt: everything past
+                            // the cut is a dead tail, holes before it come from the same decode)
+                            && (self.has_pending_dead_fills()
+                                || self.holes_form_one_run(repair_set_idx)
+                                || crate::frontiercut::is_cut(self.dead_nzb_id))
                             && crate::restartlend::earlier(self.dead_nzb_id, &restart_key).is_none()
                             && !env_cell.borrow_mut().is_stopped()
                         {

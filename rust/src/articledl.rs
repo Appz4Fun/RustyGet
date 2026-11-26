@@ -699,7 +699,12 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
             for fi in 0..flen {
                 let fp = qh.nzb_file_at(nzb_ptr, fi);
                 let f = qh.file_snap(fp);
-                if f.cached_articles > 0 && (f.active_downloads == 0 || flush_everything) {
+                // A file a live extraction waits on is written out at once (see `livewrite`).
+                if f.cached_articles > 0
+                    && (f.active_downloads == 0
+                        || flush_everything
+                        || crate::livewrite::wanted(nzb.id, f.id))
+                {
                     let Ok(write_context) = crate::parlive::source_write_context(
                         nzb.id,
                         f.id,
@@ -930,7 +935,7 @@ fn daemon_article_cache_run() {
         if is_stopped && allocated == 0 {
             break;
         }
-        let (should_flush, flush_everything, need_emergency_flush) = article_cache_should_flush(
+        let (mut should_flush, flush_everything, need_emergency_flush) = article_cache_should_flush(
             allocated,
             effective_limit,
             tier,
@@ -939,6 +944,9 @@ fn daemon_article_cache_run() {
             is_stopped,
             direct_write,
         );
+        // A live extraction waits for articles held here: write them out now, not at the next
+        // periodic flush (see `livewrite`).
+        should_flush |= direct_write && allocated > 0 && crate::livewrite::any_wanted();
         if should_flush {
             just_flushed = daemon_article_cache_check_flush(allocated, flush_everything);
             trim_pending |= just_flushed;
@@ -1481,6 +1489,9 @@ struct RsArticleWriter {
     proc_skip_disk_write: bool,
     proc_outfile: Option<BufferedDiskFile>,
     proc_crc: u32,
+    /// Direct write: the (offset, length) of every finished article of the file being
+    /// completed, all in place once its output is flushed (reported to `livewrite`).
+    proc_written: Vec<(u64, u64)>,
     post_crc: u32,
     post_final_path: Vec<u8>,
     post_orig_filename: Vec<u8>,
@@ -1527,6 +1538,7 @@ impl Default for RsArticleWriter {
             proc_skip_disk_write: false,
             proc_outfile: None,
             proc_crc: 0,
+            proc_written: Vec::new(),
             post_crc: 0,
             post_final_path: Vec::new(),
             post_orig_filename: Vec::new(),
@@ -2360,6 +2372,14 @@ impl RsArticleWriter {
         if commit_err {
             self.commit_error = true;
         }
+        self.proc_written = if self.proc_direct_write && !self.proc_skip_disk_write && !commit_err {
+            finished
+                .iter()
+                .filter_map(|m| Some((u64::try_from(m.offset).ok()?, u64::try_from(m.size).ok()?)))
+                .collect()
+        } else {
+            Vec::new()
+        };
         if failed_delta > 0 {
             host.op45(
                 9,
@@ -2776,6 +2796,18 @@ impl RsArticleWriter {
                     ]),
                 );
                 return (false, false);
+            }
+            let written = std::mem::take(&mut self.proc_written);
+            if direct_write && !written.is_empty() {
+                // Every finished article is in place now, the ones held in the cache included:
+                // live extraction reads them before the rename (see `livewrite`).
+                let (nzb_id, file_id) = host.qh.with_locked_queue(|_| {
+                    let file = host.qh.file_snap(host.file_ptr);
+                    (host.qh.nzb_snap(file.nzb_ptr, false).id, file.id)
+                });
+                for (offset, len) in written {
+                    crate::livewrite::written(nzb_id, file_id, offset, len);
+                }
             }
             if !direct_write {
                 let moved = self

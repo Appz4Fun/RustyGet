@@ -481,6 +481,26 @@ def seven_zip_copy_encrypted(files, workdir, password):
                             ['-mhe=on', '-p' + password], method='Copy')
 
 
+def rar5_method_volumes(inner_name, data, volume_size, method, workdir):
+    """Plain RAR5 volumes of ``volume_size`` bytes holding ``inner_name`` =
+    ``data``, packed with rar's ``-m<method>`` (0 store ... 5 best); returns
+    their bytes in order. Callers check HAVE_RAR first; ``workdir`` is a
+    scratch directory the caller creates and removes."""
+    if not HAVE_RAR:
+        raise RuntimeError('rar is not installed')
+    with open(os.path.join(workdir, inner_name), 'wb') as f:
+        f.write(data)
+    subprocess.run([RAR_PATH, 'a', '-idq', '-m%d' % method, '-ma5', '-v%db' % volume_size, 'out.rar',
+                    inner_name], cwd=workdir, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    vols = [n for n in os.listdir(workdir) if n.startswith('out.part') and n.endswith('.rar')]
+    vols.sort(key=lambda n: int(''.join(c for c in n if c.isdigit()) or 0))
+    out = []
+    for n in vols:
+        with open(os.path.join(workdir, n), 'rb') as f:
+            out.append(f.read())
+    return out
+
+
 def rar5_store_volumes_hp(inner_name, data, volume_size, password, workdir):
     """RAR5 volumes, store mode (-m0), headers and data encrypted
     (-hp<password>), holding ``inner_name`` = ``data`` split into volumes of

@@ -337,8 +337,10 @@ impl<'f> Volumes<'f> {
         let (live, synced) = self.live[i].as_mut()?;
         live.sync(&mut self.written, i as u32, synced);
         let read = self.written.read_packed(i as u32, offset, buf);
-        if let PackedRead::Data(n) = read {
-            crate::livewrite::count_read(n as u64, crate::livewrite::ReadKind::Live);
+        match read {
+            PackedRead::Data(n) => crate::livewrite::count_read(n as u64, crate::livewrite::ReadKind::Live),
+            PackedRead::NotYet { .. } => live.want(offset),
+            PackedRead::Hole { .. } => {}
         }
         Some(read)
     }
@@ -406,6 +408,13 @@ impl PackedSource for Volumes<'_> {
         let i = volume as usize;
         if i >= self.paths.len() {
             return PackedRead::Hole { len: u64::MAX };
+        }
+        // Bytes the writer reported are read from what it wrote, also once the volume is
+        // complete (it is the same file).
+        if self.live[i].is_some() {
+            if let Some(PackedRead::Data(n)) = self.read_growing(i, offset, buf) {
+                return PackedRead::Data(n);
+            }
         }
         let (len, holes) = match self.view(i) {
             View::Ready { len, holes } => (len, holes),

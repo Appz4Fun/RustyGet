@@ -39,8 +39,9 @@ struct State {
     final_path: Vec<u8>,
     /// Byte ranges written, sorted and disjoint.
     written: Vec<Range<u64>>,
-    /// A reader parked on an offset not written yet, woken once it is.
-    waiting: Option<(u64, Waker)>,
+    /// A reader waiting for an offset not written yet, woken (when parked) once it is. The
+    /// article cache writes the volume's articles out while someone waits (see [`wanted`]).
+    waiting: Option<(u64, Option<Waker>)>,
     /// The download dropped this volume (finished, moved or deleted): nothing more comes.
     forgotten: bool,
 }
@@ -67,8 +68,19 @@ impl LiveVolume {
         if st.forgotten || run_holding(&st.written, offset).is_some() {
             return false;
         }
-        st.waiting = Some((offset, waker.clone()));
+        st.waiting = Some((offset, Some(waker.clone())));
         true
+    }
+
+    /// A reader that polls (no waker) waits for `offset`: the article cache writes this
+    /// volume's articles out instead of holding them (see [`wanted`]).
+    pub fn want(&self, offset: u64) {
+        let mut st = lock(&self.state);
+        if !st.forgotten && run_holding(&st.written, offset).is_none() {
+            if !matches!(st.waiting, Some((_, Some(_)))) {
+                st.waiting = Some((offset, None));
+            }
+        }
     }
 
     /// Gives zipfast's writer-fed source every range written since the last call: `synced`
@@ -96,7 +108,7 @@ impl LiveVolume {
         let mut st = lock(&self.state);
         insert(&mut st.written, range);
         match st.waiting.take() {
-            Some((offset, waker)) if run_holding(&st.written, offset).is_some() => Some(waker),
+            Some((offset, waker)) if run_holding(&st.written, offset).is_some() => waker,
             other => {
                 st.waiting = other;
                 None
@@ -107,7 +119,7 @@ impl LiveVolume {
     fn forget(&self) -> Option<Waker> {
         let mut st = lock(&self.state);
         st.forgotten = true;
-        st.waiting.take().map(|(_, w)| w)
+        st.waiting.take().and_then(|(_, w)| w)
     }
 }
 
@@ -262,6 +274,24 @@ pub fn forget(nzb_id: i32) {
     let (m, cv) = &WRITES;
     *lock(m) += 1;
     cv.notify_all();
+}
+
+/// Whether a live extraction waits for an article of file `file_id` of download `nzb_id`
+/// that is not written yet: the article cache then writes that file's articles out at once
+/// instead of holding them until the file is done.
+pub fn wanted(nzb_id: i32, file_id: i32) -> bool {
+    let map = lock(&VOLUMES);
+    map.get(&nzb_id)
+        .and_then(|l| l.iter().find(|v| v.file_id == file_id))
+        .is_some_and(|v| lock(&v.state).waiting.is_some())
+}
+
+/// Whether a live extraction waits for any article not written yet (see [`wanted`]).
+pub fn any_wanted() -> bool {
+    let map = lock(&VOLUMES);
+    map.values()
+        .flatten()
+        .any(|v| lock(&v.state).waiting.is_some())
 }
 
 /// The current write count, for [`wait_any`].

@@ -3155,9 +3155,8 @@ impl RangeSource for WrittenSource {
             e
         };
         loop {
-            if let Some(v) = self.done.as_mut() {
-                return v.read_at(offset, buf, cx);
-            }
+            // Bytes the writer reported are read from what it wrote, also once the volume is
+            // finished (the same file, or the same bytes).
             let n = buf.len().min(self.info.extent.saturating_sub(offset) as usize);
             self.live.sync(&mut self.files, 0, &mut self.synced);
             match self.files.read_packed(0, offset, &mut buf[..n]) {
@@ -3170,6 +3169,10 @@ impl RangeSource for WrittenSource {
                     return Err(input(std::io::Error::other("cannot read a written article back")))
                 }
                 PackedRead::NotYet { .. } => {}
+            }
+            if let Some(v) = self.done.as_mut() {
+                // Never reported (lost, or repaired since): the finished volume's answer.
+                return v.read_at(offset, buf, cx);
             }
             let view = self.feed.lock().unwrap_or_else(|e| e.into_inner()).volume(&self.path);
             match view {

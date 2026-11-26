@@ -7127,6 +7127,105 @@ def scenario_liveedgehole5(daemon, t):
                 _live_timing(clock, 'RelLE5')))
 
 
+# Options of the writer-fed scenarios: an article cache as in production (the cache path
+# reports its flushed articles), no external unpacker needed.
+WRITER_FED_OPTIONS = ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no',
+                      'KeepHistory=1', 'UnpackCleanupDisk=yes', 'ArticleCache=8192']
+
+_LIVE_READS = re.compile(r'Live extraction read ([\d.]+) MB as written, ([\d.]+) MB read back after their volume '
+                         r'finished, ([\d.]+) MB from volumes finished before')
+
+
+def _live_reads(t):
+    """(MB read as written, MB read back, MB from volumes finished before) summed over the
+    direct unpack summary lines of the log, or None without any."""
+    try:
+        text = t.read_file('nzbget.log').decode(errors='replace')
+    except Exception:
+        return None
+    found = _LIVE_READS.findall(text)
+    if not found:
+        return None
+    return tuple(round(sum(float(x[k]) for x in found), 1) for k in range(3))
+
+
+def _writer_fed(daemon, t, label, name, tag, volumes, files, first):
+    """A set with big volumes extracted while it downloads, its volumes read article by
+    article as the writer puts them in place (writer-fed, see rust/src/livewrite.rs): when
+    the last article lands nearly everything is extracted, so the extracted files are in
+    place a moment after the download ends, and no packed byte is read back from a
+    finished volume (``read_back_mb=0``). ``first`` is the volume direct unpack starts
+    from; it finished before the extraction began (``finished_mb``)."""
+    h, clock = _live_release(daemon, t, name, tag, volumes, 500_000)
+    extracted = all(_verify_output(t, data, '.' + fname.rsplit('.', 1)[1], dirs=(('main', 'dst'), ('main', 'inter')))
+                    for fname, data in files)
+    live = _grep_log(t, 'Unrar: Extracting from %s' % first)
+    du_ok = _grep_log(t, 'Direct unpack for %s successful' % name)
+    used = _grep_log(t, 'Using directly unpacked files')
+    reads = _live_reads(t)
+    as_written, read_back, finished = reads if reads else (0.0, None, None)
+    stray = _stray_temp_files(t)
+    ok = (extracted and live >= 1 and du_ok == 1 and used == 1 and not stray and as_written > 0 and
+          read_back == 0 and h['Status'].startswith('SUCCESS') and h['UnpackStatus'] == 'SUCCESS')
+    return (label, ok, 'status=%s unpack=%s extracted_ok=%s live=%d du_ok=%d used_direct=%d stray_temp=%s '
+            'as_written_mb=%s read_back_mb=%s finished_mb=%s %s' % (
+                h['Status'], h['UnpackStatus'], extracted, live, du_ok, used, stray, as_written, read_back,
+                finished, _live_timing(clock, name)))
+
+
+def _video_like(size, seed):
+    """A partly compressible payload: random 4 KiB blocks between zero runs."""
+    rnd = _payload(size // 2, seed)
+    return b''.join(rnd[i:i + 4096] + bytes(4096) for i in range(0, len(rnd), 4096))[:size]
+
+
+def scenario_livefedrar5store(daemon, t):
+    """A RAR5 store set with big volumes made by rar is read article by article while it
+    downloads: its last volume is not read back after the download."""
+    if not generators.HAVE_RAR:
+        return ('livefedrar5store', None, 'SKIP: rar not installed')
+    scale = _live_scale()
+    movie = _payload(60_000_000 * scale, 7301)
+    with tempfile.TemporaryDirectory(prefix='lfr5s-') as workdir:
+        vols = generators.rar5_method_volumes('movie.mkv', movie, 20_000_000 * scale, 0, workdir)
+    volumes = [('Rel.part%02d.rar' % (i + 1), v) for i, v in enumerate(vols)]
+    return _writer_fed(daemon, t, 'livefedrar5store', 'RelWF5', 'wf5A', volumes, [('movie.mkv', movie)],
+                       volumes[0][0])
+
+
+def scenario_livefedrar5m3(daemon, t):
+    """A compressed RAR5 set (rar -m3) with big volumes is decoded article by article
+    while it downloads."""
+    if not generators.HAVE_RAR:
+        return ('livefedrar5m3', None, 'SKIP: rar not installed')
+    scale = _live_scale()
+    movie = _video_like(60_000_000 * scale, 7302)
+    with tempfile.TemporaryDirectory(prefix='lfr5c-') as workdir:
+        vols = generators.rar5_method_volumes('movie.mkv', movie, 10_000_000 * scale, 3, workdir)
+    volumes = [('Rel.part%02d.rar' % (i + 1), v) for i, v in enumerate(vols)]
+    return _writer_fed(daemon, t, 'livefedrar5m3', 'RelWFC', 'wfcA', volumes, [('movie.mkv', movie)],
+                       volumes[0][0])
+
+
+def scenario_livefed7z(daemon, t):
+    """A 7z made by 7-Zip (LZMA2, multithreaded) and cut into big pieces by 7-Zip (-v) is
+    decoded article by article while it downloads."""
+    if not generators.HAVE_7Z:
+        return ('livefed7z', None, 'SKIP: 7z not installed')
+    scale = _live_scale()
+    movie = _video_like(60_000_000 * scale, 7303)
+    with tempfile.TemporaryDirectory(prefix='lf7z-') as workdir:
+        with open(os.path.join(workdir, 'movie.mkv'), 'wb') as f:
+            f.write(movie)
+        subprocess.run([generators.SEVENZIP_PATH, 'a', '-bd', '-m0=LZMA2', '-mx5', '-mmt=4',
+                        '-v%dm' % (10 * scale), 'out.7z', 'movie.mkv'], cwd=workdir, check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        names = sorted(n for n in os.listdir(workdir) if n.startswith('out.7z.'))
+        volumes = [('Movie' + n[len('out'):], open(os.path.join(workdir, n), 'rb').read()) for n in names]
+    return _writer_fed(daemon, t, 'livefed7z', 'RelWF7', 'wf7A', volumes, [('movie.mkv', movie)],
+                       volumes[0][0])
+
+
 
 def scenario_jointwosets(daemon, t):
     """Two sets of split files in one download (a.mkv.001-003, b.srt.001-002): both
@@ -14204,6 +14303,9 @@ SCENARIOS = {
     'livesplitjoin': scenario_livesplitjoin,
     'liveedgehole': scenario_liveedgehole,
     'liveedgehole5': scenario_liveedgehole5,
+    'livefedrar5store': scenario_livefedrar5store,
+    'livefedrar5m3': scenario_livefedrar5m3,
+    'livefed7z': scenario_livefed7z,
     'staleprogress': scenario_staleprogress,
     'authrejected': scenario_authrejected,
     'appendlongname': scenario_appendlongname,
@@ -14674,6 +14776,10 @@ SCENARIO_OPTIONS = {
     'livesplitjoin': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1', 'UnpackCleanupDisk=yes', 'DownloadRate=8000'],
     'liveedgehole': PROD_OPTIONS + ['DownloadRate=3000'],
     'liveedgehole5': PROD_OPTIONS + ['DownloadRate=3000'],
+    # Writer-fed live extraction: a download slower than the decode, as on a real line.
+    'livefedrar5store': WRITER_FED_OPTIONS + ['DownloadRate=8000'],
+    'livefedrar5m3': WRITER_FED_OPTIONS + ['DownloadRate=6000'],
+    'livefed7z': WRITER_FED_OPTIONS + ['DownloadRate=6000'],
     'directunpacktwoarchives': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1'],
     'directunpackparfailure': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1'],
     'parfailurenodirectunpack': ['Unpack=yes', 'DirectUnpack=no', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1'],

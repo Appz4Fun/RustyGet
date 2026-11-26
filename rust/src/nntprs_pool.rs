@@ -367,22 +367,25 @@ pub struct AttemptLog(std::sync::Arc<std::sync::Mutex<Vec<Rec>>>);
 impl AttemptLog {
     /// The observer for one fetch's `FetchOptions::observer`.
     pub fn observer(&self, shared: &Shared) -> nntp_rs::Observe {
-        self.observer_with(shared, None, None)
+        self.observer_with(shared, None, None, None)
     }
 
-    /// [`Self::observer`], also calling `on_miss` (quickly: it runs on
-    /// nntp-rs's I/O threads) after every attempt that brought no article,
-    /// and keeping `wait` in step with whether the fetch has a connection.
+    /// [`Self::observer`], also calling `on_miss` after every attempt that
+    /// brought no article and `on_start` when an attempt has its connection
+    /// (both quickly: they run on nntp-rs's I/O threads), and keeping `wait`
+    /// in step with whether the fetch has a connection.
     pub fn observer_with(
         &self,
         shared: &Shared,
         on_miss: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+        on_start: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
         wait: Option<WaitMark>,
     ) -> nntp_rs::Observe {
         nntp_rs::Observe::new(LogObserver {
             log: self.clone(),
             ids: shared.servers.iter().map(|s| s.id).collect(),
             on_miss,
+            on_start,
             wait,
         })
     }
@@ -399,6 +402,7 @@ struct LogObserver {
     log: AttemptLog,
     ids: Vec<i32>,
     on_miss: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+    on_start: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
     wait: Option<WaitMark>,
 }
 
@@ -454,6 +458,9 @@ impl nntp_rs::Observer for LogObserver {
     fn started(&self, _server: usize, _id: &str, _fresh: bool) {
         if let Some(w) = &self.wait {
             w.set_waiting(false);
+        }
+        if let Some(f) = &self.on_start {
+            f();
         }
     }
 }
@@ -980,7 +987,7 @@ mod tests {
         let c = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0));
         let w = WaitMark::start(std::sync::Arc::clone(&c));
         let log = AttemptLog::default();
-        let obs = LogObserver { log: log.clone(), ids: vec![3, 4], on_miss: None, wait: Some(w.clone()) };
+        let obs = LogObserver { log: log.clone(), ids: vec![3, 4], on_miss: None, on_start: None, wait: Some(w.clone()) };
         obs.started(0, "<a@b>", true);
         assert_eq!(c.load(Ordering::SeqCst), 0, "a connection in hand is the server's time");
         obs.attempt(&nntp_rs::Attempt {

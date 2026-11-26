@@ -3423,6 +3423,19 @@ impl NzbgetRsArticleDownloader {
             .clone()
     }
 
+    /// A pooled fetch's attempt has its connection: running from now, unless a
+    /// restart for a live extraction already claimed this request (it stays
+    /// claimed; the cancel ends the fetch).
+    fn mark_attempt_running(&self) {
+        if self.request_state.load(Ordering::SeqCst) == REQ_RESTART {
+            return;
+        }
+        self.last_update_time.store(now_sec(), Ordering::SeqCst);
+        self.running_since_ms
+            .store(crate::liveorder::now_ms().max(1), Ordering::SeqCst);
+        self.status.store(AD_RUNNING, Ordering::SeqCst);
+    }
+
     fn set_status(&self, st: i32, touch_now: bool) {
         if touch_now {
             self.last_update_time.store(now_sec(), Ordering::SeqCst);
@@ -4063,6 +4076,13 @@ impl NzbgetRsArticleDownloader {
             // until bytes arrive: the pacer marks it running then, so the
             // hanging-download check sees only a stalled body
             self.set_status(AD_WAITING, true);
+            // a new fetch of this article (after a rejected copy) is read again
+            let _ = self.request_state.compare_exchange(
+                REQ_BODY_DONE,
+                REQ_READING,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            );
             w.writing_started = false;
             w.local_write_error = false;
             w.content_rejected = false;
@@ -4100,10 +4120,21 @@ impl NzbgetRsArticleDownloader {
                 } else {
                     nntp_rs::BodyMode::Decode
                 },
-                observer: Some(attempts.observer_with(shared, Some({
-                    let dl = std::sync::Arc::clone(self);
-                    std::sync::Arc::new(move || dl.set_status(AD_WAITING, true))
-                }), None)),
+                observer: Some(attempts.observer_with(
+                    shared,
+                    Some({
+                        let dl = std::sync::Arc::clone(self);
+                        std::sync::Arc::new(move || dl.set_status(AD_WAITING, true))
+                    }),
+                    // a connection in hand: running, as the per-connection
+                    // download was once connected (the hanging-download check
+                    // and a live extraction's straggler re-ask go by this)
+                    Some({
+                        let dl = std::sync::Arc::clone(self);
+                        std::sync::Arc::new(move || dl.mark_attempt_running())
+                    }),
+                    None,
+                )),
                 pacer: Some(nntp_rs::Pace::new(DownloadPacer {
                     dl: std::sync::Arc::clone(self),
                 })),
@@ -4113,7 +4144,20 @@ impl NzbgetRsArticleDownloader {
             let recs = attempts.take();
             self.log_attempts(w, host, shared, &recs, &mut noted_backbones);
             let d = match got {
-                Ok(d) => d,
+                Ok(d) => {
+                    // the body is read: from here on it is decoded and written,
+                    // unless a restart for a live extraction swapped first (then
+                    // this request ends as a stopped one, as on a cancel)
+                    if self
+                        .request_state
+                        .compare_exchange(REQ_READING, REQ_BODY_DONE, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_err()
+                    {
+                        self.stopped.store(true, Ordering::SeqCst);
+                        return AD_RETRY;
+                    }
+                    d
+                }
                 Err(nntp_rs::Error::Cancelled) => return AD_RETRY,
                 Err(nntp_rs::Error::NotFound) => {
                     host.log(

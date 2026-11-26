@@ -1144,7 +1144,7 @@ impl ArticleFetcher {
             work,
             only_server,
             priority,
-            observer: Some(attempts.observer_with(shared, None, wait)),
+            observer: Some(attempts.observer_with(shared, None, None, wait)),
             pacer: Some(nntp_rs::Pace::new(RepairPacer {
                 unthrottled: self.unthrottled.load(Ordering::Relaxed),
             })),

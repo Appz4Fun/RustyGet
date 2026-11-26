@@ -4520,6 +4520,23 @@ struct RsStateFile {
     file_version: i32,
 }
 
+/// Test hook: `RUSTYGET_TEST_STATE_SYNC_DELAY_MS` delays every sync of a saved state
+/// file and of its directory by that many milliseconds, as a disk busy with another
+/// job does (6790: 0.4-3.5 s per fdatasync during a post-processing move). The
+/// queuesyncslow scenario sets it; unset, it costs one load.
+pub(crate) fn test_state_sync_delay() {
+    static DELAY_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let ms = *DELAY_MS.get_or_init(|| {
+        std::env::var("RUSTYGET_TEST_STATE_SYNC_DELAY_MS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0)
+    });
+    if ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+}
+
 impl RsStateFile {
     fn new(
         qdir: &[u8],
@@ -4615,6 +4632,7 @@ impl RsStateFile {
             );
             let mut errmsg = Vec::new();
             let fd = std::os::unix::io::AsRawFd::as_raw_fd(w.get_ref());
+            test_state_sync_delay();
             if !crate::fsops::flush_file_buffers(fd, &mut errmsg) {
                 emit_log_parts(
                     env,
@@ -4659,6 +4677,7 @@ impl RsStateFile {
                 ],
             );
             let mut errmsg = Vec::new();
+            test_state_sync_delay();
             if !crate::fsops::flush_dir_buffers(&self.dest_c, self.sep, &mut errmsg) {
                 emit_log_parts(
                     env,

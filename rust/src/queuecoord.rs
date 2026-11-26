@@ -2393,6 +2393,10 @@ impl NzbgetRsQueueCoordinator {
             crate::queuesubsys_host::MK_DEBUG,
             b"Entering QueueCoordinator-loop",
         );
+        // The state saves of this thread (partial states, progress, queue) are written,
+        // synced and renamed on the queue-saver thread: a slow disk must not stop the
+        // handing out of articles (statesaver).
+        let async_saves = crate::statesaver::AsyncSaves::enter();
         self.load(host);
         self.adjust_downloads_limit(host);
         let mut was_standby = true;
@@ -2515,6 +2519,8 @@ impl NzbgetRsQueueCoordinator {
         self.save_all_partial_state(host);
         self.save_queue_if_changed(host);
         self.save_all_file_state(host);
+        drop(async_saves);
+        crate::statesaver::drain();
 
         host.log(
             crate::queuesubsys_host::MK_DEBUG,

@@ -116,6 +116,7 @@ pub mod wildmask;
 
 pub mod artwritercore;
 pub mod diskstate_format;
+pub(crate) mod statesaver;
 pub(crate) mod donorkind;
 pub mod dupefallback;
 pub mod dupeidentity;

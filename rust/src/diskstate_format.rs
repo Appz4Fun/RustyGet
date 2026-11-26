@@ -2111,18 +2111,28 @@ fn queue_file_path(qdir: &[u8], sep: u8, name: &[u8]) -> Vec<u8> {
     crate::artwritercore::article_writer_format_dest_file_path(qdir, sep, name)
 }
 
+/// Deletes a queue-dir file, in order with the saves queued for it (statesaver).
 fn remove_queue_file(qdir: &[u8], sep: u8, name: &[u8]) {
     let p = queue_file_path(qdir, sep, name);
-    let _ = std::fs::remove_file(crate::fsops::path(&p));
+    let job = crate::statesaver::Job {
+        temp: p.clone(),
+        path: p,
+        sep,
+        kind: crate::statesaver::JobKind::Delete { temp_too: false },
+    };
+    crate::statesaver::submit(job, &mut active_disk_log_cb);
 }
 
 fn queue_file_exists(qdir: &[u8], sep: u8, name: &[u8]) -> bool {
-    crate::fsops::posix_stat(&queue_file_path(qdir, sep, name)) == 1
+    let p = queue_file_path(qdir, sep, name);
+    crate::statesaver::settled(&p, || crate::fsops::posix_stat(&p) == 1)
 }
 
 /// `DiscardDownloadQueue`: removes the queue and history files and every
 /// numbered file (with its `s` and `c` companions) in the queue dir.
 pub fn discard_queue_files(qdir: &[u8], sep: u8) {
+    // The listing below must see every file a queued save still creates.
+    crate::statesaver::drain();
     remove_queue_file(qdir, sep, b"queue");
     remove_queue_file(qdir, sep, b"history");
     for entry in crate::fsops::list_dir_entries(qdir) {
@@ -4537,6 +4547,124 @@ pub(crate) fn test_state_sync_delay() {
     }
 }
 
+/// Writes or deletes one state file as `RsStateFile` always has: a transactional write
+/// goes to `<file>.new`, is synced (FlushQueue), renamed over the file, and the
+/// directory synced. Runs inline or on the `queue-saver` thread (statesaver).
+pub(crate) fn run_state_job(
+    job: &crate::statesaver::Job,
+    log: &mut dyn FnMut(DiskLogLevel, &[u8]),
+) -> bool {
+    let dest_c = bytes_to_cstring_trunc(&job.path);
+    let temp_c = bytes_to_cstring_trunc(&job.temp);
+    let (bytes, transactional, sync) = match &job.kind {
+        crate::statesaver::JobKind::Delete { temp_too } => {
+            crate::fsops::delete_file(&dest_c);
+            if *temp_too {
+                crate::fsops::delete_file(&temp_c);
+            }
+            return true;
+        }
+        crate::statesaver::JobKind::Write {
+            bytes,
+            transactional,
+            sync,
+        } => (bytes, *transactional, *sync),
+    };
+    let fd = crate::fsops::open_cloexec_fd(&temp_c, 2, 0, 1, 2);
+    if fd == -1 {
+        let err = crate::fsops::error_message(crate::fsops::last_errno());
+        log(
+            DiskLogLevel::Error,
+            &[
+                b"Error saving diskstate: Could not create file ",
+                &job.temp[..],
+                b": ",
+                &err,
+            ]
+            .concat(),
+        );
+        return false;
+    }
+    let mut file: std::fs::File = unsafe { std::os::unix::io::FromRawFd::from_raw_fd(fd) };
+    let _ = file.write_all(bytes);
+    if !transactional {
+        return true;
+    }
+
+    if sync {
+        log(
+            DiskLogLevel::Debug,
+            &[
+                &b"Flushing data for file "[..],
+                crate::nserv::base_file_name(&job.temp),
+            ]
+            .concat(),
+        );
+        let mut errmsg = Vec::new();
+        let fd = std::os::unix::io::AsRawFd::as_raw_fd(&file);
+        test_state_sync_delay();
+        if !crate::fsops::flush_file_buffers(fd, &mut errmsg) {
+            log(
+                DiskLogLevel::Warning,
+                &[
+                    b"Could not flush file ",
+                    &job.temp[..],
+                    b" into disk: ",
+                    &errmsg,
+                ]
+                .concat(),
+            );
+        }
+    }
+
+    drop(file);
+
+    crate::fsops::delete_file(&dest_c);
+    if !crate::fsops::move_file(&temp_c, &dest_c) {
+        let err = crate::fsops::error_message(crate::fsops::last_errno());
+        log(
+            DiskLogLevel::Error,
+            &[
+                b"Error saving diskstate: Could not rename file ",
+                &job.temp[..],
+                b" to ",
+                &job.path,
+                b": ",
+                &err,
+            ]
+            .concat(),
+        );
+        return false;
+    }
+
+    if sync {
+        log(
+            DiskLogLevel::Debug,
+            &[
+                &b"Flushing directory for file "[..],
+                crate::nserv::base_file_name(&job.path),
+            ]
+            .concat(),
+        );
+        let mut errmsg = Vec::new();
+        test_state_sync_delay();
+        if !crate::fsops::flush_dir_buffers(&dest_c, job.sep, &mut errmsg) {
+            log(
+                DiskLogLevel::Warning,
+                &[
+                    b"Could not flush directory buffers for file ",
+                    &job.path[..],
+                    b" into disk: ",
+                    &errmsg,
+                ]
+                .concat(),
+            );
+        }
+    }
+
+    true
+}
+
 impl RsStateFile {
     fn new(
         qdir: &[u8],
@@ -4573,129 +4701,64 @@ impl RsStateFile {
     }
 
     fn discard(&self) {
-        crate::fsops::delete_file(&self.dest_c);
-        if self.transactional {
-            crate::fsops::delete_file(&self.temp_c);
-        }
+        let job = crate::statesaver::Job {
+            path: self.dest.clone(),
+            temp: self.temp.clone(),
+            sep: self.sep,
+            kind: crate::statesaver::JobKind::Delete {
+                temp_too: self.transactional,
+            },
+        };
+        crate::statesaver::submit(job, &mut active_disk_log_cb);
     }
 
     fn file_exists(&self) -> bool {
-        crate::fsops::posix_stat(&self.dest) == 1
-            || (self.transactional && crate::fsops::posix_stat(&self.temp) == 1)
+        crate::statesaver::settled(&self.dest, || {
+            crate::fsops::posix_stat(&self.dest) == 1
+                || (self.transactional && crate::fsops::posix_stat(&self.temp) == 1)
+        })
     }
 
-    unsafe fn begin_write(
-        &self,
-        env: &NzbgetRsDiskStateEnv,
-    ) -> Option<std::io::BufWriter<std::fs::File>> {
-        let fd = crate::fsops::open_cloexec_fd(&self.temp_c, 2, 0, 1, 2);
-        if fd == -1 {
-            let err = crate::fsops::error_message(crate::fsops::last_errno());
-            emit_log_parts(
-                env,
-                DiskLogLevel::Error,
-                &[
-                    b"Error saving diskstate: Could not create file ",
-                    &self.temp,
-                    b": ",
-                    &err,
-                ],
-            );
-            return None;
-        }
-        let file = unsafe { std::os::unix::io::FromRawFd::from_raw_fd(fd) };
-        let mut w = std::io::BufWriter::new(file);
+    /// The buffer a save is serialized into, starting with the version line; the
+    /// caller fills it (under the queue lock) and hands it to `finish_write`.
+    unsafe fn begin_write(&self, _env: &NzbgetRsDiskStateEnv) -> Option<Vec<u8>> {
+        let mut w = Vec::with_capacity(4096);
         let _ = writeln!(w, "nzbget diskstate file version {}", self.format_version);
         Some(w)
     }
 
+    /// Writes the serialized `w` to the file (`run_state_job`): inline, or on the
+    /// `queue-saver` thread when called by the queue coordinator (statesaver).
     unsafe fn finish_write(
         &self,
         env: &NzbgetRsDiskStateEnv,
-        mut w: std::io::BufWriter<std::fs::File>,
+        w: Vec<u8>,
         flush_queue: bool,
     ) -> bool {
-        let _ = w.flush();
-        if !self.transactional {
-            drop(w);
-            return true;
-        }
-
-        if self.flush && flush_queue {
-            emit_log_parts(
-                env,
-                DiskLogLevel::Debug,
-                &[
-                    b"Flushing data for file ",
-                    crate::nserv::base_file_name(&self.temp),
-                ],
-            );
-            let mut errmsg = Vec::new();
-            let fd = std::os::unix::io::AsRawFd::as_raw_fd(w.get_ref());
-            test_state_sync_delay();
-            if !crate::fsops::flush_file_buffers(fd, &mut errmsg) {
-                emit_log_parts(
-                    env,
-                    DiskLogLevel::Warning,
-                    &[
-                        b"Could not flush file ",
-                        &self.temp,
-                        b" into disk: ",
-                        &errmsg,
-                    ],
-                );
-            }
-        }
-
-        drop(w);
-
-        crate::fsops::delete_file(&self.dest_c);
-        if !crate::fsops::move_file(&self.temp_c, &self.dest_c) {
-            let err = crate::fsops::error_message(crate::fsops::last_errno());
-            emit_log_parts(
-                env,
-                DiskLogLevel::Error,
-                &[
-                    b"Error saving diskstate: Could not rename file ",
-                    &self.temp,
-                    b" to ",
-                    &self.dest,
-                    b": ",
-                    &err,
-                ],
-            );
-            return false;
-        }
-
-        if self.flush && flush_queue {
-            emit_log_parts(
-                env,
-                DiskLogLevel::Debug,
-                &[
-                    b"Flushing directory for file ",
-                    crate::nserv::base_file_name(&self.dest),
-                ],
-            );
-            let mut errmsg = Vec::new();
-            test_state_sync_delay();
-            if !crate::fsops::flush_dir_buffers(&self.dest_c, self.sep, &mut errmsg) {
-                emit_log_parts(
-                    env,
-                    DiskLogLevel::Warning,
-                    &[
-                        b"Could not flush directory buffers for file ",
-                        &self.dest,
-                        b" into disk: ",
-                        &errmsg,
-                    ],
-                );
-            }
-        }
-
-        true
+        let job = crate::statesaver::Job {
+            path: self.dest.clone(),
+            temp: self.temp.clone(),
+            sep: self.sep,
+            kind: crate::statesaver::JobKind::Write {
+                bytes: w,
+                transactional: self.transactional,
+                sync: self.flush && flush_queue,
+            },
+        };
+        crate::statesaver::submit(job, &mut |level, msg| emit_log(env, level, msg))
     }
 
+    /// Opens the file for reading once the saves queued for it are on disk, with no
+    /// save touching it meanwhile (statesaver).
     unsafe fn begin_read(&mut self, env: &NzbgetRsDiskStateEnv) -> Option<RsStateReader> {
+        let dest = self.dest.clone();
+        crate::statesaver::settled(&dest, || unsafe { self.begin_read_settled(env) })
+    }
+
+    unsafe fn begin_read_settled(
+        &mut self,
+        env: &NzbgetRsDiskStateEnv,
+    ) -> Option<RsStateReader> {
         let dest_exists = crate::fsops::posix_stat(&self.dest) == 1;
         let temp_exists = crate::fsops::posix_stat(&self.temp) == 1;
         if self.transactional && dest_exists && temp_exists {
@@ -4822,7 +4885,7 @@ impl TrailerAccum {
 
 unsafe fn save_nzb_section(
     env: &NzbgetRsDiskStateEnv,
-    w: &mut std::io::BufWriter<std::fs::File>,
+    w: &mut Vec<u8>,
     source: NzbSource,
     header_count: i32,
 ) {
@@ -4834,7 +4897,7 @@ unsafe fn save_nzb_section(
     let _ = writeln!(w, "{header_count}");
 
     struct SinkState<'a> {
-        w: &'a mut std::io::BufWriter<std::fs::File>,
+        w: &'a mut Vec<u8>,
         source: NzbSource,
         remaining_progress: i32,
         trailer: TrailerAccum,
@@ -6066,6 +6129,7 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
         DiskOp::WriteCacheFlag => {
             let flag_p =
                 crate::artwritercore::article_writer_format_dest_file_path(qdir, sep, b"acache");
+            crate::statesaver::settle(&flag_p);
             let flag_c = bytes_to_cstring_trunc(&flag_p);
             let fd = crate::fsops::open_cloexec_fd(&flag_c, 2, 0, 1, 2);
             if fd == -1 {

@@ -6900,7 +6900,7 @@ def _live_timing(clock, name):
         clock.span(done, 'Direct unpack for %s successful' % name))
 
 
-def _live_release(daemon, t, name, tag, volumes, seg, extra=()):
+def _live_release(daemon, t, name, tag, volumes, seg, extra=(), needles=()):
     """Queues ``volumes`` = [(name, bytes)] (plus ``extra`` members) as one download,
     timing it with a log clock; returns (history, clock)."""
     members = []
@@ -6910,7 +6910,7 @@ def _live_release(daemon, t, name, tag, volumes, seg, extra=()):
         members.append((rel, vname, len(data), seg, set()))
     members += list(extra)
     api = daemon.wait_ready()
-    clock = _live_clock(t, name)
+    clock = _live_clock(t, name, needles)
     daemon.append(api, name, build_multi_nzb(members), False, tag + '-key', 100)
     h = daemon.wait_history(api, name, timeout=300)
     clock.close()
@@ -7156,7 +7156,7 @@ def _writer_fed(daemon, t, label, name, tag, volumes, files, first):
     place a moment after the download ends, and no packed byte is read back from a
     finished volume (``read_back_mb=0``). ``first`` is the volume direct unpack starts
     from; it finished before the extraction began (``finished_mb``)."""
-    h, clock = _live_release(daemon, t, name, tag, volumes, 500_000)
+    h, clock = _live_release(daemon, t, name, tag, volumes, 500_000, needles=['Live extraction read'])
     extracted = all(_verify_output(t, data, '.' + fname.rsplit('.', 1)[1], dirs=(('main', 'dst'), ('main', 'inter')))
                     for fname, data in files)
     live = _grep_log(t, 'Unrar: Extracting from %s' % first)
@@ -7168,9 +7168,10 @@ def _writer_fed(daemon, t, label, name, tag, volumes, files, first):
     ok = (extracted and live >= 1 and du_ok == 1 and used == 1 and not stray and as_written > 0 and
           read_back == 0 and h['Status'].startswith('SUCCESS') and h['UnpackStatus'] == 'SUCCESS')
     return (label, ok, 'status=%s unpack=%s extracted_ok=%s live=%d du_ok=%d used_direct=%d stray_temp=%s '
-            'as_written_mb=%s read_back_mb=%s finished_mb=%s %s' % (
+            'as_written_mb=%s read_back_mb=%s finished_mb=%s extracted_after_download_s=%s %s' % (
                 h['Status'], h['UnpackStatus'], extracted, live, du_ok, used, stray, as_written, read_back,
-                finished, _live_timing(clock, name)))
+                finished, clock.span('Collection %s completely downloaded' % name, 'Live extraction read'),
+                _live_timing(clock, name)))
 
 
 def _video_like(size, seed):

@@ -3042,8 +3042,9 @@ struct WrittenSource {
     /// The output's handle: what zipfast sees as the volume's backing, unless declared NonFile.
     file: std::fs::File,
     expose_backing: bool,
-    /// The finished volume, once the feed has it.
-    done: Option<HoledVolume>,
+    /// The finished volume once the feed has it: its file, or the stand-in rebuilt from a
+    /// duplicate when the download died in it (see `crate::deadvolume`).
+    done: Option<Box<dyn RangeSource>>,
     on_finished: OnFinished,
     /// A persistent session: holes inside member data are answered past the buffer.
     long_holes: bool,
@@ -3123,7 +3124,25 @@ impl WrittenSource {
         if !holes.is_empty() || replaced {
             (self.on_finished)(&self.path, &holes, replaced);
         }
-        self.done = Some(v);
+        self.done = Some(Box::new(v));
+        Ok(())
+    }
+
+    /// The download died in this volume and its part was borrowed from a duplicate: read the
+    /// rest from the rebuilt volume, which has the volume's layout and length.
+    fn finish_virtual(&mut self, v: crate::deadvolume::VirtualVolume) -> ProgressiveResult<()> {
+        let source = VirtualSource::open(&self.path, v).map_err(|cause| {
+            ProgressiveFailure::new(FailureKind::Input {
+                operation: zipfast::progressive::InputOperation::Open,
+                cause,
+            })
+        })?;
+        if source.info.length != self.info.length {
+            return Err(ProgressiveFailure::new(FailureKind::Truncated));
+        }
+        // No file of the set: never declared.
+        (self.on_finished)(&self.path, &[], true);
+        self.done = Some(Box::new(source));
         Ok(())
     }
 }
@@ -3192,11 +3211,24 @@ impl RangeSource for WrittenSource {
                         Some((self.path.clone(), cx.waker().clone(), true));
                     return Ok(RangeRead::NotYet);
                 }
-                VolumeView::Missing | VolumeView::Virtual(_) => {
-                    return Err(input(std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        "the volume being written is gone",
-                    )))
+                VolumeView::Virtual(v) if v.holes.is_empty() => {
+                    self.finish_virtual(v)?;
+                    continue;
+                }
+                VolumeView::Virtual(_) => {
+                    // Its borrow is not finished: woken once the feed's answer changes.
+                    *self.pending.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some((self.path.clone(), cx.waker().clone(), true));
+                    return Ok(RangeRead::NotYet);
+                }
+                VolumeView::Missing => {
+                    // The download ended without finishing this volume: what it did not write
+                    // is lost, as in a damaged volume (read past; the set fails as damaged
+                    // unless something repairs it).
+                    (self.on_finished)(&self.path, &[], true);
+                    let next = self.live.next_written(offset).unwrap_or(self.info.extent);
+                    let len = next.min(offset + n.max(1) as u64) - offset;
+                    return Ok(RangeRead::Hole { len });
                 }
             }
         }

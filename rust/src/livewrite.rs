@@ -61,6 +61,13 @@ impl LiveVolume {
         run_holding(&st.written, offset).map(|r| r.end)
     }
 
+    /// Where the next written run after `offset` starts, if any.
+    pub fn next_written(&self, offset: u64) -> Option<u64> {
+        let st = lock(&self.state);
+        let at = st.written.partition_point(|r| r.end <= offset);
+        st.written.get(at).map(|r| r.start.max(offset))
+    }
+
     /// Parks `waker` until `offset` is written (or the volume is dropped). False when it is
     /// written already, or nothing more comes: the caller reads again instead of waiting.
     pub fn wait_for(&self, offset: u64, waker: &Waker) -> bool {

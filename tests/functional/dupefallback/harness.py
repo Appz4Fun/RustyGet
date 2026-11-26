@@ -1709,10 +1709,12 @@ def scenario_streamrestartcredit(daemon, t):
     api = daemon.wait_ready()
     daemon.append(api, 'DonSR', donor, True, 'sr2-key', 50)
     daemon.append(api, 'RelSR2', primary, False, 'sr2-key', 100)
+    # "Recovered ... of Sr1.mkv from duplicate DonSR", not the "Queueing stream repair of
+    # Sr1.mkv from duplicate collections" before it: the shutdown must catch the repair running
     deadline = time.time() + 120
-    while time.time() < deadline and _grep_log(t, 'of Sr1.mkv from duplicate') == 0:
+    while time.time() < deadline and _grep_log(t, 'of Sr1.mkv from duplicate DonSR') == 0:
         time.sleep(0.3)
-    first_repaired = _grep_log(t, 'of Sr1.mkv from duplicate')
+    first_repaired = _grep_log(t, 'of Sr1.mkv from duplicate DonSR')
     try:
         api.shutdown()
     except Exception:

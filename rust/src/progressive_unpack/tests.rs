@@ -6520,3 +6520,183 @@ fn a_crash_before_a_grouped_refill_commits_refills_the_hole_again() {
     assert_eq!(std::fs::read(t.out().join("b.bin")).unwrap(), b);
     assert!(!state.exists());
 }
+
+// ---- Writer-fed volumes (see `crate::livewrite`) ----
+
+/// A download writing its volumes with direct write: every volume but the first is written
+/// article by article into an output created at its length, each article reported to
+/// `livewrite` once written, and renamed into place once complete. A volume in `holes` was
+/// finished with those articles lost, and is "repaired" (`wait_repaired` writes its bytes).
+struct WrittenFeed {
+    nzb_id: i32,
+    done: Arc<AtomicBool>,
+    holes: Vec<(PathBuf, Vec<(u64, u64)>)>,
+    repair: Vec<(PathBuf, Vec<u8>)>,
+    repaired: bool,
+}
+
+impl VolumeFeed for WrittenFeed {
+    fn volume(&mut self, path: &Path) -> VolumeView {
+        if path.is_file() {
+            let holes = match self.holes.iter().find(|(p, _)| p == path) {
+                Some((_, h)) if !self.repaired => h.clone(),
+                _ => Vec::new(),
+            };
+            VolumeView::Ready { holes }
+        } else if self.done.load(Ordering::Acquire) {
+            VolumeView::Missing
+        } else {
+            VolumeView::NotYet
+        }
+    }
+    fn growing(&mut self, path: &Path) -> Option<Arc<crate::livewrite::LiveVolume>> {
+        if path.is_file() {
+            return None;
+        }
+        crate::livewrite::lookup(self.nzb_id, crate::fsops::path_to_bytes(path))
+    }
+    fn wait_repaired(&mut self, _is_cancelled: &mut dyn FnMut() -> bool) -> bool {
+        for (p, bytes) in &self.repair {
+            std::fs::write(p, bytes).unwrap();
+        }
+        self.repaired = true;
+        true
+    }
+    fn still_held(&self, path: &Path) -> bool {
+        !self.repaired && self.holes.iter().any(|(p, _)| p == path)
+    }
+}
+
+/// Starts writing volumes 1.. of `vols` into `dl` as a download does (see [`WrittenFeed`]),
+/// `article` bytes at a time, each half of a volume in reverse order; `lose` (volume, offset,
+/// length) is never written. Returns the writer.
+fn write_like_a_download(
+    dl: &Path,
+    vols: &[Vec<u8>],
+    nzb_id: i32,
+    article: usize,
+    lose: Option<(usize, u64, u64)>,
+    done: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    let dl = dl.to_path_buf();
+    let vols = vols.to_vec();
+    std::thread::spawn(move || {
+        use std::os::unix::fs::FileExt;
+        let n = vols.len();
+        for (i, v) in vols.iter().enumerate().skip(1) {
+            let out = dl.join(format!("{i}.out.tmp"));
+            let fin = dl.join(volume_name(i, n));
+            let f = std::fs::File::create(&out).unwrap();
+            f.set_len(v.len() as u64).unwrap();
+            crate::livewrite::register(
+                nzb_id,
+                i as i32,
+                crate::fsops::path_to_bytes(&fin),
+                crate::fsops::path_to_bytes(&out),
+                v.len() as u64,
+            );
+            let count = v.len().div_ceil(article);
+            let half = count / 2;
+            let order = (0..half).rev().chain((half..count).rev());
+            for a in order {
+                let start = a * article;
+                let end = (start + article).min(v.len());
+                let lost = lose
+                    .is_some_and(|(lv, lo, ll)| lv == i && (start as u64) < lo + ll && lo < end as u64);
+                if !lost {
+                    f.write_all_at(&v[start..end], start as u64).unwrap();
+                    crate::livewrite::written(nzb_id, i as i32, start as u64, (end - start) as u64);
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            drop(f);
+            std::fs::rename(&out, &fin).unwrap();
+        }
+        crate::livewrite::forget(nzb_id);
+        done.store(true, Ordering::Release);
+    })
+}
+
+type WrittenSet = (Vec<u8>, PathBuf, WrittenFeed, std::thread::JoinHandle<()>);
+
+fn written_set(t: &TestDir, nzb_id: i32, lose: bool) -> WrittenSet {
+    let data = pattern(1_200_000);
+    let chunk = 100_000;
+    let vols = rar5_volumes("movie.mkv", &data, chunk);
+    let n = vols.len();
+    let first = t.dl().join(volume_name(0, n));
+    std::fs::write(&first, &vols[0]).unwrap();
+    let done = Arc::new(AtomicBool::new(false));
+    let lost = lose.then(|| (5, payload_offset(&vols[5], chunk) as u64 + 30_000, 10_000));
+    let mut feed = WrittenFeed {
+        nzb_id,
+        done: done.clone(),
+        holes: Vec::new(),
+        repair: Vec::new(),
+        repaired: false,
+    };
+    if let Some((v, lo, ll)) = lost {
+        let p = t.dl().join(volume_name(v, n));
+        // The writer's articles are 10 000 bytes from offset 0: the hole is the articles the
+        // lost range touches.
+        let start = lo / 10_000 * 10_000;
+        let end = ((lo + ll).div_ceil(10_000) * 10_000).min(vols[v].len() as u64);
+        feed.holes.push((p.clone(), vec![(start, end - start)]));
+        feed.repair.push((p, vols[v].clone()));
+    }
+    let writer = write_like_a_download(&t.dl(), &vols, nzb_id, 10_000, lost, done);
+    (data, first, feed, writer)
+}
+
+#[test]
+fn volumes_being_written_are_read_article_by_article() {
+    let t = TestDir::new("written");
+    let (data, first, feed, writer) = written_set(&t, -7_320_001, false);
+    let before = crate::livewrite::read_counts();
+    let (r, log) = run(&first, &t.out(), Box::new(feed));
+    writer.join().unwrap();
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    let after = crate::livewrite::read_counts();
+    assert!(after.0 > before.0, "nothing was read as written: {before:?} {after:?}");
+}
+
+#[test]
+fn volumes_being_written_are_read_article_by_article_on_the_copy_path() {
+    let t = TestDir::new("written-copy");
+    let (data, first, feed, writer) = written_set(&t, -7_320_002, false);
+    let before = crate::livewrite::read_counts();
+    let mut log = Vec::new();
+    let mut outputs = Vec::new();
+    let out = t.out();
+    let req = Request {
+        first_volume: &first,
+        dest: &out,
+        password: "",
+        overwrite: Overwrite::Always,
+        on_wait: None,
+    };
+    let r = extract_recording(
+        &req,
+        Box::new(feed),
+        &mut |_, m: &str| log.push(m.to_string()),
+        &mut || false,
+        Some(&mut outputs),
+    );
+    writer.join().unwrap();
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    let after = crate::livewrite::read_counts();
+    assert!(after.0 > before.0, "nothing was read as written: {before:?} {after:?}");
+}
+
+#[test]
+fn a_lost_article_in_a_volume_being_written_is_a_hole_patched_after_the_repair() {
+    let t = TestDir::new("written-hole");
+    let (data, first, feed, writer) = written_set(&t, -7_320_003, true);
+    let (r, log) = run(&first, &t.out(), Box::new(feed));
+    writer.join().unwrap();
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    assert!(log.iter().any(|l| l.contains("extracted past damage")), "{log:?}");
+}

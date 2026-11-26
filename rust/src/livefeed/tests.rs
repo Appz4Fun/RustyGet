@@ -516,3 +516,116 @@ fn a_member_named_like_the_temp_folder_is_left_to_post_processing() {
     assert!(!in_temp_dir(Path::new("movie/.rustyget-live")));
     assert!(!in_temp_dir(Path::new("movie.mkv")));
 }
+
+/// A download feed whose volumes not on disk yet may be being written (see `crate::livewrite`).
+struct WrittenDiskFeed {
+    disk: DiskFeed,
+    nzb_id: i32,
+}
+
+impl VolumeFeed for WrittenDiskFeed {
+    fn volume(&mut self, path: &Path) -> VolumeView {
+        self.disk.volume(path)
+    }
+    fn download_finished(&self) -> bool {
+        self.disk.download_finished()
+    }
+    fn set_became_final(&self) -> bool {
+        self.disk.set_became_final()
+    }
+    fn growing(&mut self, path: &Path) -> Option<Arc<crate::livewrite::LiveVolume>> {
+        if path.is_file() {
+            return None;
+        }
+        crate::livewrite::lookup(self.nzb_id, crate::fsops::path_to_bytes(path))
+    }
+}
+
+#[test]
+fn volumes_being_written_are_fed_article_by_article() {
+    use std::os::unix::fs::FileExt;
+    let dir = scratch("written");
+    let dl = dir.join("dl");
+    let movie = payload(1_400_000, 21);
+    let zip = stored_zip(&[("movie.mkv", &movie)]);
+    let pieces: Vec<(String, Vec<u8>)> = zip
+        .chunks(200_000)
+        .enumerate()
+        .map(|(i, c)| (format!("Movie.zip.{:03}", i + 1), c.to_vec()))
+        .collect();
+    let names: Vec<Vec<u8>> = pieces.iter().map(|(n, _)| n.as_bytes().to_vec()).collect();
+    let set = live_set(b"Movie.zip.001", &names).unwrap();
+    let n = pieces.len();
+    // The first and the last volume (the directory) are on disk: the set maps at once.
+    std::fs::write(dl.join(&pieces[0].0), &pieces[0].1).unwrap();
+    std::fs::write(dl.join(&pieces[n - 1].0), &pieces[n - 1].1).unwrap();
+    let nzb_id = -7_330_001;
+    let finished = Arc::new(AtomicBool::new(false));
+    let fin = finished.clone();
+    let wdl = dl.clone();
+    let middle: Vec<(String, Vec<u8>)> = pieces[1..n - 1].to_vec();
+    let writer = std::thread::spawn(move || {
+        for (k, (name, data)) in middle.iter().enumerate() {
+            let out = wdl.join(format!("{k}.out.tmp"));
+            let f = std::fs::File::create(&out).unwrap();
+            f.set_len(data.len() as u64).unwrap();
+            let target = wdl.join(name);
+            crate::livewrite::register(
+                nzb_id,
+                k as i32,
+                crate::fsops::path_to_bytes(&target),
+                crate::fsops::path_to_bytes(&out),
+                data.len() as u64,
+            );
+            // Articles in reverse.
+            let starts: Vec<usize> = (0..data.len()).step_by(10_000).rev().collect();
+            for s in starts {
+                let e = (s + 10_000).min(data.len());
+                f.write_all_at(&data[s..e], s as u64).unwrap();
+                crate::livewrite::written(nzb_id, k as i32, s as u64, (e - s) as u64);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            drop(f);
+            std::fs::rename(&out, &target).unwrap();
+        }
+        crate::livewrite::forget(nzb_id);
+        fin.store(true, Ordering::Release);
+    });
+    let mut feed = WrittenDiskFeed {
+        disk: DiskFeed {
+            finished,
+            damaged: Vec::new(),
+        },
+        nzb_id,
+    };
+    let dest = dir.join("out");
+    let mut lines = Vec::new();
+    let req = Request {
+        dir: &dl,
+        set: &set,
+        password: "",
+    };
+    let before = crate::livewrite::read_counts();
+    let outcome = extract(
+        &req,
+        &mut feed,
+        &mut || Some((dest.clone(), None)),
+        &mut |_, m| lines.push(m.to_string()),
+        &mut || false,
+        &|_| {},
+    );
+    writer.join().unwrap();
+    let after = crate::livewrite::read_counts();
+    assert_eq!(
+        outcome,
+        Outcome::Done {
+            files: 1,
+            dirs: 0,
+            bytes: movie.len() as u64
+        },
+        "{lines:?}"
+    );
+    assert_eq!(std::fs::read(dir.join("out/movie.mkv")).unwrap(), movie);
+    assert!(after.0 > before.0, "nothing was read as written: {before:?} {after:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

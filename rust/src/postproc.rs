@@ -2618,6 +2618,26 @@ impl crate::progressive_unpack::VolumeFeed for DirectUnpackFeed {
             .is_some_and(|st| !st.abandoned && !st.held.iter().any(|p| p == &full))
     }
 
+    fn growing(&mut self, path: &std::path::Path) -> Option<Arc<crate::livewrite::LiveVolume>> {
+        #[cfg(unix)]
+        let full = {
+            use std::os::unix::ffi::OsStrExt;
+            path.as_os_str().as_bytes().to_vec()
+        };
+        #[cfg(not(unix))]
+        let full = path.to_string_lossy().as_bytes().to_vec();
+        // Only a volume still being written: not one on disk, held for a repair, borrowed or
+        // given up on.
+        if path.exists()
+            || direct_unpack_abandoned(self.nzb_id)
+            || direct_unpack_hole_view(&full).is_some()
+            || direct_unpack_virtual(self.nzb_id, &full).is_some()
+        {
+            return None;
+        }
+        crate::livewrite::lookup(self.nzb_id, &full)
+    }
+
     fn wait_repaired(&mut self, is_cancelled: &mut dyn FnMut() -> bool) -> bool {
         loop {
             if direct_unpack_abandoned(self.nzb_id) || is_cancelled() {
@@ -2731,6 +2751,8 @@ fn direct_unpack_mark_downloaded(nzb_id: i32) {
         .entry(nzb_id)
         .or_default()
         .download_finished = true;
+    // Nothing is written any more: extractions parked on a volume being written look again.
+    crate::livewrite::forget(nzb_id);
 }
 
 fn direct_unpack_download_finished(nzb_id: i32) -> bool {
@@ -5028,6 +5050,7 @@ impl NzbgetRsDirectUnpack {
             password: &password,
         };
         let cell = std::cell::RefCell::new(&mut *local);
+        let reads = crate::livewrite::read_counts();
         let outcome = crate::livefeed::extract(
             &req,
             &mut feed,
@@ -5078,6 +5101,8 @@ impl NzbgetRsDirectUnpack {
             &|waiting| self.set_waiting(waiting),
         );
         drop(cell);
+        let summary = crate::livewrite::read_summary(reads, crate::livewrite::read_counts());
+        self.add_message(host, MK_INFO, summary.as_bytes(), local);
 
         match outcome {
             Outcome::Done { files, bytes, .. } => {
@@ -5174,6 +5199,7 @@ impl NzbgetRsDirectUnpack {
             nzb_id: self.nzb_id,
             expected_volumes: local.expected_volumes,
         });
+        let reads = crate::livewrite::read_counts();
         let res = crate::unpack::extract_archive_with_feed(
             crate::fsops::path(&full_archive_path),
             crate::fsops::path(&unpack_dir),
@@ -5222,6 +5248,9 @@ impl NzbgetRsDirectUnpack {
                 self.stop_for_failure(host, f);
             }
         }
+
+        let summary = crate::livewrite::read_summary(reads, crate::livewrite::read_counts());
+        self.add_message(host, MK_INFO, summary.as_bytes(), local);
 
         self.set_unpacking(false);
         self.exec_thread_key.store(0, Ordering::Release);

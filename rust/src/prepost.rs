@@ -1510,6 +1510,7 @@ impl NzbgetRsPrePostProcessor {
             host.nzb_set_int(nzb_ptr, NZB_INT_CLEANUP_DISK, 1);
             let nzb2 = host.nzb_snap(nzb_ptr, false);
             crate::parlive::forget_download_writes(nzb2.id);
+            crate::livewrite::forget(nzb2.id);
             crate::postproc::direct_unpack_join_live_par_repair(nzb2.id);
             delete_cleanup_host(host, &opts, &nzb2);
             self.nzb_completed(host, dq_ptr, nzb_ptr, true);

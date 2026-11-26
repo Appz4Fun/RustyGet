@@ -143,15 +143,27 @@ fn basename(path: &[u8]) -> &[u8] {
 struct Waiting<'a> {
     on_wait: &'a dyn Fn(bool),
     waiting: bool,
+    /// Article writes reported when the extraction last looked (see `crate::livewrite`).
+    writes: u64,
 }
 
 impl Waiting<'_> {
+    fn new(on_wait: &dyn Fn(bool)) -> Waiting<'_> {
+        Waiting {
+            on_wait,
+            waiting: false,
+            writes: crate::livewrite::write_count(),
+        }
+    }
+
+    /// Waits for anything new: a volume, or an article written into a volume being read.
     fn idle(&mut self) {
         if !self.waiting {
             self.waiting = true;
             (self.on_wait)(true);
         }
-        std::thread::sleep(IDLE);
+        crate::livewrite::wait_any(self.writes, IDLE);
+        self.writes = crate::livewrite::write_count();
     }
     fn busy(&mut self) {
         if self.waiting {
@@ -278,6 +290,11 @@ struct Volumes<'f> {
     expect: Vec<Option<u64>>,
     /// A volume whose length differs from the one the map was built with.
     wrong: Option<String>,
+    /// Volumes read while the download writes them, article by article (see
+    /// `crate::livewrite`): the writer's volume and the ranges handed to `written` so far.
+    live: Vec<Option<(std::sync::Arc<crate::livewrite::LiveVolume>, Vec<Range<u64>>)>>,
+    /// zipfast's writer-fed source over those volumes' outputs, by volume index.
+    written: zipfast::map::VolumeFiles,
 }
 
 impl<'f> Volumes<'f> {
@@ -295,7 +312,35 @@ impl<'f> Volumes<'f> {
             damaged: vec![false; n],
             expect: vec![None; n],
             wrong: None,
+            live: (0..n).map(|_| None).collect(),
+            written: zipfast::map::VolumeFiles::new(),
         }
+    }
+
+    /// Reads volume `i`, not on disk yet, from the output the download is writing, once the
+    /// set is mapped: written bytes at once, others `NotYet`. `None` when it is not being
+    /// written that way (direct write off, another length than the map's).
+    fn read_growing(&mut self, i: usize, offset: u64, buf: &mut [u8]) -> Option<PackedRead> {
+        if self.live[i].is_none() {
+            let want = self.expect[i]?;
+            let live = self.feed.growing(&self.paths[i])?;
+            if live.size() != want {
+                return None;
+            }
+            let f = File::open(live.out_path()).ok()?;
+            if f.metadata().ok()?.len() != want {
+                return None;
+            }
+            self.written.set_file(i as u32, f);
+            self.live[i] = Some((live, Vec::new()));
+        }
+        let (live, synced) = self.live[i].as_mut()?;
+        live.sync(&mut self.written, i as u32, synced);
+        let read = self.written.read_packed(i as u32, offset, buf);
+        if let PackedRead::Data(n) = read {
+            crate::livewrite::count_read(n as u64, crate::livewrite::ReadKind::Live);
+        }
+        Some(read)
     }
 
     fn view(&mut self, i: usize) -> View {
@@ -345,7 +390,14 @@ impl<'f> Volumes<'f> {
         let Some(f) = self.files[i].as_ref() else {
             return Ok(0);
         };
-        read_at(f, buf, offset)
+        let n = read_at(f, buf, offset)?;
+        let kind = if self.live[i].is_some() {
+            crate::livewrite::ReadKind::Back
+        } else {
+            crate::livewrite::ReadKind::Finished
+        };
+        crate::livewrite::count_read(n as u64, kind);
+        Ok(n)
     }
 }
 
@@ -357,7 +409,11 @@ impl PackedSource for Volumes<'_> {
         }
         let (len, holes) = match self.view(i) {
             View::Ready { len, holes } => (len, holes),
-            View::NotYet => return PackedRead::NotYet { len: u64::MAX },
+            View::NotYet => {
+                return self
+                    .read_growing(i, offset, buf)
+                    .unwrap_or(PackedRead::NotYet { len: u64::MAX })
+            }
             View::Missing => return PackedRead::Hole { len: u64::MAX },
         };
         if offset >= len {
@@ -680,10 +736,7 @@ pub fn extract(
         return join_live(req, feed, prepare, log, is_cancelled, on_wait);
     }
     let mut vols = Volumes::new(req.dir, req.set, feed);
-    let mut waiting = Waiting {
-        on_wait,
-        waiting: false,
-    };
+    let mut waiting = Waiting::new(on_wait);
     // Map the set as soon as its headers are on disk.
     let mut last_ready = usize::MAX;
     let mut last_try = Instant::now() - MAP_RETRY;
@@ -1073,10 +1126,7 @@ fn join_live(
     );
     log(4, &format!("Unrar: Extracting  {name}"));
     let mut vols = Volumes::new(req.dir, req.set, feed);
-    let mut waiting = Waiting {
-        on_wait,
-        waiting: false,
-    };
+    let mut waiting = Waiting::new(on_wait);
     let n = req.set.volumes.len();
     let mut placed = vec![false; n];
     let mut piece_len: Option<u64> = None;

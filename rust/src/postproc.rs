@@ -37,6 +37,32 @@ pub(crate) fn extraction_running() -> bool {
     crate::unpackslots::in_use() > 0
 }
 
+/// The unpack-slot class of download `n`'s direct unpack (`unpackslots::download_class`):
+/// paused when the files other than par2 it still needs are all paused, every download is
+/// paused for it, or its fleet holds it. The caller holds the queue lock.
+pub(crate) fn direct_unpack_class(
+    host: &QueueSubsysHost,
+    opts: &crate::queuesubsys_host::GlobalOptsSnap,
+    n: NzbRef,
+) -> crate::unpackslots::Class {
+    let ns = host.nzb_snap(n, false);
+    let (mut data, mut paused) = (0, 0);
+    for i in 0..host.nzb_file_len(n) {
+        let f = host.file_snap(host.nzb_file_at(n, i));
+        if f.deleted || f.par_file {
+            continue;
+        }
+        data += 1;
+        paused += usize::from(f.paused);
+    }
+    crate::unpackslots::download_class(
+        data,
+        paused,
+        (opts.pause_download || opts.quota_reached) && !ns.force_priority,
+        crate::fleethold::is_held(host, n),
+    )
+}
+
 /// The message logged once when an extraction waits for an unpack slot.
 fn slot_wait_message(in_use: usize, cap: usize) -> Vec<u8> {
     format!("Waiting for an unpack slot ({in_use} of {cap} in use, option UnpackSlots)").into_bytes()
@@ -1471,6 +1497,8 @@ pub(crate) fn quick_info_from_status(
 
 #[derive(Default)]
 struct UnpackRunState {
+    /// "Waiting for an unpack slot" was logged for this job.
+    slot_wait_told: bool,
     name: Vec<u8>,
     info_name: Vec<u8>,
     info_name_up: Vec<u8>,
@@ -2202,8 +2230,15 @@ impl NzbgetRsUnpackController {
             crate::unpackslots::Kind::Post,
             &mut || crate::unpackslots::Class::Finished,
             &mut || q.is_stopped(),
-            &mut |in_use, cap| self.print_message(q, st, MK_INFO, &slot_wait_message(in_use, cap)),
+            &mut |in_use, cap| {
+                if !st.slot_wait_told {
+                    st.slot_wait_told = true;
+                    self.print_message(q, st, MK_INFO, &slot_wait_message(in_use, cap));
+                }
+            },
         ) else {
+            st.log_prefix = None;
+            q.set_progress_label(b"");
             return;
         };
         self.exec_thread_key
@@ -4593,13 +4628,7 @@ impl NzbgetRsDirectUnpack {
             if n.is_none() {
                 return crate::unpackslots::Class::Paused;
             }
-            let ns = host.nzb_snap(n, false);
-            crate::unpackslots::download_class(
-                host.nzb_file_len(n),
-                ns.paused_file_count,
-                (opts.pause_download || opts.quota_reached) && !ns.force_priority,
-                crate::fleethold::is_held(host, n),
-            )
+            direct_unpack_class(host, &opts, n)
         })
     }
 

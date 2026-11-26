@@ -157,13 +157,20 @@ impl Waiting<'_> {
     }
 
     /// Waits for anything new: a volume, or an article written into a volume being read.
+    /// When something was written meanwhile, the caller is told it works again before its
+    /// next step decodes it (a direct unpack takes its unpack slot back then: it decodes only
+    /// while it holds one).
     fn idle(&mut self) {
         if !self.waiting {
             self.waiting = true;
             (self.on_wait)(true);
         }
         crate::livewrite::wait_any(self.writes, IDLE);
-        self.writes = crate::livewrite::write_count();
+        let now = crate::livewrite::write_count();
+        if now != self.writes {
+            self.busy();
+        }
+        self.writes = now;
     }
     fn busy(&mut self) {
         if self.waiting {

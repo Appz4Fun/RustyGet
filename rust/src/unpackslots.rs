@@ -85,6 +85,18 @@ pub fn capacity_for(option: i32, cores: usize) -> usize {
     }
 }
 
+/// Direct unpack sessions (threads, with their decoder state and open volumes) that may
+/// exist at once for `capacity` slots: twice the slots, at least four. Sessions waiting for
+/// volumes hold no slot, so there may be more of them than slots, but not without bound.
+pub fn session_limit_for(capacity: usize) -> usize {
+    (capacity * 2).max(4)
+}
+
+/// [`session_limit_for`] the slots now.
+pub fn session_limit() -> usize {
+    session_limit_for(capacity())
+}
+
 /// Slots now, from the active options (read each time, so a reload applies).
 pub fn capacity() -> usize {
     let option = crate::options::active_options().map_or(0, |o| o.scalars().unpack_slots);
@@ -92,12 +104,13 @@ pub fn capacity() -> usize {
     capacity_for(option, cores)
 }
 
-/// The class of a download's direct unpack: [`Class::Paused`] when its remaining files cannot
-/// arrive for now (`remaining_files` left and every one paused, or `downloads_paused`: every
-/// download paused or the quota reached, and it is not forced) or its fleet holds it (`held`),
-/// else [`Class::Active`].
-pub fn download_class(remaining_files: usize, paused_files: i32, downloads_paused: bool, held: bool) -> Class {
-    let all_paused = remaining_files > 0 && remaining_files as i64 <= i64::from(paused_files);
+/// The class of a download's direct unpack: [`Class::Paused`] when the files it still needs
+/// cannot arrive for now (`remaining_data` files other than par2 left and every one of them
+/// paused, `paused_data`; or `downloads_paused`: every download paused or the quota reached,
+/// and it is not forced) or its fleet holds it (`held`), else [`Class::Active`]. Paused extra
+/// par2 files left over do not count: such a download has everything to extract.
+pub fn download_class(remaining_data: usize, paused_data: usize, downloads_paused: bool, held: bool) -> Class {
+    let all_paused = remaining_data > 0 && paused_data >= remaining_data;
     if downloads_paused || all_paused || held {
         Class::Paused
     } else {
@@ -165,10 +178,38 @@ impl Drop for Slot {
     }
 }
 
+/// How long a waiter waits before it goes up one class: a finished job's unpack (or a paused
+/// download's extraction) is not held back for ever by active downloads coming and going.
+const AGE_STEP: Duration = Duration::from_secs(30);
+
+/// `class` raised one step for every [`AGE_STEP`] waited (`waited`), up to [`Class::Active`].
+pub fn aged(class: Class, waited: Duration) -> Class {
+    let steps = (waited.as_secs() / AGE_STEP.as_secs()) as u8;
+    match (class as u8).saturating_add(steps) {
+        0 => Class::Paused,
+        1 => Class::Finished,
+        _ => Class::Active,
+    }
+}
+
+/// Removes a waiter from the pool however its wait ends (given up, admitted, or a panic in
+/// a callback), so no stale waiter holds others back.
+struct WaiterGuard(u64);
+
+impl Drop for WaiterGuard {
+    fn drop(&mut self) {
+        let mut st = lock();
+        st.waiters.retain(|w| w.ticket != self.0);
+        drop(st);
+        CHANGED.notify_all();
+    }
+}
+
 /// Takes a slot for an extraction, waiting while none is free for it. `class` is asked
 /// before the first wait and again every quarter second while waiting (it may lock the queue:
-/// it is never called with the pool's lock held). `stopped` is asked as often: true gives up
-/// (None). `on_wait(in_use, capacity)` is called once, when the first look found no slot.
+/// it is never called with the pool's lock held); a waiter goes up one class for every
+/// [`AGE_STEP`] it waited ([`aged`]). `stopped` is asked as often: true gives up (None).
+/// `on_wait(in_use, capacity)` is called once, when the first look found no slot.
 pub fn acquire(
     kind: Kind,
     class: &mut dyn FnMut() -> Class,
@@ -182,42 +223,30 @@ pub fn acquire(
         let ticket = st.next_ticket;
         st.next_ticket += 1;
         if st.waiters.is_empty() && st.holders.len() < cap {
-            st.holders.push(Holder {
-                ticket,
-                kind,
-            });
+            st.holders.push(Holder { ticket, kind });
             return Some(Slot { ticket });
         }
         ticket
     };
+    let _guard = WaiterGuard(ticket);
+    let since = std::time::Instant::now();
     let mut told = false;
     loop {
         if stopped() {
-            let mut st = lock();
-            st.waiters.retain(|w| w.ticket != ticket);
-            drop(st);
-            CHANGED.notify_all();
             return None;
         }
-        let my_class = class();
+        let my_class = aged(class(), since.elapsed());
         let cap = capacity();
         let mut st = lock();
         match st.waiters.iter_mut().find(|w| w.ticket == ticket) {
             Some(w) => w.class = my_class,
-            None => st.waiters.push(Waiter {
-                ticket,
-                class: my_class,
-                kind,
-            }),
+            None => st.waiters.push(Waiter { ticket, class: my_class, kind }),
         }
         let free = cap.saturating_sub(st.holders.len());
         let order: Vec<(Class, u64)> = st.waiters.iter().map(|w| (w.class, w.ticket)).collect();
         if admitted(free, &order, (my_class, ticket)) {
             st.waiters.retain(|w| w.ticket != ticket);
-            st.holders.push(Holder {
-                ticket,
-                kind,
-            });
+            st.holders.push(Holder { ticket, kind });
             return Some(Slot { ticket });
         }
         if !told {
@@ -248,6 +277,14 @@ mod tests {
         assert_eq!(capacity_for(1, 12), 1);
         assert_eq!(capacity_for(8, 2), 8);
         assert_eq!(capacity_for(1000, 2), 64);
+    }
+
+    #[test]
+    fn sessions_are_bounded_at_twice_the_slots_at_least_four() {
+        assert_eq!(session_limit_for(1), 4);
+        assert_eq!(session_limit_for(2), 4);
+        assert_eq!(session_limit_for(4), 8);
+        assert_eq!(session_limit_for(64), 128);
     }
 
     #[test]
@@ -294,15 +331,30 @@ mod tests {
         use Class::*;
         // paused whole
         assert_eq!(download_class(5, 5, false, false), Paused);
-        // a paused par2 among files still downloading is no pause
+        // some data files still download
         assert_eq!(download_class(5, 1, false, false), Active);
         assert_eq!(download_class(5, 0, false, false), Active);
-        // every file arrived: it finishes what it has, as an active download
+        // every data file arrived (paused extra par2 files are not counted): it finishes what
+        // it has, as an active download
         assert_eq!(download_class(0, 0, false, false), Active);
         // every download paused (or the quota reached), and it is not forced
         assert_eq!(download_class(5, 0, true, false), Paused);
         // held by its fleet
         assert_eq!(download_class(5, 0, false, true), Paused);
+    }
+
+    #[test]
+    fn a_long_wait_raises_a_waiter_one_class_every_half_minute() {
+        use Class::*;
+        let s = Duration::from_secs;
+        assert_eq!(aged(Finished, s(0)), Finished);
+        assert_eq!(aged(Finished, s(29)), Finished);
+        assert_eq!(aged(Finished, s(30)), Active);
+        assert_eq!(aged(Paused, s(30)), Finished);
+        assert_eq!(aged(Paused, s(60)), Active);
+        assert_eq!(aged(Active, s(600)), Active);
+        // a finished job that waited goes before an active download asking now (older ticket)
+        assert!(admitted(1, &[(aged(Finished, s(31)), 1), (Active, 9)], (Active, 1)));
     }
 
     fn state(holders: usize, waiters: &[Class]) -> State {

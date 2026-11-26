@@ -1618,7 +1618,7 @@ impl NzbgetRsPrePostProcessor {
         } else if action == ASPECT_URL_FAILED {
             self.nzb_completed(host, dq_ptr, nzb_ptr, true);
         } else if action == crate::queuesubsys_host::ASPECT_LIVE_HEAD {
-            self.live_head_written(host, nzb_ptr);
+            self.live_head_written(host, dq_ptr, nzb_ptr);
         } else if action == ASPECT_FILE_COMPLETED || action == ASPECT_FILE_DELETED {
             if action == ASPECT_FILE_COMPLETED {
                 self.file_downloaded(host, dq_ptr, nzb_ptr, file_ptr);
@@ -1872,6 +1872,50 @@ impl NzbgetRsPrePostProcessor {
             }
         }
         stages
+    }
+
+    /// Whether another direct unpack session may start (`unpackslots::session_limit`). At the
+    /// limit, the direct unpack of a paused or held download waiting for a volume is stopped to
+    /// make room (it is unpacked after its download instead, as when its direct unpack fails);
+    /// with none to stop, the new download is unpacked after its download.
+    fn room_for_direct_unpack(&self, host: &crate::queuesubsys_host::QueueSubsysHost, dq_ptr: usize) -> bool {
+        let limit = crate::unpackslots::session_limit();
+        let opts = host.opts();
+        let mut sessions = 0;
+        let mut idle_paused: Option<crate::queuesubsys_host::NzbSnap> = None;
+        for qi in 0..host.queue_len(dq_ptr) {
+            let nzb_ptr = host.queue_at(dq_ptr, qi);
+            let nzb = host.nzb_snap(nzb_ptr, false);
+            if !nzb.has_unpack_thread {
+                continue;
+            }
+            sessions += 1;
+            if idle_paused.is_none()
+                && host.direct_unpack_is_active(nzb_ptr, true)
+                && !host.direct_unpack_is_active(nzb_ptr, false)
+                && crate::postproc::direct_unpack_class(host, &opts, nzb_ptr)
+                    == crate::unpackslots::Class::Paused
+            {
+                idle_paused = Some(nzb);
+            }
+        }
+        if sessions < limit {
+            return true;
+        }
+        let Some(nzb) = idle_paused else {
+            return false;
+        };
+        let mut msg = b"Stopping the direct unpack of ".to_vec();
+        msg.extend_from_slice(crate::cstr::until_nul(&nzb.name));
+        msg.extend_from_slice(
+            format!(
+                ": it is paused while it waits for a volume and {sessions} direct unpacks exist (at most {limit}); it is unpacked after its download instead"
+            )
+            .as_bytes(),
+        );
+        host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
+        host.direct_unpack_stop(dq_ptr, nzb.ptr);
+        true
     }
 
     /// Whether a finished job's unpack would find no unpack slot now (`unpackslots`): slots
@@ -2568,6 +2612,7 @@ impl NzbgetRsPrePostProcessor {
     fn live_head_written(
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
+        dq_ptr: usize,
         nzb_ptr: NzbRef,
     ) {
         let opts = host.opts();
@@ -2589,7 +2634,7 @@ impl NzbgetRsPrePostProcessor {
             .nzb_get_param(nzb_ptr, b"*Unpack:")
             .as_ref()
             .map_or(true, |v| v.eq_ignore_ascii_case(b"yes"));
-        if want_unpack {
+        if want_unpack && self.room_for_direct_unpack(host, dq_ptr) {
             host.direct_unpack_start_job(nzb_ptr);
         }
     }
@@ -2694,7 +2739,7 @@ impl NzbgetRsPrePostProcessor {
                 let want_unpack = unpack_param
                     .as_ref()
                     .map_or(true, |v| v.eq_ignore_ascii_case(b"yes"));
-                if want_unpack {
+                if want_unpack && self.room_for_direct_unpack(host, dq_ptr) {
                     host.direct_unpack_start_job(nzb_ptr);
                 }
             }

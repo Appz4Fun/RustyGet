@@ -354,6 +354,12 @@ pub fn eval_dead_download(
 /// (`backup_mismatched`, see `postproc::dead_volume_donor_cannot_lend`) lends nothing, whatever
 /// its kind: the download fails over then, instead of downloading to its end first. It is not
 /// called mismatched while another donor lends the dead volumes.
+///
+/// `borrow_underway` is also set once a live repair run matched this backup's video against
+/// the download's own bytes ([`borrow_underway_or_video_confirmed`]): such a backup lends
+/// whatever its label, also in the seconds before direct unpack starts (6790 XB X52: a fast
+/// download fell under its critical health just as direct rename finished, after the backup's
+/// video had matched, and failed over before direct unpack ran).
 #[allow(clippy::too_many_arguments)]
 pub fn alt_covers_lost_articles(
     dead_rate: bool,
@@ -497,6 +503,14 @@ fn backup_is_twin(
         ) == crate::donorkind::DonorKind::Twin
 }
 
+/// True while a live borrow of download `nzb_id` is under way, or once a live repair run
+/// matched the video of backup `backup_id` against the download's own bytes (with no later
+/// check finding it different: `postproc::dead_volume_donor_confirmed`): that backup lends.
+fn borrow_underway_or_video_confirmed(nzb_id: i32, backup_id: i32) -> bool {
+    crate::postproc::dead_volume_borrow_underway(nzb_id)
+        || crate::postproc::dead_volume_donor_confirmed(nzb_id, backup_id).is_some()
+}
+
 /// Why `backup` cannot carry on the running (or kept) extraction of `nzb`, which failing
 /// over to it throws away (failover-continue: wherever it can, the backup lends the rest
 /// instead, see [`alt_covers_lost_articles`]). Asked only while an extraction runs.
@@ -582,7 +596,7 @@ fn backup_continues_extraction(
                 host.nzb_get_param(backup.ptr, crate::donorkind::KIND_PARAM).as_deref(),
             ),
             0,
-            crate::postproc::dead_volume_borrow_underway(nzb.id),
+            borrow_underway_or_video_confirmed(nzb.id, backup.id),
             true,
             backup_may_lend_while_extracting(host, backup.ptr),
             backup_cannot_lend(host, nzb, backup),
@@ -5108,7 +5122,7 @@ impl NzbgetRsQueueCoordinator {
                     ),
                     backup_kind,
                     nzb.health,
-                    crate::postproc::dead_volume_borrow_underway(nzb.id),
+                    borrow_underway_or_video_confirmed(nzb.id, backup_nzb.id),
                     nzb.direct_unpack_status == DirectUnpackStatus::Running,
                     backup_may_lend_while_extracting(host, backup_nzb.ptr),
                     backup_cannot_lend(host, nzb, &backup_nzb),
@@ -5421,7 +5435,7 @@ impl NzbgetRsQueueCoordinator {
             own_kind,
             backup_kind,
             eval.projected,
-            crate::postproc::dead_volume_borrow_underway(nzb.id),
+            borrow_underway_or_video_confirmed(nzb.id, backup_nzb.id),
             nzb.direct_unpack_status == DirectUnpackStatus::Running,
             backup_may_lend_while_extracting(host, backup_nzb.ptr),
             backup_cannot_lend(host, &nzb, &backup_nzb),
@@ -6846,6 +6860,30 @@ mod tests {
         assert_eq!(weak_primary_switch(&WeakSwitchFacts { backup_locked: true, ..dune }), WeakSwitch::Stay);
         assert_eq!(weak_primary_switch(&WeakSwitchFacts { extraction_verified: true, ..dune }), WeakSwitch::Stay);
     }
+
+    /// 6790 XB X52: a backup labelled only `container` (no packing kind) whose video a live run
+    /// matched lends, so a fast download that falls under its critical health before direct
+    /// unpack starts is kept instead of failing over; a later mismatch takes that back.
+    #[test]
+    fn a_confirmed_live_video_match_keeps_the_download_before_direct_unpack_starts() {
+        use crate::donorkind::DonorKind;
+        let (nzb, backup) = (2_000_001, 2_000_002);
+        assert!(!super::borrow_underway_or_video_confirmed(nzb, backup));
+        let keep = |confirmed| {
+            super::alt_covers_lost_articles(
+                false, true, DonorKind::Unknown, DonorKind::Unknown, 953, confirmed, false, true, false,
+            )
+        };
+        assert!(!keep(super::borrow_underway_or_video_confirmed(nzb, backup)));
+        crate::postproc::note_dead_volume_donor_confirmed(nzb, backup, 2_000_000_000);
+        assert!(super::borrow_underway_or_video_confirmed(nzb, backup));
+        assert!(keep(super::borrow_underway_or_video_confirmed(nzb, backup)));
+        // a match with another backup proves nothing of this one
+        assert!(!super::borrow_underway_or_video_confirmed(nzb, backup + 1));
+        crate::postproc::forget_dead_volume_donor_confirmed(nzb, backup);
+        assert!(!super::borrow_underway_or_video_confirmed(nzb, backup));
+    }
+
     /// Review of b38a5981: a split-off part drops the fleet's rank and its
     /// membership, so it never stays a managed fleet copy.
     #[test]

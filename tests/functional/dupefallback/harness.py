@@ -15024,19 +15024,6 @@ def scenario_fleetbigqueue(daemon, t):
     time.sleep(3)  # a few refreshes on the full queue
     cpu = queue_coord_cpu(15)
     lg = listgroups_secs()
-    # The 150 primaries download (the news server holds their articles, so the connections
-    # stay busy and the coordinator looks for the next article every few milliseconds, as on
-    # 6790), then are paused again; ArticleTimeout=20 frees the connections.
-    primaries = [g['NZBID'] for g in groups if g['NZBName'].endswith('-G0')]
-    api.editqueue('GroupResume', 0, '', primaries)
-    time.sleep(5)
-    cpu_dl = queue_coord_cpu(15)
-    lg_dl = listgroups_secs()
-    api.editqueue('GroupPause', 0, '', primaries)
-    # The held articles end by timeout and retries (ArticleTimeout=20), not at the pause.
-    freed_by = time.time() + 240
-    while time.time() < freed_by and any(g.get('ActiveDownloads', 0) for g in api.listgroups()):
-        time.sleep(2)
     # an ordinary download behind them goes through post-processing (unpack) at once
     members = _rarrenamer_members(t, 'bqP', ['testfile3'])
     added = time.time()
@@ -15046,6 +15033,15 @@ def scenario_fleetbigqueue(daemon, t):
         plain, plain_s = h['Status'], time.time() - added
     except RuntimeError:
         plain, plain_s = 'not in history', time.time() - added
+    # Last, the 150 primaries download: the news server holds their articles, so the
+    # connections stay busy and the coordinator looks for the next article every few
+    # milliseconds, as on 6790. (Last because the held articles keep the connections and the
+    # server blocked long after a pause.)
+    primaries = [g['NZBID'] for g in groups if g['NZBName'].endswith('-G0')]
+    api.editqueue('GroupResume', 0, '', primaries)
+    time.sleep(5)
+    cpu_dl = queue_coord_cpu(15)
+    lg_dl = listgroups_secs()
     files = _main_basenames(t)
     pct = lambda c: 'n/a' if c is None else '%.1f%%' % (c * 100)
     ok = (len(groups) == BIGQ_FLEETS * BIGQ_COPIES and held >= BIGQ_FLEETS * (BIGQ_COPIES - 1) and

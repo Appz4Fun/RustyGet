@@ -771,10 +771,24 @@ pub(crate) fn backup_may_lend_while_extracting(
     {
         return true;
     }
+    let copy_kind = host.nzb_get_param(backup_ptr, crate::donorkind::KIND_PARAM);
+    let video = host.nzb_get_param(backup_ptr, crate::dupesearch_coord::VIDEO_PARAM);
+    // A copy the fleet intake found the same video (its video read inside both) but holding it
+    // compressed lends too: zipfast restarts its decoder near the frontier (`restartlend`),
+    // and a refused restart makes it one that cannot lend (`backup_cannot_lend`). TwinCheck
+    // without par2 may clear its DupeKind; the intake's verdict stands.
+    if copy_kind.as_deref().map(|k| k.trim_ascii()) == Some(b"unborrowable".as_slice())
+        && video.as_deref().map(|v| v.trim_ascii()) == Some(b"same".as_slice())
+        && host
+            .nzb_get_param(backup_ptr, b"DupeKind")
+            .is_none_or(|k| k.trim_ascii() != b"other")
+    {
+        return true;
+    }
     crate::donorkind::unknown_kind_is_labelled_alt(
-        host.nzb_get_param(backup_ptr, crate::donorkind::KIND_PARAM).as_deref(),
+        copy_kind.as_deref(),
         host.nzb_get_param(backup_ptr, b"DupeKind").as_deref(),
-        host.nzb_get_param(backup_ptr, crate::dupesearch_coord::VIDEO_PARAM).as_deref(),
+        video.as_deref(),
     )
 }
 

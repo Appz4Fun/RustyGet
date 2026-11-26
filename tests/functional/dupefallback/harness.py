@@ -4390,8 +4390,8 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
             enc = [open(os.path.join(workdir, n), 'rb').read() for n in outs]
         donor_vols = [('Other.7z.%03d' % (i + 1), d) for i, d in enumerate(enc)]
         donor_seg = 100_000
-        # labelled the way TwinCheck labels another container holding the same video
-        labels = [('DupeVideo', 'same'), ('DupeKind', 'alt')]
+        # labelled the way a fleet labels a compressed copy whose video it read the same
+        labels = [('DupeCopyKind', 'unborrowable'), ('DupeVideo', 'same'), ('DupeKind', 'alt')]
     else:
         with tempfile.TemporaryDirectory(prefix='fc-') as workdir:
             if backup in ('aes', 'aesalt'):
@@ -4412,7 +4412,7 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
             labels = [('DupeCopyKind', 'borrowable-encrypted'), ('DupeLocked', 'yes'), ('DupeVideo', 'same'),
                       ('DupeKind', 'alt')]
         elif backup in ('rar5m3', 'rar5m3aes'):
-            labels = [('DupeVideo', 'same'), ('DupeKind', 'alt')]
+            labels = [('DupeCopyKind', 'unborrowable'), ('DupeVideo', 'same'), ('DupeKind', 'alt')]
         else:
             labels = [('DupeCopyKind', 'unborrowable')]
     donor_members = []

@@ -10457,10 +10457,15 @@ impl CrossPackRepairSession {
                         donor_queued_filename,
                         &donor_members[donor_set.members[0] as usize].name,
                     );
-                    if !set_tried[set_index] && !allow_decompress && self.is_video_set(repair_set_idx) {
-                        if let Some(earlier) = crate::restartlend::earlier(self.dead_nzb_id, &restart_key) {
-                            // Restarted (or found not restartable) by an earlier run for this
-                            // download: its headers are not read again, its output is lent on.
+                    if !set_tried[set_index] && self.is_video_set(repair_set_idx) {
+                        // Restarted (or found not restartable) by an earlier run for this
+                        // download: its headers are not read again, its output is lent on. After
+                        // the download (decompression allowed) only a restart's output is reused:
+                        // the backup is not downloaded and extracted whole for what it already
+                        // decoded.
+                        let earlier = crate::restartlend::earlier(self.dead_nzb_id, &restart_key)
+                            .filter(|e| !allow_decompress || e.is_ok());
+                        if let Some(earlier) = earlier {
                             set_tried[set_index] = true;
                             set_compressed[set_index] = earlier.is_err();
                             if let Ok(r) = earlier {

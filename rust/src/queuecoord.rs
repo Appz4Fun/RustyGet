@@ -652,6 +652,32 @@ fn was_kept_for_borrowing(nzb_id: i32) -> bool {
         .is_some_and(|g| g.contains(&nzb_id))
 }
 
+/// What [`weak_primary_switch`] decides on for download `nzb` and its best backup, with the
+/// dead-download check's `tried` articles and `projected` health.
+#[cfg(unix)]
+fn weak_switch_facts(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb: &crate::queuesubsys_host::NzbSnap,
+    backup_nzb: &crate::queuesubsys_host::NzbSnap,
+    tried: i32,
+    projected: i32,
+) -> WeakSwitchFacts {
+    WeakSwitchFacts {
+        held_in_fleet: crate::fleethold::holds_in_queue(host, nzb)
+            && crate::fleethold::is_held(host, backup_nzb.ptr)
+            && backup_nzb.dupe_key.eq_ignore_ascii_case(&nzb.dupe_key),
+        tried,
+        projected,
+        backup_alive: backup_alive_permille(host, backup_nzb.ptr),
+        same_video: backup_same_video(host, nzb, backup_nzb),
+        backup_twin: backup_is_twin(host, backup_nzb),
+        primary_held: crate::fleethold::is_held(host, nzb.ptr),
+        backup_locked: crate::dupecoord::locked_host(host, backup_nzb.ptr),
+        done: data_done_permille(nzb),
+        extraction_verified: direct_unpack_verified(nzb.direct_unpack_status),
+    }
+}
+
 /// A download the dead-download check leaves alone: not an nzb, already being removed or parked,
 /// or one whose direct unpack already finished and verified. Failing that one over (on projected
 /// health, as nest3v on 6790 did 1 s after its verified extraction) only downloads and extracts
@@ -5347,7 +5373,15 @@ impl NzbgetRsQueueCoordinator {
         // runs, or its backup is still within the classify grace: those decide first below.
         if !dead
             && (!doomed
-                || self.doomed_par_check_allowed(host, opts, dq_ptr, &nzb, dead_rate, eval.projected))
+                || self.doomed_par_check_allowed(
+                    host,
+                    opts,
+                    dq_ptr,
+                    &nzb,
+                    dead_rate,
+                    eval.tried,
+                    eval.projected,
+                ))
             && self.check_par_damage(host, opts, dq_ptr, &nzb)
         {
             return;
@@ -5428,20 +5462,7 @@ impl NzbgetRsQueueCoordinator {
             host.nzb_get_param(nzb.ptr, crate::donorkind::KIND_PARAM)
                 .as_deref(),
         );
-        let facts = WeakSwitchFacts {
-            held_in_fleet: crate::fleethold::holds_in_queue(host, &nzb)
-                && crate::fleethold::is_held(host, backup_nzb.ptr)
-                && backup_nzb.dupe_key.eq_ignore_ascii_case(&nzb.dupe_key),
-            tried: eval.tried,
-            projected: eval.projected,
-            backup_alive: backup_alive_permille(host, backup_nzb.ptr),
-            same_video: backup_same_video(host, &nzb, &backup_nzb),
-            backup_twin: backup_is_twin(host, &backup_nzb),
-            primary_held: crate::fleethold::is_held(host, nzb.ptr),
-            backup_locked: crate::dupecoord::locked_host(host, backup_nzb.ptr),
-            done: data_done_permille(&nzb),
-            extraction_verified: direct_unpack_verified(nzb.direct_unpack_status),
-        };
+        let facts = weak_switch_facts(host, &nzb, &backup_nzb, eval.tried, eval.projected);
         match weak_primary_switch(&facts) {
             WeakSwitch::Stay => {}
             WeakSwitch::FailOver => {
@@ -5812,7 +5833,8 @@ impl NzbgetRsQueueCoordinator {
     }
 
     /// Whether a doomed download may be failed over by the par2 check (see
-    /// `check_dead_download`): not while it is kept to borrow its lost parts, or would be kept
+    /// `check_dead_download`): not while the weak-primary switch would move it to its fleet's
+    /// alt, nor while it is kept to borrow its lost parts, or would be kept
     /// this round (the same [`alt_covers_lost_articles`] the doomed path asks, with its
     /// `dead_rate` and `projected` health), a dead-volume borrow of it runs, or its backup is
     /// still within the classify grace ([`backup_still_unclassified`]).
@@ -5823,6 +5845,7 @@ impl NzbgetRsQueueCoordinator {
         dq_ptr: usize,
         nzb: &crate::queuesubsys_host::NzbSnap,
         dead_rate: bool,
+        tried: i32,
         projected: i32,
     ) -> bool {
         if was_kept_for_borrowing(nzb.id) || crate::postproc::dead_volume_borrow_underway(nzb.id) {
@@ -5838,6 +5861,13 @@ impl NzbgetRsQueueCoordinator {
         ) else {
             return true;
         };
+        // a weak fleet primary the doomed path switches to its alt (#724): that switch stops
+        // its extraction and live writes first, which the par2 failover would skip
+        if weak_primary_switch(&weak_switch_facts(host, nzb, &backup_nzb, tried, projected))
+            == WeakSwitch::FailOver
+        {
+            return false;
+        }
         let backup_kind = crate::donorkind::DonorKind::from_param(
             host.nzb_get_param(backup_nzb.ptr, crate::donorkind::KIND_PARAM)
                 .as_deref(),

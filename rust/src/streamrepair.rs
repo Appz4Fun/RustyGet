@@ -6421,7 +6421,7 @@ impl DonorArticleUse {
         self.fetched.iter().fold(0u32, |a, &b| a.saturating_add(b))
     }
 
-    /// `"N fetched (w wave, r read, s single), U never read (w/r/s), A fetched again"`.
+    /// `"N fetched (w wave, r read, s single), U never read (w/r/s), A needed again"`.
     pub fn summary(&self) -> String {
         let [s, r, w] = self.fetched;
         let [us, ur, uw] = self.unread;

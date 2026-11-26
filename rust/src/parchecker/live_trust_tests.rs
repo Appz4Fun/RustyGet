@@ -852,12 +852,20 @@ fn repair_with_loss(f: &Fixture, lost: &[usize], decode_ahead: bool) -> LiveIoSt
                 .unwrap()
                 .unwrap();
         } else {
-            entry
-                .session
-                .on_article_finished_memory_only(&id, offset, chunk, par_rs::crc::crc32(chunk))
-                .unwrap();
+            // As the download hands them over (through `record`, which takes rebuilt slices).
+            streaming_session_on_article_finished_by_name(
+                f.nzb_id,
+                b"part01.rar",
+                offset,
+                chunk.len() as u64,
+                par_rs::crc::crc32(chunk),
+                Some(chunk),
+            )
+            .unwrap()
+            .unwrap();
         }
     }
+    // The file completes: slices rebuilt ahead while it was being written are looked at again.
     with_live_entry(f.nzb_id, &entry, |e| e.recheck_rebuilt(f.nzb_id, id)).unwrap();
     assert_eq!(
         streaming_session_download_end_targets(f.nzb_id),
@@ -882,21 +890,29 @@ fn repair_with_loss(f: &Fixture, lost: &[usize], decode_ahead: bool) -> LiveIoSt
     assert_eq!(report.repaired_slices.len() + rebuilt, lost.len());
     assert_eq!(rebuilt > 0, decode_ahead);
     assert_eq!(std::fs::read(&path).unwrap(), f.data, "byte-exact");
-    let mut io = entry.session.io_stats();
+    // RustyGet's own catch-up reads included.
+    let mut io = streaming_session_io_stats(f.nzb_id).unwrap();
     io.recovery_bytes_read -= index_read;
     io
 }
 
 /// Zero re-reads (par-rs #143): with every article from RAM, the recovery volume from its
-/// written bytes, trusted slices and the slots planned up front, a live repair reads nothing
-/// back: no source byte, no back-fill, and no rebuilt slice re-read for the refold or the
-/// whole-file check (`target_verification_bytes_read`, which counts the refold read-back
-/// since #143). Both ways: rebuilt by the repair call, and rebuilt ahead by decode-ahead.
+/// written bytes, trusted slices and the slots planned up front, a live repair whose call
+/// rebuilds the lost slices reads nothing back: no source byte, no back-fill, and no rebuilt
+/// slice re-read for the refold or the whole-file check (`target_verification_bytes_read`,
+/// which counts the refold read-back since #143).
+///
+/// With decode-ahead the slices are rebuilt within the last article's hand-over, while their
+/// file is still being written; the only read is the deliberate second look at exactly those
+/// slices when the file completes (`recheck_rebuilt`: a late write could have undone them).
+/// Everything else is read nowhere.
 #[test]
 fn a_live_repair_reads_nothing_back() {
+    let lost = [2, 9, 14];
     for (n, decode_ahead) in [(0x7a75_0014, false), (0x7a75_0015, true)] {
         let f = fixture(n, 16, 3, 3);
-        let io = repair_with_loss(&f, &[2, 9, 14], decode_ahead);
+        let io = repair_with_loss(&f, &lost, decode_ahead);
+        let rechecked = if decode_ahead { (lost.len() * SLICE) as u64 } else { 0 };
         assert_eq!(
             (
                 io.source_bytes_read,
@@ -904,8 +920,13 @@ fn a_live_repair_reads_nothing_back() {
                 io.recovery_bytes_read,
                 io.target_verification_bytes_read,
             ),
-            (0, 0, 0, 0),
+            (rechecked, 0, 0, 0),
             "decode_ahead={decode_ahead}: {io:?}"
+        );
+        let entry = active_streaming_session(n).unwrap();
+        assert_eq!(
+            entry.metrics.rebuilt_rechecked.load(Ordering::Relaxed),
+            if decode_ahead { lost.len() as u64 } else { 0 }
         );
     }
 }

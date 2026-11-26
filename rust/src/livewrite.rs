@@ -355,6 +355,23 @@ pub fn wait_any(seen: u64, timeout: Duration) {
 mod tests {
     use super::*;
 
+    /// A weak fleet primary that fails over stops its direct unpack and forgets its live
+    /// volumes (queuecoord's weak-primary switch): a volume its reader wanted no longer keeps
+    /// the article cache writing early, and nothing of that download stays registered.
+    #[test]
+    fn forgetting_a_download_drops_its_wanted_volumes() {
+        let nzb_id = 0x7fff_0724;
+        register(nzb_id, 1, b"/x/fwp.part01.rar", b"/x/fwp.part01.rar.tmp", 1000, true);
+        let v = lookup(nzb_id, b"/x/fwp.part01.rar").expect("registered");
+        v.want(0);
+        assert!(wanted(nzb_id, 1), "the reader waits for its first article");
+        forget(nzb_id);
+        assert!(!wanted(nzb_id, 1), "forgotten: the cache holds articles again");
+        assert!(lookup(nzb_id, b"/x/fwp.part01.rar").is_none());
+        v.want(0);
+        assert!(!wanted(nzb_id, 1), "a stale handle cannot ask again");
+    }
+
     #[test]
     fn written_ranges_merge() {
         let mut r = Vec::new();

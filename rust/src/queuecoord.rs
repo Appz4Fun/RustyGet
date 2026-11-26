@@ -5396,6 +5396,11 @@ impl NzbgetRsQueueCoordinator {
                 if nzb.has_live_repair_thread {
                     host.live_repair_stop(nzb.ptr);
                 }
+                // writer-fed live extraction (#721): the held copy writes no volume any more
+                // and its stopped extraction reads none; left registered, a volume its reader
+                // wanted would keep the article cache writing early for every download
+                // (`livewrite::any_wanted`) until this copy finished, which it never does
+                crate::livewrite::forget(nzb.id);
                 crate::fleethold::park_on_health_host(host, dq_ptr, &nzb);
                 return;
             }

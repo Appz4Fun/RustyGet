@@ -614,9 +614,9 @@ pub(crate) fn backup_may_lend_while_extracting(
     )
 }
 
-/// Set by `get_next_article` when it passed over a download only because its dead-pick probe
-/// waits for a connection (see `dupeprobe::probe_waiting_for_connection`): the queue has work
-/// left, so it neither idles nor, in standalone mode, ends with the download unfinished.
+/// Set while the download next in line waits for its dead-pick probe's connection (see
+/// `dupeprobe::probe_waiting_for_connection`): the queue has work left, so it neither idles
+/// nor, in standalone mode, ends with the download unfinished.
 static PROBE_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 static KEPT_FOR_BORROWING: std::sync::Mutex<Option<std::collections::HashSet<i32>>> =
@@ -1246,14 +1246,17 @@ pub fn should_wait_for_borrowing_on_par_damage(
 }
 
 /// How many of `untried` articles are expected to be lost, at the rate the `tried_ok` +
-/// `tried_failed` articles so far were (rounded up; all of them before anything was tried).
+/// `tried_failed` articles so far were (rounded down: a lost article is expected only once a
+/// whole one is; all of them before anything was tried). Articles a duplicate lent count as
+/// arrived, so the rate is low while borrowing works partly: the failover comes earlier, still
+/// judged on at least half the sample.
 pub fn expected_lost(untried: i32, tried_ok: i32, tried_failed: i32) -> i32 {
     let tried = i64::from(tried_ok.max(0)) + i64::from(tried_failed.max(0));
     if tried == 0 {
         return untried.max(0);
     }
     let lost = i64::from(untried.max(0)) * i64::from(tried_failed.max(0));
-    ((lost + tried - 1) / tried) as i32
+    (lost / tried) as i32
 }
 
 /// Formats PAR damage summary string for `QueueCoordinator::CheckParDamage`.
@@ -1559,7 +1562,7 @@ const BACKUP_CLASSIFY_GRACE_SEC: i64 = 120;
 ///
 /// The grace for an unknown kind is only worth its wait while a backup could keep the
 /// extraction going (`lending_possible`, see [`extraction_fed_by_duplicates`]). Without that
-/// (`RawArticle`, `DupeArticleFallback=no`, or no `DirectUnpack`) no kind found later could
+/// (`RawArticle`, `DupeArticleFallback=no` or `article`, or no `DirectUnpack`) no kind found later could
 /// save anything, and waiting would only download the dead copy in full (B25, functional
 /// `dupefailoverraw`; B48/B49 `projectedswap`, `projectededge`, `parlesscritical`).
 ///
@@ -1600,7 +1603,7 @@ fn backup_twincheck_labelled(
 /// [`live_borrowing`]), or live stream repair (`DupeArticleFallback=stream`) patching what
 /// direct unpack extracted, which keeps a download whose extraction a duplicate already
 /// patched (`dupe_recovered_bytes`, see `check_dupe_failover`). Not with
-/// `DupeArticleFallback=no`, without `DirectUnpack`, or with `RawArticle`.
+/// `DupeArticleFallback=no` or `article`, without `DirectUnpack`, or with `RawArticle`.
 #[cfg(unix)]
 fn extraction_fed_by_duplicates(opts: &crate::queuesubsys_host::GlobalOptsSnap) -> bool {
     opts.dupe_article_fallback >= crate::queuesubsys_host::DAF_STREAM
@@ -2061,9 +2064,18 @@ impl NzbgetRsQueueCoordinator {
             host.with_locked_queue(|dq_ptr| {
                 let opts = host.opts();
                 let next_pair = self.get_next_article(host, &opts, dq_ptr);
-                // a download held for its probe's connection has articles left all the same
-                let has_more_articles = next_pair.is_some()
-                    || PROBE_HELD.load(std::sync::atomic::Ordering::Relaxed);
+                // The download next in line waits while its dead-pick probe waits for a
+                // connection (see `dupeprobe::probe_waiting_for_connection`): the connection it
+                // would take goes to the probe. Nothing of lower priority takes it meanwhile
+                // (a fleet's primary stays first), and the queue stays busy (`PROBE_HELD`).
+                let held = next_pair.as_ref().is_some_and(|(file, _)| {
+                    crate::dupeprobe::probe_waiting_for_connection(
+                        host.nzb_snap(file.nzb_ptr, false).id,
+                    )
+                });
+                PROBE_HELD.store(held, std::sync::atomic::Ordering::Relaxed);
+                let next_pair = if held { None } else { next_pair };
+                let has_more_articles = next_pair.is_some() || held;
                 let active_len = host.active_downloads_len();
                 article_downloads_running = active_len > 0;
                 host.self_set_has_more_jobs(has_more_articles || article_downloads_running);
@@ -2758,7 +2770,6 @@ impl NzbgetRsQueueCoordinator {
         crate::queuesubsys_host::FileSnap,
         crate::queuesubsys_host::ArticleSnap,
     )> {
-        PROBE_HELD.store(false, std::sync::atomic::Ordering::Relaxed);
         let mut checked_files: Vec<FileRef> = Vec::new();
         let cur_date = opts.cur_time;
 
@@ -2791,19 +2802,11 @@ impl NzbgetRsQueueCoordinator {
 
                 let nzb_paused = (flen as i32) == nzb.paused_file_count;
 
-                // a download whose dead-pick probe still waits for a connection leaves the
-                // next free one to the probe (see `dupeprobe::probe_waiting_for_connection`);
-                // the other downloads go on. It still has work: the queue stays busy for it
-                // (`PROBE_HELD`), never idle or done.
-                let eligible = nzb_higher
+                if nzb_higher
                     && !nzb_paused
                     && !self.has_active_dupe(host, dq_ptr, &nzb)
-                    && ((!opts.pause_download && !opts.quota_reached) || nzb.force_priority);
-                let held = eligible && crate::dupeprobe::probe_waiting_for_connection(nzb.id);
-                if held {
-                    PROBE_HELD.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
-                if eligible && !held {
+                    && ((!opts.pause_download && !opts.quota_reached) || nzb.force_priority)
+                {
                     let propagation_delay = opts.propagation_delay;
                     for j in 0..flen {
                         let fp = host.nzb_file_at(nzb_ptr, j);
@@ -7022,7 +7025,10 @@ mod tests {
     #[test]
     fn lost_articles_expected_at_the_rate_so_far() {
         assert_eq!(super::expected_lost(120, 255, 45), 18);
-        assert_eq!(super::expected_lost(10, 85, 15), 2);
+        assert_eq!(super::expected_lost(10, 85, 15), 1);
+        // 31 counted needs one more: expected only once a whole lost article is
+        assert_eq!(super::expected_lost(6, 85, 15), 0);
+        assert_eq!(super::expected_lost(7, 85, 15), 1);
         assert_eq!(super::expected_lost(0, 85, 15), 0);
         assert_eq!(super::expected_lost(40, 0, 0), 40);
         assert_eq!(super::expected_lost(40, 100, 0), 0);
@@ -7042,6 +7048,8 @@ mod tests {
         // pardamageborrow: 30 counted, too few articles left to reach 32: fail over now
         assert!(!wait(30, 0, 1));
         assert!(!wait(30, 0, 0));
+        assert!(!wait(31, 0, 0));
+        assert!(wait(31, 0, 1));
         assert!(!wait(16, 0, 0));
         // but never on fewer than half the sample: one failed borrow near the end waits
         assert!(wait(1, 0, 0));

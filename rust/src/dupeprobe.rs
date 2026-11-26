@@ -259,7 +259,8 @@ struct ActiveProbeEntry {
     started: i64,
     stopped: Arc<AtomicBool>,
     conn_ptr: usize,
-    /// Set once the probe got its first connection (see [`probe_waiting_for_connection`]).
+    /// Set once the probe got its first connection, or gave up waiting for it (see
+    /// [`probe_waiting_for_connection`]).
     connected: bool,
 }
 
@@ -372,7 +373,8 @@ pub fn probe_probing_for(nzb_id: i32) -> i32 {
 }
 
 /// True while the dead-pick probe of download `nzb_id` waits for its first connection, for at
-/// most [`CONNECTION_WAIT_SEC`]: the queue then picks no article of that download (other
+/// most [`CONNECTION_WAIT_SEC`] (less when its first server gives none, see
+/// `end_connection_wait`): the queue then picks no article of that download (other
 /// downloads go on), so a connection the download frees goes to the probe. Without that, a
 /// download using every connection of a small server takes each freed one back at once, and
 /// the probe, polling for one, may only get it after the download failed over on its health
@@ -486,6 +488,16 @@ impl NzbgetRsDupeProbe {
         PROBE_COUNT.fetch_sub(1, Ordering::SeqCst);
     }
 
+    /// Ends the hold [`probe_waiting_for_connection`] puts on the probe's download.
+    #[cfg(unix)]
+    fn end_connection_wait(&self) {
+        if let Ok(mut reg) = registry().lock() {
+            if let Some(entry) = reg.entries.get_mut(&self.id) {
+                entry.connected = true;
+            }
+        }
+    }
+
     #[cfg(unix)]
     fn set_conn(&self, conn_ptr: usize) {
         if let Ok(mut reg) = registry().lock() {
@@ -536,6 +548,8 @@ impl NzbgetRsDupeProbe {
         }
 
         if conn_ptr == 0 {
+            // its download no longer waits for this probe's connection
+            self.end_connection_wait();
             result.unreachable = match pool.server_by_id(server_id) {
                 None => false,
                 Some(wanted) => {
@@ -1016,6 +1030,13 @@ mod tests {
         probe.set_conn(0);
         assert!(!probe_waiting_for_connection(nzb_id));
         probe.unregister();
+        // its first server gave no connection: the download goes on without it
+        let mut unreachable = NzbgetRsDupeProbe::new(nzb_id, false, 0);
+        assert!(unreachable.register());
+        assert!(probe_waiting_for_connection(nzb_id));
+        unreachable.end_connection_wait();
+        assert!(!probe_waiting_for_connection(nzb_id));
+        unreachable.unregister();
         // a recheck probe (count_all) never holds the downloads back
         let mut recheck = NzbgetRsDupeProbe::new(nzb_id, true, 0);
         assert!(recheck.register());

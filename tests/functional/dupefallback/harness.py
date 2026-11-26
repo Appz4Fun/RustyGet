@@ -7527,7 +7527,7 @@ def scenario_fleetpaused(daemon, t):
 def scenario_fleetparallel(daemon, t):
     """appendfleet (F11): two fleets for different keys at once, while a long
     download holds both connections. One fleet's check runs at a time; the other
-    waits within its own limit: both finish well inside 20 s with every member
+    waits within its own limit: both finish inside 19 s with every member
     measured. Before, they shared the connections and both used the whole limit
     with members unmeasured."""
     import threading

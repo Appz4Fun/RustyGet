@@ -543,7 +543,32 @@ fn recent_single(msg_id: &[u8]) -> Option<FetchedDonorArticle> {
     None
 }
 
-fn keep_single(msg_id: &[u8], article: FetchedDonorArticle) {
+/// An article already fetched: from the memos of recent articles, or else from the store of
+/// donor articles fetched to map or sample a duplicate ([`crate::donorstore`], on disk, which
+/// `owner`, the download repaired, now also owns). The flag is true when the store served it.
+fn held_article(owner: i32, msg_id: &[u8]) -> Option<(FetchedDonorArticle, bool)> {
+    if let Some(hit) = recent_single(msg_id) {
+        return Some((hit, false));
+    }
+    let stored = crate::donorstore::get(owner, msg_id)?;
+    Some((
+        FetchedDonorArticle {
+            success: true,
+            offset: stored.offset,
+            file_size: stored.file_size,
+            data: stored.data,
+        },
+        true,
+    ))
+}
+
+/// Keeps a single fetch (archive headers and footers while the payload map is built, a
+/// member's size) in memory and in the donor article store for `owner`: every later run of
+/// the download maps its donor again and asks for the same articles.
+fn keep_single(owner: i32, msg_id: &[u8], article: FetchedDonorArticle) {
+    if article.success {
+        crate::donorstore::put(owner, msg_id, article.offset, article.file_size, &article.data);
+    }
     keep_in(&RECENT_SINGLES, msg_id, article);
 }
 
@@ -583,30 +608,41 @@ fn keep_in(
     true
 }
 
-/// A donor article to fetch: its message-id and its groups.
-type PrefetchId = (Vec<u8>, Arc<Vec<Vec<u8>>>);
+/// A donor article to fetch: its message-id, its groups, and whether it is the first or last
+/// article of its volume (the ones a payload map reads: kept in the donor article store too).
+type PrefetchId = (Vec<u8>, Arc<Vec<Vec<u8>>>, bool);
+
+/// True when part `pi` of a volume of `parts` articles is its first or last (see [`PrefetchId`]).
+fn is_edge_part(pi: usize, parts: usize) -> bool {
+    pi == 0 || pi + 1 == parts
+}
 
 /// One article of an open prefetch batch, in delivery order: already held (fetched by an
 /// earlier repair run or check moments ago, so never fetched again), or still to come from
 /// the batch fetcher under this message-id.
 enum PrefetchSlot {
-    Held(FetchedDonorArticle),
-    Fetching(Vec<u8>),
+    /// Held already; true when the donor article store served it (not the memos).
+    Held(FetchedDonorArticle, bool),
+    /// To come from the batch fetcher; true for a volume's first or last article.
+    Fetching(Vec<u8>, bool),
 }
 
 /// The batch to fetch for `ids` (in delivery order) and the delivery plan: articles
 /// [`RECENT_SINGLES`] holds are served from it instead of the network. A borrow run, the
 /// identity check before it and the next run often want the same donor articles (the one
 /// straddling a dead volume's edge, a probe window); each is fetched once.
-fn plan_prefetch(ids: Vec<PrefetchId>) -> (Vec<BatchRequest>, std::collections::VecDeque<PrefetchSlot>) {
+fn plan_prefetch(
+    owner: i32,
+    ids: Vec<PrefetchId>,
+) -> (Vec<BatchRequest>, std::collections::VecDeque<PrefetchSlot>) {
     expire_batched();
     let mut requests = Vec::with_capacity(ids.len());
     let mut plan = std::collections::VecDeque::with_capacity(ids.len());
-    for (message_id, groups) in ids {
-        match recent_single(&message_id) {
-            Some(hit) => plan.push_back(PrefetchSlot::Held(hit)),
+    for (message_id, groups, edge) in ids {
+        match held_article(owner, &message_id) {
+            Some((hit, stored)) => plan.push_back(PrefetchSlot::Held(hit, stored)),
             None => {
-                plan.push_back(PrefetchSlot::Fetching(message_id.clone()));
+                plan.push_back(PrefetchSlot::Fetching(message_id.clone(), edge));
                 requests.push(BatchRequest { message_id, groups });
             }
         }
@@ -631,6 +667,9 @@ struct DonorFetchStats {
     /// Articles served from the memory of recent articles ([`RECENT_SINGLES`],
     /// [`RECENT_BATCHED`]) instead of the network: not in `singles` or `batch_parts`.
     from_memory: u32,
+    /// Articles served from the donor article store ([`crate::donorstore`]): fetched by an
+    /// earlier run, check or map of this process, so not fetched again.
+    from_store: u32,
 }
 
 impl DonorFetchStats {
@@ -652,7 +691,7 @@ impl DonorFetchStats {
         msg.extend_from_slice(donor);
         msg.extend_from_slice(
             format!(
-                ": {:.1} MB in {:.1} s, waiting on the network {:.1} s; {} single fetch(es), {} batch(es) of {} article(s) ({} wave(s) of {} across volumes, largest {}), {} taken from memory, {} worker(s)",
+                ": {:.1} MB in {:.1} s, waiting on the network {:.1} s; {} single fetch(es), {} batch(es) of {} article(s) ({} wave(s) of {} across volumes, largest {}), {} taken from memory, {} from the fetched-article store, {} worker(s)",
                 self.bytes as f64 / 1_000_000.0,
                 elapsed.as_secs_f64(),
                 self.waited.as_secs_f64(),
@@ -663,6 +702,7 @@ impl DonorFetchStats {
                 self.wave_parts,
                 self.largest,
                 self.from_memory,
+                self.from_store,
                 workers,
             )
             .as_bytes(),
@@ -746,13 +786,18 @@ impl NzbgetRsStreamRepairCtrl {
     /// Bytes fetched count into `fetch_stats`, held ones do not.
     fn next_planned_article(&self) -> Option<FetchedDonorArticle> {
         let slot = self.prefetch_plan.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
-        let message_id = match slot {
-            Some(PrefetchSlot::Held(hit)) => {
-                self.fetch_stats.lock().unwrap_or_else(|e| e.into_inner()).from_memory += 1;
+        let (message_id, edge) = match slot {
+            Some(PrefetchSlot::Held(hit, stored)) => {
+                let mut st = self.fetch_stats.lock().unwrap_or_else(|e| e.into_inner());
+                if stored {
+                    st.from_store += 1;
+                } else {
+                    st.from_memory += 1;
+                }
                 return Some(hit);
             }
-            Some(PrefetchSlot::Fetching(id)) => Some(id),
-            None => None,
+            Some(PrefetchSlot::Fetching(id, edge)) => (Some(id), edge),
+            None => (None, false),
         };
         let fetched = self.batch_fetcher.next()?;
         self.fetch_stats.lock().unwrap_or_else(|e| e.into_inner()).bytes += fetched.data.len() as u64;
@@ -763,6 +808,10 @@ impl NzbgetRsStreamRepairCtrl {
             data: fetched.data,
         };
         if let (true, Some(id)) = (article.success, message_id) {
+            if edge {
+                // a volume's first or last article: the next run's payload map reads it
+                crate::donorstore::put(self.nzb_id, &id, article.offset, article.file_size, &article.data);
+            }
             keep_batched(&id, article.clone());
         }
         Some(article)
@@ -1765,13 +1814,16 @@ impl NzbgetRsStreamRepairCtrl {
                     let Some(df) = self.donor_files.get(donor_file_index as usize) else {
                         return;
                     };
+                    let parts = df.article_msg_ids.len();
                     let ids = part_indices
                         .iter()
                         .filter(|&&pi| pi >= 0)
-                        .filter_map(|&pi| df.article_msg_ids.get(pi as usize))
-                        .map(|id| (id.clone(), Arc::clone(&df.groups)))
+                        .filter_map(|&pi| {
+                            let id = df.article_msg_ids.get(pi as usize)?;
+                            Some((id.clone(), Arc::clone(&df.groups), is_edge_part(pi as usize, parts)))
+                        })
                         .collect();
-                    let (requests, plan) = plan_prefetch(ids);
+                    let (requests, plan) = plan_prefetch(self.ctrl.nzb_id, ids);
                     *self.ctrl.prefetch_plan.lock().unwrap_or_else(|e| e.into_inner()) = plan;
                     self.ctrl.batch_fetcher.begin(requests);
                 }
@@ -2103,14 +2155,20 @@ impl NzbgetRsStreamRepairCtrl {
                     }
                     let df = self.donor_files.get(member_index as usize)?;
                     let msg_id = df.article_msg_ids.get(part_index as usize)?;
-                    if let Some(hit) = recent_single(msg_id) {
-                        self.ctrl.fetch_stats.lock().unwrap_or_else(|e| e.into_inner()).from_memory += 1;
+                    if let Some((hit, stored)) = held_article(self.ctrl.nzb_id, msg_id) {
+                        let mut st = self.ctrl.fetch_stats.lock().unwrap_or_else(|e| e.into_inner());
+                        if stored {
+                            st.from_store += 1;
+                        } else {
+                            st.from_memory += 1;
+                        }
                         return Some(hit);
                     }
                     let started = std::time::Instant::now();
                     let fetched = self.ctrl.fetcher.fetch(msg_id, &df.groups);
                     if fetched.success {
                         keep_single(
+                            self.ctrl.nzb_id,
                             msg_id,
                             FetchedDonorArticle {
                                 success: true,
@@ -2141,13 +2199,16 @@ impl NzbgetRsStreamRepairCtrl {
                     let Some(df) = self.donor_files.get(member_index as usize) else {
                         return;
                     };
+                    let parts = df.article_msg_ids.len();
                     let ids = part_indices
                         .iter()
                         .filter(|&&pi| pi >= 0)
-                        .filter_map(|&pi| df.article_msg_ids.get(pi as usize))
-                        .map(|id| (id.clone(), Arc::clone(&df.groups)))
+                        .filter_map(|&pi| {
+                            let id = df.article_msg_ids.get(pi as usize)?;
+                            Some((id.clone(), Arc::clone(&df.groups), is_edge_part(pi as usize, parts)))
+                        })
                         .collect();
-                    let (requests, plan) = plan_prefetch(ids);
+                    let (requests, plan) = plan_prefetch(self.ctrl.nzb_id, ids);
                     {
                         let mut st = self.ctrl.fetch_stats.lock().unwrap_or_else(|e| e.into_inner());
                         st.count_batch(requests.len(), false);
@@ -2163,8 +2224,10 @@ impl NzbgetRsStreamRepairCtrl {
                             .ok()
                             .and_then(|m| self.donor_files.get(m))
                             .and_then(|df| {
-                                let id = df.article_msg_ids.get(usize::try_from(part).ok()?)?;
-                                Some((id.clone(), Arc::clone(&df.groups)))
+                                let pi = usize::try_from(part).ok()?;
+                                let id = df.article_msg_ids.get(pi)?;
+                                let edge = is_edge_part(pi, df.article_msg_ids.len());
+                                Some((id.clone(), Arc::clone(&df.groups), edge))
                             });
                         // Every part must map to a request, or the delivery order would shift.
                         let Some(id) = msg else {
@@ -2172,7 +2235,7 @@ impl NzbgetRsStreamRepairCtrl {
                         };
                         ids.push(id);
                     }
-                    let (requests, plan) = plan_prefetch(ids);
+                    let (requests, plan) = plan_prefetch(self.ctrl.nzb_id, ids);
                     {
                         let mut st = self.ctrl.fetch_stats.lock().unwrap_or_else(|e| e.into_inner());
                         st.count_batch(requests.len(), true);
@@ -2205,12 +2268,14 @@ impl NzbgetRsStreamRepairCtrl {
                     let Some(df) = self.donor_files.get(member_index as usize) else {
                         return;
                     };
+                    let parts = df.article_msg_ids.len();
                     let ids = df
                         .article_msg_ids
                         .iter()
-                        .map(|msg_id| (msg_id.clone(), Arc::clone(&df.groups)))
+                        .enumerate()
+                        .map(|(pi, msg_id)| (msg_id.clone(), Arc::clone(&df.groups), is_edge_part(pi, parts)))
                         .collect();
-                    let (requests, plan) = plan_prefetch(ids);
+                    let (requests, plan) = plan_prefetch(self.ctrl.nzb_id, ids);
                     {
                         let mut st = self.ctrl.fetch_stats.lock().unwrap_or_else(|e| e.into_inner());
                         st.count_batch(requests.len(), false);
@@ -3420,14 +3485,14 @@ mod tests {
         keep_batched(&held, article);
         let groups = Arc::new(vec![b"alt.binaries.test".to_vec()]);
         let (requests, plan) =
-            plan_prefetch(vec![(fresh.clone(), Arc::clone(&groups)), (held.clone(), groups)]);
+            plan_prefetch(-1, vec![(fresh.clone(), Arc::clone(&groups), false), (held.clone(), groups, false)]);
         // Only the article not held goes to the network; delivery keeps the asked order.
         assert_eq!(requests.iter().map(|r| r.message_id.clone()).collect::<Vec<_>>(), vec![fresh.clone()]);
-        assert!(matches!(plan.front(), Some(PrefetchSlot::Fetching(id)) if *id == fresh));
-        assert!(matches!(plan.back(), Some(PrefetchSlot::Held(a)) if a.data == vec![7, 8, 9]));
+        assert!(matches!(plan.front(), Some(PrefetchSlot::Fetching(id, false)) if *id == fresh));
+        assert!(matches!(plan.back(), Some(PrefetchSlot::Held(a, false)) if a.data == vec![7, 8, 9]));
         // A batch of many articles never pushes the headers' singles out.
         let header = b"<plan-header@x>".to_vec();
-        keep_single(&header, FetchedDonorArticle { success: true, offset: 0, file_size: 1, data: vec![1] });
+        keep_single(-1, &header, FetchedDonorArticle { success: true, offset: 0, file_size: 1, data: vec![1] });
         for i in 0..RECENT_SINGLES_MAX * 2 {
             keep_batched(
                 format!("<plan-filler-{i}@x>").as_bytes(),
@@ -3504,11 +3569,12 @@ mod tests {
             bytes: 30_000_000,
             waited: std::time::Duration::from_secs(9),
             from_memory: 41,
+            from_store: 170,
         };
         let line = String::from_utf8(st.line(b"Copy.05", std::time::Duration::from_secs(12), 8)).unwrap();
         assert_eq!(
             line,
-            "Fetch cost of borrowing from Copy.05: 30.0 MB in 12.0 s, waiting on the network 9.0 s; 3 single fetch(es), 2 batch(es) of 40 article(s) (1 wave(s) of 30 across volumes, largest 30), 41 taken from memory, 8 worker(s)"
+            "Fetch cost of borrowing from Copy.05: 30.0 MB in 12.0 s, waiting on the network 9.0 s; 3 single fetch(es), 2 batch(es) of 40 article(s) (1 wave(s) of 30 across volumes, largest 30), 41 taken from memory, 170 from the fetched-article store, 8 worker(s)"
         );
     }
 

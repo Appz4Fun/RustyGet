@@ -3109,6 +3109,7 @@ pub(crate) fn forget_dead_volume_verdicts(nzb_id: i32) {
     dead_volume_donor_confirmations().retain(|(id, _), _| *id != nzb_id);
     crate::queuecoord::forget_kept_for_borrowing(nzb_id);
     crate::streamrepair_coord::expire_batched();
+    crate::donorstore::forget(nzb_id);
 }
 
 /// Forgets what was put back into the volumes of download `nzb_id` (dead volumes read

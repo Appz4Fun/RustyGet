@@ -4323,8 +4323,8 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
     b_before = _failcont_before(ids, tag + 'B/', cut, seg) if backup == 'twin' else 0
     # Known residual: before TwinCheck labels an alt (another container), the whole-file pass
     # may sample one of its volumes of about a damaged volume's size; a sample batch it cancels
-    # drops an article the borrow then fetches again. At most one.
-    b_again_ok = 0 if backup == 'twin' else 1
+    # drops the articles in flight, which the borrow then fetches again (two at most here).
+    b_again_ok = 0 if backup == 'twin' else 2
     if backup == 'compressed':
         ok = (integ and winner == 'Backup' and failed_over == 1 and
               _grep_log(t, 'cannot continue the extraction of Primary') >= 1)

@@ -1029,7 +1029,7 @@ fn live_metrics_distinguish_network_capture_from_committed_replay() {
 fn live_metrics_do_not_count_unavailable_cache_as_network_capture() {
     let fx = Fixture::new();
     let set = fx.set();
-    let id = -1900145;
+    let id = -1909001; // unique: sessions are process-wide
     streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 << 20).unwrap();
     let desc = &set.file_descs[&set.main.as_ref().unwrap().recoverable_file_ids[0]];
     assert!(
@@ -1051,7 +1051,7 @@ fn live_metrics_do_not_count_unavailable_cache_as_network_capture() {
 fn live_target_lease_consumes_the_final_owned_article_before_postprocessing() {
     let fx = Fixture::new();
     let set = fx.set();
-    let id = -1900146;
+    let id = -1909002; // unique: sessions are process-wide
     streaming_session_start_bounded(id, &fx.0.join("testfile.vol00+1.PAR2"), &fx.0, 500 << 20)
         .unwrap();
     let files = &set.main.as_ref().unwrap().recoverable_file_ids;
@@ -1925,7 +1925,7 @@ fn live_article_ram_refused_waits_for_the_cache_flush() {
 fn live_written_handoff_stays_within_the_byte_limit() {
     let fx = Fixture::new();
     let set = fx.set();
-    let id = -1900186;
+    let id = -1909003; // unique: sessions are process-wide
     streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 * 1024 * 1024)
         .unwrap();
     let files = written_copies(&fx, &set);
@@ -1952,7 +1952,7 @@ fn live_written_handoff_stays_within_the_byte_limit() {
 fn live_capture_after_its_write_takes_the_kept_bytes() {
     let fx = Fixture::new();
     let set = fx.set();
-    let id = -1900187;
+    let id = -1909004; // unique: sessions are process-wide
     streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 * 1024 * 1024)
         .unwrap();
     let files = written_copies(&fx, &set);
@@ -1985,7 +1985,7 @@ fn live_capture_after_its_write_takes_the_kept_bytes() {
 fn live_tee_of_an_uncached_article_feeds_its_capture() {
     let fx = Fixture::new();
     let set = fx.set();
-    let id = -1900188;
+    let id = -1909005; // unique: sessions are process-wide
     streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 * 1024 * 1024)
         .unwrap();
     let files = written_copies(&fx, &set);
@@ -2078,7 +2078,7 @@ fn live_binds_an_obfuscated_file_by_its_first_article() {
 #[test]
 fn live_unbound_articles_are_released_when_the_first_article_cannot_bind() {
     let fx = Fixture::new();
-    let id = -1900191;
+    let id = -1909006; // unique: sessions are process-wide
     streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 * 1024 * 1024)
         .unwrap();
     let data: Vec<u8> = (0..40_000u32).map(|i| (i * 13) as u8).collect();

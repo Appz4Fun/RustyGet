@@ -227,6 +227,11 @@ impl LightState {
         self.get(server_id).map_or(0, |s| s.size)
     }
 
+    /// Whether a server counts as flaky at `now_ms` (see [`FLAKY_HOLD_MS`]).
+    pub fn flaky(&self, server_id: i32, now_ms: i64) -> bool {
+        self.get(server_id).is_some_and(|s| now_ms < s.flaky_until_ms)
+    }
+
     /// Notes that a server now has `spare` idle download connections.
     pub fn note_spare(&mut self, server_id: i32, spare: i32) {
         if let Some(s) = self.get_mut(server_id) {
@@ -315,16 +320,9 @@ pub fn parallel_jobs(max: usize, light: i32) -> usize {
     }
 }
 
-/// [`parallel_jobs`] for the light connections of the primary servers now.
-#[cfg(unix)]
-pub fn parallel_jobs_now(max: usize) -> usize {
-    let light = crate::net::active_server_pool().map_or(0, |p| p.primary_light_connections());
-    parallel_jobs(max, light)
-}
-
 /// A count of light reads running at once, shared by every caller, so a
 /// job that reads several articles at once (a fleet copy's probe) never
-/// runs more reads than [`parallel_jobs`] allows in all: a read past the
+/// runs more reads than its limit allows in all: a read past the
 /// limit waits for one to end (woken when it does, never polling for a
 /// connection). Waiters are served in the order they came, so no copy's
 /// reads keep losing the race until its deadline.
@@ -423,7 +421,8 @@ impl Drop for ReadSlot<'_> {
 }
 
 /// The reads of fleet probes (par2 lists, archive heads and keys, intake
-/// samples): at most [`parallel_jobs_now`] at once, all fleets together.
+/// samples): at most `crate::fleetprobe::probe_reads_now` at once, all
+/// fleets together.
 pub static PROBE_READS: ReadSlots = ReadSlots::new();
 
 /// A checked-out connection that goes back to the pool when dropped (an early

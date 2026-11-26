@@ -978,6 +978,69 @@ mod tests {
         assert!(locked.live() && !locked.pickable() && unverified.pickable());
     }
 
+    /// F16a (#717 review), pinned: the alive gate first (healthy before
+    /// weak, whatever the ease), then F10 ease among healthy copies, twins
+    /// before alts at the same ease, weak copies by their share, then
+    /// unverified ones, dead last. A copy with any alive article (0.3%)
+    /// ranks ahead of an unchecked one: intended, it can lend what it has.
+    #[test]
+    fn failover_order_pins_f16a() {
+        // ids and scores run against the expected order, so no pair is
+        // decided by the tie-break (score, then id) instead of its rule
+        let mut bare_alt = m(9, 980);
+        bare_alt.ease = 0;
+        let mut stored_twin = m(8, 990);
+        stored_twin.ease = 1;
+        stored_twin.twin = true;
+        stored_twin.kind = crate::donorkind::DonorKind::Twin as u8;
+        let mut stored_alt = m(7, 1000);
+        stored_alt.ease = 1;
+        let mut encrypted_alt = m(6, 1000);
+        encrypted_alt.ease = 3;
+        // weak, but the easiest kind: the alive gate comes first
+        let mut weak_bare = m(5, 900);
+        weak_bare.ease = 0;
+        let mut barely_alive = m(4, 3);
+        barely_alive.ease = 0;
+        let mut unverified_twin = m(3, -1);
+        unverified_twin.twin = true;
+        unverified_twin.kind = crate::donorkind::DonorKind::Twin as u8;
+        let mut unverified = m(2, -1);
+        let mut dead = m(1, 0);
+        for f in [
+            &mut bare_alt,
+            &mut stored_twin,
+            &mut stored_alt,
+            &mut encrypted_alt,
+            &mut weak_bare,
+            &mut barely_alive,
+            &mut unverified_twin,
+            &mut unverified,
+            &mut dead,
+        ] {
+            f.score = f.id;
+        }
+        let members = [
+            dead,
+            unverified,
+            barely_alive,
+            encrypted_alt,
+            weak_bare,
+            stored_alt,
+            unverified_twin,
+            stored_twin,
+            bare_alt,
+        ];
+        let ids: Vec<i32> = failover_order(&members).into_iter().map(|i| members[i].id).collect();
+        assert_eq!(ids, vec![9, 8, 7, 6, 5, 4, 3, 2, 1]);
+        let place = |id: i32| ids.iter().position(|&x| x == id).unwrap();
+        assert!(place(4) < place(3) && place(4) < place(2), "0.3% alive before unchecked");
+        assert!(place(8) < place(7), "twin before alt at the same ease");
+        assert!(place(3) < place(2), "unverified twin before unverified alt");
+        assert!(place(6) < place(5), "healthy before weak, whatever the ease");
+        assert!(place(9) < place(8), "ease before twin among healthy copies");
+    }
+
     /// Ties keep the order copies came (their scores), then their ids.
     #[test]
     fn failover_order_ties_go_by_score() {

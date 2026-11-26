@@ -44,6 +44,18 @@ pub unsafe extern "C" fn nzbget_rs_ptrlist_free(l: *mut PtrList) {
     drop_all(list.drop_fn, items);
 }
 
+/// Every item of the list, in order, read under one lock. A caller walking a
+/// whole list (a collection's files) takes it once this way rather than once
+/// per index with ops 0 and 1, which made a snapshot of a large queue cost a
+/// lock round trip per file (6790: the queue coordinator spun on them).
+pub(crate) fn items(l: *const PtrList) -> Vec<usize> {
+    if l.is_null() {
+        return Vec::new();
+    }
+    let list = unsafe { &*l };
+    list.lock().iter().copied().collect()
+}
+
 /// Ops (index a, item p):
 ///  0 count; 1 item at a (0 when out of range); 2 index of p (-1);
 ///  3 add p at the back; 4 add p at the front; 5 insert p before index a

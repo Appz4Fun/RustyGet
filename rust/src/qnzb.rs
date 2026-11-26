@@ -2418,10 +2418,9 @@ fn files_of(p: *const NzbScalars) -> Vec<*const crate::qfile::File> {
     if fl == 0 {
         return Vec::new();
     }
-    (0..ptr_list_op(fl, 0, 0, 0, std::ptr::null(), 0))
-        .map(|i| {
-            ptr_list_op(fl, 1, i, 0, std::ptr::null(), 0) as usize as *const crate::qfile::File
-        })
+    crate::qlist::items(fl as *const crate::qlist::PtrList)
+        .into_iter()
+        .map(|f| f as *const crate::qfile::File)
         .collect()
 }
 

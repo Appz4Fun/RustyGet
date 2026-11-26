@@ -62,6 +62,42 @@ impl FileStamp {
         None
     }
 }
+/// A leaf name whose identity a case-insensitive comparison proves on every supported file
+/// system: printable ASCII without separators or reserved characters, no trailing dot or
+/// space.
+fn flat_ascii(name: &std::ffi::OsStr) -> bool {
+    let bytes = name.as_encoded_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 255
+        && !matches!(bytes.last(), Some(b' ' | b'.'))
+        && bytes.iter().all(|&byte| {
+            (b' '..=b'~').contains(&byte)
+                && !matches!(
+                    byte,
+                    b'/' | b'\\' | b':' | b'"' | b'<' | b'>' | b'|' | b'?' | b'*'
+                )
+        })
+}
+
+/// The file `path` names now, following links: `Some(Some((device, inode)))`, `Some(None)`
+/// when no such file exists, `None` when it cannot be told.
+fn file_identity(path: &std::path::Path) -> Option<Option<(u64, u64)>> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match std::fs::metadata(path) {
+            Ok(meta) => Some(Some((meta.dev(), meta.ino()))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(None),
+            Err(_) => None,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 struct WriteState {
     physical_root: Option<Arc<super::source_identity::SourceRoot>>,
     generation: SessionGeneration,
@@ -477,18 +513,64 @@ impl WriteCoordinator {
         })
     }
     fn is_certified(state: &WriteState, identity: &WriterIdentity) -> bool {
-        state
-            .certified
-            .iter()
-            .flat_map(|set| set.targets.iter())
-            .any(|target| match identity {
+        // The writer's file, looked up at most once per check (and only when a name alone
+        // cannot decide).
+        let mut writer = None;
+        state.certified.iter().any(|set| {
+            set.targets.iter().any(|target| match identity {
                 #[cfg(test)]
                 WriterIdentity::File(id) => target.file_id == *id,
-                WriterIdentity::Path(path) => Self::paths_may_alias(&target.path, path),
+                WriterIdentity::Path(path) => Self::certified_alias(set, target, path, &mut writer),
                 WriterIdentity::FileAndPath(id, path) => {
-                    target.file_id == *id || Self::paths_may_alias(&target.path, path)
+                    target.file_id == *id || Self::certified_alias(set, target, path, &mut writer)
                 }
             })
+        })
+    }
+
+    /// Whether a write to `path` may reach certified `target`. As [`Self::paths_may_alias`],
+    /// except for two names in the target's folder that the name rule cannot tell apart
+    /// (not both flat ASCII): the file decides. `path` is the certified file when it resolves
+    /// (following links) to the file sealed (`set.stamps`: device and inode, which follow a
+    /// later rename). A name that does not exist is not that file: on a case- or
+    /// normalization-insensitive file system the lookup would have found it. Without a
+    /// stamp, or when the lookup fails otherwise, it counts as the same file.
+    ///
+    /// The cache flush drops an article whose target is certified (counted, not written);
+    /// the name rule alone made it drop the articles of an uncertified file whose name
+    /// differed from a certified one only in non-ASCII characters.
+    fn certified_alias(
+        set: &CertifiedTargets,
+        target: &WriterTarget,
+        path: &std::path::Path,
+        writer: &mut Option<Option<Option<(u64, u64)>>>,
+    ) -> bool {
+        if !Self::paths_may_alias(&target.path, path) {
+            return false;
+        }
+        let undecided = target.path != path
+            && target.path.parent() == path.parent()
+            && path.is_absolute()
+            && match (target.path.file_name(), path.file_name()) {
+                (Some(left), Some(right)) => !(flat_ascii(left) && flat_ascii(right)),
+                _ => false,
+            };
+        if !undecided {
+            return true;
+        }
+        let Some(stamp) = set
+            .stamps
+            .iter()
+            .find(|(id, _)| *id == target.file_id)
+            .map(|(_, stamp)| *stamp)
+        else {
+            return true;
+        };
+        match *writer.get_or_insert_with(|| file_identity(path)) {
+            Some(Some(id)) => id == (stamp.dev, stamp.ino),
+            Some(None) => false,
+            None => true,
+        }
     }
     fn paths_may_alias(left: &std::path::Path, right: &std::path::Path) -> bool {
         // Each coordinator belongs to an established root. A different parent
@@ -496,19 +578,6 @@ impl WriteCoordinator {
         if left == right || left.parent() != right.parent() {
             return true;
         }
-        let flat_ascii = |name: &std::ffi::OsStr| {
-            let bytes = name.as_encoded_bytes();
-            !bytes.is_empty()
-                && bytes.len() <= 255
-                && !matches!(bytes.last(), Some(b' ' | b'.'))
-                && bytes.iter().all(|&byte| {
-                    (b' '..=b'~').contains(&byte)
-                        && !matches!(
-                            byte,
-                            b'/' | b'\\' | b':' | b'"' | b'<' | b'>' | b'|' | b'?' | b'*'
-                        )
-                })
-        };
         match (left.file_name(), right.file_name()) {
             (Some(left), Some(right)) if flat_ascii(left) && flat_ascii(right) => left
                 .as_encoded_bytes()

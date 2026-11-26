@@ -448,14 +448,14 @@ fn certified_target_seal_covers_ascii_case_alias_after_cancellation() {
 }
 
 #[test]
-fn certified_target_seal_refuses_uncertain_namespace() {
+fn certified_target_seal_follows_the_exact_file() {
     let disk = Disk::new("sealed-uncertain-alias");
     let gate = WriteCoordinator::new(SessionGeneration(131));
     // Unsupported live identities keep their ordinary write path before any seal.
     assert!(gate
         .writer(&WriterIdentity::FileAndPath(
             41,
-            disk.0.with_file_name("sourcé.rar")
+            disk.0.with_file_name("sourc\u{e9}.rar")
         ))
         .is_ok());
     let lease = gate
@@ -466,16 +466,25 @@ fn certified_target_seal_refuses_uncertain_namespace() {
         )
         .unwrap();
     lease.publish(&[(40, 0)], || ()).unwrap();
-    for leaf in ["sourcé.rar", "source.rar.", "sub/../source.rar"] {
-        let identity = WriterIdentity::FileAndPath(41, disk.0.parent().unwrap().join(leaf));
-        assert!(
-            matches!(gate.writer(&identity), Err(WriteBlocked::Certified)),
-            "unprovable alias {leaf} must not bypass the existing seal"
-        );
+    // A path through another folder cannot be proven disjoint: refused.
+    let up = WriterIdentity::FileAndPath(41, disk.0.parent().unwrap().join("sub/../source.rar"));
+    assert!(matches!(gate.writer(&up), Err(WriteBlocked::Certified)));
+    // A non-ASCII name that is the certified file (a hard link, as case folding or Unicode
+    // normalization would give) is refused.
+    let link = disk.0.with_file_name("sourc\u{e9}-link.rar");
+    std::fs::hard_link(&disk.0, &link).unwrap();
+    let identity = WriterIdentity::FileAndPath(41, link.clone());
+    assert!(
+        matches!(gate.writer(&identity), Err(WriteBlocked::Certified)),
+        "the certified file under another name must not bypass the seal"
+    );
+    // Names that are other files (or no file yet) keep downloading: refusing them dropped
+    // their cached articles as "already certified".
+    for leaf in ["sourc\u{e9}.rar", "source.rar.", "other.rar"] {
+        let identity = WriterIdentity::FileAndPath(42, disk.0.parent().unwrap().join(leaf));
+        assert!(gate.writer(&identity).is_ok(), "{leaf} is another file");
     }
-    // A distinct eligible source in the same established root keeps downloading.
-    let other = WriterIdentity::FileAndPath(42, disk.0.with_file_name("other.rar"));
-    assert!(gate.writer(&other).is_ok());
+    let _ = std::fs::remove_file(link);
 }
 
 #[test]
@@ -593,4 +602,64 @@ fn a_write_that_found_nothing_leaves_live_par_sources_valid() {
         );
         forget_download_writes(id);
     }
+}
+
+/// Two missing non-ASCII names one repair request claims may be one file on a case- or
+/// normalization-insensitive file system: still refused (only the certified check decides by
+/// the file itself).
+#[test]
+fn one_repair_request_cannot_claim_two_missing_non_ascii_names() {
+    let disk = Disk::new("request-nonascii");
+    let gate = WriteCoordinator::new(SessionGeneration(137));
+    let targets = vec![
+        WriterTarget {
+            file_id: 40,
+            path: disk.0.with_file_name("\u{c4}rger.rar"),
+        },
+        WriterTarget {
+            file_id: 41,
+            path: disk.0.with_file_name("\u{e4}rger.rar"),
+        },
+    ];
+    assert!(matches!(
+        gate.begin_repair(SessionGeneration(137), targets, control(-1900337)),
+        Err(WriteBlocked::InvalidTarget)
+    ));
+}
+
+/// The seal follows the certified file, not its name: after a rename (par-rename gives an
+/// obfuscated target its par2 name) and through a symlink, a write to it is still refused.
+#[test]
+fn certified_seal_follows_a_renamed_file_and_symlinks() {
+    let disk = Disk::new("sealed-renamed");
+    let gate = WriteCoordinator::new(SessionGeneration(138));
+    let lease = gate
+        .begin_repair(
+            SessionGeneration(138),
+            vec![disk.target()],
+            control(-1900338),
+        )
+        .unwrap();
+    lease.publish(&[(40, 0)], || ()).unwrap();
+    let renamed = disk.0.with_file_name("\u{c4}rger.rar");
+    std::fs::rename(&disk.0, &renamed).unwrap();
+    assert!(matches!(
+        gate.writer(&WriterIdentity::Path(renamed.clone())),
+        Err(WriteBlocked::Certified)
+    ));
+    let link = disk.0.with_file_name("\u{c4}rger-sym.rar");
+    std::os::unix::fs::symlink(&renamed, &link).unwrap();
+    assert!(matches!(
+        gate.writer(&WriterIdentity::Path(link.clone())),
+        Err(WriteBlocked::Certified)
+    ));
+    // Another existing non-ASCII file in the folder is not the certified one.
+    let other = disk.0.with_file_name("\u{d6}rger.rar");
+    std::fs::write(&other, b"other").unwrap();
+    assert!(gate
+        .writer(&WriterIdentity::FileAndPath(42, other.clone()))
+        .is_ok());
+    let _ = std::fs::remove_file(link);
+    let _ = std::fs::remove_file(other);
+    let _ = std::fs::rename(&renamed, &disk.0);
 }

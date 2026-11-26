@@ -1105,7 +1105,12 @@ pub struct LeadView {
 /// The copy that should download now, among copies whose probe is done: the
 /// healthy one easiest to borrow into (most alive, then the order they came,
 /// on a tie). `current` (index, ease) already downloads: it is kept unless a
-/// healthy copy strictly easier to borrow into is found. None: nothing to do.
+/// healthy copy strictly easier to borrow into is found, or its own probe has
+/// since measured it weak (its view is no longer healthy) while a healthy copy
+/// is there: health gates the lead before ease does (F10), so a copy released
+/// early on its first few answers gives way once its whole sample shows it
+/// misses articles (Dune on 6790: `_1` released early, then 103 of 133
+/// sampled articles alive, while `_12` was 200 of 200). None: nothing to do.
 pub fn pick_lead(views: &[LeadView], current: Option<(usize, u8)>) -> Option<usize> {
     let best = views
         .iter()
@@ -1113,7 +1118,9 @@ pub fn pick_lead(views: &[LeadView], current: Option<(usize, u8)>) -> Option<usi
         .min_by(|a, b| a.ease.cmp(&b.ease).then(b.alive.cmp(&a.alive)).then(a.idx.cmp(&b.idx)))?;
     match current {
         None => Some(best.idx),
-        Some((idx, ease)) if best.idx != idx && best.ease < ease => Some(best.idx),
+        Some((idx, _)) if best.idx == idx => None,
+        Some((_, ease)) if best.ease < ease => Some(best.idx),
+        Some((idx, _)) if views.iter().any(|v| v.idx == idx && !v.healthy) => Some(best.idx),
         _ => None,
     }
 }
@@ -1138,6 +1145,18 @@ pub fn fleet_switch_allowed(downloaded: i64) -> bool {
 /// release that finished downloading or is unpacking keeps the lead.
 pub fn fleet_leader_switchable(downloaded: i64, post_processing: bool, left: i64) -> bool {
     fleet_switch_allowed(downloaded) && !post_processing && left > 0
+}
+
+/// [`fleet_leader_switchable`], with no byte limit for a leader its probe
+/// measured weak (`weak`): a copy missing articles costs a borrow for every
+/// one of them however much of it came, so it gives way to a healthy copy
+/// while it still downloads and is not post-processed.
+pub fn weak_leader_switchable(weak: bool, downloaded: i64, post_processing: bool, left: i64) -> bool {
+    if weak {
+        !post_processing && left > 0
+    } else {
+        fleet_leader_switchable(downloaded, post_processing, left)
+    }
 }
 
 /// Whether the probe's findings may be written onto a fleet copy already in
@@ -1207,8 +1226,10 @@ pub fn fleet_added_status(dead: bool, alive: i32) -> (&'static [u8], Vec<u8>) {
 /// B1c: releases `new_id` as its fleet's primary while the other copies are
 /// still being probed, with what its probe found written on it (`params`).
 /// `old_id`, the primary released before (0: none), goes back to its hold,
-/// but only while it has downloaded little ([`fleet_switch_allowed`]): false
-/// when it is kept, or when another copy of the key downloads already.
+/// but only while it has downloaded little ([`fleet_switch_allowed`]), or
+/// whatever it downloaded when its probe measured it weak (`old_weak`: its
+/// own articles miss, so every byte more of it costs a borrow): false when it
+/// is kept, or when another copy of the key downloads already.
 fn fleet_lead_release(
     host_ctx: *mut c_void,
     host_cb: DupeHostFn,
@@ -1216,6 +1237,7 @@ fn fleet_lead_release(
     new_id: i32,
     params: &[(&[u8], &[u8])],
     old_id: i32,
+    old_weak: bool,
 ) -> bool {
     with_guarded_queue(host_ctx, host_cb, |dq_ptr| {
         let Some(qh) = crate::ffi::queue_host() else {
@@ -1244,14 +1266,19 @@ fn fleet_lead_release(
                 old_q.current_success_size + old_q.current_failed_size,
                 old_q.success_size + old_q.failed_size,
             );
-            if !fleet_leader_switchable(downloaded, old_q.has_post_info, old_q.remaining_size - old_q.paused_size) {
+            let left = old_q.remaining_size - old_q.paused_size;
+            if !weak_leader_switchable(old_weak, downloaded, old_q.has_post_info, left) {
                 return false;
             }
             crate::fleethold::hold_host(
                 &qh,
                 dq_ptr,
                 &old_q,
-                b"a healthy copy easier to borrow into was found while its fleet is probed",
+                if old_weak {
+                    &b"its probe measured it weak (articles missing) and a healthy copy was found while its fleet is probed"[..]
+                } else {
+                    &b"a healthy copy easier to borrow into was found while its fleet is probed"[..]
+                },
             );
         }
         for (k, v) in params {
@@ -8154,6 +8181,9 @@ pub unsafe fn fleet_append(
                             ];
                             params.push((ALIVE_CUT_PARAM, if cut { b"yes" } else { b"no" }));
                             let old_id = leader.map_or(0, |(_, _, id)| id);
+                            // the leader's own probe now measures it weak
+                            let old_weak = leader
+                                .is_some_and(|(li, _, _)| views.iter().any(|v| v.idx == li && !v.healthy));
                             let released = fleet_lead_release(
                                 ctx_addr as *mut c_void,
                                 host_cb,
@@ -8161,6 +8191,7 @@ pub unsafe fn fleet_append(
                                 id,
                                 &params,
                                 old_id,
+                                old_weak,
                             );
                             if released {
                                 leader = Some((pick, view.ease, id));
@@ -8938,6 +8969,29 @@ mod tests {
         let v = |idx, healthy, ease, alive| LeadView { idx, healthy, ease, alive };
         // with the failed leader (0) left out, the next healthy copy leads
         assert_eq!(pick_lead(&[v(2, true, 3, 1000)], None), Some(2));
+    }
+
+    /// Dune on 6790: a leader released on its first answers that its whole
+    /// sample then measures weak gives way to a healthy copy, whatever the
+    /// ease; a healthy leader keeps the lead against an equally easy one.
+    #[test]
+    fn a_leader_measured_weak_gives_way_to_a_healthy_copy() {
+        let v = |idx, healthy, ease, alive| LeadView { idx, healthy, ease, alive };
+        // _1 (idx 3) 103/133 = 774, _12 (idx 1) 200/200: same ease
+        assert_eq!(pick_lead(&[v(3, false, 1, 774), v(1, true, 1, 1000)], Some((3, 1))), Some(1));
+        // healthy beats weak even when harder to borrow into (health gates first)
+        assert_eq!(pick_lead(&[v(3, false, 1, 774), v(2, true, 3, 1000)], Some((3, 1))), Some(2));
+        // a healthy leader stays against an equally easy healthier copy
+        assert_eq!(pick_lead(&[v(3, true, 1, 980), v(1, true, 1, 1000)], Some((3, 1))), None);
+        // no healthy copy: the weak leader stays
+        assert_eq!(pick_lead(&[v(3, false, 1, 774), v(1, false, 1, 900)], Some((3, 1))), None);
+        // the leader is the best: nothing to do
+        assert_eq!(pick_lead(&[v(1, true, 1, 1000)], Some((1, 1))), None);
+        let gb = 1024 * 1024 * 1024;
+        assert!(weak_leader_switchable(true, 4 * gb, false, gb), "weak: no byte limit");
+        assert!(!weak_leader_switchable(false, 4 * gb, false, gb), "healthy: the 512 MB limit");
+        assert!(!weak_leader_switchable(true, 4 * gb, true, gb), "never in post-processing");
+        assert!(!weak_leader_switchable(true, 4 * gb, false, 0), "nothing left");
     }
 
     /// F6/F7: only answers are evidence. A copy a paused server left with

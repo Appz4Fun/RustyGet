@@ -207,6 +207,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const CONNECTION_WAIT_SEC: i64 = 10;
+
+/// How long (in whole seconds, so up to just under one more) a dead-pick probe waiting for a
+/// connection holds its download back (see
+/// [`probe_waiting_for_connection`]): enough for the articles the download has under way to
+/// finish and free a connection, so a probe that still gets none later polls for it beside the
+/// download, as before.
+pub const CONNECTION_HOLD_SEC: i64 = 3;
 pub const PROBE_LIMIT_SEC: i32 = 90;
 pub const RECHECK_LIMIT_SEC: i32 = 60;
 
@@ -259,6 +266,9 @@ struct ActiveProbeEntry {
     started: i64,
     stopped: Arc<AtomicBool>,
     conn_ptr: usize,
+    /// Set once the probe got its first connection, or gave up waiting for it (see
+    /// [`probe_waiting_for_connection`]).
+    connected: bool,
 }
 
 #[derive(Default)]
@@ -369,6 +379,30 @@ pub fn probe_probing_for(nzb_id: i32) -> i32 {
     -1
 }
 
+/// True while the dead-pick probe of download `nzb_id` waits for its first connection, for at
+/// most [`CONNECTION_HOLD_SEC`] (less when its server is blocked, see `end_connection_wait`):
+/// while that download is next in line the queue starts nothing, so the connection it would
+/// take goes to the probe. Without that, a
+/// download using every connection of a small server takes each freed one back at once, and
+/// the probe, polling for one, may only get it after the download failed over on its health
+/// anyway (functional `deadpickstray`, two connections).
+pub fn probe_waiting_for_connection(nzb_id: i32) -> bool {
+    if PROBE_COUNT.load(Ordering::SeqCst) == 0 {
+        return false;
+    }
+    let Ok(reg) = registry().lock() else {
+        return false;
+    };
+    let now = now_sec();
+    reg.entries.values().any(|entry| {
+        entry.nzb_id == nzb_id
+            && !entry.count_all
+            && !entry.connected
+            && !entry.stopped.load(Ordering::SeqCst)
+            && now - entry.started <= CONNECTION_HOLD_SEC
+    })
+}
+
 pub fn probe_stop_all() {
     let Ok(mut reg) = registry().lock() else {
         return;
@@ -442,6 +476,7 @@ impl NzbgetRsDupeProbe {
                 started: now_sec(),
                 stopped: Arc::clone(&self.stopped),
                 conn_ptr: 0,
+                connected: false,
             },
         );
         PROBE_COUNT.fetch_add(1, Ordering::SeqCst);
@@ -460,11 +495,22 @@ impl NzbgetRsDupeProbe {
         PROBE_COUNT.fetch_sub(1, Ordering::SeqCst);
     }
 
+    /// Ends the hold [`probe_waiting_for_connection`] puts on the probe's download.
+    #[cfg(unix)]
+    fn end_connection_wait(&self) {
+        if let Ok(mut reg) = registry().lock() {
+            if let Some(entry) = reg.entries.get_mut(&self.id) {
+                entry.connected = true;
+            }
+        }
+    }
+
     #[cfg(unix)]
     fn set_conn(&self, conn_ptr: usize) {
         if let Ok(mut reg) = registry().lock() {
             if let Some(entry) = reg.entries.get_mut(&self.id) {
                 entry.conn_ptr = conn_ptr;
+                entry.connected |= conn_ptr != 0;
             }
         }
     }
@@ -482,6 +528,7 @@ impl NzbgetRsDupeProbe {
     ) -> (bool, ServerResult) {
         let mut result = ServerResult::default();
         if pool.server_by_id(server_id).is_none() {
+            self.end_connection_wait();
             return (false, result);
         }
 
@@ -503,12 +550,23 @@ impl NzbgetRsDupeProbe {
                 actual_server_id = c.server.id;
                 join_group = c.server.join_group;
                 server_name = c.server.name.to_bytes().to_vec();
+                // got one (a server already probed included): the download goes on
+                self.end_connection_wait();
             } else {
+                // a blocked server frees no connection for the probe: the download need not
+                // hold back for it
+                if pool
+                    .server_by_id(server_id)
+                    .is_some_and(|wanted| pool.is_server_blocked(&wanted))
+                {
+                    self.end_connection_wait();
+                }
                 std::thread::sleep(Duration::from_millis(50));
             }
         }
 
         if conn_ptr == 0 {
+            self.end_connection_wait();
             result.unreachable = match pool.server_by_id(server_id) {
                 None => false,
                 Some(wanted) => {
@@ -972,6 +1030,36 @@ impl Drop for NzbgetRsDupeProbe {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dead_pick_probe_waits_for_its_first_connection_only() {
+        // ids no other test registers: the registry is process-wide
+        let nzb_id = -1_907_001;
+        let mut probe = NzbgetRsDupeProbe::new(nzb_id, false, 0);
+        assert!(!probe_waiting_for_connection(nzb_id));
+        assert!(probe.register());
+        assert!(probe_waiting_for_connection(nzb_id));
+        assert!(!probe_waiting_for_connection(nzb_id - 1));
+        // connected once: the downloads take connections again, also between its servers
+        probe.set_conn(0x1000);
+        assert!(!probe_waiting_for_connection(nzb_id));
+        probe.set_conn(0);
+        assert!(!probe_waiting_for_connection(nzb_id));
+        probe.unregister();
+        // its first server gave no connection: the download goes on without it
+        let mut unreachable = NzbgetRsDupeProbe::new(nzb_id, false, 0);
+        assert!(unreachable.register());
+        assert!(probe_waiting_for_connection(nzb_id));
+        unreachable.end_connection_wait();
+        assert!(!probe_waiting_for_connection(nzb_id));
+        unreachable.unregister();
+        // a recheck probe (count_all) never holds the downloads back
+        let mut recheck = NzbgetRsDupeProbe::new(nzb_id, true, 0);
+        assert!(recheck.register());
+        assert!(!probe_waiting_for_connection(nzb_id));
+        recheck.unregister();
+    }
 
     /// A probe of a server that refuses connections (port 1), on 40 connections
     /// with `LightConnections=cap`.

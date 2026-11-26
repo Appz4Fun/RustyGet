@@ -1426,6 +1426,9 @@ fn edit_group(
     if is_group_del && host.queue_find_by_id(dq_ptr, nzb_id).is_some() {
         host.dq_notify(dq_ptr, ASPECT_NZB_DELETED, nzb_ptr, FileRef::NONE);
     }
+    if action == crate::queuesubsys_host::EA_GROUP_RESUME {
+        crate::dupefallback::prioritize_par_index_on_resume_host(host, nzb_ptr);
+    }
 
     ok
 }

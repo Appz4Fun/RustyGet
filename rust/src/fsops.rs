@@ -1194,9 +1194,15 @@ mod tests {
 
     use PosixFsOps as RealPosixFsOps;
 
+    /// The descriptor the probe script reads: dash (Debian/Ubuntu `/bin/sh`) rejects a
+    /// redirection from fd 10 or above ("Bad fd number"), and under parallel tests a `dup()`
+    /// lands there at random, so the child moves a high descriptor down to this one first,
+    /// keeping its close-on-exec flag.
+    const PROBE_FD: c_int = 9;
+
     fn child_sees_descriptor(fd: i32) -> i32 {
         let script = CString::new(format!(
-            "exec </dev/null 2>/dev/null; IFS= read -r line <&{fd} && [ \"$line\" = cloexec-probe ]"
+            "exec </dev/null 2>/dev/null; IFS= read -r line <&{PROBE_FD} && [ \"$line\" = cloexec-probe ]"
         ))
         .unwrap();
         let sh = c"/bin/sh";
@@ -1208,6 +1214,16 @@ mod tests {
                 return -1;
             }
             if pid == 0 {
+                if fd != PROBE_FD {
+                    let flags = libc::fcntl(fd, libc::F_GETFD);
+                    if flags == -1 || libc::dup2(fd, PROBE_FD) == -1 {
+                        libc::_exit(127);
+                    }
+                    // dup2 clears close-on-exec on the copy: the probe is about that flag
+                    if libc::fcntl(PROBE_FD, libc::F_SETFD, flags & libc::FD_CLOEXEC) == -1 {
+                        libc::_exit(127);
+                    }
+                }
                 libc::execl(
                     sh.as_ptr(),
                     sh_arg.as_ptr(),
@@ -1230,6 +1246,26 @@ mod tests {
                 0
             }
         }
+    }
+
+    #[test]
+    fn the_cloexec_probe_reads_a_descriptor_of_ten_or_more() {
+        // dash cannot redirect from fd 10+: with the descriptors below taken, as parallel
+        // tests leave them, the probe still tells an inherited descriptor from a close-on-exec one
+        let dir = std::env::temp_dir().join(format!("rustyget-probe-fd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("probe.txt");
+        std::fs::write(&file, b"cloexec-probe\n").unwrap();
+        let src = std::fs::File::open(&file).unwrap();
+        use std::os::fd::AsRawFd;
+        let high = unsafe { libc::fcntl(src.as_raw_fd(), libc::F_DUPFD, 12) };
+        assert!(high >= 12, "{high}");
+        assert_eq!(child_sees_descriptor(high), 1);
+        unsafe { libc::lseek(high, 0, libc::SEEK_SET) };
+        assert_ne!(unsafe { libc::fcntl(high, libc::F_SETFD, libc::FD_CLOEXEC) }, -1);
+        assert_eq!(child_sees_descriptor(high), 0);
+        unsafe { libc::close(high) };
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -614,6 +614,11 @@ pub(crate) fn backup_may_lend_while_extracting(
     )
 }
 
+/// Set while the download next in line waits for its dead-pick probe's connection (see
+/// `dupeprobe::probe_waiting_for_connection`): the queue has work left, so it neither idles
+/// nor, in standalone mode, ends with the download unfinished.
+static PROBE_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 static KEPT_FOR_BORROWING: std::sync::Mutex<Option<std::collections::HashSet<i32>>> =
     std::sync::Mutex::new(None);
 
@@ -645,6 +650,32 @@ fn was_kept_for_borrowing(nzb_id: i32) -> bool {
         .unwrap_or_else(|e| e.into_inner())
         .as_ref()
         .is_some_and(|g| g.contains(&nzb_id))
+}
+
+/// What [`weak_primary_switch`] decides on for download `nzb` and its best backup, with the
+/// dead-download check's `tried` articles and `projected` health.
+#[cfg(unix)]
+fn weak_switch_facts(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb: &crate::queuesubsys_host::NzbSnap,
+    backup_nzb: &crate::queuesubsys_host::NzbSnap,
+    tried: i32,
+    projected: i32,
+) -> WeakSwitchFacts {
+    WeakSwitchFacts {
+        held_in_fleet: crate::fleethold::holds_in_queue(host, nzb)
+            && crate::fleethold::is_held(host, backup_nzb.ptr)
+            && backup_nzb.dupe_key.eq_ignore_ascii_case(&nzb.dupe_key),
+        tried,
+        projected,
+        backup_alive: backup_alive_permille(host, backup_nzb.ptr),
+        same_video: backup_same_video(host, nzb, backup_nzb),
+        backup_twin: backup_is_twin(host, backup_nzb),
+        primary_held: crate::fleethold::is_held(host, nzb.ptr),
+        backup_locked: crate::dupecoord::locked_host(host, backup_nzb.ptr),
+        done: data_done_permille(nzb),
+        extraction_verified: direct_unpack_verified(nzb.direct_unpack_status),
+    }
 }
 
 /// A download the dead-download check leaves alone: not an nzb, already being removed or parked,
@@ -1205,6 +1236,16 @@ pub fn should_park_dead_without_backup(
 }
 
 /// Determines whether `QueueCoordinator::CheckParDamage` should wait for duplicate article borrowing before failing over.
+///
+/// It waits for `failover_sample` lost articles tried for borrowing only while that many can
+/// still come (`untried`: the lost articles expected among the data articles left, see
+/// [`expected_lost`]): lost articles count only once the par2
+/// damage is known (before, they wait for par-check), so a download whose damage turned up
+/// late may never reach the sample, and it would download to its end and fail par-repair
+/// before any failover (functional `pardamageborrow` with 4 connections counted 30 to 35 of
+/// its 48 lost articles). It then judges on what it counted, but never on fewer than half the
+/// sample: one or two failed borrows (a donor not read yet, say) are no reason to throw away a
+/// download that is nearly done.
 #[allow(clippy::too_many_arguments)]
 #[inline]
 pub fn should_wait_for_borrowing_on_par_damage(
@@ -1217,14 +1258,31 @@ pub fn should_wait_for_borrowing_on_par_damage(
     attempted: i32,
     failover_sample: i32,
     recovered: i32,
+    untried: i32,
 ) -> bool {
     if fallback_enabled && !raw_article && dupe_mode != DupeMode::Force && has_par2 {
         defer_state == dp_deferred
-            || attempted < failover_sample
+            || (attempted < failover_sample
+                && (attempted < failover_sample / 2
+                    || attempted.saturating_add(untried.max(0)) >= failover_sample))
             || recovered.saturating_mul(2) >= attempted
     } else {
         false
     }
+}
+
+/// How many of `untried` articles are expected to be lost, at the rate the `tried_ok` +
+/// `tried_failed` articles so far were (rounded down: a lost article is expected only once a
+/// whole one is; all of them before anything was tried). Articles a duplicate lent count as
+/// arrived, so the rate is low while borrowing works partly: the failover comes earlier, still
+/// judged on at least half the sample.
+pub fn expected_lost(untried: i32, tried_ok: i32, tried_failed: i32) -> i32 {
+    let tried = i64::from(tried_ok.max(0)) + i64::from(tried_failed.max(0));
+    if tried == 0 {
+        return untried.max(0);
+    }
+    let lost = i64::from(untried.max(0)) * i64::from(tried_failed.max(0));
+    (lost / tried) as i32
 }
 
 /// Formats PAR damage summary string for `QueueCoordinator::CheckParDamage`.
@@ -1528,12 +1586,21 @@ const BACKUP_CLASSIFY_GRACE_SEC: i64 = 120;
 /// longer to open down to it). That check is bounded on its own: it reads until its deadline,
 /// then lets go.
 ///
-/// The grace for an unknown kind is only worth its wait while a backup can lend at all
-/// (`lending_possible`): with `RawArticle` the articles stay encoded, nothing is decoded,
-/// borrowed or extracted, so no kind found later could save anything, and waiting would only
-/// download the dead copy in full (B25, functional `dupefailoverraw`).
+/// The grace for an unknown kind is only worth its wait while a backup could keep the
+/// extraction going (`lending_possible`, see [`extraction_fed_by_duplicates`]). Without that
+/// (`RawArticle`, `DupeArticleFallback=no` or `article`, or no `DirectUnpack`) no kind found later could
+/// save anything, and waiting would only download the dead copy in full (B25, functional
+/// `dupefailoverraw`; B48/B49 `projectedswap`, `projectededge`, `parlesscritical`).
+///
+/// Nor is it once TwinCheck labelled the backup (`labelled`: a `DupeKind` of `twin`, `alt`,
+/// `container`, `other`, ...): that label is what [`alt_covers_lost_articles`] reads for a copy
+/// of unknown kind. The kind itself is set as a copy is added (fleet intake, dupe search), so a
+/// plain duplicate never gets one later: waiting on for it only downloaded a doomed copy further
+/// (functional `pardamageborrow`, labelled `container` within 2 s, then held for its 120 s).
+/// The fleet intake still reading a copy's video holds it all the same (`checking`).
 fn backup_still_unclassified(
     kind: crate::donorkind::DonorKind,
+    labelled: bool,
     parked_at: i64,
     now: i64,
     checking: bool,
@@ -1543,24 +1610,42 @@ fn backup_still_unclassified(
     checking
         || (lending_possible
             && kind == crate::donorkind::DonorKind::Unknown
+            && !labelled
             && now - parked_at < BACKUP_CLASSIFY_GRACE_SEC)
 }
 
-/// Whether any duplicate can lend this download data: not with `RawArticle`, which keeps
-/// articles encoded (article borrowing, stream repair and extraction all skip it).
+/// Whether TwinCheck labelled `backup_ptr` (see [`backup_still_unclassified`]).
 #[cfg(unix)]
-fn dupe_lending_possible(opts: &crate::queuesubsys_host::GlobalOptsSnap) -> bool {
-    !opts.raw_article
+fn backup_twincheck_labelled(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    backup_ptr: NzbRef,
+) -> bool {
+    host.nzb_get_param(backup_ptr, b"DupeKind")
+        .is_some_and(|k| !k.trim_ascii().is_empty())
+}
+
+/// Whether a duplicate's bytes can feed the extraction while the download runs (the
+/// `lending_possible` argument of [`backup_still_unclassified`]): live borrowing (see
+/// [`live_borrowing`]), or live stream repair (`DupeArticleFallback=stream`) patching what
+/// direct unpack extracted, which keeps a download whose extraction a duplicate already
+/// patched (`dupe_recovered_bytes`, see `check_dupe_failover`). Not with
+/// `DupeArticleFallback=no` or `article`, without `DirectUnpack`, or with `RawArticle`.
+#[cfg(unix)]
+fn extraction_fed_by_duplicates(opts: &crate::queuesubsys_host::GlobalOptsSnap) -> bool {
+    opts.dupe_article_fallback >= crate::queuesubsys_host::DAF_STREAM
+        && opts.direct_unpack
+        && !opts.raw_article
 }
 
 /// Whether the live dead-volume borrow can feed a running extraction (the `live_borrowing`
 /// argument of [`alt_covers_lost_articles`]): `DupeArticleFallback=live` with `DirectUnpack`,
-/// and a duplicate can lend at all.
+/// and a duplicate can lend at all: not with `RawArticle`, which keeps articles encoded
+/// (article borrowing, stream repair and extraction all skip it).
 #[cfg(unix)]
 fn live_borrowing(opts: &crate::queuesubsys_host::GlobalOptsSnap) -> bool {
     opts.dupe_article_fallback == crate::queuesubsys_host::DAF_LIVE
         && opts.direct_unpack
-        && dupe_lending_possible(opts)
+        && !opts.raw_article
 }
 #[cfg(unix)]
 const DUPE_PROBE_SAMPLE_COUNT: i32 = 10;
@@ -2005,7 +2090,18 @@ impl NzbgetRsQueueCoordinator {
             host.with_locked_queue(|dq_ptr| {
                 let opts = host.opts();
                 let next_pair = self.get_next_article(host, &opts, dq_ptr);
-                let has_more_articles = next_pair.is_some();
+                // The download next in line waits while its dead-pick probe waits for a
+                // connection (see `dupeprobe::probe_waiting_for_connection`): the connection it
+                // would take goes to the probe. Nothing of lower priority takes it meanwhile
+                // (a fleet's primary stays first), and the queue stays busy (`PROBE_HELD`).
+                let held = next_pair.as_ref().is_some_and(|(file, _)| {
+                    crate::dupeprobe::probe_waiting_for_connection(
+                        host.nzb_snap(file.nzb_ptr, false).id,
+                    )
+                });
+                PROBE_HELD.store(held, std::sync::atomic::Ordering::Relaxed);
+                let next_pair = if held { None } else { next_pair };
+                let has_more_articles = next_pair.is_some() || held;
                 let active_len = host.active_downloads_len();
                 article_downloads_running = active_len > 0;
                 host.self_set_has_more_jobs(has_more_articles || article_downloads_running);
@@ -2055,7 +2151,9 @@ impl NzbgetRsQueueCoordinator {
                 });
             }
 
-            let standby = !article_downloads_running;
+            // (a download held for its probe's connection resumes as soon as the probe has one)
+            let standby =
+                !article_downloads_running && !PROBE_HELD.load(std::sync::atomic::Ordering::Relaxed);
             if standby != was_standby {
                 host.stat_meter_enter_leave_standby(standby);
                 host.work_state_set_downloading(!standby);
@@ -5069,10 +5167,11 @@ impl NzbgetRsQueueCoordinator {
             );
             if backup_still_unclassified(
                 backup_kind,
+                backup_twincheck_labelled(host, backup_nzb.ptr),
                 backup_hi.time,
                 now,
                 crate::dupesearch_coord::intake_pending(backup_nzb.id, &nzb.dupe_key),
-                dupe_lending_possible(opts),
+                extraction_fed_by_duplicates(opts),
             ) && !download_hopeless(nzb.total_articles, nzb.current_success_articles, failed)
             {
                 // Not checked yet: the next round looks again instead of waiting for
@@ -5267,7 +5366,24 @@ impl NzbgetRsQueueCoordinator {
         let far_below = eval.far_below != 0;
         let below = eval.below != 0;
 
-        if !dead && !doomed && self.check_par_damage(host, opts, dq_ptr, &nzb) {
+        // A doomed download (projected health near critical) still gets the par2 check: the
+        // doomed failover below needs a backup known alive enough and may decline (functional
+        // `pardamageborrow`, projected 84.5-85% against critical 81% plus the margin, missed its
+        // par failover). Not while it is kept to borrow its lost parts, a dead-volume borrow
+        // runs, or its backup is still within the classify grace: those decide first below.
+        if !dead
+            && (!doomed
+                || self.doomed_par_check_allowed(
+                    host,
+                    opts,
+                    dq_ptr,
+                    &nzb,
+                    dead_rate,
+                    eval.tried,
+                    eval.projected,
+                ))
+            && self.check_par_damage(host, opts, dq_ptr, &nzb)
+        {
             return;
         }
         if (!dead && !doomed) || (probing >= 0 && !hopeless) {
@@ -5346,20 +5462,7 @@ impl NzbgetRsQueueCoordinator {
             host.nzb_get_param(nzb.ptr, crate::donorkind::KIND_PARAM)
                 .as_deref(),
         );
-        let facts = WeakSwitchFacts {
-            held_in_fleet: crate::fleethold::holds_in_queue(host, &nzb)
-                && crate::fleethold::is_held(host, backup_nzb.ptr)
-                && backup_nzb.dupe_key.eq_ignore_ascii_case(&nzb.dupe_key),
-            tried: eval.tried,
-            projected: eval.projected,
-            backup_alive: backup_alive_permille(host, backup_nzb.ptr),
-            same_video: backup_same_video(host, &nzb, &backup_nzb),
-            backup_twin: backup_is_twin(host, &backup_nzb),
-            primary_held: crate::fleethold::is_held(host, nzb.ptr),
-            backup_locked: crate::dupecoord::locked_host(host, backup_nzb.ptr),
-            done: data_done_permille(&nzb),
-            extraction_verified: direct_unpack_verified(nzb.direct_unpack_status),
-        };
+        let facts = weak_switch_facts(host, &nzb, &backup_nzb, eval.tried, eval.projected);
         match weak_primary_switch(&facts) {
             WeakSwitch::Stay => {}
             WeakSwitch::FailOver => {
@@ -5445,10 +5548,11 @@ impl NzbgetRsQueueCoordinator {
                 && crate::dupesearch_coord::intake_pending(backup_nzb.id, &nzb.dupe_key)
                 && backup_still_unclassified(
                     backup_kind,
+                    backup_twincheck_labelled(host, backup_nzb.ptr),
                     backup_hi.time,
                     now,
                     true,
-                    dupe_lending_possible(opts),
+                    extraction_fed_by_duplicates(opts),
                 )
             {
                 return;
@@ -5489,10 +5593,11 @@ impl NzbgetRsQueueCoordinator {
                 .map_or(0, |d| d.as_secs() as i64);
             if backup_still_unclassified(
                 backup_kind,
+                backup_twincheck_labelled(host, backup_nzb.ptr),
                 backup_hi.time,
                 now,
                 crate::dupesearch_coord::intake_pending(backup_nzb.id, &nzb.dupe_key),
-                dupe_lending_possible(opts),
+                extraction_fed_by_duplicates(opts),
             ) {
                 return;
             }
@@ -5596,6 +5701,26 @@ impl NzbgetRsQueueCoordinator {
         if !certain && !verdict.projected() {
             return false;
         }
+        let attempted = nzb.dupe_attempted_articles + nzb.dupe_unsourced_articles;
+        // (walks the files only while the sample is not reached) the lost articles still to
+        // come, at the rate the data articles tried so far were lost
+        let untried = if (DUPE_FAILOVER_SAMPLE / 2..DUPE_FAILOVER_SAMPLE).contains(&attempted) {
+            expected_lost(
+                Self::untried_articles(host, nzb),
+                data_articles(
+                    nzb.current_success_articles,
+                    nzb.current_success_size,
+                    nzb.par_current_success_size,
+                ),
+                data_articles(
+                    nzb.current_failed_articles,
+                    nzb.current_failed_size,
+                    nzb.par_current_failed_size,
+                ),
+            )
+        } else {
+            0
+        };
         if should_wait_for_borrowing_on_par_damage(
             opts.dupe_article_fallback != crate::queuesubsys_host::DAF_NONE,
             opts.raw_article,
@@ -5603,9 +5728,10 @@ impl NzbgetRsQueueCoordinator {
             crate::dupefallback::has_par2_host(host, nzb),
             nzb.dupe_par_defer_state,
             crate::queuesubsys_host::DP_DEFERRED,
-            nzb.dupe_attempted_articles + nzb.dupe_unsourced_articles,
+            attempted,
             DUPE_FAILOVER_SAMPLE,
             nzb.dupe_recovered_articles,
+            untried,
         ) {
             return false;
         }
@@ -5688,6 +5814,91 @@ impl NzbgetRsQueueCoordinator {
         crate::dupefallback::par_damage_forget_all(nzb.id);
         crate::fleethold::park_on_health_host(host, dq_ptr, &nzb);
         true
+    }
+
+    /// Articles of the data files `nzb` still downloads (not paused) that were not tried yet.
+    /// par2 files are left out: borrowing never fills their articles.
+    fn untried_articles(
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        nzb: &crate::queuesubsys_host::NzbSnap,
+    ) -> i32 {
+        (0..host.nzb_file_len(nzb.ptr))
+            .map(|i| host.file_snap(host.nzb_file_at(nzb.ptr, i)))
+            .filter(|f| !f.paused && !f.deleted && !crate::dupefallback::file_is_par_snap(f))
+            .map(|f| {
+                (f.total_articles - f.success_articles - f.failed_articles - f.missed_articles)
+                    .max(0)
+            })
+            .fold(0i32, i32::saturating_add)
+    }
+
+    /// Whether a doomed download may be failed over by the par2 check (see
+    /// `check_dead_download`): not while the weak-primary switch would move it to its fleet's
+    /// alt, nor while it is kept to borrow its lost parts, or would be kept
+    /// this round (the same [`alt_covers_lost_articles`] the doomed path asks, with its
+    /// `dead_rate` and `projected` health), a dead-volume borrow of it runs, or its backup is
+    /// still within the classify grace ([`backup_still_unclassified`]).
+    fn doomed_par_check_allowed(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        opts: &crate::queuesubsys_host::GlobalOptsSnap,
+        dq_ptr: usize,
+        nzb: &crate::queuesubsys_host::NzbSnap,
+        dead_rate: bool,
+        tried: i32,
+        projected: i32,
+    ) -> bool {
+        if was_kept_for_borrowing(nzb.id) || crate::postproc::dead_volume_borrow_underway(nzb.id) {
+            return false;
+        }
+        let Some((backup_hi, backup_nzb)) = crate::dupecoord::find_dupe_backup_host(
+            host,
+            opts,
+            dq_ptr,
+            nzb.ptr,
+            &nzb.name,
+            &nzb.dupe_key,
+        ) else {
+            return true;
+        };
+        // a weak fleet primary the doomed path switches to its alt (#724): that switch stops
+        // its extraction and live writes first, which the par2 failover would skip
+        if weak_primary_switch(&weak_switch_facts(host, nzb, &backup_nzb, tried, projected))
+            == WeakSwitch::FailOver
+        {
+            return false;
+        }
+        let backup_kind = crate::donorkind::DonorKind::from_param(
+            host.nzb_get_param(backup_nzb.ptr, crate::donorkind::KIND_PARAM)
+                .as_deref(),
+        );
+        if alt_covers_lost_articles(
+            dead_rate,
+            live_borrowing(opts),
+            crate::donorkind::DonorKind::from_param(
+                host.nzb_get_param(nzb.ptr, crate::donorkind::KIND_PARAM)
+                    .as_deref(),
+            ),
+            backup_kind,
+            projected,
+            crate::postproc::dead_volume_borrow_underway(nzb.id),
+            nzb.direct_unpack_status == DirectUnpackStatus::Running,
+            backup_may_lend_while_extracting(host, backup_nzb.ptr),
+            backup_cannot_lend(host, nzb, &backup_nzb),
+        ) {
+            return false;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        !backup_still_unclassified(
+            backup_kind,
+            backup_twincheck_labelled(host, backup_nzb.ptr),
+            backup_hi.time,
+            now,
+            crate::dupesearch_coord::intake_pending(backup_nzb.id, &nzb.dupe_key),
+            extraction_fed_by_duplicates(opts),
+        )
     }
 
     fn files_tried(
@@ -6889,19 +7100,91 @@ mod tests {
         use crate::donorkind::DonorKind;
         let parked = 1_000;
         let unclassified = super::backup_still_unclassified;
-        assert!(unclassified(DonorKind::Unknown, parked, parked + 2, false, true));
-        assert!(unclassified(DonorKind::Unknown, parked, parked + 119, false, true));
-        assert!(!unclassified(DonorKind::Unknown, parked, parked + 120, false, true));
+        assert!(unclassified(DonorKind::Unknown, false, parked, parked + 2, false, true));
+        assert!(unclassified(DonorKind::Unknown, false, parked, parked + 119, false, true));
+        assert!(!unclassified(DonorKind::Unknown, false, parked, parked + 120, false, true));
         // still being read in the background: held while the check runs, however old
-        assert!(unclassified(DonorKind::Unknown, parked, parked + 3_600, true, true));
+        assert!(unclassified(DonorKind::Unknown, false, parked, parked + 3_600, true, true));
         for kind in [DonorKind::Twin, DonorKind::Borrowable, DonorKind::Unborrowable] {
-            assert!(!unclassified(kind, parked, parked + 2, false, true));
-            assert!(unclassified(kind, parked, parked + 3_600, true, true));
+            assert!(!unclassified(kind, false, parked, parked + 2, false, true));
+            assert!(unclassified(kind, false, parked, parked + 3_600, true, true));
         }
         // nothing can lend (RawArticle): an unknown kind is no reason to wait, but the
         // fleet intake still reading the copy's video is (it may drop another video)
-        assert!(!unclassified(DonorKind::Unknown, parked, parked + 2, false, false));
-        assert!(unclassified(DonorKind::Unknown, parked, parked + 2, true, false));
+        assert!(!unclassified(DonorKind::Unknown, false, parked, parked + 2, false, false));
+        assert!(unclassified(DonorKind::Unknown, false, parked, parked + 2, true, false));
+        // TwinCheck labelled it (container, alt, ...): its label decides, no grace; the
+        // fleet intake still reading the copy's video holds it all the same
+        assert!(!unclassified(DonorKind::Unknown, true, parked, parked + 2, false, true));
+        assert!(unclassified(DonorKind::Unknown, true, parked, parked + 2, true, true));
+    }
+
+    #[test]
+    fn lost_articles_expected_at_the_rate_so_far() {
+        assert_eq!(super::expected_lost(120, 255, 45), 18);
+        assert_eq!(super::expected_lost(10, 85, 15), 1);
+        // 31 counted needs one more: expected only once a whole lost article is
+        assert_eq!(super::expected_lost(6, 85, 15), 0);
+        assert_eq!(super::expected_lost(7, 85, 15), 1);
+        assert_eq!(super::expected_lost(0, 85, 15), 0);
+        assert_eq!(super::expected_lost(40, 0, 0), 40);
+        assert_eq!(super::expected_lost(40, 100, 0), 0);
+    }
+
+    #[test]
+    fn par_damage_waits_for_the_borrow_sample_only_while_it_can_be_reached() {
+        use crate::queuesubsys_host::DP_DEFERRED;
+        let wait = |attempted, recovered, untried| {
+            super::should_wait_for_borrowing_on_par_damage(
+                true, false, DupeMode::Score, true, 0, DP_DEFERRED, attempted, 32, recovered, untried,
+            )
+        };
+        // fewer than 32 tried and enough left to try: borrowing gets its turn
+        assert!(wait(10, 0, 100));
+        assert!(wait(30, 0, 2));
+        // pardamageborrow: 30 counted, too few articles left to reach 32: fail over now
+        assert!(!wait(30, 0, 1));
+        assert!(!wait(30, 0, 0));
+        assert!(!wait(31, 0, 0));
+        assert!(wait(31, 0, 1));
+        assert!(!wait(16, 0, 0));
+        // but never on fewer than half the sample: one failed borrow near the end waits
+        assert!(wait(1, 0, 0));
+        assert!(wait(15, 7, 3));
+        // the sample reached: under half recovered fails over, half or more keeps borrowing
+        assert!(!wait(32, 15, 0));
+        assert!(wait(32, 16, 0));
+        // few tried and nothing left, all recovered: borrowing works, nothing to fail over for
+        assert!(wait(4, 2, 0));
+        // deferred to par-check: waits whatever the counts
+        assert!(super::should_wait_for_borrowing_on_par_damage(
+            true, false, DupeMode::Score, true, DP_DEFERRED, DP_DEFERRED, 40, 32, 0, 0,
+        ));
+    }
+
+    #[test]
+    fn classify_grace_waits_only_while_duplicates_feed_the_extraction() {
+        use crate::queuesubsys_host::{GlobalOptsSnap, DAF_LIVE, DAF_NONE, DAF_STREAM};
+        let opts = |daf, direct_unpack, raw_article| GlobalOptsSnap {
+            dupe_article_fallback: daf,
+            direct_unpack,
+            raw_article,
+            ..GlobalOptsSnap::default()
+        };
+        // live borrowing: DupeArticleFallback=live with DirectUnpack and no RawArticle
+        assert!(super::live_borrowing(&opts(DAF_LIVE, true, false)));
+        assert!(!super::live_borrowing(&opts(DAF_NONE, true, false)));
+        assert!(!super::live_borrowing(&opts(DAF_STREAM, true, false)));
+        assert!(!super::live_borrowing(&opts(DAF_LIVE, false, false)));
+        assert!(!super::live_borrowing(&opts(DAF_LIVE, true, true)));
+        // the grace: live borrowing, or live stream repair patching the extraction; not
+        // with DupeArticleFallback=no (B48/B49 projectedswap, parlesscritical), without
+        // DirectUnpack, or with RawArticle (dupefailoverraw)
+        assert!(super::extraction_fed_by_duplicates(&opts(DAF_LIVE, true, false)));
+        assert!(super::extraction_fed_by_duplicates(&opts(DAF_STREAM, true, false)));
+        assert!(!super::extraction_fed_by_duplicates(&opts(DAF_NONE, true, false)));
+        assert!(!super::extraction_fed_by_duplicates(&opts(DAF_STREAM, false, false)));
+        assert!(!super::extraction_fed_by_duplicates(&opts(DAF_LIVE, true, true)));
     }
 
     #[test]

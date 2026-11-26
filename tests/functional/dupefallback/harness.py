@@ -1709,10 +1709,12 @@ def scenario_streamrestartcredit(daemon, t):
     api = daemon.wait_ready()
     daemon.append(api, 'DonSR', donor, True, 'sr2-key', 50)
     daemon.append(api, 'RelSR2', primary, False, 'sr2-key', 100)
+    # "Recovered ... of Sr1.mkv from duplicate DonSR", not the "Queueing stream repair of
+    # Sr1.mkv from duplicate collections" before it: the shutdown must catch the repair running
     deadline = time.time() + 120
-    while time.time() < deadline and _grep_log(t, 'of Sr1.mkv from duplicate') == 0:
+    while time.time() < deadline and _grep_log(t, 'of Sr1.mkv from duplicate DonSR') == 0:
         time.sleep(0.3)
-    first_repaired = _grep_log(t, 'of Sr1.mkv from duplicate')
+    first_repaired = _grep_log(t, 'of Sr1.mkv from duplicate DonSR')
     try:
         api.shutdown()
     except Exception:
@@ -3981,12 +3983,18 @@ def _prod_rar(daemon, t, tag, damage):
 def scenario_prodrarwhole(daemon, t):
     """Fix 2 on a rar set under the production option set: the third volume is
     missing entirely while direct unpack extracts the others. The volume is
-    recreated, par-check passes, and unpack extracts a byte-identical movie."""
+    recreated, par-check passes, and unpack extracts a byte-identical movie.
+    When direct unpack is still running as the volume is found dead, the live
+    dead-volume borrow hands it the volume instead (it extracts on past it and
+    patches it in once borrowed; its archive checksums vouch for the movie, so
+    par-check is skipped): no file needs recreating then."""
     h, ok = _prod_rar(daemon, t, 'RW', {2: set(range(1, 6))})
     recreated = _grep_log(t, 'Recreating')
-    return ('prodrarwhole', ok and recreated == 1 and h['Status'].startswith('SUCCESS'),
-            'status=%s par=%s unpack=%s recreated_logs=%d extracted_ok=%s'
-            % (h['Status'], h['ParStatus'], h['UnpackStatus'], recreated, ok))
+    lent_live = _grep_log(t, 'for dead volume Rel.part03.rar from a duplicate; direct unpack reads it in place')
+    return ('prodrarwhole', ok and (recreated == 1 or (recreated == 0 and lent_live == 1)) and
+            h['Status'].startswith('SUCCESS'),
+            'status=%s par=%s unpack=%s recreated_logs=%d lent_to_direct_unpack=%d extracted_ok=%s'
+            % (h['Status'], h['ParStatus'], h['UnpackStatus'], recreated, lent_live, ok))
 
 
 def scenario_prodrarstream(daemon, t):
@@ -4040,8 +4048,13 @@ def _skiphole_rar(daemon, t, tag, donor, recovery, damage=None):
     daemon.append(api, 'Rel' + tag, build_multi_nzb(members), False, tag + '-key', 100)
     h = daemon.wait_history(api, 'Rel' + tag, timeout=300)
     ok = _verify_output(t, movie, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
-    skipped = _grep_log(t, 'extracted past damage in movie.mkv')
-    patched = _grep_log(t, 'repaired movie.mkv from the repaired volumes')
+    # a set extracted while it downloads goes to persistent partial files (Linux): the hole
+    # is noted as it is met and patched inline once its volume is repaired, before the
+    # extraction ends; otherwise it is reported at the end and patched afterwards
+    skipped = (_grep_log(t, 'extracted past damage in movie.mkv') +
+               _grep_log(t, 'Unrar: movie.mkv has a hole at'))
+    patched = (_grep_log(t, 'repaired movie.mkv from the repaired volumes') +
+               _grep_log(t, 'Unrar: patched movie.mkv from repaired Rel.part02.rar while extracting'))
     paused = _grep_log(t, 'Pausing direct unpack at Rel.part02.rar')
     detail = 'status=%s par=%s unpack=%s extracted_ok=%s skipped=%d patched=%d paused=%d' % (
         h['Status'], h['ParStatus'], h['UnpackStatus'], ok, skipped, patched, paused)
@@ -4696,18 +4709,25 @@ def _headlost_volume(daemon, t, name, rar5, par=False):
     hp = daemon.wait_history(api, 'Primary', timeout=300)
     failed_over = _grep_log(t, 'Failing over Primary')
     cancelled = _grep_log(t, 'Cancelling direct unpack')
-    rebuilt = _grep_log(t, 'Volume Show.part07.rar lost its headers')
-    # Written back over the file on disk, byte for byte: par verification finds it whole
-    # (RAR5 only: RAR 1.5-4 headers are rebuilt, not restored).
+    # From a sibling volume, or (RAR5) from the volume's own quick-open record as it arrives.
+    from_sibling = _grep_log(t, 'Volume Show.part07.rar lost its headers')
+    quick_open = _grep_log(t, 'Rebuilt the headers of Show.part07.rar')
+    rebuilt = from_sibling + quick_open
+    # Rebuilt from a sibling, the volume is written back over the file on disk, byte for
+    # byte, so par verification finds it whole (RAR5 only: RAR 1.5-4 headers are rebuilt,
+    # not restored). Rebuilt from its quick-open record, direct unpack reads on past the
+    # lost data and its archive checksums vouch for every byte (par-check is skipped).
     on_disk = _grep_log(t, 'Rebuilt Show.part07.rar on disk')
+    on_disk_ok = (on_disk == 1 or quick_open >= 1) if rar5 else on_disk == 0
     par_failed = _grep_log(t, 'Repair failed for Primary')
     du_ok = _grep_log(t, 'Direct unpack for Primary successful')
     integ = _verify_output(t, movie, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
-    ok = (failed_over == 0 and cancelled == 0 and rebuilt >= 1 and on_disk == (1 if rar5 else 0) and
+    ok = (failed_over == 0 and cancelled == 0 and rebuilt >= 1 and on_disk_ok and
           par_failed == 0 and du_ok == 1 and integ and hp['Status'].startswith('SUCCESS'))
     return (name, ok,
-            'status=%s failover_logs=%d du_cancelled=%d headers_rebuilt=%d on_disk=%d par_failed=%d du_ok=%d extracted_ok=%s'
-            % (hp['Status'], failed_over, cancelled, rebuilt, on_disk, par_failed, du_ok, integ))
+            'status=%s failover_logs=%d du_cancelled=%d headers_rebuilt=%d (quick_open=%d) on_disk=%d '
+            'par_failed=%d du_ok=%d extracted_ok=%s'
+            % (hp['Status'], failed_over, cancelled, rebuilt, quick_open, on_disk, par_failed, du_ok, integ))
 
 
 def scenario_headlostvolume(daemon, t):
@@ -4721,7 +4741,11 @@ def scenario_headlostvolume5(daemon, t):
 def scenario_headlostvolumepar(daemon, t):
     """headlostvolume5 with a par2 index but no recovery blocks (6790 job 354):
     the rebuilt volume has to count as repaired, or par verification finds
-    the volume still damaged and direct unpack is not resumed."""
+    the volume still damaged and direct unpack is not resumed. (rar 7 writes a
+    quick-open record, so the headers are now rebuilt from it as the volume
+    arrives and direct unpack reads on; par-check is skipped, the archive
+    checksums vouching for the movie. The sibling rebuild written back to disk
+    is left for sets without that record, as headlostvolume's RAR 1.5-4.)"""
     return _headlost_volume(daemon, t, 'headlostvolumepar', rar5=True, par=True)
 
 
@@ -5247,7 +5271,8 @@ def scenario_xpackdeadserver(daemon, t):
     h = daemon.wait_history(api, 'RelXD', timeout=300)
     log = t.read_file('nzbget.log').decode(errors='replace')
     def when(pattern):
-        m = re.search(r'^(\w{3} \w{3} +\d+ [\d:]+ \d{4})\t\w+\t' + pattern, log, re.M)
+        # date, then (in the current log format) the process and thread ids, then the kind
+        m = re.search(r'^(\w{3} \w{3} +\d+ [\d:]+ \d{4})\t(?:\d+\t\d+\t)?\w+\t' + pattern, log, re.M)
         return time.mktime(time.strptime(m.group(1), '%a %b %d %H:%M:%S %Y')) if m else None
     start, end = when('Cross-packing repair of'), when(r'Recovered .*\(cross-packing\)')
     seconds = end - start if start is not None and end is not None else None
@@ -7508,7 +7533,7 @@ def scenario_fleetpaused(daemon, t):
 def scenario_fleetparallel(daemon, t):
     """appendfleet (F11): two fleets for different keys at once, while a long
     download holds both connections. One fleet's check runs at a time; the other
-    waits within its own limit: both finish well inside 20 s with every member
+    waits within its own limit: both finish inside 19 s with every member
     measured. Before, they shared the connections and both used the whole limit
     with members unmeasured."""
     import threading
@@ -7530,7 +7555,12 @@ def scenario_fleetparallel(daemon, t):
         th.start()
     for th in threads:
         th.join(timeout=90)
-    ok = all(box.get(slot, {}).get('Complete') and box.get(slot + 'took', 99) < 15 and
+    # Each fleet waits for connections the busy download holds for 3 s per article, so a
+    # run takes whole multiples of those 3 s by when its reads land (3.2, 6.2 and 9.2 s in
+    # three runs on one Mac; 12.4-15.8 s on an emulated Linux x86_64). The fault this
+    # catches is both fleets using their whole 20 s limit (members left unmeasured, also
+    # checked): a second inside it tells them apart.
+    ok = all(box.get(slot, {}).get('Complete') and box.get(slot + 'took', 99) < 19 and
              all(m['Alive'] >= 0 for m in box[slot]['Members']) for slot in ('1', '2'))
     return ('fleetparallel', ok, 'took=%.1f/%.1f complete=%s/%s' % (box.get('1took', -1), box.get('2took', -1),
             box.get('1', {}).get('Complete'), box.get('2', {}).get('Complete')))
@@ -11553,7 +11583,10 @@ def scenario_pardamageborrow(daemon, t):
     """The par-damage failover with borrowing on (DupeArticleFallback=live): the
     spoiled blocks end its wait for par-check, it gets its turn, and the
     failover comes once it tried 32 articles and found under half (the backup
-    waits in history: another encode, other sizes, nothing it can lend)."""
+    waits in history: other files and sizes, another container by its par2 checksums,
+    nothing it can lend). Lost articles count only once the par2 damage is known, so
+    fewer than 32 may ever be counted (30 to 35 of the 48 here): with too few articles
+    left to reach the sample, it fails over on what it counted."""
     # 1 MB blocks: a par2 set big enough that health (87%) stays above critical
     # (81%), while 48 lost articles spoil 16 blocks of the 3 it can recover
     primary = _pardamage_release(t, 'pbP', 12480, {3, 10, 17, 24, 31, 38}, block=1048576)
@@ -15089,7 +15122,11 @@ SCENARIO_OPTIONS = {
     'directrenamesubdirjoin': ['DirectRename=yes', 'DirectWrite=no', 'ParCheck=auto'],
     'parvolnames': ['ParCheck=auto'],
     'pardamagefailover': ['ParCheck=auto', 'HealthCheck=dupe', 'DupeArticleFallback=no'],
-    'pardamageborrow': ['ParCheck=auto', 'HealthCheck=dupe', 'DupeArticleFallback=live'],
+    # at full speed its 16 MB arrive in about a second: the queue's checks may not run between
+    # the moment too few articles are left to reach the borrow sample and the end (1 in 12
+    # runs under load); about 4 s leaves them that time
+    'pardamageborrow': ['ParCheck=auto', 'HealthCheck=dupe', 'DupeArticleFallback=live',
+                        'DownloadRate=4000'],
     'nosourceonce': ['DupeArticleFallback=live', 'HealthCheck=none'],
     'twinalt': ['HealthCheck=dupe'],
     'twinlabelonadd': ['HealthCheck=dupe'],

@@ -1049,6 +1049,22 @@ impl NzbgetRsStreamRepairCtrl {
                 same_video_label: row.same_video_label,
             });
         }
+        // Donor order: a copy labelled the same video (a proven twin, an alt, or the fleet
+        // intake's same video) comes before the others, and one whose video already failed this
+        // download's dead-volume check goes behind every copy not yet checked. (Within those
+        // groups the dupe score still decides: twins are not yet put ahead of alts, nor alts
+        // lending by range ahead of ones extracted whole, as AGENTS.md prefers.) A pass is cut short by each new dead
+        // volume, so by score alone the same mismatched copy was checked pass after pass until
+        // it "could not lend" and the download failed over to it, while the labelled alt behind
+        // it was never tried (functional `deadvolumetwolenders`).
+        let own_id = q.host.nzb_snap(nzb_ptr, false).id;
+        // (keys read once: another run may record a check meanwhile)
+        donors.sort_by_cached_key(|d| {
+            (
+                crate::postproc::dead_volume_donor_mismatch_seen(own_id, &d.queued_filename),
+                !d.same_video_label,
+            )
+        });
 
         // A live pass with no duplicate to borrow from leaves its files
         // unattempted, so a backup added later (a fleet member, DupeWatch)

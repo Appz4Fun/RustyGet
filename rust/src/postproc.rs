@@ -2923,6 +2923,16 @@ pub(crate) fn dead_volume_donor_confirmed(nzb_id: i32, donor_id: i32) -> Option<
         .flatten()
 }
 
+/// True when the donor whose queued nzb file is `donor` failed the identity check of download
+/// `nzb_id`'s dead volumes at least once and never passed it (see
+/// [`dead_volume_donor_mismatched`] for the verdict that it cannot lend).
+pub(crate) fn dead_volume_donor_mismatch_seen(nzb_id: i32, donor: &[u8]) -> bool {
+    !donor.is_empty()
+        && dead_volume_donor_identities()
+            .get(&(nzb_id, donor.to_vec()))
+            .is_some_and(|r| matches!(r, Err(n) if *n >= 1))
+}
+
 /// True when some donor's video matched the one of download `nzb_id` while dead volumes waited
 /// for it: that donor lends them.
 pub(crate) fn dead_volume_any_donor_confirmed(nzb_id: i32) -> bool {

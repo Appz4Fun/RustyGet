@@ -395,33 +395,39 @@ fn cannot_continue_reason(
     opts: &crate::queuesubsys_host::GlobalOptsSnap,
     nzb: &crate::queuesubsys_host::NzbSnap,
     backup: &crate::queuesubsys_host::NzbSnap,
-) -> &'static str {
+) -> std::borrow::Cow<'static, str> {
     use crate::donorkind::DonorKind;
     let kind = |ptr| {
         DonorKind::from_param(host.nzb_get_param(ptr, crate::donorkind::KIND_PARAM).as_deref())
     };
+    if let Some(why) = crate::restartlend::refusal(nzb.id, &backup.queued_filename) {
+        // zipfast could not restart its decoder near the frontier (no restart point in its
+        // coder, say): the reason the restart gave
+        return format!("it holds the video compressed and zipfast cannot restart it near the frontier ({why})")
+            .into();
+    }
     if !live_borrowing(opts) {
-        "live borrowing is off (it needs DupeArticleFallback=live, DirectUnpack and no RawArticle)"
+        "live borrowing is off (it needs DupeArticleFallback=live, DirectUnpack and no RawArticle)".into()
     } else if crate::postproc::dead_volume_donor_cannot_lend(nzb.id, &backup.queued_filename) {
-        "its video failed the check against the download's, or it holds the video compressed"
+        "its video failed the check against the download's, or it holds the video compressed".into()
     } else if kind(backup.ptr) == DonorKind::Unborrowable {
-        "it holds the video compressed (or encrypted with no password), which live repair cannot lend from"
+        "it holds the video compressed (or encrypted with no password), which live repair cannot lend from".into()
     } else if kind(nzb.ptr) == DonorKind::Unborrowable {
-        "the download's own archive cannot be borrowed into"
+        "the download's own archive cannot be borrowed into".into()
     } else if host
         .nzb_get_param(backup.ptr, b"DupeKind")
         .is_some_and(|k| k.trim_ascii() == b"other")
     {
-        "TwinCheck found another video in it"
+        "TwinCheck found another video in it".into()
     } else if host
         .nzb_get_param(backup.ptr, b"DupeKind")
         .is_some_and(|k| k.trim_ascii().starts_with(b"twin:"))
     {
-        "it is a near twin (only some of its files agree), which proves nothing of the video"
+        "it is a near twin (only some of its files agree), which proves nothing of the video".into()
     } else if kind(backup.ptr) == DonorKind::Unknown && !backup_may_lend_while_extracting(host, backup.ptr) {
-        "nothing shows it holds the same video"
+        "nothing shows it holds the same video".into()
     } else {
-        "its labels do not show it can lend what lies past the frontier"
+        "its labels do not show it can lend what lies past the frontier".into()
     }
 }
 

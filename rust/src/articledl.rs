@@ -3777,7 +3777,7 @@ impl NzbgetRsArticleDownloader {
             let dupe_fallback_round = art.dupe_fallback_round;
             // A weak primary cut at its frontier (`frontiercut`): its data articles not fetched
             // yet are lent by its alt, so none goes to a server.
-            let cut_at_frontier = !fsnap.par_file && crate::frontiercut::is_cut(nzb.id);
+            let cut_at_frontier = !fsnap.par_file && crate::frontiercut::cuts_file(nzb.id, fsnap.id);
             let file_time = fsnap.time;
 
             let (retries, interval_sec) = match crate::options::active_options().as_deref() {

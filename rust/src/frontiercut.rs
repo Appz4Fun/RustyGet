@@ -15,17 +15,25 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-/// Cut downloads, each with the alt it was cut for.
-fn cut_set() -> MutexGuard<'static, HashMap<i32, i32>> {
-    static SET: OnceLock<Mutex<HashMap<i32, i32>>> = OnceLock::new();
+/// A cut: the alt it was made for, and the files it covers (the video's set; extras such as
+/// subs or a sample, which the alt does not lend, are still fetched).
+struct Cut {
+    alt: i32,
+    files: std::collections::HashSet<i32>,
+}
+
+/// Cut downloads, by NZBID.
+fn cut_set() -> MutexGuard<'static, HashMap<i32, Cut>> {
+    static SET: OnceLock<Mutex<HashMap<i32, Cut>>> = OnceLock::new();
     SET.get_or_init(Default::default)
         .lock()
         .unwrap_or_else(|e| e.into_inner())
 }
 
 /// Cuts download `nzb_id` at its frontier for alt `alt_id`, the copy proven to hold its video
-/// (equal inner keys) that lends the rest. True when it was not cut already.
-pub fn cut(nzb_id: i32, alt_id: i32) -> bool {
+/// (equal inner keys) that lends the rest; `files` are the IDs of the files of its video's set,
+/// the only ones cut. True when it was not cut already.
+pub fn cut(nzb_id: i32, alt_id: i32, files: impl IntoIterator<Item = i32>) -> bool {
     if nzb_id <= 0 || alt_id <= 0 {
         return false;
     }
@@ -33,19 +41,25 @@ pub fn cut(nzb_id: i32, alt_id: i32) -> bool {
     if set.contains_key(&nzb_id) {
         return false;
     }
-    set.insert(nzb_id, alt_id);
+    set.insert(nzb_id, Cut { alt: alt_id, files: files.into_iter().collect() });
     true
 }
 
-/// Whether download `nzb_id` is cut: its data articles not fetched yet are not fetched.
+/// Whether download `nzb_id` is cut.
 pub fn is_cut(nzb_id: i32) -> bool {
     cut_set().contains_key(&nzb_id)
+}
+
+/// Whether file `file_id` of download `nzb_id` is cut: its articles not fetched yet are not
+/// fetched (the alt lends them).
+pub fn cuts_file(nzb_id: i32, file_id: i32) -> bool {
+    cut_set().get(&nzb_id).is_some_and(|c| c.files.contains(&file_id))
 }
 
 /// The alt download `nzb_id` was cut for: only that copy keeps the cut (another backup the
 /// failover order picks later was never proven to hold the video).
 pub fn cut_for(nzb_id: i32) -> Option<i32> {
-    cut_set().get(&nzb_id).copied()
+    cut_set().get(&nzb_id).map(|c| c.alt)
 }
 
 /// Forgets the cut of download `nzb_id` (it left the queue, failed over, or starts over).
@@ -59,13 +73,14 @@ mod tests {
     fn a_cut_holds_until_forgotten() {
         let id = 0x7ffe_0001;
         assert!(!super::is_cut(id));
-        assert!(super::cut(id, 7));
-        assert!(!super::cut(id, 8), "cut once");
+        assert!(super::cut(id, 7, [11, 12]));
+        assert!(!super::cut(id, 8, [13]), "cut once");
         assert!(super::is_cut(id));
+        assert!(super::cuts_file(id, 12) && !super::cuts_file(id, 13), "only the video's set");
         assert_eq!(super::cut_for(id), Some(7), "for the alt it was cut for");
         super::forget(id);
         assert!(!super::is_cut(id));
-        assert!(!super::cut(0, 7), "no download 0");
-        assert!(!super::cut(id, 0), "no alt 0");
+        assert!(!super::cut(0, 7, [1]), "no download 0");
+        assert!(!super::cut(id, 0, [1]), "no alt 0");
     }
 }

@@ -10529,6 +10529,9 @@ impl CrossPackRepairSession {
                             && crate::restartlend::earlier(self.dead_nzb_id, &restart_key).is_none()
                             && !env_cell.borrow_mut().is_stopped()
                         {
+                            // a pass yielding for a newly dead volume waits for the restart to
+                            // finish (its reads would fail half way and be fetched again)
+                            env_cell.borrow_mut().set_finishing_volume(true);
                             let result = self
                                 .exec_restart(
                                     repair_set_idx,
@@ -10539,6 +10542,7 @@ impl CrossPackRepairSession {
                                     &env_cell,
                                 )
                                 .map(std::sync::Arc::new);
+                            env_cell.borrow_mut().set_finishing_volume(false);
                             let mut msg = Vec::new();
                             match &result {
                                 Ok(r) => {
@@ -10578,7 +10582,10 @@ impl CrossPackRepairSession {
                             env_cell.borrow_mut().emit_message_bytes(TargetMessageKind::Info, &msg);
                             // A read that failed (an article the backup lacks, a timeout) is no
                             // verdict on the backup: a later run tries again.
-                            if !result.as_ref().is_err_and(|why| crate::restartlend::transient(why)) {
+                            if !result.as_ref().is_err_and(|why| {
+                                crate::restartlend::transient(why)
+                                    && !crate::restartlend::transient_gave_up(self.dead_nzb_id, &restart_key)
+                            }) {
                                 crate::restartlend::keep(self.dead_nzb_id, &restart_key, result);
                             }
                             set_compressed[set_index] = restart_maps[set_index].is_none();

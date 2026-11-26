@@ -567,6 +567,9 @@ fn note_cannot_continue(
     nzb: &crate::queuesubsys_host::NzbSnap,
     backup: &crate::queuesubsys_host::NzbSnap,
 ) {
+    // failing over ends a frontier cut (`frontiercut`): the download fetches its own articles
+    // again if it is ever released
+    crate::frontiercut::forget(nzb.id);
     if nzb.direct_unpack_status != DirectUnpackStatus::Running {
         return;
     }
@@ -1751,6 +1754,29 @@ fn join_path(dir: &[u8], name: &[u8]) -> Vec<u8> {
     out.push(crate::paths::PATH_SEPARATOR);
     out.extend_from_slice(name);
     out
+}
+
+/// The IDs of the files of the download's video set: the set of archive volumes (or the bare or
+/// split file) with the most bytes, as stream repair groups them. A frontier cut covers only
+/// these: extras (subs, a sample, a second set) are not lent by the alt.
+#[cfg(unix)]
+fn video_set_file_ids(host: &crate::queuesubsys_host::QueueSubsysHost, nzb_ptr: NzbRef) -> Vec<i32> {
+    let files: Vec<_> = (0..host.nzb_file_len(nzb_ptr))
+        .map(|j| host.file_snap(host.nzb_file_at(nzb_ptr, j)))
+        .filter(|f| !f.par_file)
+        .collect();
+    let members: Vec<crate::streamrepair::SetMember> = files
+        .iter()
+        .map(|f| crate::streamrepair::SetMember::new(f.filename.clone(), f.size))
+        .collect();
+    let sets = crate::streamrepair::ContentMapper::group_sets(&members);
+    let total = |s: &crate::streamrepair::MemberSet| -> i64 {
+        s.members.iter().filter_map(|&m| members.get(m as usize)).map(|m| m.size).sum()
+    };
+    sets.iter()
+        .max_by_key(|s| total(s))
+        .map(|s| s.members.iter().filter_map(|&m| files.get(m as usize)).map(|f| f.id).collect())
+        .unwrap_or_default()
 }
 
 /// The share of a download's data (par2 left out) that came, success or
@@ -5427,7 +5453,7 @@ impl NzbgetRsQueueCoordinator {
         match weak_primary_switch(&facts) {
             WeakSwitch::Stay => {}
             WeakSwitch::ContinueAtFrontier => {
-                crate::frontiercut::cut(nzb.id, backup_nzb.id);
+                crate::frontiercut::cut(nzb.id, backup_nzb.id, video_set_file_ids(host, nzb.ptr));
                 let mut msg = b"Continuing ".to_vec();
                 msg.extend_from_slice(&nzb.name);
                 msg.extend_from_slice(b" at its frontier from alt ");

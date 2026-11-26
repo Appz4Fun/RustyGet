@@ -164,9 +164,30 @@ pub fn transient(why: &str) -> bool {
     why.contains("could not be read") || why.contains("hole") || why.contains("asked for nothing")
 }
 
+/// Transient refusals tried so far per (download, backup set).
+fn transient_tries() -> std::sync::MutexGuard<'static, std::collections::HashMap<(i32, Vec<u8>), u32>> {
+    static TRIES: std::sync::OnceLock<Mutex<std::collections::HashMap<(i32, Vec<u8>), u32>>> =
+        std::sync::OnceLock::new();
+    TRIES.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// How many times a restart whose reads failed is tried again before its failure stands: an
+/// article missing on every server is a fact about the backup, not a timeout.
+pub const TRANSIENT_TRIES: u32 = 3;
+
+/// Counts a transient refusal of backup set `key` for download `nzb_id`; true once it has
+/// failed [`TRANSIENT_TRIES`] times, when the caller keeps it as a refusal.
+pub fn transient_gave_up(nzb_id: i32, key: &[u8]) -> bool {
+    let mut tries = transient_tries();
+    let n = tries.entry((nzb_id, key.to_vec())).or_insert(0);
+    *n += 1;
+    *n >= TRANSIENT_TRIES
+}
+
 /// Forgets the restarts of download `nzb_id` (their scratch files go with the last holder).
 pub fn forget(nzb_id: i32) {
     tried().retain(|(id, _), _| *id != nzb_id);
+    transient_tries().retain(|(id, _), _| *id != nzb_id);
 }
 
 /// The backup as the restart reads it: its volumes in set order, read by volume offset.

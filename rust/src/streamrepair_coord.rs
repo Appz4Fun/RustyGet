@@ -100,6 +100,9 @@ struct CandSnap {
     password: Vec<u8>,
     other_container: bool,
     same_video_label: bool,
+    /// A fleet found its video compressed (or encrypted with no password): it can lend only
+    /// through a restart near the frontier (`restartlend`) or a whole decompression.
+    unborrowable: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -852,6 +855,9 @@ impl NzbgetRsStreamRepairCtrl {
                     host.nzb_get_param(cand, b"DupeKind").as_deref(),
                     host.nzb_get_param(cand, crate::dupesearch_coord::VIDEO_PARAM).as_deref(),
                 ),
+                unborrowable: crate::donorkind::DonorKind::from_param(
+                    host.nzb_get_param(cand, crate::donorkind::KIND_PARAM).as_deref(),
+                ) == crate::donorkind::DonorKind::Unborrowable,
             },
         ))
     }
@@ -996,6 +1002,7 @@ impl NzbgetRsStreamRepairCtrl {
             password: Vec<u8>,
             other_container: bool,
             same_video_label: bool,
+            unborrowable: bool,
         }
         let mut cand_rows: Vec<CandRow> = Vec::new();
         for (from_history, count) in [(false, queue_count), (true, history_count)] {
@@ -1021,12 +1028,18 @@ impl NzbgetRsStreamRepairCtrl {
                     password: cand.password,
                     other_container: cand.other_container,
                     same_video_label: cand.same_video_label,
+                    unborrowable: cand.unborrowable,
                 });
             }
         }
 
+        // Donor order: copies that lend by range (twins, stored alts) before those a fleet found
+        // compressed, which lend only through a restart reading from the first hole on, or a
+        // whole decompression; by score within each.
         cand_rows.sort_by(|a, b| {
-            if a.dupe_score != b.dupe_score {
+            if a.unborrowable != b.unborrowable {
+                a.unborrowable.cmp(&b.unborrowable)
+            } else if a.dupe_score != b.dupe_score {
                 b.dupe_score.cmp(&a.dupe_score)
             } else {
                 a.id.cmp(&b.id)

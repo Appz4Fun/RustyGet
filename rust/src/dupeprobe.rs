@@ -259,6 +259,8 @@ struct ActiveProbeEntry {
     started: i64,
     stopped: Arc<AtomicBool>,
     conn_ptr: usize,
+    /// Set once the probe got its first connection (see [`probe_waiting_for_connection`]).
+    connected: bool,
 }
 
 #[derive(Default)]
@@ -369,6 +371,26 @@ pub fn probe_probing_for(nzb_id: i32) -> i32 {
     -1
 }
 
+/// True while the dead-pick probe of download `nzb_id` waits for its first connection, for at
+/// most [`CONNECTION_WAIT_SEC`]: the queue then starts no article of that download, so the next
+/// connection a finished article frees goes to the probe. Without that, a download using every
+/// connection of a small server takes each freed one back at once, and the probe, polling for
+/// one, may only get it after the download failed over on its health anyway (functional
+/// `deadpickstray`, two connections).
+pub fn probe_waiting_for_connection(nzb_id: i32) -> bool {
+    let Ok(reg) = registry().lock() else {
+        return false;
+    };
+    let now = now_sec();
+    reg.entries.values().any(|entry| {
+        entry.nzb_id == nzb_id
+            && !entry.count_all
+            && !entry.connected
+            && !entry.stopped.load(Ordering::SeqCst)
+            && now - entry.started <= CONNECTION_WAIT_SEC
+    })
+}
+
 pub fn probe_stop_all() {
     let Ok(mut reg) = registry().lock() else {
         return;
@@ -442,6 +464,7 @@ impl NzbgetRsDupeProbe {
                 started: now_sec(),
                 stopped: Arc::clone(&self.stopped),
                 conn_ptr: 0,
+                connected: false,
             },
         );
         PROBE_COUNT.fetch_add(1, Ordering::SeqCst);
@@ -465,6 +488,7 @@ impl NzbgetRsDupeProbe {
         if let Ok(mut reg) = registry().lock() {
             if let Some(entry) = reg.entries.get_mut(&self.id) {
                 entry.conn_ptr = conn_ptr;
+                entry.connected |= conn_ptr != 0;
             }
         }
     }
@@ -972,6 +996,29 @@ impl Drop for NzbgetRsDupeProbe {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dead_pick_probe_waits_for_its_first_connection_only() {
+        // ids no other test registers: the registry is process-wide
+        let nzb_id = -1_907_001;
+        let mut probe = NzbgetRsDupeProbe::new(nzb_id, false, 0);
+        assert!(!probe_waiting_for_connection(nzb_id));
+        assert!(probe.register());
+        assert!(probe_waiting_for_connection(nzb_id));
+        assert!(!probe_waiting_for_connection(nzb_id - 1));
+        // connected once: the downloads take connections again, also between its servers
+        probe.set_conn(0x1000);
+        assert!(!probe_waiting_for_connection(nzb_id));
+        probe.set_conn(0);
+        assert!(!probe_waiting_for_connection(nzb_id));
+        probe.unregister();
+        // a recheck probe (count_all) never holds the downloads back
+        let mut recheck = NzbgetRsDupeProbe::new(nzb_id, true, 0);
+        assert!(recheck.register());
+        assert!(!probe_waiting_for_connection(nzb_id));
+        recheck.unregister();
+    }
 
     /// A probe of a server that refuses connections (port 1), on 40 connections
     /// with `LightConnections=cap`.

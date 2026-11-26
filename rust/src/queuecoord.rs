@@ -5346,7 +5346,8 @@ impl NzbgetRsQueueCoordinator {
         // par failover). Not while it is kept to borrow its lost parts, a dead-volume borrow
         // runs, or its backup is still within the classify grace: those decide first below.
         if !dead
-            && (!doomed || self.doomed_par_check_allowed(host, opts, dq_ptr, &nzb))
+            && (!doomed
+                || self.doomed_par_check_allowed(host, opts, dq_ptr, &nzb, dead_rate, eval.projected))
             && self.check_par_damage(host, opts, dq_ptr, &nzb)
         {
             return;
@@ -5811,15 +5812,18 @@ impl NzbgetRsQueueCoordinator {
     }
 
     /// Whether a doomed download may be failed over by the par2 check (see
-    /// `check_dead_download`): not while it is kept to borrow its lost parts, a dead-volume
-    /// borrow of it runs, or its backup is still within the classify grace
-    /// ([`backup_still_unclassified`]).
+    /// `check_dead_download`): not while it is kept to borrow its lost parts, or would be kept
+    /// this round (the same [`alt_covers_lost_articles`] the doomed path asks, with its
+    /// `dead_rate` and `projected` health), a dead-volume borrow of it runs, or its backup is
+    /// still within the classify grace ([`backup_still_unclassified`]).
     fn doomed_par_check_allowed(
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
         opts: &crate::queuesubsys_host::GlobalOptsSnap,
         dq_ptr: usize,
         nzb: &crate::queuesubsys_host::NzbSnap,
+        dead_rate: bool,
+        projected: i32,
     ) -> bool {
         if was_kept_for_borrowing(nzb.id) || crate::postproc::dead_volume_borrow_underway(nzb.id) {
             return false;
@@ -5834,14 +5838,31 @@ impl NzbgetRsQueueCoordinator {
         ) else {
             return true;
         };
+        let backup_kind = crate::donorkind::DonorKind::from_param(
+            host.nzb_get_param(backup_nzb.ptr, crate::donorkind::KIND_PARAM)
+                .as_deref(),
+        );
+        if alt_covers_lost_articles(
+            dead_rate,
+            live_borrowing(opts),
+            crate::donorkind::DonorKind::from_param(
+                host.nzb_get_param(nzb.ptr, crate::donorkind::KIND_PARAM)
+                    .as_deref(),
+            ),
+            backup_kind,
+            projected,
+            crate::postproc::dead_volume_borrow_underway(nzb.id),
+            nzb.direct_unpack_status == DirectUnpackStatus::Running,
+            backup_may_lend_while_extracting(host, backup_nzb.ptr),
+            backup_cannot_lend(host, nzb, &backup_nzb),
+        ) {
+            return false;
+        }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs() as i64);
         !backup_still_unclassified(
-            crate::donorkind::DonorKind::from_param(
-                host.nzb_get_param(backup_nzb.ptr, crate::donorkind::KIND_PARAM)
-                    .as_deref(),
-            ),
+            backup_kind,
             backup_twincheck_labelled(host, backup_nzb.ptr),
             backup_hi.time,
             now,

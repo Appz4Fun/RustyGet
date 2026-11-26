@@ -10228,6 +10228,13 @@ impl CrossPackRepairSession {
         self.donor_identity
     }
 
+    /// Whether the next [`Self::process_donor`] call may restart the donor's compressed video
+    /// near the frontier (`restartlend`): not for a copy TwinCheck labelled another video
+    /// (`DupeKind=other`). On by default.
+    pub fn set_donor_restartable(&mut self, restartable: bool) {
+        self.donor_restartable = restartable;
+    }
+
     /// Tells the next [`Self::process_donor`] call that an earlier run of this download already
     /// confirmed the donor's video as the same, by comparing its bytes with bytes the download
     /// holds (`postproc::dead_volume_donor_confirmed`). A probe that then cannot run in full
@@ -10236,13 +10243,6 @@ impl CrossPackRepairSession {
     /// compare (failover-continue: the dead tail is borrowed to the end instead of the release
     /// being downloaded and extracted again from its first byte). A probe that compares in full
     /// and differs still refuses the donor.
-    /// Whether the next [`Self::process_donor`] call may restart the donor's compressed video
-    /// near the frontier (`restartlend`): not for a copy TwinCheck labelled another video
-    /// (`DupeKind=other`). On by default.
-    pub fn set_donor_restartable(&mut self, restartable: bool) {
-        self.donor_restartable = restartable;
-    }
-
     pub fn set_donor_known_same(&mut self, known: Option<i64>) {
         self.donor_known_same = known.is_some();
         self.donor_known_size = known;
@@ -10500,9 +10500,12 @@ impl CrossPackRepairSession {
                             .iter()
                             .map(|h| h.offset)
                             .min();
+                        // (a copy labelled another video lends no earlier restart's output either)
+                        let restartable = self.donor_restartable;
                         let earlier = crate::restartlend::earlier(self.dead_nzb_id, &restart_key)
                             .filter(|e| {
-                                earlier_restart_reusable(
+                                (restartable || e.is_err())
+                                    && earlier_restart_reusable(
                                     e.as_ref().ok().map(|r| r.from),
                                     allow_decompress,
                                     first_hole,

@@ -4185,10 +4185,16 @@ impl NzbgetRsArticleDownloader {
                 }
                 Err(e)
                     if e.is_retryable()
-                        && crate::nntprs_pool::only_unreachable_required(
+                        && crate::nntprs_pool::wait_for_required(
                             shared,
                             &recs,
-                            matches!(e, nntp_rs::Error::Unavailable),
+                            matches!(
+                                e,
+                                nntp_rs::Error::Unavailable
+                                    | nntp_rs::Error::Io { .. }
+                                    | nntp_rs::Error::ConnectionLimit { .. }
+                            ),
+                            &rejected,
                         ) =>
                 {
                     // the required news server could not be connected to (down,

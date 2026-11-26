@@ -613,24 +613,58 @@ pub fn missing_on_usable(shared: &Shared, recs: &[Rec]) -> bool {
     })
 }
 
-/// Whether a fetch that failed with `unavailable` (nntp-rs found no server
-/// it could ask) or with the attempts `recs` never got a connection, and a
-/// required (not optional) server is among those it could not reach: the
-/// news server is down or blocked, which says nothing about the article.
-/// The per-connection download did not spend an article retry on a
-/// connection it could not establish; it waited for the blocked server
-/// (an optional one it passed over). Only a server switched on with
-/// connections counts.
+/// Servers nntp-rs blocked, by RustyGet server id: until when, and whether
+/// a refused login did it. Written in [`EventLog`]'s `server_blocked` (on
+/// nntp-rs's I/O thread, before the failed fetch returns), so a caller sees
+/// the block of the attempt it just made.
 #[cfg(unix)]
-pub fn only_unreachable_required(shared: &Shared, recs: &[Rec], unavailable: bool) -> bool {
-    let required = |s: &RsNewsServer| s.active.load(Ordering::SeqCst) && s.max_connections > 0 && !s.optional;
-    if recs.is_empty() {
-        return unavailable && shared.servers.iter().any(|s| required(s));
+static BLOCKS: std::sync::Mutex<Vec<(i32, std::time::Instant, bool)>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(unix)]
+fn note_block(id: i32, for_: Duration, auth: bool) {
+    if let Ok(mut b) = BLOCKS.lock() {
+        let until = std::time::Instant::now() + for_;
+        b.retain(|e| e.0 != id);
+        b.push((id, until, auth));
     }
-    // a refused login is the per-connection download's auth_rejected: that
-    // server is passed over as failed, never waited for
-    recs.iter().all(|r| !r.connected && matches!(r.outcome, Seen::Failed(_)) && r.fail != Some(FailKind::Auth))
-        && recs.iter().any(|r| shared.server(r.server).is_some_and(|s| required(s)))
+}
+
+/// Whether nntp-rs holds the server `id` blocked now because it could not
+/// be connected to (not for a refused login).
+#[cfg(unix)]
+fn blocked_unreachable(id: i32) -> bool {
+    let now = std::time::Instant::now();
+    BLOCKS.lock().is_ok_and(|b| b.iter().any(|e| e.0 == id && e.1 > now && !e.2))
+}
+
+/// Whether a failed fetch should wait for a news server instead of spending
+/// an article retry, as the per-connection download did for a connection it
+/// could not establish: no attempt had a connection (a fresh connection that
+/// failed before any byte counts as none), none was a refused login, and a
+/// required (not optional) server the fetch may ask (switched on, with
+/// connections, not in `skip`) is blocked now because it could not be
+/// reached. `connect_error` is true for an error that says the same with no
+/// attempts of its own (no server could be asked, or a single-flight leader's
+/// connect failure). Anything else (a refused login, a server switched off,
+/// every other server passed over for retention) spends retries as before.
+#[cfg(unix)]
+pub fn wait_for_required(shared: &Shared, recs: &[Rec], connect_error: bool, skip: &[usize]) -> bool {
+    let no_connection = if recs.is_empty() {
+        connect_error
+    } else {
+        recs.iter().all(|r| {
+            let connected = r.connected && !(r.fail.is_some() && r.fresh && r.wire_bytes == 0);
+            !connected && matches!(r.outcome, Seen::Failed(_)) && r.fail != Some(FailKind::Auth)
+        })
+    };
+    no_connection
+        && shared.servers.iter().enumerate().any(|(i, s)| {
+            s.active.load(Ordering::SeqCst)
+                && s.max_connections > 0
+                && !s.optional
+                && !skip.contains(&i)
+                && blocked_unreachable(s.id)
+        })
 }
 
 /// Servers switched on with connections: the ones a fetch can ask.
@@ -718,11 +752,14 @@ enum PoolEvent {
 #[cfg(unix)]
 struct EventLog {
     tx: std::sync::Mutex<std::sync::mpsc::Sender<PoolEvent>>,
+    /// RustyGet server ids by nntp-rs index.
+    ids: Vec<i32>,
 }
 
 #[cfg(unix)]
 impl EventLog {
     fn new(servers: Vec<std::sync::Arc<RsNewsServer>>) -> Self {
+        let ids = servers.iter().map(|s| s.id).collect();
         let (tx, rx) = std::sync::mpsc::channel::<PoolEvent>();
         let _ = std::thread::Builder::new().name("pool-events".into()).spawn(move || {
             for ev in rx {
@@ -757,7 +794,7 @@ impl EventLog {
                 }
             }
         });
-        Self { tx: std::sync::Mutex::new(tx) }
+        Self { tx: std::sync::Mutex::new(tx), ids }
     }
 
     fn send(&self, ev: PoolEvent) {
@@ -770,6 +807,9 @@ impl EventLog {
 #[cfg(unix)]
 impl nntp_rs::PoolEvents for EventLog {
     fn server_blocked(&self, server: usize, for_: Duration, reason: &nntp_rs::Error) {
+        if let Some(&id) = self.ids.get(server) {
+            note_block(id, for_, matches!(reason, nntp_rs::Error::Auth { .. }));
+        }
         self.send(PoolEvent::Blocked { server, secs: for_.as_secs(), reason: reason.to_string() });
     }
 
@@ -1257,6 +1297,19 @@ mod tests {
         std::sync::Arc::new(RsNewsServer::new(
             id, active, b"s", b"127.0.0.1", 119, 0, b"", b"", false, false, b"", conns, 0, 0, group, false, 2,
         ))
+    }
+
+    #[test]
+    fn a_block_for_a_refused_login_is_not_waited_for() {
+        note_block(-9101, Duration::from_secs(30), false);
+        note_block(-9102, Duration::from_secs(30), true);
+        note_block(-9103, Duration::from_secs(0), false);
+        assert!(blocked_unreachable(-9101));
+        assert!(!blocked_unreachable(-9102), "a refused login is passed over");
+        assert!(!blocked_unreachable(-9103), "a block that ran out");
+        assert!(!blocked_unreachable(-9104), "never blocked");
+        note_block(-9101, Duration::from_secs(0), false);
+        assert!(!blocked_unreachable(-9101), "the newest block replaces the older one");
     }
 
     fn rec(server: usize, outcome: Seen) -> Rec {

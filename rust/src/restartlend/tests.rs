@@ -332,3 +332,20 @@ fn a_restart_that_fails_after_its_scratch_file_was_made_leaves_nothing() {
     assert!(r.is_err(), "another video's prefix fails the member's CRC32");
     assert!(fx.volumes(".rg-restart").is_empty(), "the scratch file is removed");
 }
+
+/// Reads failing in back-to-back passes (one outage) are no verdict: the failure stands only
+/// after [`TRANSIENT_TRIES`] tries spanning [`TRANSIENT_SPAN`].
+#[test]
+fn transient_failures_stand_only_over_time() {
+    let id = -7281;
+    let key = set_key(b"backup.nzb", b"movie.part01.rar");
+    let t0 = std::time::Instant::now();
+    for _ in 0..10 {
+        assert!(!transient_gave_up_at(id, &key, t0));
+    }
+    assert!(!transient_gave_up_at(id, &key, t0 + TRANSIENT_SPAN / 2));
+    assert!(transient_gave_up_at(id, &key, t0 + TRANSIENT_SPAN));
+    forget(id);
+    assert!(!transient_gave_up_at(id, &key, t0 + TRANSIENT_SPAN * 2));
+    forget(id);
+}

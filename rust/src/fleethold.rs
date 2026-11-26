@@ -670,6 +670,8 @@ mod host {
         // a download failed over or parked is no longer cut at its frontier: if its fleet
         // releases it again, it fetches its own articles
         crate::frontiercut::forget(nzb.id);
+        // its compressed restarts too: their scratch files are not kept while it is parked
+        crate::restartlend::forget(nzb.id);
         // a copy already held (failed over a moment ago: its last articles in
         // flight still report) is not failed over again: that would release a
         // second copy

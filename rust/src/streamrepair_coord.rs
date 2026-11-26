@@ -1949,6 +1949,10 @@ impl NzbgetRsStreamRepairCtrl {
                     self.ctrl.finishing_volume.store(on, Ordering::SeqCst);
                 }
 
+                fn finishing_volume(&self) -> bool {
+                    self.ctrl.finishing_volume.load(Ordering::SeqCst)
+                }
+
                 fn fetch_donor_part(
                     &mut self,
                     member_index: i32,

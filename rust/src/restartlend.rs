@@ -164,10 +164,12 @@ pub fn transient(why: &str) -> bool {
     why.contains("could not be read") || why.contains("hole") || why.contains("asked for nothing")
 }
 
-/// Transient refusals tried so far per (download, backup set).
-fn transient_tries() -> std::sync::MutexGuard<'static, std::collections::HashMap<(i32, Vec<u8>), u32>> {
-    static TRIES: std::sync::OnceLock<Mutex<std::collections::HashMap<(i32, Vec<u8>), u32>>> =
-        std::sync::OnceLock::new();
+/// Transient refusals tried so far per (download, backup set): how many, and when the first.
+fn transient_tries(
+) -> std::sync::MutexGuard<'static, std::collections::HashMap<(i32, Vec<u8>), (u32, std::time::Instant)>> {
+    static TRIES: std::sync::OnceLock<
+        Mutex<std::collections::HashMap<(i32, Vec<u8>), (u32, std::time::Instant)>>,
+    > = std::sync::OnceLock::new();
     TRIES.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -175,13 +177,22 @@ fn transient_tries() -> std::sync::MutexGuard<'static, std::collections::HashMap
 /// article missing on every server is a fact about the backup, not a timeout.
 pub const TRANSIENT_TRIES: u32 = 3;
 
+/// How long the transient tries must span before their failure stands: back-to-back passes
+/// during one outage of a server or proxy are not separate tries.
+pub const TRANSIENT_SPAN: std::time::Duration = std::time::Duration::from_secs(180);
+
 /// Counts a transient refusal of backup set `key` for download `nzb_id`; true once it has
-/// failed [`TRANSIENT_TRIES`] times, when the caller keeps it as a refusal.
+/// failed [`TRANSIENT_TRIES`] times over at least [`TRANSIENT_SPAN`], when the caller keeps it
+/// as a refusal. Until then the failure is no verdict on the backup.
 pub fn transient_gave_up(nzb_id: i32, key: &[u8]) -> bool {
+    transient_gave_up_at(nzb_id, key, std::time::Instant::now())
+}
+
+fn transient_gave_up_at(nzb_id: i32, key: &[u8], now: std::time::Instant) -> bool {
     let mut tries = transient_tries();
-    let n = tries.entry((nzb_id, key.to_vec())).or_insert(0);
-    *n += 1;
-    *n >= TRANSIENT_TRIES
+    let n = tries.entry((nzb_id, key.to_vec())).or_insert((0, now));
+    n.0 += 1;
+    n.0 >= TRANSIENT_TRIES && now.saturating_duration_since(n.1) >= TRANSIENT_SPAN
 }
 
 /// Forgets the restarts of download `nzb_id` (their scratch files go with the last holder).

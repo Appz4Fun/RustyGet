@@ -8735,6 +8735,10 @@ pub trait CrossPackDonorEnv {
     /// Set while one dead volume's holes are borrowed: a pass yielding for a newly dead volume
     /// lets that volume finish first, so its bytes are handed over instead of fetched again.
     fn set_finishing_volume(&mut self, _on: bool) {}
+    /// Whether [`Self::set_finishing_volume`] is on (a restart puts back what it found).
+    fn finishing_volume(&self) -> bool {
+        false
+    }
     fn has_batch_fetcher(&self) -> bool {
         true
     }
@@ -10351,6 +10355,8 @@ impl CrossPackRepairSession {
         // Compressed sets whose decoder zipfast restarted near the frontier (`restartlend`):
         // their decoded output, mapped as a bare file (live only: offline repair decompresses).
         let mut restart_maps: Vec<Option<(ContentMap, RestartSource)>> = vec![None; donor_sets.len()];
+        // sets whose restart failed on a read and is tried again: no verdict on the backup yet
+        let mut restart_retry: Vec<bool> = vec![false; donor_sets.len()];
 
         for repair_set_idx in 0..self.repair_sets.len() {
             if self.repair_sets[repair_set_idx].map.is_none()
@@ -10531,6 +10537,7 @@ impl CrossPackRepairSession {
                         {
                             // a pass yielding for a newly dead volume waits for the restart to
                             // finish (its reads would fail half way and be fetched again)
+                            let held = env_cell.borrow().finishing_volume();
                             env_cell.borrow_mut().set_finishing_volume(true);
                             let result = self
                                 .exec_restart(
@@ -10542,7 +10549,7 @@ impl CrossPackRepairSession {
                                     &env_cell,
                                 )
                                 .map(std::sync::Arc::new);
-                            env_cell.borrow_mut().set_finishing_volume(false);
+                            env_cell.borrow_mut().set_finishing_volume(held);
                             let mut msg = Vec::new();
                             match &result {
                                 Ok(r) => {
@@ -10582,10 +10589,11 @@ impl CrossPackRepairSession {
                             env_cell.borrow_mut().emit_message_bytes(TargetMessageKind::Info, &msg);
                             // A read that failed (an article the backup lacks, a timeout) is no
                             // verdict on the backup: a later run tries again.
-                            if !result.as_ref().is_err_and(|why| {
+                            restart_retry[set_index] = result.as_ref().is_err_and(|why| {
                                 crate::restartlend::transient(why)
                                     && !crate::restartlend::transient_gave_up(self.dead_nzb_id, &restart_key)
-                            }) {
+                            });
+                            if !restart_retry[set_index] {
                                 crate::restartlend::keep(self.dead_nzb_id, &restart_key, result);
                             }
                             set_compressed[set_index] = restart_maps[set_index].is_none();
@@ -10773,7 +10781,8 @@ impl CrossPackRepairSession {
             }
         }
         if let Some(media) = donor_media {
-            self.donor_compressed = !allow_decompress && set_compressed[media];
+            // a restart to be tried again says nothing yet: a timeout is no mismatch
+            self.donor_compressed = !allow_decompress && set_compressed[media] && !restart_retry[media];
         }
         self.rebuild_container_tails(&env_cell);
         self.finish_dead_fills(&env_cell);

@@ -697,9 +697,12 @@ fn note_cannot_continue(
     // again if it is ever released
     crate::frontiercut::forget(nzb.id);
     if nzb.direct_unpack_status != DirectUnpackStatus::Running {
+        crate::restartlend::forget(nzb.id);
         return;
     }
     let why = cannot_continue_reason(host, opts, nzb, backup);
+    // the restarts tried for it (and their scratch files) go too, once their refusal is worded
+    crate::restartlend::forget(nzb.id);
     let mut msg = b"Backup ".to_vec();
     msg.extend_from_slice(&backup.name);
     msg.extend_from_slice(b" cannot continue the extraction of ");
@@ -1987,11 +1990,33 @@ fn video_set_file_ids(host: &crate::queuesubsys_host::QueueSubsysHost, nzb_ptr: 
         .map(|j| host.file_snap(host.nzb_file_at(nzb_ptr, j)))
         .filter(|f| !f.par_file)
         .collect();
-    let Some(largest) = files.iter().max_by_key(|f| f.size) else {
+    video_set_pick(files.iter().map(|f| (f.id, f.filename.as_slice(), f.size)))
+}
+
+/// Picks the video set among `(id, name, size)` files (par2 left out): the stem with the largest
+/// total size, so a sample or subs file larger than one volume cannot win over a set of many
+/// volumes. When no stem groups several files (obfuscated names, one file per stem), every file
+/// is taken: a cut that missed the video would leave the primary fetching it, never failing over.
+fn video_set_pick<'a>(files: impl Iterator<Item = (i32, &'a [u8], i64)>) -> Vec<i32> {
+    let files: Vec<(i32, Vec<u8>, i64)> =
+        files.map(|(id, name, size)| (id, set_stem(name), size)).collect();
+    let mut totals: std::collections::HashMap<&[u8], (i64, usize)> = Default::default();
+    for (_, stem, size) in &files {
+        let t = totals.entry(stem.as_slice()).or_insert((0, 0));
+        t.0 += *size;
+        t.1 += 1;
+    }
+    let Some((stem, (_, count))) = totals
+        .iter()
+        .max_by(|a, b| a.1 .0.cmp(&b.1 .0).then_with(|| b.0.cmp(a.0)))
+    else {
         return Vec::new();
     };
-    let stem = set_stem(&largest.filename);
-    files.iter().filter(|f| set_stem(&f.filename) == stem).map(|f| f.id).collect()
+    if *count < 2 && files.len() > 1 {
+        return files.iter().map(|f| f.0).collect();
+    }
+    let stem = stem.to_vec();
+    files.iter().filter(|f| f.1 == stem).map(|f| f.0).collect()
 }
 
 /// A volume's name without its volume number, lower case (see [`video_set_file_ids`]).
@@ -7595,6 +7620,19 @@ mod tests {
         assert_eq!(super::set_stem(b"Show.r07"), super::set_stem(b"Show.rar"));
         assert_eq!(super::set_stem(b"movie.7z.003"), b"movie.7z".to_vec());
         assert_ne!(super::set_stem(b"Subs.part01.rar"), super::set_stem(b"Show.part01.rar"));
+        // the set with the largest total wins over a sample larger than one volume
+        let pick = |v: &[(i32, &'static [u8], i64)]| {
+            let mut ids = super::video_set_pick(v.iter().copied());
+            ids.sort();
+            ids
+        };
+        assert_eq!(
+            pick(&[(1, b"Show.part01.rar", 100), (2, b"Show.part02.rar", 100), (3, b"Show.sample.mkv", 150)]),
+            vec![1, 2]
+        );
+        // obfuscated names group nothing: every file is cut
+        assert_eq!(pick(&[(1, b"a8f3e1", 100), (2, b"77c0d2", 100), (3, b"0e19aa", 90)]), vec![1, 2, 3]);
+        assert_eq!(pick(&[(4, b"movie.mkv", 900)]), vec![4]);
         let dune = WeakSwitchFacts {
             held_in_fleet: true,
             tried: 73477,

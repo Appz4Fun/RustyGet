@@ -5341,10 +5341,14 @@ impl NzbgetRsQueueCoordinator {
         let below = eval.below != 0;
 
         // A doomed download (projected health near critical) still gets the par2 check: the
-        // doomed failover below needs a backup known alive enough and may decline, and par2
-        // damage it cannot repair is the surer verdict (functional `pardamageborrow`, projected
-        // 84.5-85% against critical 81% plus the margin, missed its par failover).
-        if !dead && self.check_par_damage(host, opts, dq_ptr, &nzb) {
+        // doomed failover below needs a backup known alive enough and may decline (functional
+        // `pardamageborrow`, projected 84.5-85% against critical 81% plus the margin, missed its
+        // par failover). Not while it is kept to borrow its lost parts, a dead-volume borrow
+        // runs, or its backup is still within the classify grace: those decide first below.
+        if !dead
+            && (!doomed || self.doomed_par_check_allowed(host, opts, dq_ptr, &nzb))
+            && self.check_par_damage(host, opts, dq_ptr, &nzb)
+        {
             return;
         }
         if (!dead && !doomed) || (probing >= 0 && !hopeless) {
@@ -5804,6 +5808,46 @@ impl NzbgetRsQueueCoordinator {
                     .max(0)
             })
             .fold(0i32, i32::saturating_add)
+    }
+
+    /// Whether a doomed download may be failed over by the par2 check (see
+    /// `check_dead_download`): not while it is kept to borrow its lost parts, a dead-volume
+    /// borrow of it runs, or its backup is still within the classify grace
+    /// ([`backup_still_unclassified`]).
+    fn doomed_par_check_allowed(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        opts: &crate::queuesubsys_host::GlobalOptsSnap,
+        dq_ptr: usize,
+        nzb: &crate::queuesubsys_host::NzbSnap,
+    ) -> bool {
+        if was_kept_for_borrowing(nzb.id) || crate::postproc::dead_volume_borrow_underway(nzb.id) {
+            return false;
+        }
+        let Some((backup_hi, backup_nzb)) = crate::dupecoord::find_dupe_backup_host(
+            host,
+            opts,
+            dq_ptr,
+            nzb.ptr,
+            &nzb.name,
+            &nzb.dupe_key,
+        ) else {
+            return true;
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        !backup_still_unclassified(
+            crate::donorkind::DonorKind::from_param(
+                host.nzb_get_param(backup_nzb.ptr, crate::donorkind::KIND_PARAM)
+                    .as_deref(),
+            ),
+            backup_twincheck_labelled(host, backup_nzb.ptr),
+            backup_hi.time,
+            now,
+            crate::dupesearch_coord::intake_pending(backup_nzb.id, &nzb.dupe_key),
+            extraction_fed_by_duplicates(opts),
+        )
     }
 
     fn files_tried(

@@ -2584,6 +2584,7 @@ impl NzbgetRsQueueCoordinator {
         }
         // the source lost files: a live video match made on them no longer stands
         crate::postproc::forget_dead_volume_confirmations_of(src_snap.id);
+        host.nzb_set_param(src_nzb_ptr, crate::twin::LIVE_VIDEO_PARAM, None);
 
         let new_init_snap = host.nzb_snap(new_nzb_ptr, false);
         let mut sc = pack_merge_split_counters(&src_snap);

@@ -1007,8 +1007,17 @@ mod tests {
         unverified_twin.kind = crate::donorkind::DonorKind::Twin as u8;
         let mut unverified = m(2, -1);
         let mut dead = m(1, 0);
-        for f in [&mut bare_alt, &mut stored_twin, &mut stored_alt, &mut encrypted_alt, &mut weak_bare,
-                  &mut barely_alive, &mut unverified_twin, &mut unverified, &mut dead] {
+        for f in [
+            &mut bare_alt,
+            &mut stored_twin,
+            &mut stored_alt,
+            &mut encrypted_alt,
+            &mut weak_bare,
+            &mut barely_alive,
+            &mut unverified_twin,
+            &mut unverified,
+            &mut dead,
+        ] {
             f.score = f.id;
         }
         let members = [

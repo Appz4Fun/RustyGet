@@ -19,12 +19,12 @@
 //! connections, plus idle connections of the probe share the main pool
 //! already grants them (at most a quarter of the server's connections in
 //! all), taken even while a download was refused one (never a connection a
-//! download holds). While the floor is what admits them (a
-//! download was refused a connection just now, downloads not held), every
-//! probe request, a BODY read or a STAT exchange, holds a slot of
-//! [`crate::light_pool::PROBE_READS`], so the slots never outnumber the
-//! connections the floor allows; otherwise STAT exchanges take their check
-//! connections as before (up to the probe share). A flaky server
+//! download holds). Only a request holding a slot of
+//! [`crate::light_pool::PROBE_READS`] uses the floor, so the slots never
+//! outnumber the connections it allows: every BODY read holds one; a STAT
+//! exchange first asks for a connection as at the base and takes a slot only
+//! when none came while the floor is what would admit it (a download was
+//! refused a connection just now, downloads not held). A flaky server
 //! stays at one, a server with few connections at its light count; with no
 //! fleet being probed (a duplicate search's checks) nothing changes.
 

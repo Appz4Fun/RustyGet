@@ -1688,18 +1688,12 @@ impl DonorServerExchange for NntpHealthTransportShared {
             }
 
             let mut wait_start = host_now(ctx, host_cb);
-            // while a fleet is probed beside a download that wants every
-            // connection, a slot of the probe reads first: its connection
-            // may be one of the probe floor's
-            let Ok(slot) = crate::fleetprobe::stat_slot(|| {
-                http_stopped() || host_now(ctx, host_cb) - wait_start > 10
-            }) else {
-                return Err(DonorExchangeError {
-                    answers: Vec::new(),
-                    busy: true,
-                });
-            };
-            // the slot and the connection share one wait
+            // a slot of the probe reads, taken only once no connection comes
+            // as it would at the base, while a fleet is probed beside a
+            // download that wants every connection: the connection it then
+            // gets may be one of the probe floor's (fleetprobe::stat_slot).
+            // Declared before the connection's release, so it outlives it
+            let mut slot: Option<crate::light_pool::ReadSlot<'static>> = None;
             let ids = self.server_ids.lock().unwrap_or_else(|e| e.into_inner()).clone();
             // servers of this backbone whose connect failed during this exchange
             let mut failed: Vec<i32> = Vec::new();
@@ -1723,6 +1717,19 @@ impl DonorServerExchange for NntpHealthTransportShared {
                     }
                     if !known_any {
                         return Err(DonorExchangeError::default());
+                    }
+                    if conn_ptr == 0 && slot.is_none() {
+                        // the slot and the connection share one wait
+                        match crate::fleetprobe::stat_slot(|| {
+                            http_stopped() || host_now(ctx, host_cb) - wait_start > 10
+                        }) {
+                            Ok(Some(got)) => {
+                                slot = Some(got);
+                                continue;
+                            }
+                            Ok(None) => {}
+                            Err(()) => break,
+                        }
                     }
                     if conn_ptr == 0 {
                         std::thread::sleep(Duration::from_millis(20));

@@ -166,15 +166,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
-name = "cpufeatures"
-version = "0.2.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "crc32fast"
 version = "1.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -407,12 +398,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hex"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
-
-[[package]]
 name = "hybrid-array"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -536,17 +521,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "nntmux-yenc"
-version = "0.1.0"
-source = "git+https://github.com/xbmc4lyfe/newznab-tmux?rev=8dade08ca0372e046af2bd9d3040e23a47379bd4#8dade08ca0372e046af2bd9d3040e23a47379bd4"
+name = "nntp-rs"
+version = "0.4.0"
+source = "git+https://github.com/Appz4Fun/nntp-rs?rev=d475ec16604052dfd1e3c103de360973305c8a31#d475ec16604052dfd1e3c103de360973305c8a31"
 dependencies = [
  "crc32fast",
- "hex",
- "md-5 0.10.6",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
 ]
 
 [[package]]
@@ -568,7 +547,7 @@ dependencies = [
  "flate2",
  "libc",
  "md-5 0.11.0",
- "nntmux-yenc",
+ "nntp-rs",
  "openssl",
  "openssl-sys",
  "par-rs",
@@ -805,17 +784,6 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
-]
-
-[[package]]
-name = "sha2"
-version = "0.10.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
-dependencies = [
- "cfg-if",
- "cpufeatures",
- "digest 0.10.7",
 ]
 
 [[package]]

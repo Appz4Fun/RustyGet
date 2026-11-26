@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use crate::decoder::{yenc_crc, yenc_decode_incremental, Decoder, Format, Status};
+use crate::decoder::{yenc_crc, yenc_decode_piece, Decoder, Format, Status};
 use crate::dupefallback::{
     article_fetch_add_decoded_bytes, article_fetch_add_raw_bytes,
     article_fetch_header_within_limit, article_size_steps_hash,
@@ -1015,7 +1015,7 @@ impl ArticleFetcher {
             return result;
         }
 
-        let mut decoder = Decoder::new(yenc_decode_incremental, yenc_crc);
+        let mut decoder = Decoder::new(yenc_decode_piece, yenc_crc);
         decoder.clear();
         decoder.crc_check = true;
         decoder.raw_mode = false;

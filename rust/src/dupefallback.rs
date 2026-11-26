@@ -1410,6 +1410,39 @@ pub(crate) fn prioritize_par_index_host(
     }
 }
 
+/// Whether `name` is the par2 index of its collection (`name.par2`, no `.volN+M`): the file
+/// [`prioritize_par_index_on_resume_host`] moves ahead of the data.
+pub fn is_par_index_name(name: &[u8], confirmed: bool) -> bool {
+    matches!(crate::parparser::parse_par_filename(name, confirmed), Some((_, 0)))
+}
+
+/// A resumed download (`GroupResume`) gets its par2 index ahead of the data files again, as
+/// when it was added (see [`prioritize_par_index_host`]): a download added paused, or a fleet
+/// copy released from its hold, had every file paused then, so its index never got that
+/// priority and arrived after the data, too late for the par2 damage tracking and live par2
+/// while it downloads (functional `pardamageborrow`). Only the index: `GroupResume` unpauses
+/// the par2 volumes too, and they keep their place after the data (a `GroupPauseExtraPars`
+/// may pause them again).
+#[cfg(unix)]
+pub(crate) fn prioritize_par_index_on_resume_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb_ptr: NzbRef,
+) {
+    let flen = host.nzb_file_len(nzb_ptr);
+    for i in 0..flen {
+        let fp = host.nzb_file_at(nzb_ptr, i);
+        let f = host.file_snap(fp);
+        if !f.deleted
+            && !f.paused
+            && !f.extra_priority
+            && file_is_par_snap(&f)
+            && is_par_index_name(&f.filename, f.filename_confirmed)
+        {
+            host.file_set_int(fp, crate::queuesubsys_host::FILE_INT_EXTRA_PRIORITY, 1);
+        }
+    }
+}
+
 #[cfg(unix)]
 pub(crate) fn completed_file_is_par2_snap(cf: &crate::queuesubsys_host::CompletedFileSnap) -> bool {
     is_par_file(cf.par_file, 0, 1, true, &cf.filename)
@@ -2789,6 +2822,19 @@ pub(crate) fn try_fallback_host(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn par_index_name_is_the_par2_without_volume_blocks() {
+        // the index a resumed download fetches first; its volumes keep their place
+        assert!(is_par_index_name(b"rel.par2", true));
+        assert!(is_par_index_name(b"Show.S01E01.PAR2", true));
+        assert!(is_par_index_name(b"rel.par2.1", false));
+        assert!(!is_par_index_name(b"rel.vol0+3.par2", true));
+        assert!(!is_par_index_name(b"rel.vol07+08.PAR2", true));
+        assert!(!is_par_index_name(b"rel.vol00-01.par2", true));
+        assert!(!is_par_index_name(b"data0.bin", true));
+        assert!(!is_par_index_name(b"movie.part01.rar", false));
+    }
 
     #[test]
     fn test_par_cannot_cover() {

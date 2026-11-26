@@ -11577,7 +11577,10 @@ def scenario_pardamageborrow(daemon, t):
     """The par-damage failover with borrowing on (DupeArticleFallback=live): the
     spoiled blocks end its wait for par-check, it gets its turn, and the
     failover comes once it tried 32 articles and found under half (the backup
-    waits in history: another encode, other sizes, nothing it can lend)."""
+    waits in history: other files and sizes, another container by its par2 checksums,
+    nothing it can lend). Lost articles count only once the par2 damage is known, so
+    fewer than 32 may ever be counted (30 to 35 of the 48 here): with too few articles
+    left to reach the sample, it fails over on what it counted."""
     # 1 MB blocks: a par2 set big enough that health (87%) stays above critical
     # (81%), while 48 lost articles spoil 16 blocks of the 3 it can recover
     primary = _pardamage_release(t, 'pbP', 12480, {3, 10, 17, 24, 31, 38}, block=1048576)
@@ -15113,12 +15116,11 @@ SCENARIO_OPTIONS = {
     'directrenamesubdirjoin': ['DirectRename=yes', 'DirectWrite=no', 'ParCheck=auto'],
     'parvolnames': ['ParCheck=auto'],
     'pardamagefailover': ['ParCheck=auto', 'HealthCheck=dupe', 'DupeArticleFallback=no'],
-    # Lost articles count towards the 32 tried only once the par2 damage is known (before, they
-    # wait for par-check): with 4 connections several files are under way by then, and of the
-    # 48 lost 30 to 35 counted in eight runs, so 1 in 8 missed the sample. With 2 the files
-    # come nearly one after the other (12 of 12 runs passed under load).
+    # at full speed its 16 MB arrive in about a second: the queue's checks may not run between
+    # the moment too few articles are left to reach the borrow sample and the end (1 in 12
+    # runs under load); about 4 s leaves them that time
     'pardamageborrow': ['ParCheck=auto', 'HealthCheck=dupe', 'DupeArticleFallback=live',
-                        'Server1.Connections=2'],
+                        'DownloadRate=4000'],
     'nosourceonce': ['DupeArticleFallback=live', 'HealthCheck=none'],
     'twinalt': ['HealthCheck=dupe'],
     'twinlabelonadd': ['HealthCheck=dupe'],

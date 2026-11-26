@@ -10,6 +10,15 @@
 //! keeps the rest; with downloads held it may take them all), and each request
 //! waits at most [`PROBE_IO_TIMEOUT_SEC`]; a request that timed out leaves its
 //! article unknown, never missing (F6).
+//!
+//! While downloads want every connection, the light reserve shrinks to one
+//! connection per server, which used to probe a whole fleet one read at a
+//! time (122 s to the primary on 6790 with a busy queue). Probe requests keep
+//! a floor of [`PROBE_READ_FLOOR`] at once per server ([`probe_reads`]): the
+//! light connections, plus idle connections of the probe share the main pool
+//! already grants them, taken even while a download was refused one (never a
+//! connection a download holds). A flaky server stays at one, a server with
+//! few connections at its light count.
 
 /// How long one probe request may wait for the server, in seconds.
 pub const PROBE_IO_TIMEOUT_SEC: i32 = 5;
@@ -20,10 +29,51 @@ pub fn probe_share(max_connections: i32) -> usize {
     (max_connections.max(1) / 2).max(1) as usize
 }
 
+/// The probe requests a server keeps at once while downloads want every
+/// connection and its light reserve shrank to one.
+pub const PROBE_READ_FLOOR: i32 = 5;
+
+/// The probe requests one server may have at once: its light connections
+/// (`light`), raised to [`PROBE_READ_FLOOR`] with check connections of its
+/// [`probe_share`]. A flaky server (`flaky`: recent errors or timeouts, as
+/// the light reserve measures them) keeps one; a server with at most
+/// [`crate::light_pool::FEW_CONNECTIONS`] keeps its light count; 0 for a
+/// server with no light reserve (the main pool serves its probes as any
+/// check, [`crate::light_pool::parallel_jobs`]).
+pub fn probe_reads(light: i32, max_connections: i32, flaky: bool) -> i32 {
+    if light <= 0 {
+        0
+    } else if flaky {
+        1
+    } else if max_connections <= crate::light_pool::FEW_CONNECTIONS {
+        light
+    } else {
+        light.max(PROBE_READ_FLOOR.min(probe_share(max_connections) as i32))
+    }
+}
+
+/// The check connections of a server a probe may hold even while a download
+/// was refused a connection (`crate::net::check_connection_allowed`): what
+/// [`probe_reads`] adds to the light connections, at least the one every
+/// check may take.
+pub fn probe_check_floor(light: i32, max_connections: i32, flaky: bool) -> usize {
+    (probe_reads(light, max_connections, flaky) - light.max(0)).max(1) as usize
+}
+
+/// How many probe reads to run at once out of at most `max`
+/// ([`crate::light_pool::parallel_jobs`] with the [`probe_reads`] of the
+/// primary servers now): the rest queue instead of polling for a connection.
+#[cfg(unix)]
+pub fn probe_reads_now(max: usize) -> usize {
+    let reads = crate::net::active_server_pool().map_or(0, |p| p.primary_probe_reads());
+    crate::light_pool::parallel_jobs(max, reads)
+}
+
 /// A free connection of `srv` for a probe request, or null when none is
-/// free: a light connection first ([`crate::light_pool::check_connection`]),
-/// else a check connection of the main pool while the probes hold less than
-/// their share of it. THE place probe requests get connections.
+/// free: a light connection first, else a check connection of the main pool
+/// while the probes hold less than their share of it (up to
+/// [`probe_check_floor`] of them even while downloads want every
+/// connection). THE place probe requests get connections.
 #[cfg(unix)]
 pub fn probe_connection(
     pool: &crate::net::NzbgetRsServerPool,
@@ -40,7 +90,7 @@ pub fn probe_connection(
     if !downloads_held && srv.check_in_use.load(Ordering::SeqCst) >= probe_share(srv.max_connections) {
         return std::ptr::null_mut();
     }
-    crate::light_pool::check_connection(pool, srv)
+    pool.get_probe_connection(srv)
 }
 
 /// Shortens a probe connection's request timeout once it is connected (a
@@ -216,5 +266,35 @@ mod tests {
         assert_eq!(probe_share(50), 25);
         assert_eq!(probe_share(0), 1);
         assert!(PROBE_IO_TIMEOUT_SEC <= 5);
+    }
+
+    /// 6790 (#717 follow-up): with downloads using every connection the
+    /// light reserve is 1, and the probes read one article at a time. They
+    /// keep a floor of 5 reads per server from the probe share; never more
+    /// than half the server's connections, a flaky server stays at 1, a
+    /// server with few connections at its light count, and with no reserve
+    /// the main pool serves the probes as before.
+    #[test]
+    fn probe_reads_keep_a_floor_beside_a_saturating_download() {
+        use crate::light_pool::LIGHT_MAX;
+        // 60 connections, reserve shrunk to 1: 5 reads, 4 from the probe share
+        assert_eq!(probe_reads(1, 60, false), PROBE_READ_FLOOR);
+        assert_eq!(probe_check_floor(1, 60, false), 4);
+        // a full reserve needs nothing from the main pool past the usual one
+        assert_eq!(probe_reads(LIGHT_MAX, 60, false), LIGHT_MAX);
+        assert_eq!(probe_check_floor(LIGHT_MAX, 60, false), 1);
+        // a flaky server: one read, and the usual one check connection
+        assert_eq!(probe_reads(1, 60, true), 1);
+        assert_eq!(probe_check_floor(1, 60, true), 1);
+        // few connections: its light count only
+        assert_eq!(probe_reads(1, 8, false), 1);
+        assert_eq!(probe_check_floor(1, 8, false), 1);
+        // never more than the probe share (half the connections)
+        assert_eq!(probe_reads(1, 9, false), 4);
+        assert_eq!(probe_check_floor(1, 9, false), 3);
+        // no reserve (off, or too few connections): unchanged
+        assert_eq!(probe_reads(0, 60, false), 0);
+        assert_eq!(crate::light_pool::parallel_jobs(16, probe_reads(0, 60, false)), 16);
+        assert_eq!(crate::light_pool::parallel_jobs(16, probe_reads(1, 60, false)), 5);
     }
 }

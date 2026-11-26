@@ -1924,12 +1924,12 @@ fn fetch_any_article_via_host(
         return FetchedArticleResult::default();
     };
     let ctx_addr = host_ctx as usize;
-    // no more probe reads at once than there are light connections (#703),
-    // whatever reads them at once (each copy's probe reads several): a read
+    // no more probe reads at once than the light connections and the probe
+    // floor allow (#703, fleetprobe::probe_reads), whatever reads them at once (each copy's probe reads several): a read
     // past that waits for one to end instead of polling for a connection
     #[cfg(unix)]
     let Some(_slot) = crate::light_pool::PROBE_READS.take(
-        || crate::light_pool::parallel_jobs_now(FLEET_KIND_PROBE_PARALLEL),
+        || crate::fleetprobe::probe_reads_now(FLEET_KIND_PROBE_PARALLEL),
         || host_now(ctx_addr as *mut c_void, host_cb) >= deadline || http_stopped() || donor_stopping(),
     ) else {
         return FetchedArticleResult::default();
@@ -2129,8 +2129,8 @@ type CopyProbe = (
 
 /// [`probe_copies`] with each copy's salvaged par2 identity (F2b) when its
 /// index was lost. The copies are taken from one queue by as many workers as
-/// there are light connections, so a slow copy (a dead index waiting out its
-/// timeouts) never holds back the copies after it.
+/// the probes may read at once (fleetprobe::probe_reads), so a slow copy (a
+/// dead index waiting out its timeouts) never holds back the copies after it.
 fn probe_copies_salvaged(
     host_ctx: *mut c_void,
     host_cb: DupeHostFn,
@@ -2143,8 +2143,8 @@ fn probe_copies_salvaged(
         .map(|_| Mutex::new((crate::twin::Listed::default(), Packing::Unknown, None)))
         .collect();
     let ctx_addr = host_ctx as usize;
-    // no more at once than there are light connections: the rest queue
-    let parallel = crate::light_pool::parallel_jobs_now(FLEET_KIND_PROBE_PARALLEL);
+    // no more at once than the probes may read at once: the rest queue
+    let parallel = crate::fleetprobe::probe_reads_now(FLEET_KIND_PROBE_PARALLEL);
     let next = AtomicUsize::new(0);
     std::thread::scope(|s| {
         for _ in 0..parallel.min(n) {
@@ -2433,8 +2433,8 @@ fn fleet_prints_keyed(
         .map(|_| Mutex::new((Err(INTAKE_TIME_RAN_OUT.to_string()), None)))
         .collect();
     let ctx_addr = host_ctx as usize;
-    // no more at once than there are light connections: the rest queue
-    let parallel = crate::light_pool::parallel_jobs_now(FLEET_KIND_PROBE_PARALLEL);
+    // no more at once than the probes may read at once: the rest queue
+    let parallel = crate::fleetprobe::probe_reads_now(FLEET_KIND_PROBE_PARALLEL);
     for chunk in (0..n).collect::<Vec<_>>().chunks(parallel) {
         if now_unix_sec() >= deadline || donor_stopping() || http_stopped() {
             break;
@@ -6596,6 +6596,15 @@ struct FleetOutEntry {
     reason: Vec<u8>,
 }
 
+impl FleetOutEntry {
+    /// The copy is the fleet's primary (QUEUED): a reason it had as a backup
+    /// (a weak copy's "weak: N% ... kept as a donor") no longer holds.
+    fn promote(&mut self) {
+        self.status = b"QUEUED".to_vec();
+        self.reason.clear();
+    }
+}
+
 /// Writes what the probe found on a copy its fleet added held (F16): its
 /// parameters and score, no longer probing; it stays held until the fleet
 /// picks it. Returns its id, or 0 when it left the queue meanwhile.
@@ -7787,7 +7796,7 @@ pub unsafe fn fleet_append(
                     let _done = Done(kinds_done);
                     let total = summaries_ref.len();
                     let taken = Mutex::new(vec![false; total]);
-                    let parallel = crate::light_pool::parallel_jobs_now(FLEET_KIND_PROBE_PARALLEL);
+                    let parallel = crate::fleetprobe::probe_reads_now(FLEET_KIND_PROBE_PARALLEL);
                     std::thread::scope(|s2| {
                         for _ in 0..parallel.min(total) {
                             s2.spawn(|| loop {
@@ -8641,7 +8650,7 @@ pub unsafe fn fleet_append(
                 && dq_find_nzb(host_ctx, host_cb, dq_ptr, entry.nzb_id)
                     .is_some_and(|(_, in_hist)| !in_hist)
             {
-                entry.status = b"QUEUED".to_vec();
+                entry.promote();
                 chosen = entry.nzb_id;
             }
         }
@@ -8710,7 +8719,7 @@ pub unsafe fn fleet_append(
         chosen = done_id;
         for entry in &mut out_entries {
             if entry.nzb_id == done_id {
-                entry.status = b"QUEUED".to_vec();
+                entry.promote();
             }
         }
     }
@@ -8826,6 +8835,30 @@ mod tests {
         servers[1].usable = false;
         assert_eq!(backbone_order(&servers)[&1], vec![1]);
     }
+    /// #717 review: a weak copy that becomes the primary (QUEUED) drops its
+    /// "weak ... kept as a donor" reason in the fleet reply.
+    #[test]
+    fn a_promoted_weak_copy_loses_its_weak_reason() {
+        let (status, reason) = fleet_added_status(true, 40);
+        let mut entry = FleetOutEntry {
+            nzb_id: 7,
+            name: b"Dune_3.nzb".to_vec(),
+            rank: 1,
+            alive: 40,
+            status: status.to_vec(),
+            same_as: 0,
+            same_as_rank: 0,
+            member_idx: 0,
+            reason,
+        };
+        assert_eq!(entry.status, b"BACKUP");
+        assert!(String::from_utf8_lossy(&entry.reason).starts_with("weak"));
+        entry.promote();
+        assert_eq!(entry.status, b"QUEUED");
+        assert!(entry.reason.is_empty());
+        assert_eq!(entry.alive, 40, "its alive share stays");
+    }
+
     /// B1c: the primary starts as soon as a copy is proven healthy, the
     /// easiest to borrow into of the copies probed so far; a copy probed
     /// later replaces it only when strictly easier (and only before much is

@@ -13206,6 +13206,96 @@ def scenario_fleetprobespeed(daemon, t):
         light, probed_s, kind_ms, kinds[len(kinds) // 2] if kinds else None, stat_ms, done and done['NZBName']))
 
 
+def scenario_fleetprobebusy(daemon, t):
+    """Probe floor (#717 follow-up, 6790): fleetprobespeed while an unrelated
+    download keeps every connection busy. 40 connections, 300 ms per request
+    (nserv -w 300); the download of 8,000 small articles wants them all, so
+    the light reserve shrinks to 1 ("Light connections of Server1: N -> 1").
+    With the reserve as the only limit the four copies' kind probes read one
+    article at a time, so the primary was released only after all of them,
+    one after another (on 6790: 122 s). Probe reads now keep a floor of 5 per
+    server from the probe share (idle connections only, never one a download
+    holds). Logged for the PR's before/after table: each copy's kind probe
+    time, the time to the primary's release and the download rate before
+    and during the probe. Passes when every copy was probed, a copy's reads
+    overlapped (one took less than N x 300 ms for N reads), the reserve was
+    1 when the fleet came, the download kept going (no zero-rate stretch of
+    more than 3 s while the probe ran) and the fleet's primary completes."""
+    rel = 'Speed.Movie.2024.1080p.WEB-DL.x264-GRP'
+    key = 'dupes:speed.movie.2024.1080p.web.dl.x264.grp'
+    data = _payload(1_200_000, 16611)
+    names = [rel + '.nzb', rel + '_1.nzb', rel + '_2.nzb', rel + '_3.nzb']
+    copies = [_rar_drop_copy(t, 'pb%d' % i, data) for i in range(len(names))]
+    load_size, load_seg = 40_000_000, 5_000
+    load = _place_copy(t, 'pbLoad', _payload(load_size, 16612), 'big.bin')
+    api = daemon.wait_ready()
+    daemon.append(api, 'BusyLoad', build_nzb(load, 'BusyLoad.bin', load_size, load_seg, set()), False, 'pbl', 0)
+
+    def light_now():
+        return max([s.get('LightConnections', 0) for s in api.status().get('NewsServers', [])] or [0])
+
+    def rate():
+        return api.status().get('DownloadRate', 0)
+    # the download takes every connection; the reserve shrinks one per 5 s window
+    deadline = time.time() + 60
+    while time.time() < deadline and not (rate() > 0 and light_now() == 1 and
+                                          _grep_log(t, 'Light connections of Server1: 2 -> 1') +
+                                          _grep_log(t, 'Light connections of Server1: 0 -> 1') > 0):
+        time.sleep(0.5)
+    light_at_add = light_now()
+    before = []
+    for _ in range(6):
+        before.append(rate())
+        time.sleep(0.5)
+    start = time.time()
+    threading.Thread(target=lambda: _fleet(daemon, list(zip(names, copies)), key=key, timeout=60),
+                     daemon=True).start()
+    during = []
+    released_s = None
+    zero_since = None
+    longest_zero = 0.0
+    items = []
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        r = rate()
+        during.append(r)
+        now = time.time()
+        if r == 0:
+            zero_since = zero_since or now
+            longest_zero = max(longest_zero, now - zero_since)
+        else:
+            zero_since = None
+        items = _queued(api, key)
+        if released_s is None and any(_params(g).get('DupeHeld') != 'yes' and
+                                      _params(g).get('DupeProbing') != 'yes' for g in items):
+            released_s = now - start
+        if (len(items) >= len(names) and released_s is not None and
+                not any(_params(g).get('DupeProbing') == 'yes' for g in items)):
+            break
+        time.sleep(0.25)
+    probed_s = time.time() - start
+    load_left = [g for g in api.listgroups() if g.get('NZBName') == 'BusyLoad']
+    log = t.read_file('nzbget.log').decode(errors='replace')
+    kind_ms = {m.group(1): int(m.group(2)) for m in
+               re.finditer(r'Fleet kind probe of (\S+?)(?:\.nzb)?: (\d+) ms', log)}
+    kind_reads = [(int(m.group(1)), int(m.group(2))) for m in
+                  re.finditer(r'Fleet kind probe of \S+?: (\d+) ms, (\d+) article', log)]
+    # the rest of the download only slows the end of the test down
+    for g in load_left:
+        api.editqueue('GroupFinalDelete', 0, '', [g['NZBID']])
+    done = _wait_key_success(api, key, timeout=240)
+    kinds = sorted(kind_ms.values())
+    avg = lambda xs: sum(xs) / len(xs) if xs else 0
+    ok = (len(items) == len(names) and len(kind_ms) == len(names) and done is not None and
+          light_at_add == 1 and bool(load_left) and longest_zero <= 3.0 and
+          any(ms < reads * 300 for ms, reads in kind_reads))
+    return ('fleetprobebusy', ok, 'light_at_add=%d released_in=%s probed_in=%.1fs kind_ms=%s (median %s) '
+            'rate_before=%.0f KB/s rate_during=%.0f KB/s longest_zero=%.1fs load_running=%s done=%s' % (
+                light_at_add, released_s is not None and '%.1fs' % released_s, probed_s, kind_ms,
+                kinds[len(kinds) // 2] if kinds else None, avg(before) / 1024, avg(during) / 1024,
+                longest_zero, bool(load_left), done and done['NZBName']))
+
+
 def scenario_fleetslowprobe(daemon, t):
     """B1 and B5 (fleet-e2e-6790): behind a server that answers a missing
     article only after 2 s (nserv -x 2000; the LAN proxy took 1.5 s), a copy
@@ -13581,6 +13671,7 @@ SCENARIOS = {
     'fleetfailoverorder': scenario_fleetfailoverorder,
     'fleetprimaryfirst': scenario_fleetprimaryfirst,
     'fleetprobespeed': scenario_fleetprobespeed,
+    'fleetprobebusy': scenario_fleetprobebusy,
     'fleetallweak': scenario_fleetallweak,
     'fleetslowprobe': scenario_fleetslowprobe,
     'fleetfailoverkeepsalive': scenario_fleetfailoverkeepsalive,
@@ -14023,6 +14114,7 @@ SCENARIO_OPTIONS = {
     'fleetfailoverorder': ['HealthCheck=dupe', 'DupeArticleFallback=article'],
     'fleetprimaryfirst': ['HealthCheck=dupe', 'DupeArticleFallback=article'],
     'fleetprobespeed': ['HealthCheck=dupe', 'DupeArticleFallback=article', 'Server1.Connections=40'],
+    'fleetprobebusy': ['HealthCheck=dupe', 'DupeArticleFallback=article', 'Server1.Connections=40'],
     'fleetallweak': ['HealthCheck=dupe', 'DupeArticleFallback=article'],
     'fleetslowprobe': ['HealthCheck=dupe', 'DupeArticleFallback=article'],
     'fleetfailoverkeepsalive': ['HealthCheck=dupe', 'DupeArticleFallback=article', 'DupeWatch=yes'],
@@ -14412,7 +14504,7 @@ FALLBACK_MODE_BOUND = {'livegate', 'streamrestartcredit', 'wholefilerestart', 'w
 # scenarios that read nserv's request log (nserv.log)
 CAPTURE_REQUESTS = {'repost', 'wholefileproofcost', 'dropnzbdir', 'fleetstaysqueued', 'fleetprimaryfirst'}
 # extra nserv arguments per scenario (-w: response latency in ms)
-SCENARIO_NSERV_ARGS = {'fleetslowprobe': ['-x', '2000'], 'fleetprobespeed': ['-w', '300'], 'fleetprobehealthfail': ['-w', '800'], 'finaldeletemidway': ['-w', '300'], 'finaldeleterestart': ['-w', '300'], 'restartmidway': ['-w', '300'], 'xpacklatency': ['-w', '1000'], 'deadpickprobe': ['-w', '500'], 'deadpickafterreload': ['-w', '500'],
+SCENARIO_NSERV_ARGS = {'fleetslowprobe': ['-x', '2000'], 'fleetprobespeed': ['-w', '300'], 'fleetprobebusy': ['-w', '300'], 'fleetprobehealthfail': ['-w', '800'], 'finaldeletemidway': ['-w', '300'], 'finaldeleterestart': ['-w', '300'], 'restartmidway': ['-w', '300'], 'xpacklatency': ['-w', '1000'], 'deadpickprobe': ['-w', '500'], 'deadpickafterreload': ['-w', '500'],
                        'deadpickpartial': ['-w', '100'], 'deadpickstray': ['-w', '500'], 'forcefailover': ['-w', '500'], 'copybackup': ['-w', '500'], 'copyoffailed': ['-w', '500'], 'deaddownloadstray2': ['-w', '300'], 'deaddownloadrestart': ['-w', '300'], 'deadbackupsonly': ['-w', '500'], 'backuporder': ['-w', '500'], 'deaddownloadlate': ['-w', '300'], 'deadpickservers': ['-w', '200'],
                        'deadpickfewservers': ['-w', '200']}
 

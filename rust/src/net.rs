@@ -2877,6 +2877,16 @@ pub struct NzbgetRsServerPool {
     light_cap_override: AtomicI32,
 }
 
+/// Who asks [`NzbgetRsServerPool`] for a connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConnUse {
+    Download,
+    /// A duplicate health check (`get_check_connection`).
+    Check,
+    /// A fleet probe request (`get_probe_connection`).
+    Probe,
+}
+
 /// How long a download's failed connection request keeps duplicate health checks
 /// from taking more connections.
 pub const DOWNLOAD_STARVED_WINDOW_MS: i64 = 3000;
@@ -2888,10 +2898,18 @@ fn pool_now_ms() -> i64 {
 }
 
 /// Whether a duplicate health check may take one more connection of a server:
-/// always its first one (checks keep making progress), any further one only
-/// while no download has been refused a connection within the window.
-pub fn check_connection_allowed(check_in_use: usize, starved_at_ms: i64, now_ms: i64) -> bool {
-    check_in_use == 0
+/// always while checks hold fewer than `floor` (at least its first one, so
+/// checks keep making progress; a fleet probe's floor is
+/// `crate::fleetprobe::probe_check_floor`), any further one only while no
+/// download has been refused a connection within the window. Only idle
+/// connections are ever handed out: a connection a download holds stays its.
+pub fn check_connection_allowed(
+    check_in_use: usize,
+    floor: usize,
+    starved_at_ms: i64,
+    now_ms: i64,
+) -> bool {
+    check_in_use < floor.max(1)
         || starved_at_ms == 0
         || now_ms.saturating_sub(starved_at_ms) > DOWNLOAD_STARVED_WINDOW_MS
 }
@@ -3343,7 +3361,7 @@ impl NzbgetRsServerPool {
         ignore_srvs: &[&RsNewsServer],
         missing: &[crate::nntp::BackboneMiss],
     ) -> *mut PooledNntpConn {
-        let conn = self.select_connection(level, want_srv, ignore_srvs, missing, false);
+        let conn = self.select_connection(level, want_srv, ignore_srvs, missing, ConnUse::Download);
         if conn.is_null() && level >= 0 {
             self.download_starved_at_ms
                 .store(pool_now_ms(), Ordering::SeqCst);
@@ -3356,7 +3374,15 @@ impl NzbgetRsServerPool {
     /// handed out while a download was recently refused one.
     pub fn get_check_connection(&self, srv: &RsNewsServer) -> *mut PooledNntpConn {
         let nl = srv.norm_level.load(Ordering::SeqCst);
-        self.select_connection(nl, Some(srv), &[], &[], true)
+        self.select_connection(nl, Some(srv), &[], &[], ConnUse::Check)
+    }
+
+    /// [`Self::get_check_connection`] for a fleet probe request: up to
+    /// `crate::fleetprobe::probe_check_floor` check connections of the server
+    /// even while a download was refused one (idle connections only).
+    pub fn get_probe_connection(&self, srv: &RsNewsServer) -> *mut PooledNntpConn {
+        let nl = srv.norm_level.load(Ordering::SeqCst);
+        self.select_connection(nl, Some(srv), &[], &[], ConnUse::Probe)
     }
 
     /// [`Self::get_check_connection`] by server id.
@@ -3367,18 +3393,19 @@ impl NzbgetRsServerPool {
         self.get_check_connection(&srv)
     }
 
-    /// Picks a free connection under the pool lock. `for_check`: the admission
-    /// rule of [`check_connection_allowed`] is applied to the server that
-    /// actually supplies the connection, and the check
-    /// occupancy is reserved in the same critical section.
+    /// Picks a free connection under the pool lock. For a check or probe
+    /// (`use_`), the admission rule of [`check_connection_allowed`] is
+    /// applied to the server that actually supplies the connection, and the
+    /// check occupancy is reserved in the same critical section.
     fn select_connection(
         &self,
         level: i32,
         want_srv: Option<&RsNewsServer>,
         ignore_srvs: &[&RsNewsServer],
         missing: &[crate::nntp::BackboneMiss],
-        for_check: bool,
+        use_: ConnUse,
     ) -> *mut PooledNntpConn {
+        let for_check = use_ != ConnUse::Download;
         if level < 0 {
             return ptr::null_mut();
         }
@@ -3475,17 +3502,26 @@ impl NzbgetRsServerPool {
             g.sorted_servers[idx].block_time.store(0, Ordering::SeqCst);
         }
         if let Some((chosen_conn, chosen_level)) = found {
-            if for_check
-                && !check_connection_allowed(
-                    g.connections[chosen_conn]
-                        .server
-                        .check_in_use
-                        .load(Ordering::SeqCst),
+            if for_check {
+                let srv = &g.connections[chosen_conn].server;
+                let now = pool_now_ms();
+                let floor = if use_ == ConnUse::Probe {
+                    crate::fleetprobe::probe_check_floor(
+                        g.light.size_of(srv.id),
+                        srv.max_connections,
+                        g.light.flaky(srv.id, now),
+                    )
+                } else {
+                    1
+                };
+                if !check_connection_allowed(
+                    srv.check_in_use.load(Ordering::SeqCst),
+                    floor,
                     self.download_starved_at_ms.load(Ordering::SeqCst),
-                    pool_now_ms(),
-                )
-            {
-                return ptr::null_mut();
+                    now,
+                ) {
+                    return ptr::null_mut();
+                }
             }
             g.levels[chosen_level as usize] -= 1;
             let srv_index = conn_views[chosen_conn].server_index;
@@ -3655,6 +3691,25 @@ impl NzbgetRsServerPool {
             .iter()
             .filter(|s| s.active.load(Ordering::SeqCst) && s.norm_level.load(Ordering::SeqCst) == 0)
             .map(|s| g.light.size_of(s.id))
+            .sum()
+    }
+
+    /// Probe requests the servers [`Self::primary_connections`] counts may
+    /// have at once (`crate::fleetprobe::probe_reads`): their light
+    /// connections raised to the probe floor, 0 with no light reserve.
+    pub fn primary_probe_reads(&self) -> i32 {
+        self.maybe_recompute_light();
+        let Ok(g) = self.inner.lock() else {
+            return 0;
+        };
+        let now = pool_now_ms();
+        g.sorted_servers
+            .iter()
+            .filter(|s| s.active.load(Ordering::SeqCst) && s.norm_level.load(Ordering::SeqCst) == 0)
+            .map(|s| {
+                let flaky = g.light.flaky(s.id, now);
+                crate::fleetprobe::probe_reads(g.light.size_of(s.id), s.max_connections, flaky)
+            })
             .sum()
     }
 
@@ -4596,21 +4651,89 @@ mod tests {
     #[test]
     fn check_connection_allowed_rules() {
         // first check connection of a server is always allowed
-        assert!(check_connection_allowed(0, 1000, 1001));
+        assert!(check_connection_allowed(0, 1, 1000, 1001));
+        assert!(check_connection_allowed(0, 0, 1000, 1001));
         // further ones while no download was refused
-        assert!(check_connection_allowed(5, 0, 1001));
+        assert!(check_connection_allowed(5, 1, 0, 1001));
         // not while a download was refused recently
         assert!(!check_connection_allowed(
             5,
+            1,
             1000,
             1000 + DOWNLOAD_STARVED_WINDOW_MS
         ));
         // again once the window has passed
         assert!(check_connection_allowed(
             5,
+            1,
             1000,
             1001 + DOWNLOAD_STARVED_WINDOW_MS
         ));
+        // a probe floor of 4: up to 4 even while a download was refused
+        assert!(check_connection_allowed(3, 4, 1000, 1001));
+        assert!(!check_connection_allowed(4, 4, 1000, 1001));
+    }
+
+    /// 6790 (#717 follow-up): downloads use every connection, so the light
+    /// reserve shrinks to 1 and the fleet probes used to read one article at
+    /// a time. Probe requests now keep 5 at once (1 light + 4 idle check
+    /// connections of the probe share) while a download is refused
+    /// connections; a plain check still gets only its one, and no connection
+    /// a download holds is ever handed out.
+    #[test]
+    fn probes_keep_a_floor_while_downloads_saturate() {
+        let (pool, srv) = light_test_pool(60, crate::light_pool::LIGHT_MAX);
+        assert_eq!(pool.primary_probe_reads(), 5, "a full reserve");
+        let mut dl: Vec<*mut PooledNntpConn> = Vec::new();
+        let take_all = |dl: &mut Vec<*mut PooledNntpConn>| loop {
+            let c = pool.get_connection(0, None, &[]);
+            if c.is_null() {
+                break;
+            }
+            dl.push(c);
+        };
+        take_all(&mut dl);
+        assert_eq!(dl.len(), 55);
+        // the download wants every connection: one less light per window
+        for _ in 0..4 {
+            force_light_recompute(&pool);
+            take_all(&mut dl);
+        }
+        assert_eq!(pool.light_status(), vec![(1, 1, 0)]);
+        assert_eq!(dl.len(), 59);
+        // the probes keep 5 reads at once all the same
+        assert_eq!(pool.primary_probe_reads(), crate::fleetprobe::PROBE_READ_FLOOR);
+        // the downloads hold every main connection: nothing to take from them
+        assert!(pool.get_probe_connection(&srv).is_null());
+        let light = pool.get_light_connection(&srv);
+        assert!(!light.is_null());
+        // four downloads end an article (between two fetches) and a download
+        // was refused a connection just now
+        for c in dl.drain(..4) {
+            pool.free_connection(c, true);
+        }
+        assert!(pool.get_connection(0, None, &[&srv]).is_null());
+        let probes: Vec<_> = (0..4).map(|_| pool.get_probe_connection(&srv)).collect();
+        assert!(probes.iter().all(|c| !c.is_null()));
+        assert_eq!(srv.check_in_use.load(Ordering::SeqCst), 4);
+        // no fifth, and a plain check gets none past the probes' either
+        pool.free_connection(dl.pop().unwrap(), true);
+        assert!(pool.get_probe_connection(&srv).is_null());
+        assert!(pool.get_check_connection(&srv).is_null());
+        // the idle connection is the download's
+        let back = pool.get_connection(0, None, &[]);
+        assert!(!back.is_null());
+        dl.push(back);
+        for c in probes.into_iter().chain(dl).chain([light]) {
+            pool.free_connection(c, true);
+        }
+        assert_eq!(srv.check_in_use.load(Ordering::SeqCst), 0);
+        // a flaky server: one probe read
+        for _ in 0..10 {
+            srv.note_io(false);
+        }
+        force_light_recompute(&pool);
+        assert_eq!(pool.primary_probe_reads(), 1);
     }
 
     #[test]

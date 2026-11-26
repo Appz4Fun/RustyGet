@@ -4467,8 +4467,12 @@ def _weakswitch(daemon, t, name, twin):
         dead = {p for p in range(2, parts + 1) if p % 3 == 0}
         members.append((rel, vname, len(data), seg, dead))
     par = generators.par2_index(list(zip(names, vols)))
-    t.write_file(os.path.join('data', '%sA/Show.par2' % tag), par)
-    members.append(('%sA/Show.par2' % tag, 'Show.par2', len(par), seg, set()))
+    if twin:
+        t.write_file(os.path.join('data', '%sA/Show.par2' % tag), par)
+        members.append(('%sA/Show.par2' % tag, 'Show.par2', len(par), seg, set()))
+    # (the alt case has no par2, as the Dune primary's damage was past what its
+    # par2 judged: the par-damage check fails over a par2 index with no
+    # recovery blocks before the dead-download check this reproduces)
     inner = '%d:%08x' % (len(movie), zlib.crc32(movie) & 0xffffffff)
     if twin:
         donor_vols = list(zip(names, vols))
@@ -4518,8 +4522,9 @@ def _weakswitch(daemon, t, name, twin):
     led = _grep_log(t, 'Leading Primary with its twin from here on')
     integ = _verify_output(t, movie, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
     if twin:
-        # the primary stays and extracts; after the switch its articles come from the twin
-        ok = integ and winner == 'Primary' and led >= 1 and switched == 0 and a_again == 0 and b_again == 0
+        # the primary stays and extracts; its lost articles come from the twin one
+        # for one (article fallback, or every later one once it leads): nothing twice
+        ok = integ and winner == 'Primary' and switched == 0 and a_again == 0 and b_again == 0
     else:
         # the alt took over early: less than half of the primary was fetched
         ok = integ and winner == 'Backup' and switched == 1 and a_bytes < total // 2

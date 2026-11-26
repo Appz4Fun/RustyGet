@@ -151,7 +151,7 @@ function systemStats(rangeSec = 3600) {
 const SYSINFO = {
   OS: { Name: 'Debian GNU/Linux', Version: '13' }, CPU: { Model: 'AMD Ryzen 9 5950X 16-Core Processor', Arch: 'x86_64' },
   Network: { PublicIP: '', PrivateIP: '10.0.0.2' }, Tools: [],
-  Libraries: [['zipfast', '0.1.0'], ['zipview', '0.1.0'], ['par-rs', '0.2.0'], ['nntp-rs', '0.4.0'], ['flate2', '1.1.11'],
+  Libraries: [['zipfast', '0.1.0'], ['zipview', '0.1.0'], ['par-rs', '0.2.0'], ['nntp-rs', '0.4.4'], ['flate2', '1.1.11'],
     ['zlib-rs', '0.6.8'], ['zstd', '0.14.3'], ['bzip2', '0.6.1'], ['crc32fast', '1.5.2'], ['quick-xml', '0.41.0'],
     ['md-5', '0.11.0'], ['libc', '0.2.190'], ['openssl', '0.10.82'], ['OpenSSL', '3.5.4']].map(([Name, Version]) => ({ Name, Version }))
 };

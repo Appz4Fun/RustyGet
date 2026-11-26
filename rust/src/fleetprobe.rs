@@ -327,6 +327,14 @@ impl crate::articlefetcher::NntpHost for ProbeNntpHost {
         Some(&PROBE_HOST)
     }
 
+    fn shared_work(&self) -> Option<(nntp_rs::Work, nntp_rs::Priority)> {
+        // probe reads hold a probe read slot (light_pool::PROBE_READS), which
+        // bounds how many run; each takes the next free download slot ahead of
+        // the downloads waiting, so probes keep their floor beside a
+        // saturating download (#719)
+        Some((nntp_rs::Work::Download, nntp_rs::Priority::Next))
+    }
+
     fn detail(&self, msg: &[u8]) {
         crate::articlefetcher::NativeNntpHost.detail(msg)
     }

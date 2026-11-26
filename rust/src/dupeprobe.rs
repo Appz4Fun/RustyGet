@@ -519,6 +519,155 @@ impl NzbgetRsDupeProbe {
         self.stopped.load(Ordering::SeqCst)
     }
 
+    /// The sample walk through the shared nntp-rs pool: one connection of
+    /// server `idx` checked out (light work when the caller holds a light
+    /// slot, else a download connection ahead of the waiting downloads), a
+    /// STAT per sample still unfound. Returns whether the server answered anything,
+    /// and whether it could not be reached at all.
+    #[cfg(unix)]
+    fn walk_pooled(
+        &mut self,
+        shared: &crate::nntprs_pool::Shared,
+        idx: usize,
+        server_name: &[u8],
+        light: bool,
+        result: &mut ServerResult,
+    ) -> (bool, bool) {
+        let n = self.samples.len();
+        let pending = |found: &[bool]| found.iter().filter(|&&f| !f).count() as i32;
+        let timeout = Duration::from_secs(crate::light_pool::LIGHT_IO_TIMEOUT_SECS as u64);
+        let opts = nntp_rs::FetchOptions {
+            timeout: Some(timeout),
+            ..Default::default()
+        };
+        // a light RustyGet slot runs in nntp-rs's light reserve; otherwise the
+        // walk takes one of the server's download connections, ahead of the
+        // waiting downloads
+        let (work, priority) = if light {
+            (nntp_rs::Work::Light, nntp_rs::Priority::Next)
+        } else {
+            (nntp_rs::Work::Download, nntp_rs::Priority::Next)
+        };
+        let opts = nntp_rs::FetchOptions { priority, ..opts };
+        let mut co = match shared.pool.checkout(idx, work, &opts) {
+            Ok(c) => c,
+            Err(e) => {
+                result.unknown += pending(&self.found);
+                let mut line = b"Dupe probe on ".to_vec();
+                line.extend_from_slice(server_name);
+                line.extend_from_slice(format!(": no connection ({e})").as_bytes());
+                crate::log::log_active_bytes(crate::log::MK_DETAIL, &line);
+                // a server that could not be reached at all is left out of the
+                // verdict, but a light connection that could not connect proves
+                // nothing about it (as before); a wait that ran out neither
+                let unreachable = !light
+                    && matches!(
+                        e,
+                        nntp_rs::Error::Io { .. } | nntp_rs::Error::Tls(_) | nntp_rs::Error::Unavailable
+                    );
+                return (false, unreachable);
+            }
+        };
+        co.set_io_timeout(timeout);
+        // the samples still unfound, asked at once (pipelined on the held
+        // connection); an id that could carry a second command is never sent
+        let mut todo = Vec::new();
+        for index in 0..n {
+            if self.found[index] {
+                continue;
+            }
+            if pipelinable(&self.samples[index].message_id) {
+                todo.push(index);
+            } else {
+                result.unknown += 1;
+            }
+        }
+        if self.is_stopped() || todo.is_empty() {
+            // connected: the server counts as reached
+            return (true, false);
+        }
+        let ids: Vec<String> = todo
+            .iter()
+            .map(|&i| String::from_utf8_lossy(&self.samples[i].message_id).into_owned())
+            .collect();
+        let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let answers = match co.stat_many(&refs, None) {
+            Ok(a) => a,
+            Err(e) => {
+                co.mark_broken();
+                result.unknown += todo.len() as i32;
+                let mut line = b"Dupe probe on ".to_vec();
+                line.extend_from_slice(server_name);
+                line.extend_from_slice(format!(": the STAT exchange broke ({e})").as_bytes());
+                crate::log::log_active_bytes(crate::log::MK_DETAIL, &line);
+                // connected, but the exchange broke: reached, nothing proven
+                return (true, false);
+            }
+        };
+        for (&index, answer) in todo.iter().zip(answers) {
+            match answer {
+                nntp_rs::Presence::Present => {
+                    result.exists += 1;
+                    self.found[index] = true;
+                    if self.found_on.is_empty() {
+                        self.found_on.extend_from_slice(server_name);
+                        self.found_on.extend_from_slice(b" (");
+                        self.found_on.extend_from_slice(&self.samples[index].message_id);
+                        self.found_on.push(b')');
+                    }
+                }
+                // a 451 counts as missing, as `classify` takes it
+                nntp_rs::Presence::Absent | nntp_rs::Presence::Removed => result.missing += 1,
+                nntp_rs::Presence::Unknown => result.unknown += 1,
+            }
+        }
+        (true, false)
+    }
+
+    /// [`Self::probe_server_native`] through the shared nntp-rs pool without
+    /// a RustyGet slot: the walk's checkout waits for the server's next free
+    /// connection ahead of the waiting downloads.
+    #[cfg(unix)]
+    fn probe_pooled_unslotted(
+        &mut self,
+        pool: &crate::net::NzbgetRsServerPool,
+        shared: &crate::nntprs_pool::Shared,
+        idx: usize,
+        server_id: i32,
+        probed: &mut BTreeSet<i32>,
+    ) -> (bool, ServerResult) {
+        let mut result = ServerResult::default();
+        // a pool a config reload retired hands out nothing more, as in the slotted wait
+        let srv = match pool.server_by_id(server_id) {
+            Some(srv) if !pool.is_retired() => srv,
+            _ => {
+                self.end_connection_wait();
+                return (false, result);
+            }
+        };
+        if pool.is_server_blocked(&srv) {
+            // a blocked server frees no connection for the probe
+            self.end_connection_wait();
+            result.unreachable = true;
+            let mut line = b"Dupe probe on ".to_vec();
+            line.extend_from_slice(srv.name.to_bytes());
+            line.extend_from_slice(b": no connection (the server is blocked)");
+            crate::log::log_active_bytes(crate::log::MK_DETAIL, &line);
+            return (false, result);
+        }
+        if !probed.insert(server_id) || self.is_stopped() {
+            self.end_connection_wait();
+            return (false, result);
+        }
+        let name = srv.name.to_bytes().to_vec();
+        // starting downloads takes no nntp-rs connection from a Priority::Next
+        // checkout: the download need not hold back for the walk
+        self.end_connection_wait();
+        let (answered, unreachable) = self.walk_pooled(shared, idx, &name, false, &mut result);
+        result.unreachable = unreachable;
+        (answered, result)
+    }
+
     #[cfg(unix)]
     fn probe_server_native(
         &mut self,
@@ -536,6 +685,30 @@ impl NzbgetRsDupeProbe {
         let mut actual_server_id: i32 = 0;
         let mut join_group = false;
         let mut server_name: Vec<u8> = Vec::new();
+        // With the shared nntp-rs pool a download holds its RustyGet slot (a
+        // server's, but only an admission token) for its whole fetch across
+        // every server, so a check slot of this server may not come free while
+        // downloads run, although nntp-rs's connections of it do between
+        // their requests. A free light slot is still taken (light work);
+        // without one the walk checks out a connection of the server in
+        // nntp-rs directly, ahead of the waiting downloads (Priority::Next),
+        // as fleet probe reads do (#719).
+        let pooled = crate::nntprs_pool::shared()
+            .and_then(|s| s.index_of(server_id).map(|idx| (s, idx)));
+        if let Some((shared, idx)) = &pooled {
+            let light = pool
+                .server_by_id(server_id)
+                .map_or(std::ptr::null_mut(), |srv| pool.get_light_connection(&srv));
+            if light.is_null() {
+                return self.probe_pooled_unslotted(pool, shared, *idx, server_id, probed);
+            }
+            let c = unsafe { &*light };
+            conn_ptr = light as usize;
+            actual_server_id = c.server.id;
+            join_group = c.server.join_group;
+            server_name = c.server.name.to_bytes().to_vec();
+            self.end_connection_wait();
+        }
         let wait_start = now_sec();
         // a pool a config reload retired hands out nothing more: don't wait on it
         while conn_ptr == 0
@@ -574,6 +747,16 @@ impl NzbgetRsDupeProbe {
                     pool.is_server_blocked(&wanted) || (bt > 0 && now_sec() - bt < 60)
                 }
             };
+            if let Some(wanted) = pool.server_by_id(server_id) {
+                let mut line = b"Dupe probe on ".to_vec();
+                line.extend_from_slice(wanted.name.to_bytes());
+                line.extend_from_slice(if result.unreachable {
+                    b": no connection (the server is blocked)".as_slice()
+                } else {
+                    b": no free connection within the wait".as_slice()
+                });
+                crate::log::log_active_bytes(crate::log::MK_DETAIL, &line);
+            }
             return (false, result);
         }
 
@@ -585,7 +768,16 @@ impl NzbgetRsDupeProbe {
         // a server that could not even connect (login refused, TLS, network) before
         // answering anything does not count as reached: a sibling is asked instead
         let mut never_answered = false;
-        if fresh {
+        let pooled = crate::nntprs_pool::shared()
+            .and_then(|s| s.index_of(actual_server_id).map(|idx| (s, idx)));
+        if let (true, Some((shared, idx))) = (fresh, pooled) {
+            // SAFETY: the slot stays held (and valid) until `checkout` is released below
+            let light = crate::light_pool::is_light(unsafe { &*(conn_ptr as *const crate::net::PooledNntpConn) });
+            let (answered, unreachable) =
+                self.walk_pooled(&shared, idx, &server_name, light, &mut result);
+            result.unreachable = unreachable;
+            probed_server = answered;
+        } else if fresh {
             self.set_conn(conn_ptr);
             let conn = unsafe { &*(conn_ptr as *const crate::net::PooledNntpConn) };
             unsafe {

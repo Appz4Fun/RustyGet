@@ -24,7 +24,8 @@ pub fn server_config(srv: &RsNewsServer, light_cap: usize) -> nntp_rs::ServerCon
         .with_max_connections(usize::try_from(srv.max_connections).unwrap_or(1).max(1))
         .with_level(u32::try_from(srv.level).unwrap_or(0))
         .with_light_connections(light_cap)
-        .with_active(srv.active.load(Ordering::SeqCst))
+        // a server with no connections was never used: it stays out
+        .with_active(srv.active.load(Ordering::SeqCst) && srv.max_connections > 0)
         .with_group(u32::try_from(srv.configured_group).unwrap_or(0))
         .with_retention_days(u32::try_from(srv.retention).unwrap_or(0));
     let user = srv.user.to_bytes();
@@ -34,6 +35,22 @@ pub fn server_config(srv: &RsNewsServer, light_cap: usize) -> nntp_rs::ServerCon
             text(&srv.password),
         );
     }
+    cfg = cfg
+        .with_cert_verification(match srv.cert_verif_level {
+            0 => nntp_rs::CertVerification::None,
+            1 => nntp_rs::CertVerification::Minimal,
+            _ => nntp_rs::CertVerification::Strict,
+        })
+        .with_cipher(text(&srv.cipher))
+        .with_ip_version(match srv.ip_version {
+            4 => nntp_rs::IpVersion::V4,
+            6 => nntp_rs::IpVersion::V6,
+            _ => nntp_rs::IpVersion::Auto,
+        });
+    #[cfg(unix)]
+    if crate::addrpick::wants_plan(&cfg.host) {
+        cfg = cfg.with_address_plan(std::sync::Arc::new(AddrPlan::new(srv)));
+    }
     cfg.optional = srv.optional;
     // what the user typed, never a backbone identification made earlier
     cfg.backbone = Some(
@@ -41,6 +58,108 @@ pub fn server_config(srv: &RsNewsServer, light_cap: usize) -> nntp_rs::ServerCon
     );
     cfg.io_timeout = Duration::from_secs(60);
     cfg
+}
+
+/// `ServerN.Address` for nntp-rs (`crate::addrpick`): the addresses of the
+/// host fastest first, or the pinned one first; network-level failures move
+/// an address back. nntp-rs asks on its I/O threads, which must not block, so
+/// the order is worked out (looked up and timed) on a thread of its own and
+/// kept; until the first one is ready nntp-rs resolves the host itself.
+#[cfg(unix)]
+struct AddrPlan {
+    id: i32,
+    name: String,
+    host: String,
+    port: i32,
+    ip_version: i32,
+    tls: bool,
+    cert_verif_level: u32,
+    cached: std::sync::Arc<std::sync::Mutex<(Vec<std::net::SocketAddr>, Option<std::time::Instant>, bool)>>,
+}
+
+#[cfg(unix)]
+impl AddrPlan {
+    /// How long a worked-out order is used before it is worked out again.
+    const KEEP: Duration = Duration::from_secs(60);
+
+    fn new(srv: &RsNewsServer) -> Self {
+        let text = |c: &std::ffi::CString| String::from_utf8_lossy(c.to_bytes()).into_owned();
+        Self {
+            id: srv.id,
+            name: text(&srv.name),
+            host: text(&srv.host),
+            port: srv.port,
+            ip_version: srv.ip_version,
+            tls: srv.tls,
+            cert_verif_level: srv.cert_verif_level,
+            cached: Default::default(),
+        }
+    }
+
+    fn refresh(&self, port: u16) {
+        let (id, name, host, p, ipv, tls, cv) = (
+            self.id,
+            self.name.clone(),
+            self.host.clone(),
+            self.port,
+            self.ip_version,
+            self.tls,
+            self.cert_verif_level,
+        );
+        let cached = std::sync::Arc::clone(&self.cached);
+        let retry = std::sync::Arc::clone(&self.cached);
+        let spawned = std::thread::Builder::new().name("addrplan".into()).spawn(move || {
+            let order = crate::addrpick::plan(&crate::addrpick::ServerFacts {
+                id,
+                name: &name,
+                host: &host,
+                port: p,
+                ip_version: ipv,
+                tls,
+                cert_verif_level: cv,
+            });
+            let addrs: Vec<std::net::SocketAddr> = order
+                .iter()
+                .filter_map(|a| a.trim_matches(|c| c == '[' || c == ']').parse::<std::net::IpAddr>().ok())
+                .map(|ip| std::net::SocketAddr::new(ip, port))
+                .collect();
+            if let Ok(mut g) = cached.lock() {
+                *g = (addrs, Some(std::time::Instant::now()), false);
+            }
+        });
+        if spawned.is_err() {
+            if let Ok(mut g) = retry.lock() {
+                g.2 = false;
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+impl nntp_rs::AddressPlan for AddrPlan {
+    fn addresses(&self, _host: &str, port: u16) -> Vec<std::net::SocketAddr> {
+        let Ok(mut g) = self.cached.lock() else {
+            return Vec::new();
+        };
+        let stale = g.1.is_none_or(|t| t.elapsed() >= Self::KEEP);
+        if stale && !g.2 {
+            g.2 = true;
+            drop(g);
+            self.refresh(port);
+            return self.cached.lock().map(|g| g.0.clone()).unwrap_or_default();
+        }
+        g.0.clone()
+    }
+
+    fn report(&self, addr: std::net::SocketAddr, ok: bool) {
+        crate::addrpick::report(self.id, &addr.ip().to_string(), ok);
+        if !ok {
+            // the next connect works the order out again
+            if let Ok(mut g) = self.cached.lock() {
+                g.1 = None;
+            }
+        }
+    }
 }
 
 /// What identification learned about one server's article numbers.
@@ -197,25 +316,615 @@ pub fn identified_groups(
     out
 }
 
+/// What one server answered, as an [`AttemptLog`] keeps it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Seen {
+    Have,
+    /// `430`/`423`: proof the server (and its backend) lacks the article.
+    Missing,
+    /// `451`: removed, or a proxy whose backend timed out. Not found on
+    /// this server for the attempt, but no 430 proof (as the per-server
+    /// download took it: not found, not a backbone-wide miss).
+    Removed,
+    /// A reseller could not reach its backend; says nothing about the article.
+    Unreachable(String),
+    /// Any other failure, as text.
+    Failed(String),
+}
+
+/// How a failed attempt failed, for the download's status.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FailKind {
+    /// The body did not decode (CRC error, cut short, no yEnc data, ...).
+    Decode(nntp_rs::decoder::Status),
+    Timeout,
+    /// The connection limit (a refused connection).
+    Login,
+    /// Login refused (credentials rejected): the server is passed over,
+    /// never waited for (`authrejected`).
+    Auth,
+    Other,
+}
+
+/// One server attempt of a fetch through the shared pool.
+#[derive(Clone, Debug)]
+pub struct Rec {
+    /// nntp-rs server index.
+    pub server: usize,
+    pub outcome: Seen,
+    pub fail: Option<FailKind>,
+    /// The server's status line, when it sent one.
+    pub reply: Option<String>,
+    pub wire_bytes: u64,
+    /// The connection was opened for this attempt.
+    pub fresh: bool,
+    /// The attempt had its connection (nntp-rs called `started` for it):
+    /// false for a connect, login or connection-limit failure, where the
+    /// per-connection download never connected.
+    pub connected: bool,
+}
+
+/// Collects a fetch's server attempts (nntp-rs calls the observer on its own
+/// threads; the caller logs them on its own afterwards, in order) and books
+/// each attempt's bytes on the server's statistics as they happen.
+#[derive(Clone, Default)]
+pub struct AttemptLog(std::sync::Arc<std::sync::Mutex<Vec<Rec>>>);
+
+#[cfg(unix)]
+impl AttemptLog {
+    /// The observer for one fetch's `FetchOptions::observer`.
+    pub fn observer(&self, shared: &Shared) -> nntp_rs::Observe {
+        self.observer_with(shared, None, None, None)
+    }
+
+    /// [`Self::observer`], also calling `on_miss` after every attempt that
+    /// brought no article and `on_start` when an attempt has its connection
+    /// (both quickly: they run on nntp-rs's I/O threads), and keeping `wait`
+    /// in step with whether the fetch has a connection.
+    pub fn observer_with(
+        &self,
+        shared: &Shared,
+        on_miss: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+        on_start: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+        wait: Option<WaitMark>,
+    ) -> nntp_rs::Observe {
+        nntp_rs::Observe::new(LogObserver {
+            log: self.clone(),
+            ids: shared.servers.iter().map(|s| s.id).collect(),
+            on_miss,
+            on_start,
+            wait,
+            in_hand: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    /// The attempts so far, oldest first; the log is emptied.
+    pub fn take(&self) -> Vec<Rec> {
+        self.0.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default()
+    }
+}
+
+/// [`AttemptLog`]'s observer.
+#[cfg(unix)]
+struct LogObserver {
+    log: AttemptLog,
+    ids: Vec<i32>,
+    on_miss: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+    on_start: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+    wait: Option<WaitMark>,
+    /// Per server, the attempts that have their connection (`started`) and
+    /// have not reported yet (more than one in a pipelined batch).
+    in_hand: std::sync::Mutex<Vec<usize>>,
+}
+
+#[cfg(unix)]
+impl nntp_rs::Observer for LogObserver {
+    fn attempt(&self, a: &nntp_rs::Attempt<'_>) {
+        use nntp_rs::Outcome;
+        // until the next started(), the fetch waits for a connection again
+        // (the next server's, or a retry's)
+        if let Some(w) = &self.wait {
+            w.set_waiting(true);
+        }
+        let (outcome, fail) = match &a.outcome {
+            Outcome::Have { .. } => (Seen::Have, None),
+            Outcome::Missing { removed: false } => (Seen::Missing, None),
+            Outcome::Missing { removed: true } => (Seen::Removed, None),
+            Outcome::Unreachable(t) => (Seen::Unreachable((*t).to_string()), None),
+            Outcome::Failed(e) => {
+                let kind = match e {
+                    nntp_rs::Error::Decode(st) => FailKind::Decode(*st),
+                    nntp_rs::Error::Timeout(_) => FailKind::Timeout,
+                    nntp_rs::Error::Auth { .. } => FailKind::Auth,
+                    nntp_rs::Error::ConnectionLimit { .. } => FailKind::Login,
+                    _ => FailKind::Other,
+                };
+                (Seen::Failed(e.to_string()), Some(kind))
+            }
+        };
+        if a.wire_bytes > 0 {
+            if let (Some(sm), Some(&id)) = (crate::statmeter::active_statmeter(), self.ids.get(a.server)) {
+                let off = crate::ffi::active_workstate().map_or(0, |w| w.local_time_offset());
+                sm.add_server_stats(i32::try_from(a.wire_bytes).unwrap_or(i32::MAX), 0, 0, id, off);
+            }
+        }
+        if !matches!(a.outcome, Outcome::Have { .. }) {
+            if let Some(f) = &self.on_miss {
+                f();
+            }
+        }
+        let connected = self.in_hand.lock().is_ok_and(|mut h| match h.get_mut(a.server) {
+            Some(n) if *n > 0 => {
+                *n -= 1;
+                true
+            }
+            _ => false,
+        });
+        if let Ok(mut g) = self.log.0.lock() {
+            g.push(Rec {
+                server: a.server,
+                outcome,
+                fail,
+                reply: a.reply.map(str::to_string),
+                wire_bytes: a.wire_bytes,
+                fresh: a.fresh,
+                connected,
+            });
+        }
+    }
+
+    fn started(&self, server: usize, _id: &str, _fresh: bool) {
+        if let Ok(mut h) = self.in_hand.lock() {
+            if h.len() <= server {
+                h.resize(server + 1, 0);
+            }
+            h[server] += 1;
+        }
+        if let Some(w) = &self.wait {
+            w.set_waiting(false);
+        }
+        if let Some(f) = &self.on_start {
+            f();
+        }
+    }
+}
+
+/// Counts one fetch in a "waiting for a connection" counter (a stream
+/// repair's watchdog stops its clock while any of its fetches wait): from
+/// [`WaitMark::start`] to nntp-rs's first `started()`, and again from each
+/// attempt to the next `started()`, until [`WaitMark::finish`]. Cheap to
+/// clone; every clone is the same mark.
+#[derive(Clone)]
+pub struct WaitMark(std::sync::Arc<WaitMarkInner>);
+
+struct WaitMarkInner {
+    counter: std::sync::Arc<std::sync::atomic::AtomicI32>,
+    /// WAITING (counted), RUNNING (has a connection) or FINISHED.
+    state: std::sync::atomic::AtomicU8,
+}
+
+impl WaitMark {
+    const WAITING: u8 = 0;
+    const RUNNING: u8 = 1;
+    const FINISHED: u8 = 2;
+
+    /// Counts the fetch as waiting.
+    pub fn start(counter: std::sync::Arc<std::sync::atomic::AtomicI32>) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self(std::sync::Arc::new(WaitMarkInner {
+            counter,
+            state: std::sync::atomic::AtomicU8::new(Self::WAITING),
+        }))
+    }
+
+    /// Whether the fetch is counted as waiting now.
+    pub fn is_waiting(&self) -> bool {
+        self.0.state.load(Ordering::SeqCst) == Self::WAITING
+    }
+
+    /// Marks the fetch waiting (true) or holding a connection (false); a
+    /// finished mark stays finished (nntp-rs may report late).
+    pub fn set_waiting(&self, waiting: bool) {
+        let (from, to) = if waiting {
+            (Self::RUNNING, Self::WAITING)
+        } else {
+            (Self::WAITING, Self::RUNNING)
+        };
+        if self
+            .0
+            .state
+            .compare_exchange(from, to, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            if waiting {
+                self.0.counter.fetch_add(1, Ordering::SeqCst);
+            } else {
+                self.0.counter.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    /// The fetch is over: it no longer counts, whatever nntp-rs reports later.
+    pub fn finish(&self) {
+        if self.0.state.swap(Self::FINISHED, Ordering::SeqCst) == Self::WAITING {
+            self.0.counter.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+}
+
+/// Whether a fetch that ended in "not found" proves the article missing on
+/// every server, as the per-server download required: every server that
+/// could be asked (active, with connections, not blocked) answered 430
+/// itself, or shares a backbone with one that did and keeps articles no
+/// longer (`crate::nntp::backbone_miss_covers`); and no attempt failed any
+/// other way. A server passed over for retention or because it was blocked
+/// leaves the question open.
+#[cfg(unix)]
+pub fn missing_everywhere(shared: &Shared, recs: &[Rec]) -> bool {
+    if recs.is_empty() || recs.iter().any(|r| r.outcome != Seen::Missing) {
+        return false;
+    }
+    let pool = crate::net::active_server_pool();
+    let misses: Vec<crate::nntp::BackboneMiss> = recs
+        .iter()
+        .filter_map(|r| shared.server(r.server))
+        .map(|s| crate::nntp::BackboneMiss { group: s.group(), retention: s.retention })
+        .collect();
+    shared.servers.iter().enumerate().all(|(i, s)| {
+        let usable = s.active.load(Ordering::SeqCst) && s.max_connections > 0;
+        if !usable {
+            return false; // never asked: it may have it
+        }
+        if pool.as_ref().is_some_and(|p| p.is_server_blocked(s)) {
+            return false;
+        }
+        recs.iter().any(|r| r.server == i)
+            || misses.iter().any(|m| crate::nntp::backbone_miss_covers(m, s.group(), s.retention))
+    })
+}
+
+/// Whether every server that is switched on and has connections answered 430
+/// or 451 for the article (itself, or through its backbone), and no attempt
+/// failed any other way: not found for this fetch, as the per-server download
+/// took a 451. nntp-rs ends such a walk with `Unavailable` when a server
+/// is switched off (it might have the article); RustyGet never asked a
+/// switched-off server, so for it the article is not found.
+#[cfg(unix)]
+pub fn missing_on_usable(shared: &Shared, recs: &[Rec]) -> bool {
+    if recs.is_empty() || recs.iter().any(|r| !matches!(r.outcome, Seen::Missing | Seen::Removed)) {
+        return false;
+    }
+    let pool = crate::net::active_server_pool();
+    let misses: Vec<crate::nntp::BackboneMiss> = recs
+        .iter()
+        .filter_map(|r| shared.server(r.server))
+        .map(|s| crate::nntp::BackboneMiss { group: s.group(), retention: s.retention })
+        .collect();
+    shared.servers.iter().enumerate().all(|(i, s)| {
+        let usable = s.active.load(Ordering::SeqCst) && s.max_connections > 0;
+        if !usable {
+            return true;
+        }
+        if pool.as_ref().is_some_and(|p| p.is_server_blocked(s)) {
+            return false;
+        }
+        recs.iter().any(|r| r.server == i)
+            || misses.iter().any(|m| crate::nntp::backbone_miss_covers(m, s.group(), s.retention))
+    })
+}
+
+/// Servers nntp-rs blocked, by RustyGet server id: until when, and whether
+/// a refused login did it. Written in [`EventLog`]'s `server_blocked` (on
+/// nntp-rs's I/O thread, before the failed fetch returns), so a caller sees
+/// the block of the attempt it just made.
+#[cfg(unix)]
+static BLOCKS: std::sync::Mutex<Vec<(i32, std::time::Instant, bool)>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(unix)]
+fn note_block(id: i32, for_: Duration, auth: bool) {
+    if let Ok(mut b) = BLOCKS.lock() {
+        let until = std::time::Instant::now() + for_;
+        b.retain(|e| e.0 != id);
+        b.push((id, until, auth));
+    }
+}
+
+/// Whether nntp-rs holds the server `id` blocked now because it could not
+/// be connected to (not for a refused login).
+#[cfg(unix)]
+fn blocked_unreachable(id: i32) -> bool {
+    let now = std::time::Instant::now();
+    BLOCKS.lock().is_ok_and(|b| b.iter().any(|e| e.0 == id && e.1 > now && !e.2))
+}
+
+/// Whether a failed fetch should wait for a news server instead of spending
+/// an article retry, as the per-connection download did for a connection it
+/// could not establish: no attempt had a connection (a fresh connection that
+/// failed before any byte counts as none), none was a refused login, and a
+/// required (not optional) server the fetch may ask (switched on, with
+/// connections, not in `skip`) is blocked now because it could not be
+/// reached. `connect_error` is true for an error that says the same with no
+/// attempts of its own (no server could be asked, or a single-flight leader's
+/// connect failure). Anything else (a refused login, a server switched off,
+/// every other server passed over for retention) spends retries as before.
+#[cfg(unix)]
+pub fn wait_for_required(shared: &Shared, recs: &[Rec], connect_error: bool, skip: &[usize]) -> bool {
+    let no_connection = if recs.is_empty() {
+        connect_error
+    } else {
+        recs.iter().all(|r| {
+            let connected = r.connected && !(r.fail.is_some() && r.fresh && r.wire_bytes == 0);
+            !connected && matches!(r.outcome, Seen::Failed(_)) && r.fail != Some(FailKind::Auth)
+        })
+    };
+    no_connection
+        && shared.servers.iter().enumerate().any(|(i, s)| {
+            s.active.load(Ordering::SeqCst)
+                && s.max_connections > 0
+                && !s.optional
+                && !skip.contains(&i)
+                && blocked_unreachable(s.id)
+        })
+}
+
+/// Servers switched on with connections: the ones a fetch can ask.
+#[cfg(unix)]
+pub fn usable_count(shared: &Shared) -> usize {
+    shared
+        .servers
+        .iter()
+        .filter(|s| s.active.load(Ordering::SeqCst) && s.max_connections > 0)
+        .count()
+}
+
+/// The process-wide nntp-rs pool: every news server connection of the
+/// daemon (downloads, repair and donor fetches, checks, probes) goes
+/// through it. Built from the server pool's servers for one server
+/// configuration generation; a server change builds a new one.
+#[cfg(unix)]
+pub struct Shared {
+    pub pool: nntp_rs::BlockingPool,
+    /// The server pool generation this pool serves (moves on when only a
+    /// server's Active flag changed).
+    generation: std::sync::atomic::AtomicI32,
+    /// The RustyGet server behind each nntp-rs server index.
+    servers: Vec<std::sync::Arc<RsNewsServer>>,
+}
+
+#[cfg(unix)]
+impl Shared {
+    /// The server pool generation this pool serves.
+    pub fn generation(&self) -> i32 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    /// The nntp-rs index of the RustyGet server `id`.
+    pub fn index_of(&self, id: i32) -> Option<usize> {
+        self.servers.iter().position(|s| s.id == id)
+    }
+
+    /// How many servers the pool has.
+    pub fn server_count(&self) -> usize {
+        self.servers.len()
+    }
+
+    /// The RustyGet server at nntp-rs index `idx`.
+    pub fn server(&self, idx: usize) -> Option<&std::sync::Arc<RsNewsServer>> {
+        self.servers.get(idx)
+    }
+
+    /// "Name (host)", as RustyGet's log lines name a server's connection.
+    pub fn conn_name(&self, idx: usize) -> Vec<u8> {
+        self.servers.get(idx).map_or_else(Vec::new, |s| {
+            crate::artwritercore::article_dl_format_connection_name(
+                s.name.to_bytes(),
+                s.host.to_bytes(),
+            )
+        })
+    }
+}
+
+#[cfg(unix)]
+static SHARED: std::sync::RwLock<Option<std::sync::Arc<Shared>>> = std::sync::RwLock::new(None);
+
+/// The current nntp-rs pool, if the daemon has news servers.
+#[cfg(unix)]
+pub fn shared() -> Option<std::sync::Arc<Shared>> {
+    SHARED.read().ok().and_then(|g| g.clone())
+}
+
+/// Recently fetched bodies kept for callers that come back for the same
+/// article (dupe, fleet and repair borrows), besides single-flight for
+/// concurrent ones: decoded bytes.
+pub const BODY_CACHE_BYTES: usize = 64 << 20;
+
+/// A pool event, handed from nntp-rs's I/O tasks (which must not block) to
+/// [`EventLog`]'s thread.
+#[cfg(unix)]
+enum PoolEvent {
+    Blocked { server: usize, secs: u64, reason: String },
+    CapLowered { server: usize, cap: usize },
+}
+
+/// Logs nntp-rs's pool events as RustyGet's server pool did, and blocks the
+/// server in RustyGet's pool too (the Status page and the level rules read
+/// that). The work runs on a thread of its own that ends with the pool.
+#[cfg(unix)]
+struct EventLog {
+    tx: std::sync::Mutex<std::sync::mpsc::Sender<PoolEvent>>,
+    /// RustyGet server ids by nntp-rs index.
+    ids: Vec<i32>,
+}
+
+#[cfg(unix)]
+impl EventLog {
+    fn new(servers: Vec<std::sync::Arc<RsNewsServer>>) -> Self {
+        let ids = servers.iter().map(|s| s.id).collect();
+        let (tx, rx) = std::sync::mpsc::channel::<PoolEvent>();
+        let _ = std::thread::Builder::new().name("pool-events".into()).spawn(move || {
+            for ev in rx {
+                let label = |i: usize| {
+                    servers.get(i).map(|s| {
+                        (
+                            std::sync::Arc::clone(s),
+                            format!(
+                                "{} ({})",
+                                String::from_utf8_lossy(s.name.to_bytes()),
+                                String::from_utf8_lossy(s.host.to_bytes())
+                            ),
+                        )
+                    })
+                };
+                match ev {
+                    PoolEvent::Blocked { server, secs, reason } => {
+                        let Some((srv, name)) = label(server) else { continue };
+                        if let Some(pool) = crate::net::active_server_pool() {
+                            pool.block_server(&srv);
+                        }
+                        let msg = format!("{name}: not used for {secs} s: {reason}");
+                        crate::log::log_active_bytes(crate::log::MK_DEBUG, msg.as_bytes());
+                    }
+                    PoolEvent::CapLowered { server, cap } => {
+                        let Some((_, name)) = label(server) else { continue };
+                        let msg = format!(
+                            "{name} refused a connection at its limit; using at most {cap} connections for a while"
+                        );
+                        crate::log::log_active_bytes(crate::log::MK_WARNING, msg.as_bytes());
+                    }
+                }
+            }
+        });
+        Self { tx: std::sync::Mutex::new(tx), ids }
+    }
+
+    fn send(&self, ev: PoolEvent) {
+        if let Ok(tx) = self.tx.lock() {
+            let _ = tx.send(ev);
+        }
+    }
+}
+
+#[cfg(unix)]
+impl nntp_rs::PoolEvents for EventLog {
+    fn server_blocked(&self, server: usize, for_: Duration, reason: &nntp_rs::Error) {
+        if let Some(&id) = self.ids.get(server) {
+            note_block(id, for_, matches!(reason, nntp_rs::Error::Auth { .. }));
+        }
+        self.send(PoolEvent::Blocked { server, secs: for_.as_secs(), reason: reason.to_string() });
+    }
+
+    fn cap_lowered(&self, server: usize, cap: usize) {
+        self.send(PoolEvent::CapLowered { server, cap });
+    }
+}
+
+/// The nntp-rs pool configuration for `servers` and the current options.
+#[cfg(unix)]
+pub fn pool_config(
+    servers: &[std::sync::Arc<RsNewsServer>],
+    retry_interval: i32,
+) -> nntp_rs::PoolConfig {
+    let opts = crate::options::active_options();
+    let (light_cap, article_timeout) = opts
+        .as_deref()
+        .map_or((crate::light_pool::LIGHT_MAX as i32, 60), |o| {
+            let s = o.scalars();
+            (s.light_connections, s.article_timeout)
+        });
+    let light_cap = usize::try_from(light_cap).unwrap_or(0);
+    let io_timeout = Duration::from_secs(u64::try_from(article_timeout.max(1)).unwrap_or(60));
+    let configs = servers
+        .iter()
+        .map(|s| {
+            let mut c = server_config(s, light_cap);
+            c.io_timeout = io_timeout;
+            c
+        })
+        .collect();
+    nntp_rs::PoolConfig {
+        servers: configs,
+        limits: nntp_rs::Limits {
+            body_cache_bytes: BODY_CACHE_BYTES,
+            // no deadline for a whole fetch (a slot wait plus a paced body can be
+            // long under a speed limit): each read waits at most ArticleTimeout,
+            // and the hanging-download check catches a stalled one, as before
+            article_timeout: Duration::from_secs(24 * 3600),
+            ..Default::default()
+        },
+        policy: nntp_rs::PoolPolicy {
+            retry_interval: Duration::from_secs(u64::try_from(retry_interval.max(1)).unwrap_or(10)),
+            ..Default::default()
+        },
+        events: Some(nntp_rs::Events::new(EventLog::new(servers.to_vec()))),
+        ..Default::default()
+    }
+}
+
+/// Builds the nntp-rs pool for the server pool's servers (start-up and every
+/// server change) and starts backend identification on it.
+#[cfg(unix)]
+pub fn rebuild(pool: &crate::net::NzbgetRsServerPool) {
+    let servers = pool.servers_snapshot();
+    let generation = pool.generation();
+    if let Some(cur) = shared() {
+        let same = cur.servers.len() == servers.len()
+            && cur.servers.iter().zip(&servers).all(|(a, b)| std::sync::Arc::ptr_eq(a, b));
+        if same {
+            // only Active flags can have changed: switch them in place
+            for (i, s) in servers.iter().enumerate() {
+                cur.pool
+                    .set_server_active(i, s.active.load(Ordering::SeqCst) && s.max_connections > 0);
+            }
+            cur.generation.fetch_max(generation, Ordering::SeqCst);
+            spawn_identification(generation);
+            return;
+        }
+    }
+    let next = if servers.is_empty() {
+        None
+    } else {
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get().clamp(2, 8));
+        match nntp_rs::BlockingPool::new(pool_config(&servers, pool.retry_interval()), threads) {
+            Ok(p) => Some(std::sync::Arc::new(Shared {
+                pool: p,
+                generation: std::sync::atomic::AtomicI32::new(generation),
+                servers,
+            })),
+            Err(e) => {
+                crate::log::log_active_bytes(
+                    crate::log::MK_ERROR,
+                    format!("Could not set up the news server connections: {e}").as_bytes(),
+                );
+                None
+            }
+        }
+    };
+    let ready = next.is_some();
+    let old = SHARED.write().ok().and_then(|mut g| std::mem::replace(&mut *g, next));
+    if let Some(old) = old {
+        // the old pool opens no new connection and closes its idle ones now, so
+        // an account never has the old pool's sockets beside the new pool's;
+        // requests still running on it finish on their own Arc
+        old.pool.retire();
+    }
+    if ready {
+        spawn_identification(generation);
+    }
+}
+
 /// Identifies which servers read one article store (nntp-rs
 /// `identify_backends`, backbone "auto" for servers without one) on a thread
 /// of its own, logs the grouping and puts the servers of one store on one
-/// backbone, so a 430 from one is not asked again on its siblings.
-///
-/// Each probed server lends one idle connection of its own: held and
-/// disconnected while nntp-rs uses its slot, and freed only after the probe
-/// pool is gone, so a server never has more sockets open than its
-/// `ServerN.Connections`. A server with none idle is not probed (still
-/// grouped by host and port or by its configured backbone). Only a weak
-/// reference to the server pool is kept while the probe runs, so a reload
-/// or shutdown is not held up; a result for a pool that changed meanwhile is
-/// dropped.
+/// RustyGet backbone too. nntp-rs then shares a 430 within each store; the
+/// RustyGet backbone keeps the rest of the daemon (dupe health ranks, the
+/// Status page) in step. `generation` is the pool's; a result for an older
+/// one is dropped.
 #[cfg(unix)]
-pub fn spawn_identification(pool: &std::sync::Arc<crate::net::NzbgetRsServerPool>) {
+pub fn spawn_identification(generation: i32) {
     // one run at a time: a request while one runs makes it run again for the
-    // pool active then, instead of a second probe borrowing more connections.
-    // Recording a request and the worker going idle happen under one lock, so
-    // no request is lost between the worker's last check and its exit.
+    // pool current then. Recording a request and the worker going idle happen
+    // under one lock, so no request is lost between the worker's last check
+    // and its exit.
     {
         let mut st = ID_STATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if st.running {
@@ -225,7 +934,6 @@ pub fn spawn_identification(pool: &std::sync::Arc<crate::net::NzbgetRsServerPool
         st.running = true;
         st.again = false;
     }
-    let first = (std::sync::Arc::downgrade(pool), pool.generation());
     let spawned = std::thread::Builder::new().name("backend-id".into()).spawn(move || {
         // a panicking run must not leave identification marked running forever
         struct Idle;
@@ -237,9 +945,9 @@ pub fn spawn_identification(pool: &std::sync::Arc<crate::net::NzbgetRsServerPool
             }
         }
         let _idle = Idle;
-        let (mut weak, mut generation) = first;
+        let mut generation = generation;
         loop {
-            identify(weak, generation);
+            identify(generation);
             // the worker stays `running` until it finds no request under the lock
             loop {
                 let mut st = ID_STATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -249,8 +957,8 @@ pub fn spawn_identification(pool: &std::sync::Arc<crate::net::NzbgetRsServerPool
                 }
                 st.again = false;
                 drop(st);
-                if let Some(p) = crate::net::active_server_pool() {
-                    (weak, generation) = (std::sync::Arc::downgrade(&p), p.generation());
+                if let Some(s) = shared() {
+                    generation = s.generation();
                     break;
                 }
             }
@@ -272,124 +980,40 @@ struct IdState {
 #[cfg(unix)]
 static ID_STATE: std::sync::Mutex<IdState> = std::sync::Mutex::new(IdState { running: false, again: false });
 
-/// Held connections, as addresses (only compared by `free_connection`),
-/// shared by the probe thread and its starter so whichever ends up with them
-/// gives them back exactly once.
 #[cfg(unix)]
-type Held = std::sync::Arc<std::sync::Mutex<Vec<usize>>>;
-
-#[cfg(unix)]
-fn give_back(weak: &std::sync::Weak<crate::net::NzbgetRsServerPool>, held: &Held) {
-    let conns = held.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default();
-    if let Some(pool) = weak.upgrade() {
-        for conn in conns {
-            pool.free_connection(conn as *mut crate::net::PooledNntpConn, false);
-        }
-    }
-}
-
-#[cfg(unix)]
-fn identify(weak: std::sync::Weak<crate::net::NzbgetRsServerPool>, generation: i32) {
-    use crate::log::{log_active_bytes, MK_INFO, MK_WARNING};
-    let Some(pool) = weak.upgrade() else {
+fn identify(generation: i32) {
+    use crate::log::{log_active_bytes, MK_INFO};
+    let Some(s) = shared() else {
         return;
     };
-    let servers = pool.servers_snapshot();
-    if servers
-        .iter()
-        .filter(|s| s.active.load(Ordering::SeqCst))
-        .count()
-        < 2
+    if s.generation() != generation
+        || s.servers
+            .iter()
+            .filter(|srv| srv.active.load(Ordering::SeqCst))
+            .count()
+            < 2
     {
         return;
     }
-    let held: Held = Default::default();
-    let mut configs = Vec::with_capacity(servers.len());
-    for srv in &servers {
-        let mut cfg = server_config(srv, 0).with_max_connections(1);
-        cfg.connect_timeout = Duration::from_secs(15);
-        cfg.io_timeout = Duration::from_secs(20);
-        cfg.adaptive_cap = false;
-        if cfg.active {
-            let conn = pool.get_check_connection(srv);
-            // SAFETY: a non-null connection from the pool stays valid until freed
-            match unsafe { conn.as_ref() } {
-                Some(c) => {
-                    if c.is_connected() {
-                        // SAFETY: held by this thread until freed
-                        unsafe { c.disconnect() };
-                    }
-                    if let Ok(mut g) = held.lock() {
-                        g.push(conn as usize);
-                    }
-                }
-                None => cfg.active = false,
-            }
-        }
-        configs.push(cfg);
-    }
-    drop(pool);
-    let names: Vec<String> = configs.iter().map(|c| c.name.clone()).collect();
-    let (tx, rx) = std::sync::mpsc::channel();
-    let config = nntp_rs::PoolConfig {
-        servers: configs,
-        ..Default::default()
-    };
-    let probe_weak = weak.clone();
-    let probe_held = std::sync::Arc::clone(&held);
-    let spawned = std::thread::Builder::new()
-        .name("backend-probe".into())
-        .spawn(move || {
-            let got = nntp_rs::BlockingPool::new(config, 1).map(|p| {
-                let verdicts = p.identify_backends();
-                let prints = p.pool().fingerprints();
-                drop(p); // its sockets are closed before the slots go back
-                (verdicts, prints)
-            });
-            give_back(&probe_weak, &probe_held);
-            let _ = tx.send(got);
-        });
-    if spawned.is_err() {
-        // the probe never ran: give the held connections back here
-        give_back(&weak, &held);
+    let verdicts = s.pool.identify_backends();
+    let prints = s.pool.pool().fingerprints();
+    if shared().is_none_or(|now| now.generation() != generation) {
         return;
     }
-    let (verdicts, prints) = match rx.recv_timeout(Duration::from_secs(600)) {
-        Ok(Ok(v)) => v,
-        Ok(Err(e)) => {
-            log_active_bytes(
-                MK_WARNING,
-                format!("Backend identification failed: {e}").as_bytes(),
-            );
-            return;
-        }
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            log_active_bytes(
-                MK_WARNING,
-                b"Backend identification took more than 600 s; its result will not be used",
-            );
-            return;
-        }
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-            log_active_bytes(MK_WARNING, b"Backend identification stopped without a result");
-            return;
-        }
-    };
-    let Some(pool) = weak.upgrade() else {
-        return;
-    };
-    if pool.generation() != generation {
-        return;
-    }
-    let probes = probe_states(&prints, servers.len());
+    let probes = probe_states(&prints, s.servers.len());
+    let names: Vec<String> = s
+        .servers
+        .iter()
+        .map(|srv| String::from_utf8_lossy(srv.name.to_bytes()).into_owned())
+        .collect();
     for line in backend_log_lines(&names, &probes, &verdicts) {
         log_active_bytes(MK_INFO, line.as_bytes());
     }
-    let configured: Vec<i32> = servers.iter().map(|s| s.configured_group).collect();
+    let configured: Vec<i32> = s.servers.iter().map(|srv| srv.configured_group).collect();
     let next = identified_groups(&names, &configured, &verdicts, crate::backbones::intern);
     let mut changed = false;
-    for (i, srv) in servers.iter().enumerate() {
-        if pool.generation() != generation {
+    for (i, srv) in s.servers.iter().enumerate() {
+        if shared().is_none_or(|now| now.generation() != generation) {
             break;
         }
         if srv.group() != next[i] {
@@ -413,6 +1037,59 @@ fn identify(weak: std::sync::Weak<crate::net::NzbgetRsServerPool>, generation: i
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wait_mark_counts_only_while_waiting() {
+        let c = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0));
+        let w = WaitMark::start(std::sync::Arc::clone(&c));
+        assert_eq!(c.load(Ordering::SeqCst), 1);
+        assert!(w.is_waiting());
+        w.set_waiting(false);
+        w.set_waiting(false);
+        assert_eq!(c.load(Ordering::SeqCst), 0);
+        w.clone().set_waiting(true);
+        w.set_waiting(true);
+        assert_eq!(c.load(Ordering::SeqCst), 1);
+        w.finish();
+        assert_eq!(c.load(Ordering::SeqCst), 0);
+        // late reports after the fetch ended change nothing
+        w.set_waiting(true);
+        w.set_waiting(false);
+        w.finish();
+        assert_eq!(c.load(Ordering::SeqCst), 0);
+        // finishing while it holds a connection leaves the count alone
+        let w2 = WaitMark::start(std::sync::Arc::clone(&c));
+        w2.set_waiting(false);
+        w2.finish();
+        assert_eq!(c.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn observer_waits_until_started_and_after_each_attempt() {
+        use nntp_rs::Observer;
+        let c = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0));
+        let w = WaitMark::start(std::sync::Arc::clone(&c));
+        let log = AttemptLog::default();
+        let obs = LogObserver { log: log.clone(), ids: vec![3, 4], on_miss: None, on_start: None, wait: Some(w.clone()), in_hand: std::sync::Mutex::new(Vec::new()) };
+        obs.started(0, "<a@b>", true);
+        assert_eq!(c.load(Ordering::SeqCst), 0, "a connection in hand is the server's time");
+        obs.attempt(&nntp_rs::Attempt {
+            id: "<a@b>",
+            server: 0,
+            outcome: nntp_rs::Outcome::Missing { removed: false },
+            wire_bytes: 0,
+            elapsed: Duration::ZERO,
+            reply: Some("430 no such article"),
+            fresh: true,
+        });
+        assert_eq!(c.load(Ordering::SeqCst), 1, "waiting for the next server's connection");
+        obs.started(1, "<a@b>", false);
+        assert_eq!(c.load(Ordering::SeqCst), 0);
+        w.finish();
+        assert_eq!(c.load(Ordering::SeqCst), 0);
+        assert_eq!(log.take().len(), 1);
+    }
 
     fn server(group: i32, user: &[u8]) -> RsNewsServer {
         RsNewsServer::new(
@@ -604,5 +1281,75 @@ mod tests {
             probe_states(&prints, 5),
             vec![Compared, Compared, NothingToCompare, NotProbed, NothingToCompare]
         );
+    }
+
+    /// A Shared over `servers` (no connection is made until a request).
+    fn shared_of(servers: Vec<std::sync::Arc<RsNewsServer>>) -> Shared {
+        let pool = nntp_rs::BlockingPool::new(pool_config(&servers, 10), 1).expect("pool");
+        Shared {
+            pool,
+            generation: std::sync::atomic::AtomicI32::new(1),
+            servers,
+        }
+    }
+
+    fn srv(id: i32, active: bool, conns: i32, group: i32) -> std::sync::Arc<RsNewsServer> {
+        std::sync::Arc::new(RsNewsServer::new(
+            id, active, b"s", b"127.0.0.1", 119, 0, b"", b"", false, false, b"", conns, 0, 0, group, false, 2,
+        ))
+    }
+
+    #[test]
+    fn a_block_for_a_refused_login_is_not_waited_for() {
+        note_block(-9101, Duration::from_secs(30), false);
+        note_block(-9102, Duration::from_secs(30), true);
+        note_block(-9103, Duration::from_secs(0), false);
+        assert!(blocked_unreachable(-9101));
+        assert!(!blocked_unreachable(-9102), "a refused login is passed over");
+        assert!(!blocked_unreachable(-9103), "a block that ran out");
+        assert!(!blocked_unreachable(-9104), "never blocked");
+        note_block(-9101, Duration::from_secs(0), false);
+        assert!(!blocked_unreachable(-9101), "the newest block replaces the older one");
+    }
+
+    fn rec(server: usize, outcome: Seen) -> Rec {
+        Rec { server, outcome, fail: None, reply: None, wire_bytes: 0, fresh: false, connected: true }
+    }
+
+    #[test]
+    fn missing_rules_follow_the_servers_that_could_be_asked() {
+        // 0 and 1 on one backbone, 2 on its own, 3 switched off
+        let sh = shared_of(vec![srv(1, true, 2, 7), srv(2, true, 2, 7), srv(3, true, 2, 0), srv(4, false, 2, 0)]);
+        let both = [rec(0, Seen::Missing), rec(2, Seen::Missing)];
+        // server 1 is covered by its backbone's 430, server 3 is off: missing on
+        // every usable server, but not everywhere (3 was never asked)
+        assert!(missing_on_usable(&sh, &both));
+        assert!(!missing_everywhere(&sh, &both));
+        // a 451 is not found for this fetch, but no 430 proof
+        let removed = [rec(0, Seen::Missing), rec(2, Seen::Removed)];
+        assert!(missing_on_usable(&sh, &removed));
+        let sh_on = shared_of(vec![srv(1, true, 2, 7), srv(3, true, 2, 0)]);
+        assert!(missing_everywhere(&sh_on, &[rec(0, Seen::Missing), rec(1, Seen::Missing)]));
+        assert!(!missing_everywhere(&sh_on, &[rec(0, Seen::Missing), rec(1, Seen::Removed)]));
+        // server 2 not asked: open
+        assert!(!missing_on_usable(&sh, &[rec(0, Seen::Missing)]));
+        // any other kind of answer leaves it open
+        assert!(!missing_on_usable(&sh, &[rec(0, Seen::Missing), rec(2, Seen::Failed("x".into()))]));
+        assert!(!missing_on_usable(&sh, &[]));
+        assert_eq!(usable_count(&sh), 3);
+        // with every server on, both 430s cover all of them
+        let on = shared_of(vec![srv(1, true, 2, 7), srv(2, true, 2, 7), srv(3, true, 2, 0)]);
+        assert!(missing_everywhere(&on, &both));
+        // a server with no connections is never usable
+        let zero = shared_of(vec![srv(1, true, 2, 0), srv(2, true, 0, 0)]);
+        assert!(missing_on_usable(&zero, &[rec(0, Seen::Missing)]));
+        assert!(!missing_everywhere(&zero, &[rec(0, Seen::Missing)]));
+    }
+
+    #[test]
+    fn a_server_without_connections_or_switched_off_is_inactive_in_nntp_rs() {
+        assert!(!server_config(&srv(1, true, 0, 0), 0).active);
+        assert!(!server_config(&srv(1, false, 4, 0), 0).active);
+        assert!(server_config(&srv(1, true, 4, 0), 0).active);
     }
 }

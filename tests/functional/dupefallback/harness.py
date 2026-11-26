@@ -4181,7 +4181,14 @@ def _failcont_bytes(ids, prefix):
     return served, count, again, par_again
 
 
-def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKind'):
+def _log_text(t):
+    try:
+        return t.read_file('nzbget.log').decode(errors='replace')
+    except Exception:
+        return ''
+
+
+def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKind', need_live=False):
     """The ultimate goal (extract while downloading, 2026-11-25): a stored rar
     set of movie.mkv extracts while it downloads, and the primary dies at
     ``die`` (a fraction of its data: every article from there on is gone). Its
@@ -4306,6 +4313,14 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
     backup_unpacks = _grep_log(t, 'Directly unpacking Backup') + _grep_log(t, 'Unpacking Backup')
     du_ok = _grep_log(t, 'Direct unpack for Primary successful')
     used_direct = _grep_log(t, 'Using directly unpacked files')
+    # an extraction that started over (persistent session falling back) or stopped at a volume
+    # read as it was written
+    restarts = (_grep_log(t, 'cannot continue from its rebuilt copy') +
+                len(re.findall(r'Unrar: progressive direct unpack \((?!volume count)', _log_text(t))))
+    reads = _live_reads(t)
+    as_written = reads[0] if reads else 0.0
+    # the dying volume, read as it was written, went on from its rebuilt copy
+    continued = _grep_log(t, 'goes on from its rebuilt copy at the payload frontier')
     integ = _verify_output(t, movie, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
     winner = 'Primary' if hp['Status'].startswith('SUCCESS') else (
         'Backup' if hb['Status'].startswith('SUCCESS') else 'none')
@@ -4339,18 +4354,21 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
         ok = integ and winner == 'Backup' and du_ok == 0 and lent == 0
     else:
         # the extraction that ran before the cut is the one that finished: direct unpack of
-        # the primary succeeded and post-processing took its files, extracting nothing again
+        # the primary succeeded and post-processing took its files, extracting nothing again,
+        # and it never started over (a volume read as it was written goes on from its rebuilt
+        # copy at the payload frontier)
         ok = (integ and winner == 'Primary' and failed_over == 0 and cancelled == 0 and backup_unpacks == 0
               and du_ok == 1 and used_direct == 1 and a_again == 0 and b_again <= b_again_ok
-              and b_bytes <= b_budget and b_before == 0)
+              and b_bytes <= b_budget and b_before == 0 and restarts == 0
+              and (not need_live or as_written > 0))
     return (name, ok,
             'winner=%s primary=%s backup=%s secs=%.1f primary_served=%d/%d B (%d articles, %d again, '
             'par2 %d again) backup_served=%d B of %d (budget %d, %d articles, %d again, par2 %d again) '
             'twin_before_frontier=%d failover_logs=%d du_cancelled=%d du_ok=%d used_direct=%d '
-            'backup_unpacks=%d extracted_ok=%s'
+            'backup_unpacks=%d extracted_ok=%s restarts=%d as_written_mb=%s continued=%d'
             % (winner, hp['Status'], hb['Status'], elapsed, a_bytes, total, a_count, a_again, a_par_again,
                b_bytes, donor_total, b_budget, b_count, b_again, b_par_again, b_before, failed_over, cancelled,
-               du_ok, used_direct, backup_unpacks, integ))
+               du_ok, used_direct, backup_unpacks, integ, restarts, as_written, continued))
 
 
 def scenario_failcont_twin25(daemon, t):
@@ -4375,6 +4393,16 @@ def scenario_failcont_alt50(daemon, t):
 
 def scenario_failcont_alt90(daemon, t):
     return _failcont(daemon, t, 'failcont_alt90', 'alt', 0.90)
+
+
+def scenario_failcont_altlive(daemon, t):
+    """A stored alt continues a primary that dies inside a volume (63 %, mid-volume) while
+    the extraction reads the volumes as they are written (writer-fed): the volume it died in
+    finishes with the lost articles as holes, the alt lends them by the video's bytes, and
+    the extraction goes on with zero restarts. (A volume read as it was written and then
+    rebuilt whole as a stand-in, ``continued``, is covered by the unit tests: a partly written
+    volume here finishes damaged, not dead.)"""
+    return _failcont(daemon, t, 'failcont_altlive', 'alt', 0.63, need_live=True)
 
 
 def scenario_failcont_aes25(daemon, t):
@@ -6900,7 +6928,7 @@ def _live_timing(clock, name):
         clock.span(done, 'Direct unpack for %s successful' % name))
 
 
-def _live_release(daemon, t, name, tag, volumes, seg, extra=()):
+def _live_release(daemon, t, name, tag, volumes, seg, extra=(), needles=()):
     """Queues ``volumes`` = [(name, bytes)] (plus ``extra`` members) as one download,
     timing it with a log clock; returns (history, clock)."""
     members = []
@@ -6910,7 +6938,7 @@ def _live_release(daemon, t, name, tag, volumes, seg, extra=()):
         members.append((rel, vname, len(data), seg, set()))
     members += list(extra)
     api = daemon.wait_ready()
-    clock = _live_clock(t, name)
+    clock = _live_clock(t, name, needles)
     daemon.append(api, name, build_multi_nzb(members), False, tag + '-key', 100)
     h = daemon.wait_history(api, name, timeout=300)
     clock.close()
@@ -7125,6 +7153,112 @@ def scenario_liveedgehole5(daemon, t):
             'past_damage_before_download_end=%s %s' % (
                 h['Status'], h['ParStatus'], h['UnpackStatus'], ok, rebuilt, skipped, patched, went_on,
                 _live_timing(clock, 'RelLE5')))
+
+
+# Options of the writer-fed scenarios: an article cache as in production (the cache path
+# reports its flushed articles), no external unpacker needed.
+WRITER_FED_OPTIONS = ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no',
+                      'KeepHistory=1', 'UnpackCleanupDisk=yes', 'ArticleCache=8192']
+
+_LIVE_READS = re.compile(r'Live extraction read ([\d.]+) MB as written, ([\d.]+) MB read back after their volume '
+                         r'finished, ([\d.]+) MB from volumes finished before')
+
+
+def _live_reads(t):
+    """(MB read as written, MB read back, MB from volumes finished before) summed over the
+    direct unpack summary lines of the log, or None without any."""
+    try:
+        text = t.read_file('nzbget.log').decode(errors='replace')
+    except Exception:
+        return None
+    found = _LIVE_READS.findall(text)
+    if not found:
+        return None
+    return tuple(round(sum(float(x[k]) for x in found), 1) for k in range(3))
+
+
+def _writer_fed(daemon, t, label, name, tag, volumes, files, first):
+    """A set (enough volumes that several download while it extracts, so the result does not
+    depend on which volumes four connections finish together) extracted while it downloads,
+    its volumes read article by
+    article as the writer puts them in place (writer-fed, see rust/src/livewrite.rs): when
+    the last article lands nearly everything is extracted, so the extracted files are in
+    place a moment after the download ends, and no packed byte is read back from a
+    finished volume (``read_back_mb=0``). ``first`` is the volume direct unpack starts
+    from; it finished before the extraction began (``finished_mb``)."""
+    h, clock = _live_release(daemon, t, name, tag, volumes, 500_000, needles=['Live extraction read'])
+    extracted = all(_verify_output(t, data, '.' + fname.rsplit('.', 1)[1], dirs=(('main', 'dst'), ('main', 'inter')))
+                    for fname, data in files)
+    live = _grep_log(t, 'Unrar: Extracting from %s' % first)
+    du_ok = _grep_log(t, 'Direct unpack for %s successful' % name)
+    used = _grep_log(t, 'Using directly unpacked files')
+    reads = _live_reads(t)
+    as_written, read_back, finished = reads if reads else (0.0, None, None)
+    stray = _stray_temp_files(t)
+    ok = (extracted and live >= 1 and du_ok == 1 and used == 1 and not stray and as_written > 0 and
+          read_back == 0 and h['Status'].startswith('SUCCESS') and h['UnpackStatus'] == 'SUCCESS')
+    return (label, ok, 'status=%s unpack=%s extracted_ok=%s live=%d du_ok=%d used_direct=%d stray_temp=%s '
+            'as_written_mb=%s read_back_mb=%s finished_mb=%s extracted_after_download_s=%s %s' % (
+                h['Status'], h['UnpackStatus'], extracted, live, du_ok, used, stray, as_written, read_back,
+                finished, clock.span('Collection %s completely downloaded' % name, 'Live extraction read'),
+                _live_timing(clock, name)))
+
+
+def _video_like(size, seed):
+    """A partly compressible payload: random 4 KiB blocks between zero runs."""
+    rnd = _payload(size // 2, seed)
+    return b''.join(rnd[i:i + 4096] + bytes(4096) for i in range(0, len(rnd), 4096))[:size]
+
+
+def scenario_livefedrar5store(daemon, t):
+    """A RAR5 store set with big volumes made by rar is read article by article while it
+    downloads: its last volume is not read back after the download."""
+    if not generators.HAVE_RAR:
+        return ('livefedrar5store', None, 'SKIP: rar not installed')
+    scale = _live_scale()
+    movie = _payload(60_000_000 * scale, 7301)
+    with tempfile.TemporaryDirectory(prefix='lfr5s-') as workdir:
+        vols = generators.rar5_method_volumes('movie.mkv', movie, 8_000_000 * scale, 0, workdir)
+    volumes = [('Rel.part%02d.rar' % (i + 1), v) for i, v in enumerate(vols)]
+    return _writer_fed(daemon, t, 'livefedrar5store', 'RelWF5', 'wf5A', volumes, [('movie.mkv', movie)],
+                       volumes[0][0])
+
+
+def scenario_livefedrar5m3(daemon, t):
+    """A compressed RAR5 set (rar -m3) with big volumes is decoded article by article
+    while it downloads."""
+    if not generators.HAVE_RAR:
+        return ('livefedrar5m3', None, 'SKIP: rar not installed')
+    scale = _live_scale()
+    movie = _video_like(60_000_000 * scale, 7302)
+    with tempfile.TemporaryDirectory(prefix='lfr5c-') as workdir:
+        vols = generators.rar5_method_volumes('movie.mkv', movie, 5_000_000 * scale, 3, workdir)
+    volumes = [('Rel.part%02d.rar' % (i + 1), v) for i, v in enumerate(vols)]
+    return _writer_fed(daemon, t, 'livefedrar5m3', 'RelWFC', 'wfcA', volumes, [('movie.mkv', movie)],
+                       volumes[0][0])
+
+
+def scenario_livefed7z(daemon, t):
+    """A 7z made by 7-Zip and cut into pieces by 7-Zip (-v) is read article by article while
+    it downloads. Stored (-m0=Copy): a debug build decodes LZMA2 slower than the throttled
+    download on a loaded VM, and then reads volumes only after they finished, which is not
+    what this checks (RG_LIVE_7Z_METHOD=LZMA2 times the compressed case)."""
+    if not generators.HAVE_7Z:
+        return ('livefed7z', None, 'SKIP: 7z not installed')
+    scale = _live_scale()
+    movie = _video_like(60_000_000 * scale, 7303)
+    with tempfile.TemporaryDirectory(prefix='lf7z-') as workdir:
+        with open(os.path.join(workdir, 'movie.mkv'), 'wb') as f:
+            f.write(movie)
+        method = os.environ.get('RG_LIVE_7Z_METHOD', 'Copy')
+        level = ['-mx5', '-mmt=4'] if method != 'Copy' else []
+        subprocess.run([generators.SEVENZIP_PATH, 'a', '-bd', '-m0=%s' % method] + level +
+                       ['-v%dm' % (5 * scale), 'out.7z', 'movie.mkv'], cwd=workdir, check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        names = sorted(n for n in os.listdir(workdir) if n.startswith('out.7z.'))
+        volumes = [('Movie' + n[len('out'):], open(os.path.join(workdir, n), 'rb').read()) for n in names]
+    return _writer_fed(daemon, t, 'livefed7z', 'RelWF7', 'wf7A', volumes, [('movie.mkv', movie)],
+                       volumes[0][0])
 
 
 
@@ -14247,6 +14381,9 @@ SCENARIOS = {
     'livesplitjoin': scenario_livesplitjoin,
     'liveedgehole': scenario_liveedgehole,
     'liveedgehole5': scenario_liveedgehole5,
+    'livefedrar5store': scenario_livefedrar5store,
+    'livefedrar5m3': scenario_livefedrar5m3,
+    'livefed7z': scenario_livefed7z,
     'staleprogress': scenario_staleprogress,
     'authrejected': scenario_authrejected,
     'appendlongname': scenario_appendlongname,
@@ -14384,6 +14521,7 @@ SCENARIOS = {
     'failcont_twin90': scenario_failcont_twin90,
     'failcont_alt25': scenario_failcont_alt25,
     'failcont_alt50': scenario_failcont_alt50,
+    'failcont_altlive': scenario_failcont_altlive,
     'failcont_alt90': scenario_failcont_alt90,
     'failcont_aes25': scenario_failcont_aes25,
     'failcont_aes50': scenario_failcont_aes50,
@@ -14719,6 +14857,10 @@ SCENARIO_OPTIONS = {
     'livesplitjoin': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1', 'UnpackCleanupDisk=yes', 'DownloadRate=8000'],
     'liveedgehole': PROD_OPTIONS + ['DownloadRate=3000'],
     'liveedgehole5': PROD_OPTIONS + ['DownloadRate=3000'],
+    # Writer-fed live extraction: a download slower than the decode, as on a real line.
+    'livefedrar5store': WRITER_FED_OPTIONS + ['DownloadRate=8000'],
+    'livefedrar5m3': WRITER_FED_OPTIONS + ['DownloadRate=6000'],
+    'livefed7z': WRITER_FED_OPTIONS + ['DownloadRate=6000'],
     'directunpacktwoarchives': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1'],
     'directunpackparfailure': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1'],
     'parfailurenodirectunpack': ['Unpack=yes', 'DirectUnpack=no', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1'],
@@ -14825,6 +14967,7 @@ SCENARIO_OPTIONS = {
     'failcont_twin90': PROD_OPTIONS + ['DownloadRate=4000'],
     'failcont_alt25': PROD_OPTIONS + ['DownloadRate=4000'],
     'failcont_alt50': PROD_OPTIONS + ['DownloadRate=4000'],
+    'failcont_altlive': PROD_OPTIONS + ['DownloadRate=4000'],
     'failcont_alt90': PROD_OPTIONS + ['DownloadRate=4000'],
     'failcont_aes25': PROD_OPTIONS + ['DownloadRate=4000'],
     'failcont_aes50': PROD_OPTIONS + ['DownloadRate=4000'],
@@ -14891,7 +15034,7 @@ def _promote_fallback(options, mode):
 FALLBACK_MODE_BOUND = {'livegate', 'streamrestartcredit', 'wholefilerestart', 'wholefilestale'}
 # scenarios that read nserv's request log (nserv.log)
 CAPTURE_REQUESTS = {'repost', 'wholefileproofcost', 'dropnzbdir', 'fleetstaysqueued', 'fleetprimaryfirst'} | {
-    'failcont_twin25', 'failcont_twin50', 'failcont_twin90', 'failcont_alt25', 'failcont_alt50', 'failcont_alt90', 'failcont_aes25', 'failcont_aes50', 'failcont_aes90', 'failcont_compressed', 'failcont_othervideo', 'failcont_twinlabel', 'failcont_fleettwin', 'failcont_fleetalt', 'failcont_fleetaes'}
+    'failcont_twin25', 'failcont_twin50', 'failcont_twin90', 'failcont_alt25', 'failcont_alt50', 'failcont_altlive', 'failcont_alt90', 'failcont_aes25', 'failcont_aes50', 'failcont_aes90', 'failcont_compressed', 'failcont_othervideo', 'failcont_twinlabel', 'failcont_fleettwin', 'failcont_fleetalt', 'failcont_fleetaes'}
 # extra nserv arguments per scenario (-w: response latency in ms)
 SCENARIO_NSERV_ARGS = {'fleetslowprobe': ['-x', '2000'], 'fleetprobespeed': ['-w', '300'], 'fleetprobebusy': ['-w', '300'], 'fleetprobehealthfail': ['-w', '800'], 'finaldeletemidway': ['-w', '300'], 'finaldeleterestart': ['-w', '300'], 'restartmidway': ['-w', '300'], 'xpacklatency': ['-w', '1000'], 'deadpickprobe': ['-w', '500'], 'deadpickafterreload': ['-w', '500'],
                        'deadpickpartial': ['-w', '100'], 'deadpickstray': ['-w', '500'], 'forcefailover': ['-w', '500'], 'copybackup': ['-w', '500'], 'copyoffailed': ['-w', '500'], 'deaddownloadstray2': ['-w', '300'], 'deaddownloadrestart': ['-w', '300'], 'deadbackupsonly': ['-w', '500'], 'backuporder': ['-w', '500'], 'deaddownloadlate': ['-w', '300'], 'deadpickservers': ['-w', '200'],

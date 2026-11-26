@@ -699,7 +699,12 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
             for fi in 0..flen {
                 let fp = qh.nzb_file_at(nzb_ptr, fi);
                 let f = qh.file_snap(fp);
-                if f.cached_articles > 0 && (f.active_downloads == 0 || flush_everything) {
+                // A file a live extraction waits on is written out at once (see `livewrite`).
+                if f.cached_articles > 0
+                    && (f.active_downloads == 0
+                        || flush_everything
+                        || crate::livewrite::wanted(nzb.id, f.id))
+                {
                     let Ok(write_context) = crate::parlive::source_write_context(
                         nzb.id,
                         f.id,
@@ -728,14 +733,14 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
                         && f.decoded_file_size > 0
                         && crate::parchecker::streaming_session_wants_recovery_bytes(nzb.id))
                     .then(|| (nzb.id, f.id, f.decoded_file_size as u64));
-                    return Some((fp, info_name, write_context, live, recovery));
+                    return Some((fp, info_name, write_context, live, recovery, (nzb.id, f.id)));
                 }
             }
         }
         None
     });
 
-    let Some((file_ptr, info_name, write_context, live, recovery)) = selected else {
+    let Some((file_ptr, info_name, write_context, live, recovery, (nzb_id, file_id))) = selected else {
         CACHE_FILE_INFO.store(0, Ordering::SeqCst);
         cache_unlock_flush();
         crate::log::log_active_bytes(MK_DEBUG, b"Checking cache... nothing to flush");
@@ -778,6 +783,10 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
         })
         .collect();
 
+    let mut shapes = flush_shapes(&items);
+    // Items counted without being written (live PAR certified their target): not reported to
+    // live extraction as written; the finished file is read for them.
+    let dropped = std::cell::RefCell::new(Vec::new());
     let hand_off = (live.is_some() || recovery.is_some()) && !skip_disk_write;
     let (flushed_articles, flushed_size) = flush_cache_then_hand_off(
         &items,
@@ -791,7 +800,10 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
                 &write_context,
                 || qh.file_cache_is_deleted_unparked(file_ptr),
                 discard,
-                not_written,
+                |index| {
+                    dropped.borrow_mut().push(index);
+                    not_written(index);
+                },
                 |msg| {
                     if nzb_ptr.is_some() {
                         qh.nzb_print_message(nzb_ptr, MK_ERROR, msg);
@@ -825,6 +837,17 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
             }
         },
     );
+    if direct_write && !skip_disk_write {
+        // In their places in the volume: live extraction may read them now (see `livewrite`).
+        for &index in dropped.borrow().iter() {
+            if let Some(shape) = shapes.get_mut(index) {
+                shape.2 = false;
+            }
+        }
+        for (offset, len) in flushed_ranges(&shapes, flushed_articles, flushed_size) {
+            crate::livewrite::written(nzb_id, file_id, offset, len);
+        }
+    }
     let skip_after = qh.file_cache_flush_finish(file_ptr, flushed_articles)
         || crate::options::active_options().is_some_and(|o| o.scalars().skip_write != 0);
     cache_unlock_flush();
@@ -838,6 +861,36 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
     };
     crate::log::log_active_bytes(MK_DETAIL, &join_c_slices(&[prefix.as_bytes(), &info_name]));
     true
+}
+
+/// Each flush item's (offset, size, whether its bytes are all there), taken before the flush
+/// frees the items' contents.
+fn flush_shapes(items: &[ArticleWriterFlushItem<'_>]) -> Vec<(i64, i32, bool)> {
+    items
+        .iter()
+        .map(|item| {
+            let whole = item.segment_content.len() as i64 == i64::from(item.segment_size);
+            (item.segment_offset, item.segment_size, whole)
+        })
+        .collect()
+}
+
+/// The (offset, length) of the flushed items (`shapes`, see `flush_shapes`) written whole, up
+/// to the first failed write.
+fn flushed_ranges(shapes: &[(i64, i32, bool)], flushed_articles: i32, flushed_size: i64) -> Vec<(u64, u64)> {
+    let written = usize::try_from(flushed_articles).unwrap_or(0).min(shapes.len());
+    if written == 0 {
+        return Vec::new();
+    }
+    let all: i64 = shapes[..written].iter().map(|s| i64::from(s.1)).sum();
+    let good = if all == flushed_size { written } else { written - 1 };
+    shapes[..good]
+        .iter()
+        .filter(|s| s.2)
+        .filter_map(|&(offset, size, _)| {
+            Some((u64::try_from(offset).ok()?, u64::try_from(size).ok().filter(|&n| n > 0)?))
+        })
+        .collect()
 }
 
 /// The flushed items live PAR receives: those written, up to the first failed write, whose
@@ -928,7 +981,7 @@ fn daemon_article_cache_run() {
         if is_stopped && allocated == 0 {
             break;
         }
-        let (should_flush, flush_everything, need_emergency_flush) = article_cache_should_flush(
+        let (mut should_flush, flush_everything, need_emergency_flush) = article_cache_should_flush(
             allocated,
             effective_limit,
             tier,
@@ -937,6 +990,9 @@ fn daemon_article_cache_run() {
             is_stopped,
             direct_write,
         );
+        // A live extraction waits for articles held here: write them out now, not at the next
+        // periodic flush (see `livewrite`).
+        should_flush |= direct_write && allocated > 0 && crate::livewrite::any_wanted();
         if should_flush {
             just_flushed = daemon_article_cache_check_flush(allocated, flush_everything);
             trim_pending |= just_flushed;
@@ -1479,6 +1535,9 @@ struct RsArticleWriter {
     proc_skip_disk_write: bool,
     proc_outfile: Option<BufferedDiskFile>,
     proc_crc: u32,
+    /// Direct write: the (offset, length) of every finished article of the file being
+    /// completed, all in place once its output is flushed (reported to `livewrite`).
+    proc_written: Vec<(u64, u64)>,
     post_crc: u32,
     post_final_path: Vec<u8>,
     post_orig_filename: Vec<u8>,
@@ -1541,6 +1600,7 @@ impl Default for RsArticleWriter {
             proc_skip_disk_write: false,
             proc_outfile: None,
             proc_crc: 0,
+            proc_written: Vec::new(),
             post_crc: 0,
             post_final_path: Vec::new(),
             post_orig_filename: Vec::new(),
@@ -1769,6 +1829,7 @@ impl RsArticleWriter {
 
             if direct_write_opt && !is_dupe_fallback {
                 let out_fn_ref = &self.output_filename;
+                let created = std::cell::Cell::new(false);
                 let ok = host.with_output_guard(true, || {
                     let mut cints = [0i32; 4];
                     let mut cstrs = [std::ptr::null::<c_char>(); 3];
@@ -1798,6 +1859,7 @@ impl RsArticleWriter {
                                 }
                                 return false;
                             }
+                            created.set(true);
                         }
                         host.op45(
                             6,
@@ -1814,6 +1876,25 @@ impl RsArticleWriter {
                 });
                 if !ok {
                     return false;
+                }
+                // Live extraction reads this volume's articles as they are written (see
+                // `livewrite`): the output exists at its decoded length from here on.
+                if !skip_disk_write && !fsnap.par_file {
+                    if let Ok(size) = u64::try_from(file_size) {
+                        let final_path = article_writer_format_dest_file_path(
+                            &dest_dir,
+                            crate::paths::PATH_SEPARATOR,
+                            cstr::until_nul(&fsnap.filename),
+                        );
+                        crate::livewrite::register(
+                            nzb.id,
+                            fsnap.id,
+                            &final_path,
+                            cstr::until_nul(&self.output_filename),
+                            size,
+                            created.get(),
+                        );
+                    }
                 }
             }
         }
@@ -1984,7 +2065,9 @@ impl RsArticleWriter {
     }
 
     fn finish(&mut self, host: &DlHost<'_>, success: bool) {
-        self.out_file = None;
+        // Flushed here (not on drop) so a failed last write is known: such an article is never
+        // reported to live extraction as written.
+        let flushed = self.out_file.take().is_none_or(|mut f| f.flush_buf());
 
         // Snapshots copy strings out of the queue; hold its lock so a concurrent
         // edit (for example a new dupe key) cannot free them mid-copy.
@@ -2049,6 +2132,14 @@ impl RsArticleWriter {
             // Written whole (the file is closed above): the capture takes these bytes.
             if let Ok(offset) = u64::try_from(self.article_offset) {
                 tee.stash((Some(fsnap.id), &fsnap.filename, &fsnap.hash16k), offset);
+            }
+        }
+        if direct_write && !has_cached && !skip_disk_write && flushed {
+            // In its place in the volume: live extraction may read it now (see `livewrite`).
+            if let (Ok(offset), Ok(len)) =
+                (u64::try_from(self.article_offset), u64::try_from(self.article_ptr.min(self.article_size)))
+            {
+                crate::livewrite::written(nzb.id, fsnap.id, offset, len);
             }
         }
 
@@ -2445,6 +2536,14 @@ impl RsArticleWriter {
         if commit_err {
             self.commit_error = true;
         }
+        self.proc_written = if self.proc_direct_write && !self.proc_skip_disk_write && !commit_err {
+            finished
+                .iter()
+                .filter_map(|m| Some((u64::try_from(m.offset).ok()?, u64::try_from(m.size).ok()?)))
+                .collect()
+        } else {
+            Vec::new()
+        };
         if failed_delta > 0 {
             host.op45(
                 9,
@@ -2873,6 +2972,18 @@ impl RsArticleWriter {
                 );
                 return (false, false);
             }
+            let written = std::mem::take(&mut self.proc_written);
+            if direct_write && !written.is_empty() {
+                // Every finished article is in place now, the ones held in the cache included:
+                // live extraction reads them before the rename (see `livewrite`).
+                let (nzb_id, file_id) = host.qh.with_locked_queue(|_| {
+                    let file = host.qh.file_snap(host.file_ptr);
+                    (host.qh.nzb_snap(file.nzb_ptr, false).id, file.id)
+                });
+                for (offset, len) in written {
+                    crate::livewrite::written(nzb_id, file_id, offset, len);
+                }
+            }
             if !direct_write {
                 let moved = self
                     .write_context
@@ -2962,6 +3073,7 @@ pub(crate) fn move_completed_files_on_qh(
     }
     if cstr::until_nul(old_dest_dir) != cstr::until_nul(&nzb.dest_dir) {
         crate::parlive::forget_download_writes(nzb.id);
+        crate::livewrite::forget(nzb.id);
         crate::postproc::direct_unpack_join_live_par_repair(nzb.id);
         crate::parchecker::streaming_session_forget(nzb.id);
     }
@@ -4302,6 +4414,31 @@ impl NzbgetRsArticleDownloader {
 mod tests {
     use super::*;
     use std::os::unix::ffi::OsStrExt;
+
+    #[test]
+    fn only_whole_flushed_articles_are_reported_to_live_extraction() {
+        let a = vec![1u8; 100];
+        let short = vec![2u8; 40];
+        let item = |offset: i64, size: i32, content: &'static [u8]| ArticleWriterFlushItem {
+            segment_offset: offset,
+            segment_size: size,
+            segment_content: content,
+            result_filename: None,
+        };
+        let a: &'static [u8] = Box::leak(a.into_boxed_slice());
+        let short: &'static [u8] = Box::leak(short.into_boxed_slice());
+        let items = vec![item(0, 100, a), item(100, 100, short), item(200, 100, a), item(300, 100, a)];
+        // All four flushed, the second without its bytes: it is not reported.
+        assert_eq!(
+            super::flushed_ranges(&super::flush_shapes(&items), 4, 340),
+            vec![(0, 100), (200, 100)],
+            "a flush short of the sizes drops the last item counted"
+        );
+        assert_eq!(super::flushed_ranges(&super::flush_shapes(&items), 4, 400), vec![(0, 100), (200, 100), (300, 100)]);
+        // A write that failed at the third item: the first two counted, nothing after.
+        assert_eq!(super::flushed_ranges(&super::flush_shapes(&items), 3, 250), vec![(0, 100)]);
+        assert_eq!(super::flushed_ranges(&super::flush_shapes(&items), 0, 0), Vec::<(u64, u64)>::new());
+    }
 
     #[test]
     fn a_par2_file_flush_is_never_handed_to_live_par() {

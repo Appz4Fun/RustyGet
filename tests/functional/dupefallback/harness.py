@@ -14948,6 +14948,147 @@ def scenario_fleetendkeephistory0(daemon, t):
     return ('fleetendkeephistory0', ok, 'alive=%s queued=%d counts=%s total=%d' % (
         alive, len(_queued(api, key)) if alive else -1, counts, total))
 
+
+def _thread_cpu_seconds(pid, name):
+    """CPU seconds (user + system) the daemon's thread called ``name`` used so far, from
+    /proc (Linux); None where there is no /proc or no such thread."""
+    task_dir = '/proc/%d/task' % pid
+    if not os.path.isdir(task_dir):
+        return None
+    tick = os.sysconf('SC_CLK_TCK')
+    for tid in os.listdir(task_dir):
+        try:
+            with open(os.path.join(task_dir, tid, 'comm')) as f:
+                if f.read().strip() != name:
+                    continue
+            with open(os.path.join(task_dir, tid, 'stat')) as f:
+                fields = f.read().rsplit(')', 1)[1].split()
+            # fields after the name: state is [0], utime [11], stime [12]
+            return (int(fields[11]) + int(fields[12])) / tick
+        except (OSError, IndexError, ValueError):
+            continue
+    return None
+
+
+BIGQ_FLEETS, BIGQ_COPIES, BIGQ_FILES = 150, 7, 12
+
+
+def _bigq_nzb(tag):
+    """An nzb-file of BIGQ_FILES one-article files the news server does not have (never
+    fetched: the copy is paused or held)."""
+    files = ''.join(
+        '<file poster="p@x" date="1" subject="[%d/%d] &quot;%s.part%02d.rar&quot; yEnc (1/1)">'
+        '<groups><group>alt.binaries.test</group></groups><segments>'
+        '<segment bytes="400000" number="1">%s-%d@x</segment></segments></file>'
+        % (i + 1, BIGQ_FILES, tag, i + 1, tag, i) for i in range(BIGQ_FILES))
+    return ('<?xml version="1.0" encoding="UTF-8"?>\n<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">%s</nzb>'
+            % files)
+
+
+def scenario_fleetbigqueue(daemon, t):
+    """A queue of 1050 items in 150 fleets of 7 copies (each fleet's primary paused, its 6
+    other copies held, about 900 held copies), as the 6790 resubmit left it: the queue
+    coordinator's per-second fleet refresh read the whole queue once per fleet and once more
+    per primary, held the queue lock nearly all the time and spun at 100% CPU, so a finished
+    job waited in PP_QUEUED and the API took minutes to answer. Now: building the queue goes
+    quickly, the queue-coord thread stays under 20% of a core over 15 s with the primaries
+    paused and under 40% (a debug build) while the 150 primaries download (Linux, from
+    /proc), listgroups answers within 5 s, and an ordinary rar download added afterwards is unpacked
+    and in history as SUCCESS within 90 s."""
+    api = daemon.wait_ready()
+    start = time.time()
+    deadline = start + 300
+    for fleet in range(BIGQ_FLEETS):
+        key = 'dupes:bigq movie %03d' % fleet
+        for copy in range(BIGQ_COPIES):
+            if time.time() > deadline:
+                return ('fleetbigqueue', False, 'building the queue took over 300 s (at fleet %d copy %d)' % (fleet, copy))
+            name = 'BigQ.Movie.%03d.2160p.REMUX-G%d' % (fleet, copy)
+            _ds_append(api, name, _bigq_nzb('bq%03d-%d' % (fleet, copy)), key, 100 - copy, paused=(copy == 0))
+    built = time.time() - start
+    groups = api.listgroups()
+    held = sum(1 for g in groups if _params(g).get('DupeHeld') == 'yes')
+    pid = daemon.process.pid
+
+    def queue_coord_cpu(secs):
+        cpu0, t0 = _thread_cpu_seconds(pid, 'queue-coord'), time.time()
+        time.sleep(secs)
+        cpu1, t1 = _thread_cpu_seconds(pid, 'queue-coord'), time.time()
+        return None if cpu0 is None or cpu1 is None else (cpu1 - cpu0) / (t1 - t0)
+
+    def listgroups_secs():
+        lg_start = time.time()
+        api.listgroups()
+        return time.time() - lg_start
+
+    time.sleep(3)  # a few refreshes on the full queue
+    cpu = queue_coord_cpu(15)
+    lg = listgroups_secs()
+    # an ordinary download behind them goes through post-processing (unpack) at once
+    members = _rarrenamer_members(t, 'bqP', ['testfile3'])
+    added = time.time()
+    daemon.append(api, 'BigQPlain', build_multi_nzb([m[:5] for m in members]), False, 'bigq-plain', 100)
+    try:
+        h = daemon.wait_history(api, 'BigQPlain', timeout=90)
+        plain, plain_s = h['Status'], time.time() - added
+    except RuntimeError:
+        plain, plain_s = 'not in history', time.time() - added
+    # Last, the 150 primaries download: the news server holds their articles, so the
+    # connections stay busy and the coordinator looks for the next article every few
+    # milliseconds, as on 6790. (Last because the held articles keep the connections and the
+    # server blocked long after a pause.)
+    primaries = [g['NZBID'] for g in groups if g['NZBName'].endswith('-G0')]
+    api.editqueue('GroupResume', 0, '', primaries)
+    time.sleep(5)
+    downloading = sum(1 for g in api.listgroups() if g.get('ActiveDownloads', 0) > 0)
+    cpu_dl = queue_coord_cpu(15)
+    lg_dl = listgroups_secs()
+    files = _main_basenames(t)
+    pct = lambda c: 'n/a' if c is None else '%.1f%%' % (c * 100)
+    ok = (len(groups) == BIGQ_FLEETS * BIGQ_COPIES and held >= BIGQ_FLEETS * (BIGQ_COPIES - 1) and
+          len(primaries) == BIGQ_FLEETS and (cpu is None or cpu < 0.20) and downloading > 0 and (cpu_dl is None or cpu_dl < 0.40) and
+          lg < 5 and lg_dl < 5 and plain.startswith('SUCCESS') and 'testfile3.dat' in files)
+    return ('fleetbigqueue', ok, 'groups=%d held=%d built=%.1fs queue-coord cpu idle=%s downloading=%s (%d primaries fetching) listgroups=%.2fs/%.2fs plain=%s after %.1fs' % (
+        len(groups), held, built, pct(cpu), pct(cpu_dl), downloading, lg, lg_dl, plain, plain_s))
+
+
+def scenario_dupausedunpack(daemon, t):
+    """A direct unpack waiting for a volume of a download paused whole holds no other job's
+    unpack back. RelA's direct unpack starts on its first volumes, then RelA is paused while
+    its last volume is still on the way (the news server holds it); RelB, a whole rar set
+    added after, needs the unpack slot: RelA's direct unpack is stopped (RelA is unpacked
+    after its download instead) and RelB goes to history as SUCCESS. Before, RelB sat in
+    PP_QUEUED for as long as RelA stayed paused (6790: a finished job waited 36 minutes
+    behind a paused download's direct unpack)."""
+    api = daemon.wait_ready()
+    members_a = _rarrenamer_members(t, 'dpuA', ['testfile3'])
+    daemon.append(api, 'RelA', build_multi_nzb([m[:5] for m in members_a]), False, 'dpu-a', 100)
+    deadline = time.time() + 60
+    while time.time() < deadline and _grep_log(t, 'Directly unpacking RelA') == 0:
+        time.sleep(0.2)
+    started = _grep_log(t, 'Directly unpacking RelA') > 0
+    rel_a = next((g for g in api.listgroups() if g['NZBName'] == 'RelA'), None)
+    if rel_a is None:
+        return ('dupausedunpack', False, 'RelA left the queue before it could be paused (du_started=%s)' % started)
+    api.editqueue('GroupPause', 0, '', [rel_a['NZBID']])
+    members_b = _rarrenamer_members(t, 'dpuB', ['testfile5'])
+    daemon.append(api, 'RelB', build_multi_nzb([m[:5] for m in members_b]), False, 'dpu-b', 100)
+    # (RelA's last volume is held 200 s and ArticleTimeout is 120 s: its direct unpack waits
+    # all through this, so RelB has to go past it, not after it)
+    try:
+        h = daemon.wait_history(api, 'RelB', timeout=45)
+        status, unpack = h['Status'], h['UnpackStatus']
+    except RuntimeError:
+        g = next((g for g in api.listgroups() if g['NZBName'] == 'RelB'), {})
+        status, unpack = 'still queued: %s' % g.get('Status'), '-'
+    a_now = next((g['Status'] for g in api.listgroups() if g['NZBName'] == 'RelA'), 'gone')
+    stopped = _grep_log(t, 'Stopping the direct unpack of RelA')
+    files = _main_basenames(t)
+    ok = started and stopped == 1 and status.startswith('SUCCESS') and unpack == 'SUCCESS' and 'testfile5.dat' in files
+    return ('dupausedunpack', ok, 'du_started=%s stopped=%d relB=%s unpack=%s relA=%s files=%s' % (
+        started, stopped, status, unpack, a_now, files))
+
+
 SCENARIOS = {
     'dropnzbdir': scenario_dropnzbdir,
     'fleetprimaryease': scenario_fleetprimaryease,
@@ -15180,6 +15321,8 @@ SCENARIOS = {
     'garbageconfig': scenario_garbageconfig,
     'directunpacktwoarchives': scenario_directunpacktwoarchives,
     'directunpackparfailure': scenario_directunpackparfailure,
+    'fleetbigqueue': scenario_fleetbigqueue,
+    'dupausedunpack': scenario_dupausedunpack,
     'parfailurenodirectunpack': scenario_parfailurenodirectunpack,
     'parfailuredirectunpackfailed': scenario_parfailuredirectunpackfailed,
     'jointwosets': scenario_jointwosets,
@@ -15703,6 +15846,8 @@ SCENARIO_OPTIONS = {
     'livestraggler': WRITER_FED_OPTIONS + ['DownloadRate=3000', 'Server1.Connections=8'],
     'directunpacktwoarchives': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1'],
     'directunpackparfailure': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1'],
+    'fleetbigqueue': ['Unpack=yes', 'DirectUnpack=no', 'ParCheck=auto', 'KeepHistory=1', 'ArticleTimeout=20'],
+    'dupausedunpack': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1', 'ArticleTimeout=120'],
     'parfailurenodirectunpack': ['Unpack=yes', 'DirectUnpack=no', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1'],
     'parfailuredirectunpackfailed': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1'],
     'directunpackkeep': ['Unpack=yes', 'DirectUnpack=yes', 'UseTempUnpackDir=no', UNRAR_CMD, 'UnpackCleanupDisk=yes', 'ParCheck=auto'],
@@ -15927,7 +16072,7 @@ SCENARIO_REWRITE_PROXY = {'notfound451': (b'430 ', b'451 '),
                           'pathtraversalarticle': (b'name=aaaaaaaa.bin', b'name=../../ab.bin'), 'rejectnextserver': (b'=ypart begin=', b'=ypart begxn=')}
 
 # scenarios with a DelayingNntpProxy in front of Server1: [(message-id marker, delay in s)]
-SCENARIO_DELAY_PROXY = {'livestraggler': LIVE_STRAGGLERS, 'lightburst': [(b'lbLoad', 0.25)], 'clientthreads': [(b'ctA/', 3.0)], 'xdecomp_slow': [(b'xdzB/', 0.7)], 'damagedfilestate': [(b'?6=500000:', 20.0, True)], 'articledecoyparrestart': [(b'?9=4000000:', 15.0, True), (b'?10=4500000:', 15.0, True)], 'directrenamesubdir': [(b'drA/obf', 0.4)], 'directrenamesubdirjoin': [(b'drA/obf', 0.4)], 'slowprobe': [(b'STAT ', 5.0), (b'spA/', 0.2)],
+SCENARIO_DELAY_PROXY = {'fleetbigqueue': [(b'-0-', 600.0)], 'dupausedunpack': [(b'dpuA/testfile3.part03', 200.0)], 'livestraggler': LIVE_STRAGGLERS, 'lightburst': [(b'lbLoad', 0.25)], 'clientthreads': [(b'ctA/', 3.0)], 'xdecomp_slow': [(b'xdzB/', 0.7)], 'damagedfilestate': [(b'?6=500000:', 20.0, True)], 'articledecoyparrestart': [(b'?9=4000000:', 15.0, True), (b'?10=4500000:', 15.0, True)], 'directrenamesubdir': [(b'drA/obf', 0.4)], 'directrenamesubdirjoin': [(b'drA/obf', 0.4)], 'slowprobe': [(b'STAT ', 5.0), (b'spA/', 0.2)],
                         'directunpackkeep': [(b'rel.part03', 2.0)],
                         'directunpackkeepnointer': [(b'rel.part03', 2.0)],
                         'truncatedstate': [(b'tsA/', 0.5)],

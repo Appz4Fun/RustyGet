@@ -2128,6 +2128,23 @@ impl QueueSubsysHost {
         crate::qnzb::nzb_snapshot(nzb_ptr, text_status)
     }
 
+    /// Priority, extra priority and paused file count, as `nzb_snap` has them, without the
+    /// rest of the snapshot. On a mock host they are zero, as there.
+    pub fn nzb_pick_fields(&self, nzb_ptr: NzbRef) -> (i32, bool, i32) {
+        if nzb_ptr.is_none() || !self.use_active {
+            return (0, false, 0);
+        }
+        crate::qnzb::nzb_pick_fields(nzb_ptr).unwrap_or((0, false, 0))
+    }
+
+    /// The duplicate key, as `nzb_snap` has it, without the rest of the snapshot.
+    pub fn nzb_dupe_key(&self, nzb_ptr: NzbRef) -> Vec<u8> {
+        if nzb_ptr.is_none() || !self.use_active {
+            return Vec::new();
+        }
+        crate::qnzb::nzb_dupe_key(nzb_ptr)
+    }
+
     pub fn nzb_get_param(&self, nzb_ptr: NzbRef, name: &[u8]) -> Option<Vec<u8>> {
         if !self.use_active {
             return None;
@@ -2773,6 +2790,19 @@ impl QueueSubsysHost {
             return file_snap_from(file_ptr, &ints, &i64s, articles_len, texts);
         }
         file_snap_from(file_ptr, &ints, &i64s, 0, Default::default())
+    }
+
+    /// A file's partial-state-changed flag alone (one field read, not a whole snapshot).
+    pub fn file_partial_changed(&self, file_ptr: FileRef) -> bool {
+        if file_ptr.is_none() || !self.use_active {
+            return false;
+        }
+        unsafe {
+            crate::qfile::nzbget_rs_file_get(
+                file_ptr.addr() as *const crate::qfile::File,
+                crate::qfile::field::PARTIAL_CHANGED,
+            ) != 0
+        }
     }
 
     pub fn file_groups(&self, file_ptr: FileRef) -> Vec<Vec<u8>> {

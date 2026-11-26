@@ -3128,6 +3128,19 @@ impl NzbgetRsQueueCoordinator {
         // Downloads extracted live, by id: their volumes' extraction order and the lowest
         // unfinished volume (see `liveorder`), looked up once per call.
         let mut orders: Vec<(i32, Option<LiveOrder>)> = Vec::new();
+        // The queue, read once per call, and only as far as the pick needs: each pass of the
+        // loop below that finds a file with nothing left to fetch (all its articles in flight)
+        // goes round again, and the coordinator calls this every few milliseconds whether or
+        // not a connection is free. Re-reading a thousand-item queue whole per pass kept it
+        // busy most of the time (6790); most items (paused, held, lower priority) need only
+        // their priority and paused file count. Choosing an article changes nothing read here;
+        // the chosen collection is read afresh before it is used.
+        let queue: Vec<PickEntry> = (0..host.queue_len(dq_ptr))
+            .map(|i| PickEntry::read(host, host.queue_at(dq_ptr, i)))
+            .collect();
+        // The queue's copies by duplicate key, indexed once per call when first needed (see
+        // `has_active_dupe`).
+        let mut copies_by_key: Option<CopiesByKey> = None;
 
         loop {
             let mut best_file: Option<(
@@ -3140,30 +3153,29 @@ impl NzbgetRsQueueCoordinator {
                 crate::queuesubsys_host::FileSnap,
             )> = None;
 
-            let qlen = host.queue_len(dq_ptr);
-            for i in 0..qlen {
-                let nzb_ptr = host.queue_at(dq_ptr, i);
-                let nzb = host.nzb_snap(nzb_ptr, false);
-                let flen = host.nzb_file_len(nzb_ptr);
+            for entry in &queue {
+                let (nzb_ptr, flen) = (entry.ptr, entry.file_len);
 
                 let nzb_higher = match &best_file {
                     None => true,
                     Some((best_nzb, _, _)) => {
-                        if nzb.has_extra_priority == best_nzb.has_extra_priority {
-                            nzb.priority > best_nzb.priority
+                        if entry.has_extra_priority == best_nzb.has_extra_priority {
+                            entry.priority > best_nzb.priority
                         } else {
-                            nzb.has_extra_priority && !best_nzb.has_extra_priority
+                            entry.has_extra_priority && !best_nzb.has_extra_priority
                         }
                     }
                 };
 
-                let nzb_paused = (flen as i32) == nzb.paused_file_count;
+                let nzb_paused = (flen as i32) == entry.paused_file_count;
 
                 if nzb_higher
                     && !nzb_paused
-                    && !self.has_active_dupe(host, dq_ptr, &nzb)
-                    && ((!opts.pause_download && !opts.quota_reached) || nzb.force_priority)
+                    && !self.has_active_dupe(host, &queue, entry.snap(host), &mut copies_by_key)
+                    && ((!opts.pause_download && !opts.quota_reached)
+                        || entry.snap(host).force_priority)
                 {
+                    let nzb = entry.snap(host);
                     let propagation_delay = opts.propagation_delay;
                     let order = cached_live_order(&mut orders, host, nzb_ptr, nzb.id);
                     // A par2 file with articles to fetch seen earlier in the list: the window
@@ -3244,6 +3256,8 @@ impl NzbgetRsQueueCoordinator {
                 }
                 break;
             };
+            // The snapshot was taken at the start of the call (see `queue`).
+            nzb = host.nzb_snap(nzb.ptr, false);
 
             if opts.direct_rename
                 && nzb.direct_rename_status <= DirectRenameStatus::Running
@@ -5657,11 +5671,17 @@ impl NzbgetRsQueueCoordinator {
         false
     }
 
+    /// Whether another queued copy of `nzb`'s duplicate key downloads or is processed, so this
+    /// one waits. `queue` is the caller's snapshot of the queue and `copies` its entries grouped
+    /// by key, built on first need and kept for the rest of the caller's pass: read per
+    /// candidate, a queue of a thousand items with a hundred fleets' primaries cost a hundred
+    /// whole-queue reads every few milliseconds (6790).
     fn has_active_dupe(
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
-        dq_ptr: usize,
+        queue: &[PickEntry],
         nzb: &crate::queuesubsys_host::NzbSnap,
+        copies: &mut Option<CopiesByKey>,
     ) -> bool {
         if nzb.dupe_key.is_empty() {
             return false;
@@ -5673,14 +5693,27 @@ impl NzbgetRsQueueCoordinator {
             return false;
         }
         let self_completed_empty = host.nzb_completed_files(nzb.ptr).is_empty();
-        let qlen = host.queue_len(dq_ptr);
-        for i in 0..qlen {
-            let qp = host.queue_at(dq_ptr, i);
-            if qp.is_none() || qp == nzb.ptr {
+        let copies = copies.get_or_insert_with(|| {
+            let mut by_key = CopiesByKey::new();
+            for (i, entry) in queue.iter().enumerate() {
+                if entry.ptr.is_none() {
+                    continue;
+                }
+                let key = host.nzb_dupe_key(entry.ptr);
+                if !key.is_empty() {
+                    by_key.entry(key.to_ascii_lowercase()).or_default().push(i);
+                }
+            }
+            by_key
+        });
+        let Some(same_key) = copies.get(&nzb.dupe_key.to_ascii_lowercase()) else {
+            return false;
+        };
+        for queued in same_key.iter().map(|&i| queue[i].snap(host)) {
+            if queued.ptr == nzb.ptr {
                 continue;
             }
-            let queued = host.nzb_snap(qp, false);
-            if !queued.dupe_key.is_empty() && queued.dupe_key.eq_ignore_ascii_case(&nzb.dupe_key) {
+            {
                 if repair_lets_other_copies_download(
                     queued.has_post_info,
                     queued.post_stage,
@@ -7497,6 +7530,12 @@ fn discard_temp_files_host(
 
 #[cfg(unix)]
 fn save_partial_state_host(host: &crate::queuesubsys_host::QueueSubsysHost, file_ptr: FileRef) {
+    // Run every second over every file in the queue: check the flag before taking a whole
+    // snapshot (a thousand-item queue's file snapshots were a tenth of the coordinator's
+    // time on 6790).
+    if !host.file_partial_changed(file_ptr) {
+        return;
+    }
     let file = host.file_snap(file_ptr);
     if file.partial_changed {
         let mut dbg = b"Saving partial state for ".to_vec();
@@ -7679,6 +7718,42 @@ fn downloaded_ranges(
     merged.shrink_to_fit();
     merged
 }
+
+/// A queue item as `get_next_article` reads it: the fields its pick reads first, and the
+/// whole snapshot, taken only when the item gets that far.
+struct PickEntry {
+    ptr: NzbRef,
+    priority: i32,
+    has_extra_priority: bool,
+    paused_file_count: i32,
+    file_len: usize,
+    snap: std::cell::OnceCell<crate::queuesubsys_host::NzbSnap>,
+}
+
+impl PickEntry {
+    fn read(host: &crate::queuesubsys_host::QueueSubsysHost, ptr: NzbRef) -> Self {
+        let (priority, has_extra_priority, paused_file_count) = host.nzb_pick_fields(ptr);
+        PickEntry {
+            ptr,
+            priority,
+            has_extra_priority,
+            paused_file_count,
+            file_len: host.nzb_file_len(ptr),
+            snap: std::cell::OnceCell::new(),
+        }
+    }
+
+    fn snap(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+    ) -> &crate::queuesubsys_host::NzbSnap {
+        self.snap.get_or_init(|| host.nzb_snap(self.ptr, false))
+    }
+}
+
+/// Positions in the caller's queue snapshot grouped by lowercased duplicate key (see
+/// `has_active_dupe`).
+type CopiesByKey = std::collections::HashMap<Vec<u8>, Vec<usize>>;
 
 #[cfg(test)]
 mod tests {

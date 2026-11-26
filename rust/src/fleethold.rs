@@ -370,22 +370,27 @@ mod host {
 
     /// The queued copies of a fleet key (not being deleted).
     pub(crate) fn queued_members(host: &QueueSubsysHost, dq_ptr: usize, key: &[u8]) -> Vec<NzbSnap> {
-        let mut out = Vec::new();
-        for i in 0..host.queue_len(dq_ptr) {
-            let qp = host.queue_at(dq_ptr, i);
-            if qp.is_none() {
-                continue;
-            }
-            let q = host.nzb_snap(qp, false);
-            if q.kind == crate::queuesubsys_host::NK_NZB
-                && !q.deleting
-                && q.delete_status == DeleteStatus::None
-                && q.dupe_key.eq_ignore_ascii_case(key)
-            {
-                out.push(q);
-            }
-        }
-        out
+        queue_snaps(host, dq_ptr)
+            .into_iter()
+            .filter(|q| is_member(q, key))
+            .collect()
+    }
+
+    /// Every queued item's snapshot, in queue order.
+    fn queue_snaps(host: &QueueSubsysHost, dq_ptr: usize) -> Vec<NzbSnap> {
+        (0..host.queue_len(dq_ptr))
+            .map(|i| host.queue_at(dq_ptr, i))
+            .filter(|qp| qp.is_some())
+            .map(|qp| host.nzb_snap(qp, false))
+            .collect()
+    }
+
+    /// Whether a queued item is a copy of the fleet `key` (not being deleted).
+    fn is_member(q: &NzbSnap, key: &[u8]) -> bool {
+        q.kind == crate::queuesubsys_host::NK_NZB
+            && !q.deleting
+            && q.delete_status == DeleteStatus::None
+            && q.dupe_key.eq_ignore_ascii_case(key)
     }
 
     pub(crate) fn facts_of(host: &QueueSubsysHost, q: &NzbSnap) -> MemberFacts {
@@ -418,8 +423,13 @@ mod host {
         key: &[u8],
         exclude: NzbRef,
     ) -> Vec<(NzbSnap, MemberFacts)> {
-        let held: Vec<NzbSnap> = queued_members(host, dq_ptr, key)
-            .into_iter()
+        held_in_order_of(host, &queued_members(host, dq_ptr, key), exclude)
+    }
+
+    /// [`held_in_order`] among `members`, the fleet's queued copies.
+    fn held_in_order_of(host: &QueueSubsysHost, members: &[NzbSnap], exclude: NzbRef) -> Vec<(NzbSnap, MemberFacts)> {
+        let held: Vec<&NzbSnap> = members
+            .iter()
             .filter(|q| q.ptr != exclude && is_held(host, q.ptr))
             .collect();
         let facts: Vec<MemberFacts> = held.iter().map(|q| facts_of(host, q)).collect();
@@ -504,36 +514,113 @@ mod host {
         host.nzb_set_int(ptr, crate::queuesubsys_host::NZB_INT_CHANGED, 1);
     }
 
+    /// A queued item as a fleet's primary competes with it for the download
+    /// ([`boost_primary_with`]).
+    struct Rival {
+        ptr: NzbRef,
+        key: Vec<u8>,
+        priority: i32,
+        competes: bool,
+    }
+
+    /// The queued items the primaries compete with, read once for a pass over
+    /// every fleet ([`refresh_all_host`]) rather than once per primary.
+    struct Rivals(Vec<Rival>);
+
+    /// Whether a queued item competes for the download with the primary of a
+    /// fleet other than its own: not a held copy, not another fleet's primary
+    /// (two fleets would raise each other in turn), not an item paused whole.
+    fn competes(host: &QueueSubsysHost, o: &NzbSnap) -> bool {
+        o.kind == crate::queuesubsys_host::NK_NZB
+            && !o.deleting
+            && o.delete_status == DeleteStatus::None
+            && !is_held(host, o.ptr)
+            && host.nzb_get_param(o.ptr, BOOST_PARAM).is_none()
+            // another fleet's primary by its role, raised or not: two
+            // fleets keep their own order and never leapfrog
+            && !(holds_in_queue(host, o) && host.nzb_get_param(o.ptr, ORDER_PARAM).as_deref() == Some(b"0"))
+            && host.nzb_file_len(o.ptr) as i32 != o.paused_file_count
+    }
+
+    impl Rivals {
+        fn of(host: &QueueSubsysHost, snaps: &[NzbSnap]) -> Self {
+            Rivals(
+                snaps
+                    .iter()
+                    .map(|o| Rival {
+                        ptr: o.ptr,
+                        key: o.dupe_key.clone(),
+                        priority: o.priority,
+                        competes: competes(host, o),
+                    })
+                    .collect(),
+            )
+        }
+
+        fn scan(host: &QueueSubsysHost, dq_ptr: usize) -> Self {
+            Self::of(host, &queue_snaps(host, dq_ptr))
+        }
+
+        /// The priorities the primary `ptr` of fleet `key` competes with.
+        fn others(&self, key: &[u8], ptr: NzbRef) -> Vec<i32> {
+            self.0
+                .iter()
+                .filter(|r| r.competes && r.ptr != ptr && !r.key.eq_ignore_ascii_case(key))
+                .map(|r| r.priority)
+                .collect()
+        }
+
+        /// Reads `ptrs` again after their fleet's refresh changed them (a
+        /// raise, a release, a new place).
+        fn update(&mut self, host: &QueueSubsysHost, ptrs: &[NzbRef]) {
+            for r in self.0.iter_mut().filter(|r| ptrs.contains(&r.ptr)) {
+                let o = host.nzb_snap(r.ptr, false);
+                r.priority = o.priority;
+                r.competes = competes(host, &o);
+            }
+        }
+
+        /// Drops `ptrs` after their fleet ended: its copies left the queue
+        /// and may be freed already, so they are never read again.
+        fn forget(&mut self, ptrs: &[NzbRef]) {
+            for r in self.0.iter_mut().filter(|r| ptrs.contains(&r.ptr)) {
+                r.competes = false;
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod rival_tests {
+        use super::*;
+
+        fn rival(addr: usize, key: &[u8], priority: i32, competes: bool) -> Rival {
+            Rival { ptr: NzbRef::from_addr(addr), key: key.to_vec(), priority, competes }
+        }
+
+        #[test]
+        fn a_primary_competes_with_other_fleets_and_plain_items_only() {
+            let mut rivals = Rivals(vec![
+                rival(1, b"dupes:a", 50, true),  // the primary itself
+                rival(2, b"DUPES:A", 70, true),  // its own fleet, any case
+                rival(3, b"dupes:b", 20, true),  // another fleet's item
+                rival(4, b"", 10, true),         // a plain item
+                rival(5, b"dupes:c", 99, false), // held, raised or paused whole
+            ]);
+            assert_eq!(rivals.others(b"dupes:a", NzbRef::from_addr(1)), vec![20, 10]);
+            // an ended fleet's copies never count (nor are they read) again
+            rivals.forget(&[NzbRef::from_addr(3)]);
+            assert_eq!(rivals.others(b"dupes:a", NzbRef::from_addr(1)), vec![10]);
+            assert_eq!(rivals.others(b"dupes:b", NzbRef::from_addr(3)), vec![50, 70, 10]);
+        }
+    }
+
     /// F2c: raises a downloading copy of `key` (its primary) above every other
     /// queued item ([`primary_priority`]), so it downloads at once whatever
-    /// the priorities of the rest of the queue. Returns whether it changed.
-    pub(crate) fn boost_primary_host(host: &QueueSubsysHost, dq_ptr: usize, key: &[u8], ptr: NzbRef) -> bool {
+    /// the priorities of the rest of the queue. `rivals` are the queued items it
+    /// competes with. Returns whether it changed.
+    fn boost_primary_with(host: &QueueSubsysHost, rivals: &Rivals, key: &[u8], ptr: NzbRef) -> bool {
         let q = host.nzb_snap(ptr, false);
-        let mut others = Vec::new();
-        for i in 0..host.queue_len(dq_ptr) {
-            let qp = host.queue_at(dq_ptr, i);
-            if qp.is_none() || qp == ptr {
-                continue;
-            }
-            let o = host.nzb_snap(qp, false);
-            // only what competes for the download: not this fleet, not a
-            // held copy, not another fleet's primary (two fleets would raise
-            // each other in turn), not an item paused whole
-            if o.kind != crate::queuesubsys_host::NK_NZB
-                || o.deleting
-                || o.delete_status != DeleteStatus::None
-                || o.dupe_key.eq_ignore_ascii_case(key)
-                || is_held(host, qp)
-                || host.nzb_get_param(qp, BOOST_PARAM).is_some()
-                // another fleet's primary by its role, raised or not: two
-                // fleets keep their own order and never leapfrog
-                || (holds_in_queue(host, &o) && host.nzb_get_param(qp, ORDER_PARAM).as_deref() == Some(b"0"))
-                || host.nzb_file_len(qp) as i32 == o.paused_file_count
-            {
-                continue;
-            }
-            others.push(o.priority);
-        }
+        let others = rivals.others(key, ptr);
         let boost = int_param(host, ptr, BOOST_PARAM);
         let Some(want) = primary_priority(q.priority, boost, &others) else {
             return false;
@@ -829,19 +916,40 @@ mod host {
     /// copy waits, it is released (a primary deleted by hand, a restart in the
     /// middle of a probe). Returns whether anything changed.
     pub(crate) fn refresh_key_host(host: &QueueSubsysHost, dq_ptr: usize, key: &[u8]) -> bool {
+        let members = queued_members(host, dq_ptr, key);
+        refresh_members(host, dq_ptr, key, &members, &mut None) != Refresh::Unchanged
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Refresh {
+        Unchanged,
+        Changed,
+        /// The fleet ended: its held copies went to history.
+        Ended,
+    }
+
+    /// [`refresh_key_host`] with the fleet's queued copies read already;
+    /// `rivals` is read when first needed if None.
+    fn refresh_members(
+        host: &QueueSubsysHost,
+        dq_ptr: usize,
+        key: &[u8],
+        members: &[NzbSnap],
+        rivals: &mut Option<Rivals>,
+    ) -> Refresh {
         // nested inside an end or refresh of the same key: nothing to do
         let Some(_busy) = BusyKey::enter(key) else {
-            return false;
+            return Refresh::Unchanged;
         };
-        let members = queued_members(host, dq_ptr, key);
         if members.is_empty() {
-            return false;
+            return Refresh::Unchanged;
         }
+        let changed_if = |c: bool| if c { Refresh::Changed } else { Refresh::Unchanged };
         let probing_now = probing(key);
         let mut changed = false;
         // a copy left probing by a probe that no longer runs (a restart)
         if !probing_now {
-            for q in &members {
+            for q in members {
                 if is_probing(host, q.ptr) {
                     host.nzb_set_param(q.ptr, PROBING_PARAM, None);
                     changed = true;
@@ -850,7 +958,7 @@ mod host {
         }
         let mut active: Vec<&NzbSnap> = members.iter().filter(|q| !is_held(host, q.ptr)).collect();
         active.sort_by_key(|q| std::cmp::Reverse(q.dupe_score));
-        let mut ordered = held_in_order(host, dq_ptr, key, NzbRef::NONE);
+        let mut ordered = held_in_order_of(host, members, NzbRef::NONE);
         if active.is_empty() && !probing_now {
             // never a locked copy: failover refuses it
             let first = ordered
@@ -861,7 +969,7 @@ mod host {
             if first.is_none() && fleet_ended(0, probing_now, &flags) {
                 end_fleet_locked(host, dq_ptr, key, NzbRef::NONE);
                 host.dq_save_changed(dq_ptr);
-                return true;
+                return Refresh::Ended;
             }
             if let Some(pos) = first {
                 let (q, _) = ordered.remove(pos);
@@ -870,11 +978,11 @@ mod host {
                 let id = q.id;
                 let snap = members.iter().find(|m| m.id == id).cloned();
                 if let Some(snap) = snap {
-                    return finish_refresh(host, dq_ptr, &[&snap], &ordered) || changed;
+                    return changed_if(finish_refresh(host, dq_ptr, &[&snap], &ordered, rivals) || changed);
                 }
             }
         }
-        finish_refresh(host, dq_ptr, &active, &ordered) || changed
+        changed_if(finish_refresh(host, dq_ptr, &active, &ordered, rivals) || changed)
     }
 
     fn finish_refresh(
@@ -882,6 +990,7 @@ mod host {
         dq_ptr: usize,
         active: &[&NzbSnap],
         ordered: &[(NzbSnap, MemberFacts)],
+        rivals: &mut Option<Rivals>,
     ) -> bool {
         let primary = active.first().map_or(0, |q| q.id).to_string();
         let mut changed = false;
@@ -889,7 +998,8 @@ mod host {
             // F2c: the fleet's download goes before every other queued item,
             // also after a failover (each refresh looks again)
             if !q.has_post_info {
-                changed |= boost_primary_host(host, dq_ptr, &q.dupe_key, q.ptr);
+                let rivals = rivals.get_or_insert_with(|| Rivals::scan(host, dq_ptr));
+                changed |= boost_primary_with(host, rivals, &q.dupe_key, q.ptr);
             } else if host.nzb_get_param(q.ptr, BOOST_PARAM).is_some() {
                 // downloaded: post-processing (and History after it) sees its
                 // own priority, whatever way it ends
@@ -915,26 +1025,53 @@ mod host {
     /// [`refresh_key_host`] for every fleet key in the queue (the queue
     /// coordinator calls it every few seconds, so labels set later, such as
     /// TwinCheck's, move a copy to its place).
+    ///
+    /// The queue is read once per pass: each fleet's copies come from that
+    /// read, and the primaries' raise compares with one list of rivals, read
+    /// again only for the copies a fleet's refresh changed. Read per fleet
+    /// (and once more per primary), a queue of 1042 items in 148 fleets held
+    /// the queue lock nearly all the time: the queue coordinator spun at 100%
+    /// CPU and post-processing and the API waited minutes for the lock (6790,
+    /// 2026-11-26).
     pub(crate) fn refresh_all_host(host: &QueueSubsysHost, dq_ptr: usize) {
         if !host.opts().dupe_check {
             return;
         }
+        let snaps = queue_snaps(host, dq_ptr);
+        // each fleet key once, in queue order, with its copies
         let mut keys: Vec<Vec<u8>> = Vec::new();
-        for i in 0..host.queue_len(dq_ptr) {
-            let qp = host.queue_at(dq_ptr, i);
-            if qp.is_none() {
-                continue;
-            }
-            let q = host.nzb_snap(qp, false);
-            if holds_in_queue(host, &q) {
+        let mut copies: std::collections::HashMap<Vec<u8>, Vec<NzbSnap>> = std::collections::HashMap::new();
+        for q in &snaps {
+            if holds_in_queue(host, q) {
                 let key = q.dupe_key.to_ascii_lowercase();
-                if !keys.contains(&key) {
+                if !copies.contains_key(&key) {
+                    copies.insert(key.clone(), Vec::new());
                     keys.push(key);
                 }
             }
         }
+        for q in &snaps {
+            if let Some(members) = copies.get_mut(&q.dupe_key.to_ascii_lowercase()) {
+                if is_member(q, &q.dupe_key) {
+                    members.push(q.clone());
+                }
+            }
+        }
+        let mut rivals = Some(Rivals::of(host, &snaps));
+        drop(snaps);
         for key in keys {
-            refresh_key_host(host, dq_ptr, &key);
+            let members = copies.remove(&key).unwrap_or_default();
+            let outcome = refresh_members(host, dq_ptr, &key, &members, &mut rivals);
+            if outcome != Refresh::Unchanged {
+                let ptrs: Vec<NzbRef> = members.iter().map(|q| q.ptr).collect();
+                if let Some(r) = rivals.as_mut() {
+                    if outcome == Refresh::Ended {
+                        r.forget(&ptrs);
+                    } else {
+                        r.update(host, &ptrs);
+                    }
+                }
+            }
         }
     }
 }

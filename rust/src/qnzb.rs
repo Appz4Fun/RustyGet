@@ -2418,10 +2418,9 @@ fn files_of(p: *const NzbScalars) -> Vec<*const crate::qfile::File> {
     if fl == 0 {
         return Vec::new();
     }
-    (0..ptr_list_op(fl, 0, 0, 0, std::ptr::null(), 0))
-        .map(|i| {
-            ptr_list_op(fl, 1, i, 0, std::ptr::null(), 0) as usize as *const crate::qfile::File
-        })
+    crate::qlist::items(fl as *const crate::qlist::PtrList)
+        .into_iter()
+        .map(|f| f as *const crate::qfile::File)
         .collect()
 }
 
@@ -2604,22 +2603,27 @@ fn calc_critical_health(s: &NzbScalars, allow_estimation: bool) -> i32 {
     )
 }
 
-/// NzbInfo::IsDownloadCompleted over the file list.
-fn is_download_completed(p: *const NzbScalars, ignore_paused_pars: bool) -> bool {
+/// NzbInfo::IsDownloadCompleted over the file list, ignoring paused par files and strictly,
+/// from one read of the list. (Strict implies the other, so it is only checked then.)
+fn download_completed(p: *const NzbScalars) -> (bool, bool) {
     use crate::qfile::field;
     let active = unsafe { (*p).activeDownloads };
     if active != 0 {
-        return false;
+        return (false, false);
     }
     let files = files_of(p);
-    crate::downloadinfo::is_download_completed_with(active, ignore_paused_pars, files.len(), |i| {
-        let f = files[i];
-        (
-            file_get(f, field::PAUSED) != 0,
-            file_get(f, field::PAR_FILE) != 0,
-            file_get(f, field::DELETED) != 0,
-        )
-    })
+    let check = |ignore_paused_pars| {
+        crate::downloadinfo::is_download_completed_with(active, ignore_paused_pars, files.len(), |i| {
+            let f = files[i];
+            (
+                file_get(f, field::PAUSED) != 0,
+                file_get(f, field::PAR_FILE) != 0,
+                file_get(f, field::DELETED) != 0,
+            )
+        })
+    };
+    let lax = check(true);
+    (lax, lax && check(false))
 }
 
 /// Health check option value `hcDupe`.
@@ -2636,6 +2640,22 @@ pub(crate) enum TextStatus {
     IgnoreScript,
     /// Including the scripts' total status.
     WithScript,
+}
+
+/// The fields the next-article pick reads first (priority, extra priority, paused file
+/// count), without a whole snapshot. `None` for a collection that is gone.
+pub(crate) fn nzb_pick_fields(nzb: NzbRef) -> Option<(i32, bool, i32)> {
+    nzb_data(nzb)?;
+    let s = unsafe { &*scalars(nzb).cast_const() };
+    Some((s.priority, s.extraPriority > 0, s.pausedFileCount))
+}
+
+/// A collection's duplicate key alone (empty when unset or gone).
+pub(crate) fn nzb_dupe_key(nzb: NzbRef) -> Vec<u8> {
+    if nzb_data(nzb).is_none() {
+        return Vec::new();
+    }
+    text_bytes(scalars(nzb).cast_const(), 7)
 }
 
 /// A copy of a collection's fields and the values computed from them.
@@ -2663,6 +2683,7 @@ pub(crate) fn nzb_snapshot(
     let health = calc_health(s);
     let critical_est = calc_critical_health(s, true);
     let critical_exact = calc_critical_health(s, false);
+    let completed = download_completed(p);
     let health_check_dupe = crate::options::active_options()
         .is_some_and(|o| o.scalars().health_check == HEALTH_CHECK_DUPE);
     let is_dupe_success = crate::downloadinfo::is_dupe_success(
@@ -2755,8 +2776,8 @@ pub(crate) fn nzb_snapshot(
         health,
         critical_health_opt: critical_est,
         critical_health_exact: critical_exact,
-        is_download_completed: is_download_completed(p, true),
-        is_download_completed_strict: is_download_completed(p, false),
+        is_download_completed: completed.0,
+        is_download_completed_strict: completed.1,
         skip_disk_write: s.skipDiskWrite,
         waiting_par: s.waitingPar,
         loading_par: s.loadingPar,

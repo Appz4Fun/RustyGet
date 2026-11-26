@@ -500,7 +500,8 @@ fn recovery_tee_voids_on_overlap_and_returns_its_charge() {
     assert!(entry.recovery_tees.lock().unwrap().get(&91).is_none());
 }
 
-/// All recovery tees together stay within half the snapshot limit.
+/// All recovery tees together stay within half the snapshot limit. A tee that would pass it
+/// first lends free ParBuffer to raise the limit (a volume not teed is read back whole).
 #[test]
 fn recovery_tees_together_stay_within_half_the_snapshot_limit() {
     let f = fixture(0x7a75_000c, 6, 4, 3);
@@ -509,10 +510,19 @@ fn recovery_tees_together_stay_within_half_the_snapshot_limit() {
     let size = limit / 3;
     let piece = vec![1u8; 16];
     streaming_session_recovery_bytes_written(f.nzb_id, 1, size, &[(0, &piece)]);
+    // No loan left: the half rule holds.
+    let lent = entry.lent_memory.swap(u64::MAX / 4, Ordering::AcqRel);
     streaming_session_recovery_bytes_written(f.nzb_id, 2, size, &[(0, &piece)]);
-    let tees = entry.recovery_tees.lock().unwrap();
-    assert!(!tees[&1].void, "the first fits");
-    assert!(tees[&2].void, "the second would pass half the limit");
-    drop(tees);
+    {
+        let tees = entry.recovery_tees.lock().unwrap();
+        assert!(!tees[&1].void, "the first fits");
+        assert!(tees[&2].void, "the second would pass half the limit");
+    }
     assert_eq!(entry.articles.lock().unwrap().bytes, size);
+    // With free ParBuffer to lend, the limit grows to take the third.
+    entry.lent_memory.store(lent, Ordering::Release);
+    streaming_session_recovery_bytes_written(f.nzb_id, 3, size, &[(0, &piece)]);
+    assert!(!entry.recovery_tees.lock().unwrap()[&3].void, "a loan makes room");
+    assert!(entry.article_byte_limit.load(Ordering::Acquire) >= 4 * size);
+    assert_eq!(entry.articles.lock().unwrap().bytes, 2 * size);
 }

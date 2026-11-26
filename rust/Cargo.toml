@@ -20,7 +20,7 @@ bench = false
 doctest = false
 
 [dependencies]
-par-rs = { git = "https://github.com/Appz4Fun/par-rs", rev = "cd1703f58dfb29f40da02957310739eb37d87b0f" }
+par-rs = { git = "https://github.com/Appz4Fun/par-rs", rev = "6d0f005fffbd5d3e762706d56426cd40e586ce0f" }
 zipfast = { git = "https://github.com/Appz4Fun/zipfast", rev = "e011073da7a6775281169cb31899749564526d5a", features = ["persistent-partials"] }
 vidmatch = { git = "https://github.com/Appz4Fun/vidmatch", rev = "636facc1223d2a87e5ca7a43bc1d2e169c39deb6" }
 zipview = { git = "https://github.com/xbmc4lyfe/zipview", rev = "2c3d73a06b29987cea1510e903e437a482076745" }

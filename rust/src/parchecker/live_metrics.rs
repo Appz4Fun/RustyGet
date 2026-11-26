@@ -18,6 +18,12 @@ pub(super) struct LiveMetricCounters {
     pub awaited_commits: AtomicU64,
     /// Cache misses taken from bytes kept aside when the article was written (no read-back).
     pub stashed_articles: AtomicU64,
+    /// Articles written before their capture whose bytes could not be kept (no room even
+    /// after a loan of free ParBuffer): par-rs reads them back from their file.
+    pub stash_refusals: AtomicU64,
+    /// Cache misses taken from bytes kept when the article was written before the live
+    /// session started (`presession`), not read back.
+    pub presession_articles: AtomicU64,
     /// Articles that waited for the cache write, handed over with the bytes it wrote.
     pub written_handoffs: AtomicU64,
     /// Obfuscated queue files bound to their par2 file by their first article's 16k hash.
@@ -132,7 +138,7 @@ impl ActiveStreamingSession {
         let replay = self.catchup_source_bytes.load(Ordering::Relaxed);
         let mb = |bytes: u64| format!("{:.1}", bytes as f64 / (1024.0 * 1024.0));
         format!(
-            "Live PAR (job {nzb_id}) I/O: source_bytes_read {} MB (par-rs {} MB, RustyGet replay {} MB), backfill_bytes_read {} MB, recovery_bytes_read {} MB, target_verification_bytes_read {} MB, ram_bytes_verified {} MB, ram_backfilled_slices {}, recovery volumes from RAM {} ({} MB), trusted slice checks {}; {} cache miss(es), {} article(s) read from their file by par-rs, {} waited for the cache flush, {} still waiting, {} handed over with the bytes written, {} taken from bytes kept at write, {} file(s) matched by their first article",
+            "Live PAR (job {nzb_id}) I/O: source_bytes_read {} MB (par-rs {} MB, RustyGet replay {} MB), backfill_bytes_read {} MB, recovery_bytes_read {} MB, target_verification_bytes_read {} MB, ram_bytes_verified {} MB, ram_backfilled_slices {}, recovery volumes from RAM {} ({} MB), trusted slice checks {}; {} cache miss(es), {} article(s) read from their file by par-rs, {} waited for the cache flush, {} still waiting, {} handed over with the bytes written, {} taken from bytes kept at write, {} file(s) matched by their first article, {} not kept at write (no room), {} taken from bytes kept before the session",
             mb(io.source_bytes_read.saturating_add(replay)),
             mb(io.source_bytes_read),
             mb(replay),
@@ -151,6 +157,8 @@ impl ActiveStreamingSession {
             self.metrics.written_handoffs.load(Ordering::Relaxed),
             self.metrics.stashed_articles.load(Ordering::Relaxed),
             self.metrics.bound_by_first_article.load(Ordering::Relaxed),
+            self.metrics.stash_refusals.load(Ordering::Relaxed),
+            self.metrics.presession_articles.load(Ordering::Relaxed),
         )
     }
 }

@@ -611,10 +611,10 @@ fn build_planned_streaming_session(
     let slots = (loaded.len() + plan.exponents.len()).max(1) as u64;
     let wanted = slots.saturating_mul(slice_size).max(slice_size);
     let syndrome_ram = if wanted > options.max_syndrome_bytes {
-        // More than the options allowed: the lease grows by two slices per extra slot.
+        // More than the options allowed: the lease grows by one slice per extra slot (its
+        // syndrome; par-rs writes rebuilt slices out one at a time, see `grow_for_damage`).
         let extra = (wanted - options.max_syndrome_bytes) / slice_size;
-        let granted =
-            budget.grow_by_units(slice_size.saturating_mul(2), extra, planned_pool_limit(pool));
+        let granted = budget.grow_by_units(slice_size, extra, planned_pool_limit(pool));
         options
             .max_syndrome_bytes
             .saturating_add(granted.saturating_mul(slice_size))

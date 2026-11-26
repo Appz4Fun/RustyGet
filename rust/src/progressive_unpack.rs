@@ -63,6 +63,12 @@ pub enum VolumeView {
 /// The download side of a session: which volumes exist and which bytes in them are lost.
 pub trait VolumeFeed: Send + 'static {
     fn volume(&mut self, path: &Path) -> VolumeView;
+    /// A count that changes when something of this feed's set may have been written (a live
+    /// extraction waiting for data looks again, and a direct unpack takes its unpack slot back,
+    /// only then). By default every live write of any download.
+    fn writes(&self) -> u64 {
+        crate::livewrite::write_count()
+    }
     /// Blocks (polling `is_cancelled`) until every damaged volume this feed handed out has been
     /// repaired in place. Returns false when the repair was given up or cancelled.
     fn wait_repaired(&mut self, _is_cancelled: &mut dyn FnMut() -> bool) -> bool {

@@ -4080,6 +4080,7 @@ impl NzbgetRsArticleDownloader {
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
             );
+            let missing_epoch = crate::articlefetcher::missing_epoch();
             let attempts = crate::nntprs_pool::AttemptLog::default();
             let fetch_opts = nntp_rs::FetchOptions {
                 cancel: Some(self.cancel.clone()),
@@ -4125,7 +4126,7 @@ impl NzbgetRsArticleDownloader {
                         && crate::nntprs_pool::shared().is_some_and(|now| std::ptr::eq(&*now, &*shared))
                         && crate::nntprs_pool::missing_everywhere(shared, &recs)
                     {
-                        crate::articlefetcher::note_missing_everywhere(&w.message_id);
+                        crate::articlefetcher::note_missing_everywhere_since(&w.message_id, missing_epoch);
                     }
                     return AD_FAILED;
                 }

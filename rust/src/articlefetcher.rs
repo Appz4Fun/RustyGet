@@ -1134,6 +1134,7 @@ impl ArticleFetcher {
         } else {
             Vec::new()
         };
+        let epoch = missing_epoch();
         let attempts = crate::nntprs_pool::AttemptLog::default();
         let opts = nntp_rs::FetchOptions {
             skip_servers,
@@ -1207,7 +1208,7 @@ impl ArticleFetcher {
                     && crate::nntprs_pool::shared().is_some_and(|now| std::ptr::eq(&*now, shared))
                     && crate::nntprs_pool::missing_everywhere(shared, &recs)
                 {
-                    note_missing_everywhere(message_id);
+                    note_missing_everywhere_since(message_id, epoch);
                 }
             }
             Err(nntp_rs::Error::Unavailable) if crate::nntprs_pool::missing_on_usable(shared, &recs) => {

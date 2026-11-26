@@ -4489,7 +4489,8 @@ def scenario_failcont_aescontainer(daemon, t):
     daemon.wait_history(api, 'Backup', timeout=60)
     started = time.time()
     api.editqueue('GroupResume', 0, '', [g['NZBID'] for g in api.listgroups() if g['NZBName'] == 'Primary'])
-    hp = daemon.wait_history(api, 'Primary', timeout=300)
+    # the late 430s alone take about 200 s of download; a loaded machine needs headroom
+    hp = daemon.wait_history(api, 'Primary', timeout=900)
     hb = daemon.wait_history(api, 'Backup', timeout=300)
     deadline = time.time() + 240
     while (not hp['Status'].startswith('SUCCESS') and not hb['Status'].startswith(('SUCCESS', 'FAILURE'))

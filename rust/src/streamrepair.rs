@@ -3670,6 +3670,26 @@ fn small_hole_wave(holes: &[NzbgetRsByteRange], chunk: i64) -> usize {
     count.max(usize::from(!holes.is_empty()))
 }
 
+/// How many of the download's holes (`before`, per target file) a pass closed
+/// completely: none of what is still missing (`after`) overlaps them. A hole
+/// filled only in part is not counted; the bytes recovered count those.
+pub fn holes_closed(before: &[Vec<NzbgetRsByteRange>], after: &[Vec<NzbgetRsByteRange>]) -> i32 {
+    let mut closed = 0i32;
+    for (t, holes) in before.iter().enumerate() {
+        let left = after.get(t).map_or(&[][..], Vec::as_slice);
+        for h in holes.iter().filter(|h| h.size > 0) {
+            let end = h.offset.saturating_add(h.size);
+            let open = left
+                .iter()
+                .any(|r| r.size > 0 && r.offset < end && h.offset < r.offset.saturating_add(r.size));
+            if !open {
+                closed = closed.saturating_add(1);
+            }
+        }
+    }
+    closed
+}
+
 /// Computes `(first, last)` inclusive prefetch part indices in `DonorMemberSource::Prefetch`.
 pub fn donor_calc_prefetch_bounds(first_est: i32, last_est: i32, ranges_len: usize) -> (i32, i32) {
     let first = (first_est - 1).max(0);
@@ -8705,6 +8725,14 @@ pub trait CrossPackDonorEnv {
     fn set_progress(&mut self, label: &[u8], stage_progress: i32);
     fn set_materializing(&mut self, delta: i32);
     fn add_recovered(&mut self, bytes: i64, holes: i32);
+    /// Bytes a pass just wrote into the download, before its credit
+    /// ([`Self::add_recovered`]) at the end of the donor: the stream-repair
+    /// watchdog counts them as progress, so a long borrow that is writing is
+    /// never stopped for "nothing recovered" (DupeStreamTimeout).
+    fn note_patched(&mut self, _bytes: i64) {}
+    /// A pass that wrote but is not credited: what [`Self::note_patched`] kept
+    /// for its credit is dropped, so it never shrinks a later pass's credit.
+    fn drop_uncredited(&mut self) {}
     fn sync_target_holes(&mut self, _target_holes: &[Vec<NzbgetRsByteRange>]) {}
     fn emit_message_bytes(&mut self, kind: TargetMessageKind, text: &[u8]);
     fn emit_extractor_log(&mut self, kind: i32, msg: &str) {
@@ -8996,6 +9024,9 @@ impl TargetFileSet for DiskTargetFileSetAdapter<'_, '_, '_> {
             .get_file(self.members, member_index)
             .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
         let io_res = guarded_donor_write(file, &context, offset, data);
+        if io_res.is_ok() {
+            self.env.borrow_mut().note_patched(data.len() as i64);
+        }
         if let Err(err) = &io_res {
             let err_msg = write_error_message_bytes(&err);
             let member_name = self
@@ -10509,6 +10540,7 @@ impl CrossPackRepairSession {
                     self.repair_sets[repair_set_idx].holes_by_first_member()
                 };
                 let (mut written, mut credit_recovery) = (0i64, false);
+                let holes_before = self.target_holes.clone();
                 let mut left_over: Vec<NzbgetRsByteRange> = Vec::new();
                 for (g, group) in groups.into_iter().enumerate() {
                     if g > 0 && env_cell.borrow_mut().is_stopped() {
@@ -10553,9 +10585,13 @@ impl CrossPackRepairSession {
                     }
                 }
                 self.repair_sets[repair_set_idx].inner_holes = left_over;
+                if !(credit_recovery && written > 0) {
+                    env_cell.borrow_mut().drop_uncredited();
+                }
                 if credit_recovery && written > 0 {
                     let recovered_parts = donor_sources.take_served_parts();
-                    env_cell.borrow_mut().add_recovered(written, 0);
+                    let filled = holes_closed(&holes_before, &self.target_holes);
+                    env_cell.borrow_mut().add_recovered(written, filled);
                     let mb = stream_repair_bytes_to_mb(written);
                     let inner_name = self.repair_sets[repair_set_idx]
                         .map
@@ -12762,6 +12798,18 @@ pub fn process_m1_donor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The UI showed "978 MB borrowed, 0 holes" for cross-packing passes: a
+    /// hole they close completely counts, one filled in part does not.
+    #[test]
+    fn holes_closed_counts_only_holes_filled_completely() {
+        let r = |offset, size| NzbgetRsByteRange { offset, size };
+        let before = vec![vec![r(0, 10), r(20, 10), r(40, 10)], vec![r(5, 5)]];
+        let after = vec![vec![r(25, 5)], vec![]];
+        assert_eq!(holes_closed(&before, &after), 3, "0..10, 40..50 and the second file's hole");
+        assert_eq!(holes_closed(&before, &before), 0);
+        assert_eq!(holes_closed(&before, &[]), 4);
+    }
 
     #[test]
     fn holes_across_consecutive_dead_volumes_are_handed_over_one_volume_at_a_time() {

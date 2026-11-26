@@ -539,6 +539,12 @@ impl VolumeFeed for RememberedHoles {
     fn repaired(&self, path: &Path) -> bool {
         self.inner.repaired(path)
     }
+    fn growing(&mut self, path: &Path) -> Option<Arc<crate::livewrite::LiveVolume>> {
+        if self.holes.contains_key(path) {
+            return None;
+        }
+        self.inner.growing(path)
+    }
 }
 
 /// Volume provider of a persistent session: every expected volume is declared up front as a
@@ -554,7 +560,36 @@ struct Provider {
     /// `save_pending_repair`).
     pending_repair: PathBuf,
     /// The damaged volumes in that file.
-    saved: std::collections::HashSet<PathBuf>,
+    saved: SavedRepairs,
+}
+
+type SavedRepairs = Arc<Mutex<std::collections::HashSet<PathBuf>>>;
+
+/// Records damaged volume `path`, handed out with `holes`, and saves the damaged volumes still
+/// waiting for their repair when that changed (`changed` says it already did).
+fn record_damaged(
+    damaged: &HandedHoles,
+    saved: &SavedRepairs,
+    pending_repair: &Path,
+    path: &Path,
+    holes: &[(u64, u64)],
+    mut changed: bool,
+) {
+    let mut damaged = damaged.lock().unwrap_or_else(|e| e.into_inner());
+    let mut saved = saved.lock().unwrap_or_else(|e| e.into_inner());
+    if !holes.is_empty() {
+        changed |= damaged.get(path).map(Vec::as_slice) != Some(holes) || !saved.contains(path);
+        damaged.insert(path.to_path_buf(), holes.to_vec());
+        saved.insert(path.to_path_buf());
+    }
+    if changed {
+        let pending: std::collections::HashMap<PathBuf, Vec<(u64, u64)>> = damaged
+            .iter()
+            .filter(|(p, _)| saved.contains(*p))
+            .map(|(p, h)| (p.clone(), h.clone()))
+            .collect();
+        save_pending_repair(pending_repair, &pending);
+    }
 }
 
 impl VolumeSource for Provider {
@@ -568,27 +603,19 @@ impl VolumeSource for Provider {
             let mut feed = self.feed.lock().unwrap_or_else(|e| e.into_inner());
             // Damaged volumes repaired and released since: a restart must not hold them again.
             // Saved below whatever the answer is (a volume not here yet included).
-            let before = self.saved.len();
-            self.saved.retain(|p| feed.still_held(p));
-            let mut changed = self.saved.len() != before;
+            let changed = {
+                let mut saved = self.saved.lock().unwrap_or_else(|e| e.into_inner());
+                let before = saved.len();
+                saved.retain(|p| feed.still_held(p));
+                saved.len() != before
+            };
             let view = feed.volume(&path);
             drop(feed);
-            let mut damaged = self.damaged.lock().unwrap_or_else(|e| e.into_inner());
-            if let VolumeView::Ready { holes } = &view {
-                if !holes.is_empty() {
-                    changed |= damaged.get(&path) != Some(holes) || !self.saved.contains(&path);
-                    damaged.insert(path.clone(), holes.clone());
-                    self.saved.insert(path.clone());
-                }
-            }
-            if changed {
-                let pending: std::collections::HashMap<PathBuf, Vec<(u64, u64)>> = damaged
-                    .iter()
-                    .filter(|(p, _)| self.saved.contains(*p))
-                    .map(|(p, h)| (p.clone(), h.clone()))
-                    .collect();
-                save_pending_repair(&self.pending_repair, &pending);
-            }
+            let holes = match &view {
+                VolumeView::Ready { holes } => holes.as_slice(),
+                _ => &[],
+            };
+            record_damaged(&self.damaged, &self.saved, &self.pending_repair, &path, holes, changed);
             view
         };
         match view {
@@ -601,15 +628,41 @@ impl VolumeSource for Provider {
                 })?;
                 // Declared NonFile: zipfast must not see a backing file.
                 volume.expose_backing = false;
+                volume.count_as = Some(crate::livewrite::ReadKind::Finished);
                 if !legacy() {
                     volume.allow_long_holes(&path);
                 }
                 Ok(VolumeAnswer::Ready(Box::new(volume)))
             }
             VolumeView::NotYet => {
+                // Being written: read its articles as they land.
+                let live = self.feed.lock().unwrap_or_else(|e| e.into_inner()).growing(&path);
+                // Asked again once it starts being written, unless it is and could not be read
+                // that way (then only once it finishes).
+                let asked = live.is_none();
+                if let Some(live) = live {
+                    let (damaged, saved) = (self.damaged.clone(), self.saved.clone());
+                    let pending_repair = self.pending_repair.clone();
+                    let on_finished: super::OnFinished =
+                        Arc::new(move |path: &Path, holes: &[(u64, u64)], _: bool| {
+                            record_damaged(&damaged, &saved, &pending_repair, path, holes, false)
+                        });
+                    // Declared NonFile, as a finished volume is here.
+                    if let Ok(volume) = super::WrittenSource::open(
+                        &path,
+                        live,
+                        self.feed.clone(),
+                        self.pending.clone(),
+                        false,
+                        !legacy(),
+                        on_finished,
+                    ) {
+                        return Ok(VolumeAnswer::Ready(Box::new(volume)));
+                    }
+                }
                 *self.pending.lock().unwrap_or_else(|e| e.into_inner()) =
                     // A stand-in with holes is read here: it ends the wait.
-                    Some((path, cx.waker().clone(), false));
+                    Some((path, cx.waker().clone(), false, asked));
                 Ok(VolumeAnswer::Wait)
             }
             VolumeView::Missing => Ok(VolumeAnswer::Missing),
@@ -935,13 +988,14 @@ impl<'a> Run<'a> {
             declaration: self.plan.inventory(),
             damaged: self.damaged.clone(),
             pending_repair: self.plan.root.join(PENDING_REPAIR),
-            saved: self
-                .damaged
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .keys()
-                .cloned()
-                .collect(),
+            saved: Arc::new(Mutex::new(
+                self.damaged
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .keys()
+                    .cloned()
+                    .collect(),
+            )),
         };
         let first_name = self.plan.names[0].clone();
         let mut opts = ProgressiveOptions::new(

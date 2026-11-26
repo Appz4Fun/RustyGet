@@ -387,6 +387,116 @@ pub fn alt_covers_lost_articles(
         && (extracting || mostly_alive)
 }
 
+/// A primary whose own articles arrive at most this share (permille of those
+/// tried) is weak next to a whole copy of the same video.
+pub const WEAK_PRIMARY_PERMILLE: i32 = 900;
+/// A held copy at least this alive (permille sampled) may replace a weak primary.
+pub const SWITCH_BACKUP_ALIVE_PERMILLE: i32 = 975;
+/// A weak primary that has downloaded less than this share (permille) of its
+/// data fails over to a whole alt instead of borrowing every lost article.
+pub const WEAK_SWITCH_MAX_DONE_PERMILLE: i32 = 500;
+
+/// What a fleet primary measured weak does about a held alt of the same video
+/// ([`weak_primary_switch`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WeakSwitch {
+    /// keep it as it is (borrowing what it lacks)
+    Stay,
+    /// fail over to the alt now, while little of the primary came (a frontier
+    /// handover into a live alt is an OPEN ITEM)
+    FailOver,
+}
+
+/// The facts [`weak_primary_switch`] decides on.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WeakSwitchFacts {
+    /// the backup is a copy held in the primary's own fleet
+    pub held_in_fleet: bool,
+    /// articles of the primary tried so far, and its projected share (permille)
+    pub tried: i32,
+    pub projected: i32,
+    /// the backup's sampled alive share (permille)
+    pub backup_alive: i32,
+    /// the backup is proven to hold the same video (equal inner keys)
+    pub same_video: bool,
+    /// the backup is labelled a twin: its articles already stand in one for one
+    /// (article fallback, cutover), so it is never failed over to from here
+    pub backup_twin: bool,
+    /// the primary is held already (failed over a moment ago; its last
+    /// articles in flight still report)
+    pub primary_held: bool,
+    /// the backup is locked (no password for its encrypted headers)
+    pub backup_locked: bool,
+    /// the share of the primary's data downloaded (permille)
+    pub done: i32,
+    /// direct unpack already finished and verified the extraction
+    pub extraction_verified: bool,
+}
+
+/// Dune on 6790: a 77% primary downloaded for hours, borrowing hole by hole
+/// (2.6 times the bytes it recovered), while a held alt of the same video was
+/// 100% alive. Asked where the dead-download check reached a doomed or dead
+/// primary: once its own articles prove it weak (enough tried, at most
+/// [`WEAK_PRIMARY_PERMILLE`] arrived) next to an alt held in its fleet whose
+/// video is proven the same (equal inner keys) and at least
+/// [`SWITCH_BACKUP_ALIVE_PERMILLE`] alive (and clearly ahead), the alt takes
+/// over while less than [`WEAK_SWITCH_MAX_DONE_PERMILLE`] of the primary came.
+/// A twin backup is left to the article fallback, which takes its articles one
+/// for one already.
+pub fn weak_primary_switch(f: &WeakSwitchFacts) -> WeakSwitch {
+    let weak = f.held_in_fleet
+        && !f.primary_held
+        && f.same_video
+        && !f.backup_twin
+        && !f.backup_locked
+        && !f.extraction_verified
+        && f.tried >= PROJECTED_FAILURE_SAMPLE
+        && f.projected >= 0
+        && f.projected <= WEAK_PRIMARY_PERMILLE
+        && f.backup_alive >= SWITCH_BACKUP_ALIVE_PERMILLE
+        && f.backup_alive >= f.projected + 50
+        && f.done < WEAK_SWITCH_MAX_DONE_PERMILLE;
+    if weak {
+        WeakSwitch::FailOver
+    } else {
+        WeakSwitch::Stay
+    }
+}
+
+/// Whether `backup` is proven to hold the video of `nzb`: equal inner keys
+/// (size and CRC32/BLAKE2sp from the archive headers,
+/// [`crate::twinfields::same_inner_key`]) on both copies. Nothing else: a
+/// label recorded against another copy proves nothing about this one.
+#[cfg(unix)]
+fn backup_same_video(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb: &crate::queuesubsys_host::NzbSnap,
+    backup: &crate::queuesubsys_host::NzbSnap,
+) -> bool {
+    let key = |ptr| host.nzb_get_param(ptr, crate::twinfields::INNER_KEY_PARAM);
+    match (key(nzb.ptr), key(backup.ptr)) {
+        (Some(a), Some(b)) => {
+            crate::twinfields::same_inner_key(&a, &b, crate::twinfields::MIN_KEY_SIZE) == Some(true)
+        }
+        _ => false,
+    }
+}
+
+/// Whether `backup` carries any twin label (TwinCheck's `DupeKind=twin`, or
+/// the fleet's twin kind): its articles already stand in one for one, so the
+/// weak-primary switch leaves it to the article fallback.
+#[cfg(unix)]
+fn backup_is_twin(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    backup: &crate::queuesubsys_host::NzbSnap,
+) -> bool {
+    host.nzb_get_param(backup.ptr, b"DupeKind")
+        .is_some_and(|k| k.trim_ascii().starts_with(b"twin"))
+        || crate::donorkind::DonorKind::from_param(
+            host.nzb_get_param(backup.ptr, crate::donorkind::KIND_PARAM).as_deref(),
+        ) == crate::donorkind::DonorKind::Twin
+}
+
 /// Why `backup` cannot carry on the running (or kept) extraction of `nzb`, which failing
 /// over to it throws away (failover-continue: wherever it can, the backup lends the rest
 /// instead, see [`alt_covers_lost_articles`]). Asked only while an extraction runs.
@@ -1599,6 +1709,19 @@ fn join_path(dir: &[u8], name: &[u8]) -> Vec<u8> {
     out.push(crate::paths::PATH_SEPARATOR);
     out.extend_from_slice(name);
     out
+}
+
+/// The share of a download's data (par2 left out) that came, success or
+/// failure, in permille of its total size.
+#[cfg(unix)]
+fn data_done_permille(nzb: &crate::queuesubsys_host::NzbSnap) -> i32 {
+    let done = (nzb.current_success_size + nzb.current_failed_size)
+        - (nzb.par_current_success_size + nzb.par_current_failed_size);
+    let total = nzb.size - nzb.par_size;
+    if total <= 0 {
+        return 0;
+    }
+    ((i128::from(done.max(0)) * 1000) / i128::from(total)).clamp(0, 1000) as i32
 }
 
 #[cfg(unix)]
@@ -5223,6 +5346,65 @@ impl NzbgetRsQueueCoordinator {
             host.nzb_get_param(nzb.ptr, crate::donorkind::KIND_PARAM)
                 .as_deref(),
         );
+        let facts = WeakSwitchFacts {
+            held_in_fleet: crate::fleethold::holds_in_queue(host, &nzb)
+                && crate::fleethold::is_held(host, backup_nzb.ptr)
+                && backup_nzb.dupe_key.eq_ignore_ascii_case(&nzb.dupe_key),
+            tried: eval.tried,
+            projected: eval.projected,
+            backup_alive: backup_alive_permille(host, backup_nzb.ptr),
+            same_video: backup_same_video(host, &nzb, &backup_nzb),
+            backup_twin: backup_is_twin(host, &backup_nzb),
+            primary_held: crate::fleethold::is_held(host, nzb.ptr),
+            backup_locked: crate::dupecoord::locked_host(host, backup_nzb.ptr),
+            done: data_done_permille(&nzb),
+            extraction_verified: direct_unpack_verified(nzb.direct_unpack_status),
+        };
+        match weak_primary_switch(&facts) {
+            WeakSwitch::Stay => {}
+            WeakSwitch::FailOver => {
+                // the fleet's failover order picked this alt (no dupe score
+                // check: held copies of a fleet are ranked by it already)
+                note_cannot_continue(host, opts, &nzb, &backup_nzb);
+                let mut msg = b"Failing over ".to_vec();
+                msg.extend_from_slice(&nzb.name);
+                msg.extend_from_slice(b" to alt ");
+                msg.extend_from_slice(&backup_nzb.name);
+                msg.extend_from_slice(
+                    format!(
+                        ": weak, {} of {} tried article(s) of its own arrived (projected {:.1}%), {:.1}% of it downloaded; the alt holds the same video (equal inner keys) and is {:.0}% alive, so it downloads instead of borrowing every lost article",
+                        eval.own,
+                        eval.tried,
+                        (eval.projected as f64) / 10.0,
+                        (facts.done as f64) / 10.0,
+                        (facts.backup_alive as f64) / 10.0
+                    )
+                    .as_bytes(),
+                );
+                host.nzb_print_message(
+                    nzb.ptr,
+                    crate::queuesubsys_host::MK_WARNING,
+                    &crate::releasename::log_name(&msg),
+                );
+                // its direct unpack would wait for its next volume for ever and
+                // keep the alt from downloading (a copy of the key that extracts
+                // counts as active), and its live repair would go on borrowing
+                // for a copy that no longer downloads
+                if nzb.has_unpack_thread {
+                    host.direct_unpack_stop(dq_ptr, nzb.ptr);
+                }
+                if nzb.has_live_repair_thread {
+                    host.live_repair_stop(nzb.ptr);
+                }
+                // writer-fed live extraction (#721): the held copy writes no volume any more
+                // and its stopped extraction reads none; left registered, a volume its reader
+                // wanted would keep the article cache writing early for every download
+                // (`livewrite::any_wanted`) until this copy finished, which it never does
+                crate::livewrite::forget(nzb.id);
+                crate::fleethold::park_on_health_host(host, dq_ptr, &nzb);
+                return;
+            }
+        }
         if alt_covers_lost_articles(
             dead_rate,
             live_borrowing(opts),
@@ -6621,6 +6803,36 @@ fn downloaded_ranges(
 
 #[cfg(test)]
 mod tests {
+
+    /// Dune on 6790 (item 2): a 77% primary next to a held 100% alt of the
+    /// same video switches while little of it came.
+    #[test]
+    fn a_weak_primary_switches_to_a_whole_copy_of_the_same_video() {
+        use super::{weak_primary_switch, WeakSwitch, WeakSwitchFacts};
+        let dune = WeakSwitchFacts {
+            held_in_fleet: true,
+            tried: 73477,
+            projected: 776,
+            backup_alive: 1000,
+            same_video: true,
+            backup_twin: false,
+            primary_held: false,
+            backup_locked: false,
+            done: 300,
+            extraction_verified: false,
+        };
+        assert_eq!(weak_primary_switch(&dune), WeakSwitch::FailOver);
+        assert_eq!(weak_primary_switch(&WeakSwitchFacts { backup_twin: true, ..dune }), WeakSwitch::Stay, "a twin lends one for one");
+        assert_eq!(weak_primary_switch(&WeakSwitchFacts { primary_held: true, ..dune }), WeakSwitch::Stay, "failed over already");
+        assert_eq!(weak_primary_switch(&WeakSwitchFacts { done: 600, ..dune }), WeakSwitch::Stay, "most of it came: borrow on");
+        assert_eq!(weak_primary_switch(&WeakSwitchFacts { same_video: false, ..dune }), WeakSwitch::Stay, "video not proven");
+        assert_eq!(weak_primary_switch(&WeakSwitchFacts { backup_alive: 960, ..dune }), WeakSwitch::Stay, "backup not whole");
+        assert_eq!(weak_primary_switch(&WeakSwitchFacts { projected: 950, ..dune }), WeakSwitch::Stay, "primary not weak");
+        assert_eq!(weak_primary_switch(&WeakSwitchFacts { tried: 50, ..dune }), WeakSwitch::Stay, "too few tried");
+        assert_eq!(weak_primary_switch(&WeakSwitchFacts { held_in_fleet: false, ..dune }), WeakSwitch::Stay);
+        assert_eq!(weak_primary_switch(&WeakSwitchFacts { backup_locked: true, ..dune }), WeakSwitch::Stay);
+        assert_eq!(weak_primary_switch(&WeakSwitchFacts { extraction_verified: true, ..dune }), WeakSwitch::Stay);
+    }
     /// Review of b38a5981: a split-off part drops the fleet's rank and its
     /// membership, so it never stays a managed fleet copy.
     #[test]

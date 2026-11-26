@@ -109,6 +109,13 @@ pub trait VolumeFeed: Send + 'static {
     fn repaired(&self, _path: &Path) -> bool {
         false
     }
+    /// Asked of a volume the feed answers `NotYet` for: the volume the download is writing
+    /// now, article by article, when its articles go straight into place (direct write). The
+    /// extraction then reads each article as soon as it is written instead of waiting for the
+    /// finished volume (see [`crate::livewrite`]). `None`: wait for the finished volume.
+    fn growing(&mut self, _path: &Path) -> Option<Arc<crate::livewrite::LiveVolume>> {
+        None
+    }
 }
 
 /// Volume bytes at the start and end that may hold archive headers, for a volume whose headers
@@ -667,6 +674,7 @@ where
         pending: pending.clone(),
         protection: protection.clone(),
         opened: opened.clone(),
+        written_damaged: Arc::new(AtomicBool::new(false)),
         late: LateProtection {
             first: req.first_volume.to_path_buf(),
             password: req.password.to_string(),
@@ -2149,8 +2157,10 @@ fn create_unique_sibling(target: &Path) -> std::io::Result<(PathBuf, std::fs::Fi
 
 /// The volume the session is parked on and the waker that resumes it.
 /// The volume the session waits on, the waker to call once that changes, and whether a stand-in
-/// handed over with holes still counts as waiting (the copy path waits for the finished one).
-type PendingWait = Arc<Mutex<Option<(PathBuf, Waker, bool)>>>;
+/// handed over with holes still counts as waiting (the copy path waits for the finished one), and
+/// whether the provider asked (a volume the download starts writing then is handed over as being
+/// written) rather than a volume already read while written (see `WrittenSource`).
+type PendingWait = Arc<Mutex<Option<(PathBuf, Waker, bool, bool)>>>;
 
 /// Thread-parking driver around `poll_event`.
 struct Driver<'s> {
@@ -2212,14 +2222,11 @@ impl<'s> Driver<'s> {
         // Woken only for an answer the provider would not wait on again: waking it for one it
         // waits on spins the session until zipfast's wake limit fails it.
         let changed = match pending.as_ref() {
-            Some((path, _, holed_waits)) => {
-                match self
-                    .feed
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .volume(path)
-                {
-                    VolumeView::NotYet => false,
+            Some((path, _, holed_waits, asked)) => {
+                let mut feed = self.feed.lock().unwrap_or_else(|e| e.into_inner());
+                match feed.volume(path) {
+                    // Started being written since: the provider hands it over now.
+                    VolumeView::NotYet => *asked && feed.growing(path).is_some(),
                     VolumeView::Virtual(v) if !v.holes.is_empty() => !*holed_waits,
                     _ => true,
                 }
@@ -2227,7 +2234,7 @@ impl<'s> Driver<'s> {
             None => false,
         };
         if changed {
-            if let Some((_, waker, _)) = pending.take() {
+            if let Some((_, waker, _, _)) = pending.take() {
                 waker.wake();
             }
         }
@@ -2292,6 +2299,9 @@ struct FeedProvider {
     protection: ProtectionSlot,
     opened: OpenedVolumes,
     late: LateProtection,
+    /// A volume read while it was written finished with holes or as another file: the set is
+    /// never declared (as `late.saw_holes` / `late.refused`).
+    written_damaged: Arc<AtomicBool>,
 }
 
 /// What deciding a declaration for a set that becomes final mid-session needs.
@@ -2604,7 +2614,11 @@ impl FeedProvider {
             return;
         }
         let late = &mut self.late;
-        if !late.allowed || late.saw_holes || late.refused {
+        if !late.allowed
+            || late.saw_holes
+            || late.refused
+            || self.written_damaged.load(Ordering::Acquire)
+        {
             return;
         }
         if self
@@ -2776,12 +2790,13 @@ impl VolumeSource for FeedProvider {
         match feed.volume(&path) {
             VolumeView::Ready { holes } => {
                 self.late.saw_holes |= !holes.is_empty();
-                let volume = HoledVolume::open(&path, holes).map_err(|cause| {
+                let mut volume = HoledVolume::open(&path, holes).map_err(|cause| {
                     ProgressiveFailure::new(FailureKind::Input {
                         operation: zipfast::progressive::InputOperation::Open,
                         cause,
                     })
                 })?;
+                volume.count_as = Some(crate::livewrite::ReadKind::Finished);
                 if let Ok(meta) = volume.file.metadata() {
                     self.opened
                         .lock()
@@ -2791,10 +2806,39 @@ impl VolumeSource for FeedProvider {
                 Ok(VolumeAnswer::Ready(Box::new(volume)))
             }
             VolumeView::NotYet => {
+                // Being written: read its articles as they land.
+                let growing = feed.growing(&path);
+                // Asked again once it starts being written, unless it is and could not be read
+                // that way (then only once it finishes).
+                let asked = growing.is_none();
+                if let Some(live) = growing {
+                    drop(feed);
+                    let damaged = self.written_damaged.clone();
+                    let on_finished: OnFinished =
+                        Arc::new(move |_: &Path, _: &[(u64, u64)], _: bool| {
+                            damaged.store(true, Ordering::Release)
+                        });
+                    if let Ok(volume) = WrittenSource::open(
+                        &path,
+                        live,
+                        self.feed.clone(),
+                        self.pending.clone(),
+                        true,
+                        false,
+                        on_finished,
+                    ) {
+                        let identity = volume.identity();
+                        self.opened
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push((path.clone(), identity));
+                        return Ok(VolumeAnswer::Ready(Box::new(volume)));
+                    }
+                }
                 // The driver asks the feed again while parked and wakes the session when the
                 // volume's state changes.
                 *self.pending.lock().unwrap_or_else(|e| e.into_inner()) =
-                    Some((path, cx.waker().clone(), true));
+                    Some((path, cx.waker().clone(), true, asked));
                 Ok(VolumeAnswer::Wait)
             }
             VolumeView::Missing => Ok(VolumeAnswer::Missing),
@@ -2802,7 +2846,7 @@ impl VolumeSource for FeedProvider {
             // only from volumes on disk, so it waits for the finished volume.
             VolumeView::Virtual(v) if !v.holes.is_empty() => {
                 *self.pending.lock().unwrap_or_else(|e| e.into_inner()) =
-                    Some((path, cx.waker().clone(), true));
+                    Some((path, cx.waker().clone(), true, true));
                 Ok(VolumeAnswer::Wait)
             }
             VolumeView::Virtual(v) => {
@@ -2849,6 +2893,8 @@ struct HoledVolume {
     /// Set only for a persistent session (see `allow_long_holes`): a hole inside one of them is
     /// answered in one go, up to `LONG_HOLE`, instead of once per read.
     data_spans: Vec<(u64, u64)>,
+    /// What the bytes read count as in a live extraction's summary (not counted: `None`).
+    count_as: Option<crate::livewrite::ReadKind>,
 }
 
 /// Longest hole a persistent session takes as one answer (zipfast's cap).
@@ -2882,6 +2928,7 @@ impl HoledVolume {
             holes,
             expose_backing: true,
             data_spans: Vec::new(),
+            count_as: None,
         })
     }
 
@@ -2958,7 +3005,12 @@ impl RangeSource for HoledVolume {
         let read = read_at(&self.file, &mut buf[..n], offset);
         match read {
             Ok(0) if n > 0 => Err(ProgressiveFailure::new(FailureKind::Truncated)),
-            Ok(count) => Ok(RangeRead::Filled { count }),
+            Ok(count) => {
+                if let Some(kind) = self.count_as {
+                    crate::livewrite::count_read(count as u64, kind);
+                }
+                Ok(RangeRead::Filled { count })
+            }
             Err(cause) => {
                 let mut e = ProgressiveFailure::new(FailureKind::Input {
                     operation: zipfast::progressive::InputOperation::Read,
@@ -2966,6 +3018,449 @@ impl RangeSource for HoledVolume {
                 });
                 e.context.packed_offset = Some(offset);
                 Err(e)
+            }
+        }
+    }
+}
+
+/// Called when a volume read while it was written turns out finished with lost ranges, or
+/// finished as another file than the one written (`replaced`): the provider records it as it
+/// records a damaged volume handed out whole.
+pub(crate) type OnFinished = Arc<dyn Fn(&Path, &[(u64, u64)], bool) + Send + Sync>;
+
+/// A volume the download is still writing, read article by article as the writer reports
+/// them (writer-fed, see [`crate::livewrite`]): written bytes are read at once through
+/// zipfast's `map::VolumeFiles`, bytes not written yet park the session until they are. Once
+/// the download's feed has the finished volume (renamed into place, with its lost ranges if
+/// articles failed), the rest is read from it exactly as a volume handed over finished
+/// ([`HoledVolume`]).
+struct WrittenSource {
+    path: PathBuf,
+    live: Arc<crate::livewrite::LiveVolume>,
+    files: zipfast::map::VolumeFiles,
+    synced: u64,
+    feed: Arc<Mutex<Box<dyn VolumeFeed>>>,
+    pending: PendingWait,
+    info: SourceInfo,
+    /// The output's handle: what zipfast sees as the volume's backing, unless declared NonFile.
+    file: std::fs::File,
+    expose_backing: bool,
+    /// The finished volume once the feed has it: its file, or the stand-in rebuilt from a
+    /// duplicate when the download died in it (see `crate::deadvolume`).
+    done: Option<Box<dyn RangeSource>>,
+    on_finished: OnFinished,
+    /// A persistent session: holes inside member data are answered past the buffer.
+    long_holes: bool,
+    /// Byte ranges handed to the session from what the download wrote, merged.
+    served: Vec<std::ops::Range<u64>>,
+    /// `done` is a rebuilt stand-in (a twin's articles or an alt's video bytes): every byte is
+    /// read from it.
+    rebuilt: bool,
+    /// The download died in this volume after bytes were read: the rest comes from its rebuilt
+    /// copy at the payload frontier.
+    continuation: Option<Continuation>,
+}
+
+impl WrittenSource {
+    #[allow(clippy::too_many_arguments)]
+    fn open(
+        path: &Path,
+        live: Arc<crate::livewrite::LiveVolume>,
+        feed: Arc<Mutex<Box<dyn VolumeFeed>>>,
+        pending: PendingWait,
+        expose_backing: bool,
+        long_holes: bool,
+        on_finished: OnFinished,
+    ) -> std::io::Result<Self> {
+        let file = std::fs::File::open(live.out_path())?;
+        let meta = file.metadata()?;
+        if meta.len() != live.size() {
+            // Not the output created at the volume's length: wait for the finished volume.
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "the output being written does not have the volume's length",
+            ));
+        }
+        let (dev, ino) = file_identity(&meta);
+        let mut files = zipfast::map::VolumeFiles::new();
+        files.set_file(0, file.try_clone()?);
+        let len = live.size();
+        Ok(Self {
+            path: path.to_path_buf(),
+            live,
+            files,
+            synced: 0,
+            feed,
+            pending,
+            info: SourceInfo {
+                id: zipfast::progressive::SourceId((u128::from(dev) << 64) | u128::from(ino)),
+                generation: 0,
+                extent: len,
+                length: zipfast::progressive::SourceLength::Final(len),
+            },
+            file,
+            expose_backing,
+            done: None,
+            on_finished,
+            long_holes,
+            served: Vec::new(),
+            rebuilt: false,
+            continuation: None,
+        })
+    }
+
+    /// Whether every byte served so far reads the same from `other` (the finished volume, or a
+    /// rebuilt stand-in).
+    fn served_matches(&mut self, other: &mut dyn RangeSource) -> bool {
+        use zipfast::map::{PackedRead, PackedSource};
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        let mut ours = vec![0u8; 1 << 20];
+        let mut theirs = vec![0u8; 1 << 20];
+        for r in self.served.clone() {
+            let mut at = r.start;
+            while at < r.end {
+                let want = ((r.end - at) as usize).min(ours.len());
+                let n = match self.files.read_packed(0, at, &mut ours[..want]) {
+                    PackedRead::Data(n) => n,
+                    _ => return false,
+                };
+                let mut got = 0;
+                while got < n {
+                    match other.read_at(at + got as u64, &mut theirs[got..n], &mut cx) {
+                        Ok(RangeRead::Filled { count }) if count > 0 => got += count,
+                        _ => return false,
+                    }
+                }
+                if ours[..n] != theirs[..n] {
+                    return false;
+                }
+                at += n as u64;
+            }
+        }
+        true
+    }
+
+    /// Drops the wait this source left for its own volume once it reads again (the driver
+    /// would report the session as waiting for a volume while it decodes).
+    fn clear_own_pending(&self) {
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        if pending
+            .as_ref()
+            .is_some_and(|(path, _, _, asked)| !*asked && *path == self.path)
+        {
+            *pending = None;
+        }
+    }
+
+    fn note_served(&mut self, offset: u64, count: usize) {
+        let r = offset..offset + count as u64;
+        match self.served.last_mut() {
+            Some(last) if last.end == r.start => last.end = r.end,
+            _ => {
+                self.served.push(r);
+                self.served.sort_by_key(|r| r.start);
+                let mut merged: Vec<std::ops::Range<u64>> = Vec::with_capacity(self.served.len());
+                for r in self.served.drain(..) {
+                    match merged.last_mut() {
+                        Some(m) if m.end >= r.start => m.end = m.end.max(r.end),
+                        _ => merged.push(r),
+                    }
+                }
+                self.served = merged;
+            }
+        }
+    }
+
+    fn identity(&self) -> (u64, u64) {
+        let id = self.info.id.0;
+        ((id >> 64) as u64, id as u64)
+    }
+
+    /// The download finished the volume: read the rest from the finished file, with `holes`.
+    fn finish(&mut self, holes: Vec<(u64, u64)>) -> ProgressiveResult<()> {
+        let mut v = HoledVolume::open(&self.path, holes.clone()).map_err(|cause| {
+            ProgressiveFailure::new(FailureKind::Input {
+                operation: zipfast::progressive::InputOperation::Open,
+                cause,
+            })
+        })?;
+        if v.info.length != self.info.length {
+            return Err(ProgressiveFailure::new(FailureKind::Truncated));
+        }
+        let replaced = v
+            .file
+            .metadata()
+            .map(|m| file_identity(&m) != self.identity())
+            .unwrap_or(true);
+        // Finished as another file than the one written (a copy, or another file of the same
+        // name): only if what was read already reads the same from it.
+        if replaced && !self.served_matches(&mut v) {
+            return Err(ProgressiveFailure::new(FailureKind::Input {
+                operation: zipfast::progressive::InputOperation::Read,
+                cause: std::io::Error::other("the volume read as it was written finished as another file"),
+            }));
+        }
+        v.expose_backing = self.expose_backing;
+        v.count_as = Some(crate::livewrite::ReadKind::Back);
+        if self.long_holes {
+            v.allow_long_holes(&self.path);
+        }
+        if !holes.is_empty() || replaced {
+            (self.on_finished)(&self.path, &holes, replaced);
+        }
+        self.live.stop_waiting();
+        self.done = Some(Box::new(v));
+        Ok(())
+    }
+
+    /// The download died in this volume and its part was rebuilt (from a twin's articles, or an
+    /// alt's video bytes placed by the content map, see `crate::deadvolume`).
+    ///
+    /// Before any byte was read here the stand-in simply replaces the volume. Once bytes were
+    /// read, the extraction continues at its payload frontier without comparing container bytes:
+    /// what the download wrote stays as read, the rest of this volume's member data comes from
+    /// the stand-in's member data at the same payload offset, and the volume's end (its end of
+    /// archive block, which sends the extraction on to the next volume) from the stand-in's end.
+    fn finish_virtual(&mut self, v: crate::deadvolume::VirtualVolume) -> ProgressiveResult<()> {
+        let head = v.head.len() as u64;
+        let data_len = v.data_len;
+        let source = VirtualSource::open(&self.path, v).map_err(|cause| {
+            ProgressiveFailure::new(FailureKind::Input {
+                operation: zipfast::progressive::InputOperation::Open,
+                cause,
+            })
+        })?;
+        // No file of the set: never declared.
+        (self.on_finished)(&self.path, &[], true);
+        self.live.stop_waiting();
+        if self.served.is_empty() {
+            if source.info.length != self.info.length {
+                return Err(self.cannot_continue("the rebuilt volume has another length"));
+            }
+            self.rebuilt = true;
+            self.done = Some(Box::new(source));
+            return Ok(());
+        }
+        // The member data of this volume as the download wrote its headers.
+        let Some((data_at, packed)) = first_member_data(self.live.out_path()) else {
+            return Err(self.cannot_continue("its headers do not name one member's data"));
+        };
+        if packed != data_len {
+            return Err(self.cannot_continue("the rebuilt volume holds another part of the member"));
+        }
+        let read: u64 = self.served.iter().map(|r| r.end - r.start).sum();
+        crate::log::log_active_bytes(
+            crate::log::MK_INFO,
+            format!(
+                "Unrar: {} goes on from its rebuilt copy at the payload frontier ({read} bytes read as written, member data at {data_at})",
+                self.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+            )
+            .as_bytes(),
+        );
+        self.continuation = Some(Continuation {
+            source,
+            data_at,
+            data_end: data_at + packed,
+            source_data_at: head,
+        });
+        Ok(())
+    }
+
+    /// Logged once and returned: this volume cannot go on from the duplicate here.
+    fn cannot_continue(&self, why: &str) -> ProgressiveFailure {
+        ProgressiveFailure::new(FailureKind::Input {
+            operation: zipfast::progressive::InputOperation::Read,
+            cause: std::io::Error::other(format!(
+                "{} was read as it was written and cannot continue from its rebuilt copy: {why}",
+                self.path.display()
+            )),
+        })
+    }
+
+    /// Reads `offset` of this volume through the stand-in at the same payload offset.
+    fn read_continued(
+        &mut self,
+        offset: u64,
+        buf: &mut [u8],
+        cx: &mut Context<'_>,
+    ) -> ProgressiveResult<RangeRead> {
+        let c = self.continuation.as_mut().expect("continuing");
+        // A written byte that could not be read back is read from the copy too.
+        let next_written = match self.live.next_written(offset) {
+            Some(n) if n == offset => self.live.written_end(offset).unwrap_or(offset + 1),
+            Some(n) => n,
+            None => u64::MAX,
+        };
+        let (at, limit) = if offset < c.data_at {
+            return Err(self.cannot_continue("a header of it was never written"));
+        } else if offset < c.data_end {
+            (offset - c.data_at + c.source_data_at, c.data_end.min(next_written) - offset)
+        } else {
+            // Behind the member data: the stand-in's end of volume.
+            let tail = c.source_data_at + (c.data_end - c.data_at);
+            (tail + (offset - c.data_end), u64::MAX)
+        };
+        let source_len = c.source.info.length.value();
+        if at >= source_len {
+            // Past the stand-in's end of archive block, which the extraction never reads past.
+            let n = buf.len().min(self.info.extent.saturating_sub(offset) as usize).max(1);
+            return Ok(RangeRead::Hole { len: n as u64 });
+        }
+        let n = (buf.len() as u64).min(limit).min(source_len - at) as usize;
+        let read = c.source.read_at(at, &mut buf[..n], cx)?;
+        if let RangeRead::Filled { count } = read {
+            crate::livewrite::count_read(count as u64, crate::livewrite::ReadKind::Back);
+        }
+        Ok(read)
+    }
+}
+
+/// The data a volume's first member block holds: (offset, length), from the volume's headers.
+fn first_member_data(path: &Path) -> Option<(u64, u64)> {
+    use zipfast::rar5::reader::{Block, Volume};
+    let mut vol = Volume::open(path).ok()?;
+    for _ in 0..64 {
+        match vol.next_block() {
+            Ok(Some(Block::File(h))) => return Some((h.data_at, h.packed_size)),
+            Ok(Some(Block::Main(_))) | Ok(Some(Block::Service(_))) | Ok(Some(Block::Unknown)) => {}
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// A volume read as it was written whose download died in it, going on from its rebuilt copy
+/// at the payload frontier (see [`WrittenSource::finish_virtual`]).
+struct Continuation {
+    source: VirtualSource,
+    /// The member data in this volume, as its own headers place it.
+    data_at: u64,
+    data_end: u64,
+    /// Where the same member data starts in the stand-in.
+    source_data_at: u64,
+}
+
+impl Drop for WrittenSource {
+    fn drop(&mut self) {
+        // A session cancelled or ended while parked here waits no more.
+        self.live.stop_waiting();
+    }
+}
+
+impl RangeSource for WrittenSource {
+    fn info(&self) -> SourceInfo {
+        self.info
+    }
+    fn backing_files(&self) -> &[std::fs::File] {
+        if self.expose_backing {
+            std::slice::from_ref(&self.file)
+        } else {
+            &[]
+        }
+    }
+    fn read_at(
+        &mut self,
+        offset: u64,
+        buf: &mut [u8],
+        cx: &mut Context<'_>,
+    ) -> ProgressiveResult<RangeRead> {
+        use zipfast::map::{PackedRead, PackedSource};
+        let input = |cause: std::io::Error| {
+            let mut e = ProgressiveFailure::new(FailureKind::Input {
+                operation: zipfast::progressive::InputOperation::Read,
+                cause,
+            });
+            e.context.packed_offset = Some(offset);
+            e
+        };
+        loop {
+            if self.rebuilt {
+                if let Some(v) = self.done.as_mut() {
+                    return v.read_at(offset, buf, cx);
+                }
+            }
+            // Behind the member data of a continued volume everything comes from the rebuilt
+            // copy's end: its blocks need not be the original's.
+            if self.continuation.as_ref().is_some_and(|c| offset >= c.data_end) {
+                return self.read_continued(offset, buf, cx);
+            }
+            // Bytes the writer reported are read from what it wrote, also once the volume is
+            // finished (the same file, or the same bytes).
+            let n = buf.len().min(self.info.extent.saturating_sub(offset) as usize);
+            self.live.sync(&mut self.files, 0, &mut self.synced);
+            let unreadable = match self.files.read_packed(0, offset, &mut buf[..n]) {
+                PackedRead::Data(count) => {
+                    self.note_served(offset, count);
+                    self.clear_own_pending();
+                    self.live.count_live(count as u64);
+                    return Ok(RangeRead::Filled { count });
+                }
+                // A written article that cannot be read back (VolumeFiles answers a hole): the
+                // finished volume answers for it, or it fails the read below.
+                PackedRead::Hole { .. } if self.done.is_none() && !self.path.is_file() => {
+                    return Err(input(std::io::Error::other("cannot read a written article back")))
+                }
+                PackedRead::Hole { .. } => true,
+                PackedRead::NotYet { .. } => false,
+            };
+            if self.continuation.is_some() {
+                return self.read_continued(offset, buf, cx);
+            }
+            if let Some(v) = self.done.as_mut() {
+                // Never reported (lost, or repaired since): the finished volume's answer.
+                return v.read_at(offset, buf, cx);
+            }
+            let view = self.feed.lock().unwrap_or_else(|e| e.into_inner()).volume(&self.path);
+            match view {
+                VolumeView::Ready { holes } => {
+                    self.finish(holes)?;
+                    continue;
+                }
+                VolumeView::NotYet => {
+                    let parked = !self.path.is_file() && self.live.wait_for(offset, cx.waker());
+                    if !parked && !unreadable && self.live.written_end(offset).is_some() {
+                        // Written meanwhile.
+                        continue;
+                    }
+                    // Also woken when the feed's answer changes: the finished volume can bring
+                    // bytes no article write reported (the end of a file the writer assembles).
+                    *self.pending.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some((self.path.clone(), cx.waker().clone(), true, false));
+                    return Ok(RangeRead::NotYet);
+                }
+                // A persistent session (its volumes declared NonFile) reads a stand-in whose
+                // borrow is not finished yet, as it does one handed over (`persistent::Provider`);
+                // the copy path waits for it.
+                VolumeView::Virtual(v) if v.holes.is_empty() || (!self.expose_backing && self.served.is_empty()) => {
+                    self.finish_virtual(v)?;
+                    continue;
+                }
+                VolumeView::Virtual(_) => {
+                    // Its borrow is not finished: woken once the feed's answer changes.
+                    *self.pending.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some((self.path.clone(), cx.waker().clone(), true, false));
+                    return Ok(RangeRead::NotYet);
+                }
+                VolumeView::Missing => {
+                    // The download ended without finishing this volume: what it did not write
+                    // is lost, as in a damaged volume (read past; the set fails as damaged
+                    // unless something repairs it).
+                    (self.on_finished)(&self.path, &[], true);
+                    self.live.stop_waiting();
+                    let next = self.live.next_written(offset).unwrap_or(self.info.extent);
+                    if next <= offset && !unreadable {
+                        // Written meanwhile.
+                        continue;
+                    }
+                    let end = if unreadable {
+                        self.live.written_end(offset).unwrap_or(offset + 1)
+                    } else {
+                        next
+                    };
+                    let len = end.max(offset + 1).min(offset + n.max(1) as u64) - offset;
+                    return Ok(RangeRead::Hole { len });
+                }
             }
         }
     }

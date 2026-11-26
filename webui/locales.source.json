@@ -5938,6 +5938,10 @@
     "message": "Show or hide the other copies of this release, in the order they are tried if the primary fails",
     "description": "Tooltip of a fleet's toggle in Downloads."
   },
+  "fleet_toggle_hint_copies": {
+    "message": "Show or hide the other copies with this duplicate key: backups in History are the ones failover and borrowing take",
+    "description": "Tooltip of the toggle in Downloads for a download that is no fleet but has other copies under its duplicate key."
+  },
   "fleet_pos_primary": {
     "message": "primary",
     "description": "A fleet member's place: the copy downloading now."
@@ -6005,5 +6009,29 @@
   "fleet_label_alive_cut": {
     "message": "~$1% alive ($2 sampled, cut short)",
     "description": "Fleet member label: its check ran out of its time budget; $1 is the share measured so far, $2 found/asked."
+  },
+  "fleet_label_borrowable": {
+    "message": "borrowable",
+    "description": "Fleet member label: the copy can lend byte ranges to the download (bare, split or stored archive)."
+  },
+  "fleet_label_borrowable_encrypted": {
+    "message": "borrowable (encrypted)",
+    "description": "Fleet member label: the copy can lend byte ranges once decrypted with the password its nzb carries."
+  },
+  "fleet_label_unborrowable": {
+    "message": "not borrowable",
+    "description": "Fleet member label: the copy cannot lend byte ranges (compressed, or encrypted without a known password)."
+  },
+  "fleet_pos_backup": {
+    "message": "backup",
+    "description": "A copy's place in the list under a download: a backup waiting in History, which failover and donor search take."
+  },
+  "fleet_pos_queued": {
+    "message": "queued",
+    "description": "A copy's place in the list under a download: another copy with the same duplicate key, also in the queue."
+  },
+  "fleet_state_history_backup": {
+    "message": "backup in history",
+    "description": "A copy waiting in History as a backup (DELETED/DUPE): failover and donor search take it."
   }
 }

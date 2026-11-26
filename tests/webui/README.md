@@ -14,6 +14,14 @@ per fleet collapsed by default, the open state remembered per viewer, every
 copy in the daemon's failover order (DupeFleetOrder) with its label and state,
 "probing…" right after adding, and no fleet copy in History, in both themes at
 desktop and phone widths.
+Copies under a DupeKey that are no fleet (backups waiting in History as
+DELETED/DUPE, queued siblings) get the same toggle and list:
+`node tests/webui/dupe-copies-downloads.js http://127.0.0.1:17999/` checks the
+toggle on a plain download matched by DupeKey ignoring case, queued siblings
+keeping their rows, the History backups in donor order with kind, alive share,
+borrowable and role, a fleet's own History copies, the History panel of a
+listed copy, a redraw on a new History reply alone, and one History index per
+refresh (1400 History items read once each).
 
 The WebUI density regression check uses Playwright and Chrome against an isolated,
 loopback RustyGet instance serving the current WebUI. The fixture should start with

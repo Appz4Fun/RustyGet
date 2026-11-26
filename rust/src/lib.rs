@@ -70,6 +70,7 @@ pub mod postproc;
 pub(crate) mod prepost;
 pub(crate) mod progressive_unpack;
 pub(crate) mod livefeed;
+pub(crate) mod livewrite;
 #[cfg(unix)]
 pub(crate) mod procrun;
 pub(crate) mod queueeditor;

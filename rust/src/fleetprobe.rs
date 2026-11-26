@@ -142,13 +142,17 @@ pub fn stat_slot_needed(fleet_probing: bool, downloads_held: bool, download_star
 
 /// A free connection of `srv` for a probe request, or null when none is
 /// free: a light connection first, else a check connection of the main pool
-/// while the probes hold less than their share of it (while a fleet is being
-/// probed, up to [`probe_check_floor`] of them even while downloads want
-/// every connection). THE place probe requests get connections.
+/// while the probes hold less than their share of it. `floor`: the request
+/// holds a slot of [`crate::light_pool::PROBE_READS`] while a fleet is being
+/// probed, so it may take up to [`probe_check_floor`] of them even while
+/// downloads want every connection; without one, as any check (one while a
+/// download was refused a connection just now). THE place probe requests
+/// get connections.
 #[cfg(unix)]
 pub fn probe_connection(
     pool: &crate::net::NzbgetRsServerPool,
     srv: &crate::net::RsNewsServer,
+    floor: bool,
 ) -> *mut crate::net::PooledNntpConn {
     use std::sync::atomic::Ordering;
     let light = pool.get_light_connection(srv);
@@ -161,7 +165,7 @@ pub fn probe_connection(
     if !downloads_held && srv.check_in_use.load(Ordering::SeqCst) >= probe_share(srv.max_connections) {
         return std::ptr::null_mut();
     }
-    if fleet_probing() {
+    if floor && fleet_probing() {
         pool.get_probe_connection(srv)
     } else {
         pool.get_check_connection(srv)
@@ -246,7 +250,8 @@ impl crate::articlefetcher::NntpHost for ProbeNntpHost {
             let Some(srv) = pool.server_by_id(info.id) else {
                 continue;
             };
-            let conn_ptr = probe_connection(&pool, &srv);
+            // every BODY read holds a probe read slot (fetch_any_article_via_host)
+            let conn_ptr = probe_connection(&pool, &srv, true);
             // SAFETY: a non-null connection from the pool stays valid until freed
             let Some(conn) = (unsafe { conn_ptr.as_ref() }) else {
                 continue;
@@ -346,7 +351,7 @@ mod tests {
     /// 6790 (#717 follow-up): with downloads using every connection the
     /// light reserve is 1, and the probes read one article at a time. They
     /// keep a floor of 5 reads per server from the probe share; never more
-    /// than half the server's connections, a flaky server stays at 1, a
+    /// than a quarter of the server's connections, a flaky server stays at 1, a
     /// server with few connections at its light count, and with no reserve
     /// the main pool serves the probes as before.
     #[test]

@@ -1691,7 +1691,7 @@ impl DonorServerExchange for NntpHealthTransportShared {
             // while a fleet is probed beside a download that wants every
             // connection, a slot of the probe reads first: its connection
             // may be one of the probe floor's
-            let Ok(_slot) = crate::fleetprobe::stat_slot(|| {
+            let Ok(slot) = crate::fleetprobe::stat_slot(|| {
                 http_stopped() || host_now(ctx, host_cb) - wait_start > 10
             }) else {
                 return Err(DonorExchangeError {
@@ -1713,7 +1713,8 @@ impl DonorServerExchange for NntpHealthTransportShared {
                             continue;
                         };
                         known_any = true;
-                        let raw = crate::fleetprobe::probe_connection(&pool, &srv);
+                        // only an exchange holding a probe slot uses the floor
+                        let raw = crate::fleetprobe::probe_connection(&pool, &srv, slot.is_some());
                         if !raw.is_null() {
                             need_join = srv.join_group;
                             conn_ptr = raw as usize;

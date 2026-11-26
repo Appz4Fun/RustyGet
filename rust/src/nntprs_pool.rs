@@ -227,6 +227,16 @@ pub fn spawn_identification(pool: &std::sync::Arc<crate::net::NzbgetRsServerPool
     }
     let first = (std::sync::Arc::downgrade(pool), pool.generation());
     let spawned = std::thread::Builder::new().name("backend-id".into()).spawn(move || {
+        // a panicking run must not leave identification marked running forever
+        struct Idle;
+        impl Drop for Idle {
+            fn drop(&mut self) {
+                if std::thread::panicking() {
+                    ID_STATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).running = false;
+                }
+            }
+        }
+        let _idle = Idle;
         let (mut weak, mut generation) = first;
         loop {
             identify(weak, generation);

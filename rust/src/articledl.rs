@@ -4341,6 +4341,15 @@ impl NzbgetRsArticleDownloader {
                     if push_failed {
                         failed_servers.push(last_server);
                     }
+                    // a server or backbone change since this article began voids the
+                    // backbone 430s: decide from the first level again, minus the
+                    // servers really tried (the level check below passes over the
+                    // levels that are all tried)
+                    if crate::articlefetcher::missing_epoch() != missing_epoch_seen {
+                        missing_epoch_seen = crate::articlefetcher::missing_epoch();
+                        missing.clear();
+                        level = 0;
+                    }
 
                     let (cand_ptrs, cands): (Vec<usize>, Vec<LevelCandidate>) =
                         crate::net::active_server_pool()

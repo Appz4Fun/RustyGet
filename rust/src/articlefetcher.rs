@@ -452,7 +452,9 @@ fn known_missing_at(set: &mut KnownMissing, id: &[u8], now: Instant) -> bool {
 /// Records an article that every server was asked for and answered `430 no
 /// such article`: a background check (TwinCheck sampling) that would only
 /// ask again need not hold a connection for it. Kept for
-/// [`KNOWN_MISSING_TTL`], up to [`KNOWN_MISSING_CAP`] ids.
+/// [`KNOWN_MISSING_TTL`], up to [`KNOWN_MISSING_CAP`] ids. Fetches use
+/// [`note_missing_everywhere_since`].
+#[cfg(test)]
 pub(crate) fn note_missing_everywhere(message_id: &[u8]) {
     note_missing_everywhere_since(message_id, missing_epoch());
 }
@@ -729,8 +731,10 @@ impl ArticleFetcher {
         let mut level: i32 = 0;
         while !self.is_stopped() {
             if missing_epoch() != epoch_seen {
+                // ask again from the first level, minus the servers really tried
                 epoch_seen = missing_epoch();
                 missing.clear();
+                level = 0;
             }
             let mut st = self.host.status();
             if level > st.max_norm_level {
@@ -1498,13 +1502,11 @@ pub fn parse_donor_nzb_file(
 mod tests {
     #[test]
     fn a_miss_from_before_a_server_change_is_dropped() {
-        let epoch = missing_epoch();
-        forget_missing_everywhere();
-        note_missing_everywhere_since(b"<km-epoch-old@x>", epoch);
+        // a fetch that began in an older epoch (no global forget here: other
+        // tests share the set)
+        let stale = missing_epoch().wrapping_sub(1);
+        note_missing_everywhere_since(b"<km-epoch-old@x>", stale);
         assert!(!known_missing_everywhere(b"<km-epoch-old@x>"));
-        note_missing_everywhere_since(b"<km-epoch-new@x>", missing_epoch());
-        // another test may forget meanwhile; only the stale one must never stick
-        let _ = known_missing_everywhere(b"<km-epoch-new@x>");
     }
     use super::*;
 

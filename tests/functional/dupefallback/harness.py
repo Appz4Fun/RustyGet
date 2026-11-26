@@ -12572,8 +12572,9 @@ def _livepar_io(t, timeout=30):
     return {}
 
 
-def _livepar_run(daemon, t, tag, seed, missing, recovery, volumes=1):
-    members, payloads = _livepar_release(t, tag, seed, missing, recovery, volumes=volumes)
+def _livepar_run(daemon, t, tag, seed, missing, recovery, volumes=1, block=524288):
+    members, payloads = _livepar_release(t, tag, seed, missing, recovery, block=block,
+                                         volumes=volumes)
     api = daemon.wait_ready()
     daemon.append(api, 'Live', build_multi_nzb(members), False, tag + '-key', 100)
     h = daemon.wait_history(api, 'Live', timeout=300)
@@ -12733,6 +12734,30 @@ def scenario_liveparzeroreads(daemon, t):
           and io.get('not_kept', 99) == 0)
     return ('liveparzeroreads', ok, 'status=%s intact=%s live_repairs=%d batch_repairs=%d io=%s'
             % (h['Status'], intact, live, batch, io))
+
+
+def scenario_liveparheldvolume(daemon, t):
+    """The planned recovery volumes cover the damage, but the volume past the plan is never
+    fetched for it (6790, PR #729: a volume past the plan was fetched after ~620 of 634 slices
+    verified and back-filling its slots read the 3.3 GB set again, 3169.7 MB). 25 recovery
+    blocks in five volumes; 15 blocks of whole volumes are planned up front. One lost
+    article spans about nine 5600-byte slices, so the damage grows by nine at once. The
+    volume selector takes the smallest volume that covers a shortfall at once, and the
+    planned volumes left are each too small: before, it took the volume past the plan, whose
+    blocks needed slots added after slices verified, and those were back-filled from disk.
+    Volumes past the plan are now held while the planned ones may cover the damage: only
+    planned volumes are fetched, nothing is back-filled (backfill_bytes_read 0), and the live
+    repair finishes the job as the download ends, byte-exact."""
+    h, intact, io = _livepar_run(daemon, t, 'lhv', 12560, {3: {7}}, 25, volumes=5, block=5600)
+    live = _grep_log(t, 'as the download ended')
+    batch = _grep_log(t, 'PAR repair timings for')
+    log = t.read_file('nzbget.log').decode(errors='replace')
+    fetched = sorted(int(e) for e in re.findall(r'Successfully downloaded Live/rel\.vol(\d+)\+', log))
+    planned = all(e < 15 for e in fetched) and bool(fetched)
+    ok = (h['Status'].startswith('SUCCESS') and intact and live >= 1 and batch == 0 and bool(io)
+          and io['backfill_mb'] == 0.0 and planned)
+    return ('liveparheldvolume', ok, 'status=%s intact=%s live_repairs=%d batch_repairs=%d '
+            'volumes_fetched=%s io=%s' % (h['Status'], intact, live, batch, fetched, io))
 
 
 def scenario_parinplace(daemon, t):
@@ -15257,6 +15282,7 @@ SCENARIOS = {
     'liveparplanned': scenario_liveparplanned,
     'livepargrow': scenario_livepargrow,
     'liveparzeroreads': scenario_liveparzeroreads,
+    'liveparheldvolume': scenario_liveparheldvolume,
     'livepartrusted': scenario_livepartrusted,
     'livepartrustedtemp': scenario_livepartrustedtemp,
     'parinplace': scenario_parinplace,
@@ -15718,6 +15744,7 @@ SCENARIO_OPTIONS = {
     'liveparplanned': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
     'livepargrow': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
     'liveparzeroreads': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
+    'liveparheldvolume': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
     'livepartrusted': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
     'livepartrustedtemp': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=0', 'DirectWrite=no'],
     'parinplace': ['ParCheck=auto', 'LiveParRepair=no'],

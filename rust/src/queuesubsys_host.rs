@@ -2128,6 +2128,23 @@ impl QueueSubsysHost {
         crate::qnzb::nzb_snapshot(nzb_ptr, text_status)
     }
 
+    /// Priority, extra priority and paused file count, as `nzb_snap` has them, without the
+    /// rest of the snapshot. On a mock host they are zero, as there.
+    pub fn nzb_pick_fields(&self, nzb_ptr: NzbRef) -> (i32, bool, i32) {
+        if nzb_ptr.is_none() || !self.use_active {
+            return (0, false, 0);
+        }
+        crate::qnzb::nzb_pick_fields(nzb_ptr).unwrap_or((0, false, 0))
+    }
+
+    /// The duplicate key, as `nzb_snap` has it, without the rest of the snapshot.
+    pub fn nzb_dupe_key(&self, nzb_ptr: NzbRef) -> Vec<u8> {
+        if nzb_ptr.is_none() || !self.use_active {
+            return Vec::new();
+        }
+        crate::qnzb::nzb_dupe_key(nzb_ptr)
+    }
+
     pub fn nzb_get_param(&self, nzb_ptr: NzbRef, name: &[u8]) -> Option<Vec<u8>> {
         if !self.use_active {
             return None;

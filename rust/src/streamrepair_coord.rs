@@ -541,6 +541,21 @@ impl DonorFetchStats {
     }
 }
 
+/// What a cross-packing credit of `bytes` adds to the watchdog's progress:
+/// the part the pass's writes ([`CrossPackDonorEnv::note_patched`]) did not
+/// already add as they happened. Takes the covered part off `uncredited`.
+fn credit_after_patched(uncredited: &AtomicI64, bytes: i64) -> i64 {
+    let bytes = bytes.max(0);
+    let mut u = uncredited.load(Ordering::SeqCst);
+    loop {
+        let covered = u.clamp(0, bytes);
+        match uncredited.compare_exchange_weak(u, u.max(0) - covered, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return bytes - covered,
+            Err(now) => u = now,
+        }
+    }
+}
+
 pub struct NzbgetRsStreamRepairCtrl {
     live_mode: bool,
     /// Keys the repeated-line filter, so one job's lines never hide another's.
@@ -575,6 +590,11 @@ pub struct NzbgetRsStreamRepairCtrl {
     prefetch_plan: Mutex<std::collections::VecDeque<PrefetchSlot>>,
     timed_out: Arc<AtomicBool>,
     progress_bytes: Arc<AtomicI64>,
+    /// Bytes a cross-packing pass wrote into the download that its credit
+    /// ([`CrossPackDonorEnv::add_recovered`], given when the donor's pass
+    /// ends) has not covered yet: they moved `progress_bytes` as they were
+    /// written, so the credit adds only what they did not.
+    patched_uncredited: AtomicI64,
     checking_donor: Arc<AtomicI32>,
     materializing: Arc<AtomicI32>,
     waiting_for_connection: Arc<AtomicI32>,
@@ -643,6 +663,7 @@ impl NzbgetRsStreamRepairCtrl {
             prefetch_plan: Mutex::new(std::collections::VecDeque::new()),
             timed_out: Arc::new(AtomicBool::new(false)),
             progress_bytes: Arc::new(AtomicI64::new(0)),
+            patched_uncredited: AtomicI64::new(0),
             checking_donor: Arc::new(AtomicI32::new(0)),
             materializing: Arc::new(AtomicI32::new(0)),
             waiting_for_connection: Arc::new(AtomicI32::new(0)),
@@ -2046,8 +2067,16 @@ impl NzbgetRsStreamRepairCtrl {
 
                 fn add_recovered(&mut self, bytes: i64, holes: i32) {
                     *self.recovered_bytes = self.recovered_bytes.saturating_add(bytes);
-                    self.ctrl.progress_bytes.fetch_add(bytes, Ordering::SeqCst);
+                    let fresh = credit_after_patched(&self.ctrl.patched_uncredited, bytes);
+                    self.ctrl.progress_bytes.fetch_add(fresh, Ordering::SeqCst);
                     *self.recovered_holes = self.recovered_holes.saturating_add(holes);
+                }
+
+                fn note_patched(&mut self, bytes: i64) {
+                    if bytes > 0 {
+                        self.ctrl.patched_uncredited.fetch_add(bytes, Ordering::SeqCst);
+                        self.ctrl.progress_bytes.fetch_add(bytes, Ordering::SeqCst);
+                    }
                 }
 
                 fn sync_target_holes(&mut self, target_holes: &[Vec<NzbgetRsByteRange>]) {
@@ -3262,6 +3291,22 @@ mod tests {
             line,
             "Fetch cost of borrowing from Copy.05: 30.0 MB in 12.0 s, waiting on the network 9.0 s; 3 single fetch(es), 2 batch(es) of 40 article(s) (1 wave(s) of 30 across volumes, largest 30), 8 worker(s)"
         );
+    }
+
+    /// Dune on 6790: a cross-packing pass wrote 313.8 MB over 131.8 s and was
+    /// credited only at its end, so the watchdog saw nothing for 300 s. Its
+    /// writes count as they happen; the credit adds only what they did not.
+    #[test]
+    fn cross_packing_writes_count_as_progress_once() {
+        let u = AtomicI64::new(0);
+        assert_eq!(credit_after_patched(&u, 100), 100, "nothing written before: all fresh");
+        u.store(70, Ordering::SeqCst);
+        assert_eq!(credit_after_patched(&u, 100), 30, "70 already counted as written");
+        assert_eq!(u.load(Ordering::SeqCst), 0);
+        u.store(150, Ordering::SeqCst);
+        assert_eq!(credit_after_patched(&u, 100), 0);
+        assert_eq!(u.load(Ordering::SeqCst), 50, "the rest waits for the next credit");
+        assert_eq!(credit_after_patched(&u, -5), 0);
     }
 
     #[test]

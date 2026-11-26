@@ -2683,8 +2683,8 @@ impl NzbgetRsPrePostProcessor {
         );
         if act == 1 {
             let file = host.file_snap(file_ptr);
-            if (crate::filetypes::is_rar_file(&file.filename)
-                || crate::livefeed::is_live_volume(&file.filename))
+            if crate::filetypes::is_rar_file(&file.filename)
+                || crate::livefeed::is_live_volume(&file.filename)
             {
                 // It starts whatever else extracts or post-processes: the extraction waits for
                 // an unpack slot itself (`unpackslots`), an active download's first. A paused

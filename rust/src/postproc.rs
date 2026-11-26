@@ -2199,7 +2199,6 @@ impl NzbgetRsUnpackController {
         q.set_progress_label(b"");
 
         let Some(_unpack_slot) = crate::unpackslots::acquire(
-            q.nzb_id(),
             crate::unpackslots::Kind::Post,
             &mut || crate::unpackslots::Class::Finished,
             &mut || q.is_stopped(),
@@ -4541,7 +4540,6 @@ impl NzbgetRsDirectUnpack {
             return true;
         }
         let slot = crate::unpackslots::acquire(
-            self.nzb_id,
             crate::unpackslots::Kind::Direct,
             &mut || self.slot_class(host),
             &mut || self.is_stopped_or_terminated(host),
@@ -4573,14 +4571,17 @@ impl NzbgetRsDirectUnpack {
         drop(slot);
     }
 
-    /// The extraction takes a slot (or `wait`s for a volume and gives it back) on its own
-    /// thread, as the session tells it it waits or goes on.
-    fn slot_on_wait(&self, host: &QueueSubsysHost, wait: bool) {
+    /// The session tells the extraction it waits for a volume (`wait`) or goes on, on the
+    /// extraction's own thread: waiting, it gives its unpack slot back; going on, it takes one
+    /// again first (waiting for it while none is free), and only then counts as unpacking.
+    fn session_wait(&self, host: &QueueSubsysHost, wait: bool) {
         if wait {
+            self.set_waiting(true);
             self.yield_slot();
         } else {
             // (stopped meanwhile: it goes on without one, and ends at its next look)
             let _ = self.take_slot(host);
+            self.set_waiting(false);
         }
     }
 
@@ -5304,10 +5305,7 @@ impl NzbgetRsDirectUnpack {
                 self.apply_releases(host);
                 self.is_stopped_or_terminated(host)
             },
-            &|waiting| {
-                self.set_waiting(waiting);
-                self.slot_on_wait(host, waiting);
-            },
+            &|waiting| self.session_wait(host, waiting),
         );
         drop(cell);
         if let Some(summary) = crate::livewrite::read_summary(reads, crate::livewrite::read_counts()) {
@@ -5461,8 +5459,7 @@ impl NzbgetRsDirectUnpack {
                 // are not deferred behind it.
                 on_wait: Some(&|waiting| {
                     session_parked.store(waiting, Ordering::Release);
-                    self.set_waiting(waiting);
-                    self.slot_on_wait(host, waiting);
+                    self.session_wait(host, waiting);
                 }),
                 guard: Some(&guard),
             },

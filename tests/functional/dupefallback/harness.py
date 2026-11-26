@@ -4481,7 +4481,7 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
         _failcont_before.offsets[vname] = off
         off += len(data)
     api = daemon.wait_ready()
-    blocked = _paused_blocker(daemon, t, api, 'Blocker', 'fcBlk') if blocker else None
+    blocked = _paused_blocker(daemon, t, api, 'Blocker', 'fcBlk', _blocker_members(t, 'fcBlk')) if blocker else None
     if blocker and blocked is not True:
         return (name, False, 'the blocker was not set up: %s' % blocked)
     key = 'dupes:show.failcont.' + tag if fleet else tag + '-key'
@@ -4593,8 +4593,8 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
               and (not need_live or as_written > 0))
     if blocker:
         # the blocker stayed paused in the queue all through, its direct unpack not stopped
-        blocker_state = next((g['Status'] for g in api.listgroups() if g['NZBName'] == 'Blocker'), 'gone')
-        ok = ok and blocker_state == 'PAUSED' and _grep_log(t, 'Stopping the direct unpack of Blocker') == 0
+        blocker_state = _paused_state(api, 'Blocker')
+        ok = ok and blocker_state.startswith('paused') and _grep_log(t, 'Stopping the direct unpack of Blocker') == 0
         name = '%s (blocker %s)' % (name, blocker_state)
     return (name, ok,
             'winner=%s primary=%s backup=%s secs=%.1f primary_served=%d/%d B (%d articles, %d again, '
@@ -4618,12 +4618,29 @@ def scenario_failcont_twin90(daemon, t):
     return _failcont(daemon, t, 'failcont_twin90', 'twin', 0.90)
 
 
-def _paused_blocker(daemon, t, api, nzb_name, tag):
+def _blocker_members(t, tag):
+    """A stored RAR5 set of three volumes of 50 kB articles under ``tag``/Blk.partNN.rar:
+    every first article arrives (so direct rename has the names), and SCENARIO_DELAY_PROXY
+    holds back the second article of the last volume (marker ``tag/Blk.part03.rar?2=``)."""
+    seg = 50_000
+    with tempfile.TemporaryDirectory(prefix='blk-') as workdir:
+        vols = generators.rar5_store_volumes_hp('blocker.bin', _payload(2_500_000, 31337), 1_000_000, None, workdir)
+    members = []
+    for i, data in enumerate(vols):
+        vname = 'Blk.part%02d.rar' % (i + 1)
+        rel = '%s/%s' % (tag, vname)
+        t.write_file(os.path.join('data', rel), data)
+        members.append((rel, vname, len(data), seg, set()))
+    return members
+
+
+def _paused_blocker(daemon, t, api, nzb_name, tag, members=None):
     """Queues ``nzb_name``, a rar set of three volumes whose last one the news server holds
     back (SCENARIO_DELAY_PROXY), waits until its direct unpack starts and pauses it: its
     extraction then waits for a volume that does not come. True, or why not."""
-    members = _rarrenamer_members(t, tag, ['testfile3'])
-    daemon.append(api, nzb_name, build_multi_nzb([m[:5] for m in members]), False, tag + '-key', 100)
+    if members is None:
+        members = [m[:5] for m in _rarrenamer_members(t, tag, ['testfile3'])]
+    daemon.append(api, nzb_name, build_multi_nzb(members), False, tag + '-key', 100)
     deadline = time.time() + 60
     while time.time() < deadline and _grep_log(t, 'Directly unpacking ' + nzb_name) == 0:
         time.sleep(0.2)
@@ -4634,6 +4651,17 @@ def _paused_blocker(daemon, t, api, nzb_name, tag):
         return 'it left the queue before it could be paused'
     api.editqueue('GroupPause', 0, '', [g['NZBID']])
     return True
+
+
+def _paused_state(api, nzb_name):
+    """'paused <Status>' while ``nzb_name`` is in the queue with its files paused (its Status
+    may read DOWNLOADING while an article it asked for before the pause is on the way), else
+    its Status or 'gone'."""
+    g = next((g for g in api.listgroups() if g['NZBName'] == nzb_name), None)
+    if g is None:
+        return 'gone'
+    paused = g.get('PausedSizeLo', 0) or g.get('PausedSizeHi', 0)
+    return ('paused ' if paused else '') + g.get('Status', '?')
 
 
 def scenario_failcont_alt25busy(daemon, t):
@@ -4663,16 +4691,16 @@ def scenario_dupausedlive(daemon, t):
     except RuntimeError:
         g = next((g for g in api.listgroups() if g['NZBName'] == 'RelB'), {})
         status, unpack = 'still queued: %s' % g.get('Status'), '-'
-    rel_a = next((g for g in api.listgroups() if g['NZBName'] == 'RelA'), {})
+    rel_a = _paused_state(api, 'RelA')
     du_b = _grep_log(t, 'Directly unpacking RelB')
     du_b_ok = _grep_log(t, 'Direct unpack for RelB successful')
     used = _grep_log(t, 'Using directly unpacked files')
     stopped_a = _grep_log(t, 'Stopping the direct unpack of RelA') + _grep_log(t, 'Cancelling direct unpack for RelA')
     files = _main_basenames(t)
     ok = (du_b == 1 and du_b_ok == 1 and used >= 1 and status.startswith('SUCCESS') and unpack == 'SUCCESS'
-          and 'testfile5.dat' in files and rel_a.get('Status') == 'PAUSED' and stopped_a == 0)
-    return ('dupausedlive', ok, 'relB=%s unpack=%s du_b=%d du_b_ok=%d used_direct=%d relA=%s relA_du=%s stopped_a=%d files=%s' % (
-        status, unpack, du_b, du_b_ok, used, rel_a.get('Status'), rel_a.get('DirectUnpackStatus', '?'), stopped_a, files))
+          and 'testfile5.dat' in files and rel_a.startswith('paused') and stopped_a == 0)
+    return ('dupausedlive', ok, 'relB=%s unpack=%s du_b=%d du_b_ok=%d used_direct=%d relA=%s stopped_a=%d files=%s' % (
+        status, unpack, du_b, du_b_ok, used, rel_a, stopped_a, files))
 
 
 def scenario_failcont_alt25(daemon, t):
@@ -15939,7 +15967,7 @@ SCENARIO_REWRITE_PROXY = {'notfound451': (b'430 ', b'451 '),
                           'pathtraversalarticle': (b'name=aaaaaaaa.bin', b'name=../../ab.bin'), 'rejectnextserver': (b'=ypart begin=', b'=ypart begxn=')}
 
 # scenarios with a DelayingNntpProxy in front of Server1: [(message-id marker, delay in s)]
-SCENARIO_DELAY_PROXY = {'dupausedlive': [(b'dplA/testfile3.part03', 900.0)], 'failcont_alt25busy': [(b'fcBlk/testfile3.part03', 900.0)], 'livestraggler': LIVE_STRAGGLERS, 'lightburst': [(b'lbLoad', 0.25)], 'clientthreads': [(b'ctA/', 3.0)], 'xdecomp_slow': [(b'xdzB/', 0.7)], 'damagedfilestate': [(b'?6=500000:', 20.0, True)], 'articledecoyparrestart': [(b'?9=4000000:', 15.0, True), (b'?10=4500000:', 15.0, True)], 'directrenamesubdir': [(b'drA/obf', 0.4)], 'directrenamesubdirjoin': [(b'drA/obf', 0.4)], 'slowprobe': [(b'STAT ', 5.0), (b'spA/', 0.2)],
+SCENARIO_DELAY_PROXY = {'dupausedlive': [(b'dplA/testfile3.part03', 900.0)], 'failcont_alt25busy': [(b'fcBlk/Blk.part03.rar?2=', 900.0)], 'livestraggler': LIVE_STRAGGLERS, 'lightburst': [(b'lbLoad', 0.25)], 'clientthreads': [(b'ctA/', 3.0)], 'xdecomp_slow': [(b'xdzB/', 0.7)], 'damagedfilestate': [(b'?6=500000:', 20.0, True)], 'articledecoyparrestart': [(b'?9=4000000:', 15.0, True), (b'?10=4500000:', 15.0, True)], 'directrenamesubdir': [(b'drA/obf', 0.4)], 'directrenamesubdirjoin': [(b'drA/obf', 0.4)], 'slowprobe': [(b'STAT ', 5.0), (b'spA/', 0.2)],
                         'directunpackkeep': [(b'rel.part03', 2.0)],
                         'directunpackkeepnointer': [(b'rel.part03', 2.0)],
                         'truncatedstate': [(b'tsA/', 0.5)],

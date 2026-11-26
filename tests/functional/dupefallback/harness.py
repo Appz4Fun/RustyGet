@@ -7549,7 +7549,12 @@ def scenario_fleetparallel(daemon, t):
         th.start()
     for th in threads:
         th.join(timeout=90)
-    ok = all(box.get(slot, {}).get('Complete') and box.get(slot + 'took', 99) < 15 and
+    # Each fleet waits for connections the busy download holds for 3 s per article, so a
+    # run takes whole multiples of those 3 s by when its reads land (3.2, 6.2 and 9.2 s in
+    # three runs on one Mac; 12.4-15.8 s on an emulated Linux x86_64). The fault this
+    # catches is both fleets using their whole 20 s limit (members left unmeasured, also
+    # checked): a second inside it tells them apart.
+    ok = all(box.get(slot, {}).get('Complete') and box.get(slot + 'took', 99) < 19 and
              all(m['Alive'] >= 0 for m in box[slot]['Members']) for slot in ('1', '2'))
     return ('fleetparallel', ok, 'took=%.1f/%.1f complete=%s/%s' % (box.get('1took', -1), box.get('2took', -1),
             box.get('1', {}).get('Complete'), box.get('2', {}).get('Complete')))

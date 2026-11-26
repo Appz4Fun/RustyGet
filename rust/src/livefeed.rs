@@ -918,6 +918,18 @@ pub fn extract(
     feed_members(req, &map, &mut vols, prepare, log, is_cancelled, &mut waiting)
 }
 
+/// The options every member's feed decoder runs with. The decode keeps up with the download
+/// on one thread for stored members; an LZMA2 member decodes at about the line rate of a
+/// gigabit link (92 MB/s measured), so it ends only a little after the last article. zipfast's
+/// parallel LZMA2 decoder (`FeedOptions::threads`, its feed-lzma2-par branch) is enabled here
+/// once RustyGet's zipfast has it; nothing else depends on it.
+fn feed_options(password: Option<&str>) -> FeedOptions {
+    FeedOptions {
+        max_needs: 8,
+        ..FeedOptions::new(password)
+    }
+}
+
 /// A name that reads as an archive: nested extraction is post-processing's.
 fn names_an_archive(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
@@ -997,11 +1009,7 @@ fn feed_members(
         let decoder = if size == 0 {
             None
         } else {
-            let options = FeedOptions {
-                max_needs: 8,
-                ..FeedOptions::new(pw)
-            };
-            match FeedDecoder::new(map, index, options) {
+            match FeedDecoder::new(map, index, feed_options(pw)) {
                 Ok(d) => Some(d),
                 Err(FeedError::Unsupported(why)) => {
                     return Outcome::Declined(format!("{name} cannot be fed live ({why:?})"))

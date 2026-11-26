@@ -11791,6 +11791,19 @@ def scenario_livepartrusted(daemon, t):
             % (h['Status'], intact, live, batch, io))
 
 
+def scenario_livepartrustedtemp(daemon, t):
+    """livepartrusted with DirectWrite=no: articles go to article temporaries and are
+    joined at completion. The bytes live PAR verifies are still the bytes joined, so the
+    trusted check reads nothing again and the output is byte-exact."""
+    h, intact, io = _livepar_run(daemon, t, 'ltt', 12540, {2: {7}, 6: {18}}, 3)
+    live = _grep_log(t, 'as the download ended')
+    batch = _grep_log(t, 'PAR repair timings for')
+    ok = (h['Status'].startswith('SUCCESS') and intact and live >= 1 and batch == 0
+          and io.get('trust') == 'on' and io.get('verify_mb', 99) == 0.0)
+    return ('livepartrustedtemp', ok, 'status=%s intact=%s live_repairs=%d batch_repairs=%d io=%s'
+            % (h['Status'], intact, live, batch, io))
+
+
 def scenario_livepargrow(daemon, t):
     """Damage grows past the initial recovery plan (planned for the 0 failures seen when
     the index arrived, plus margin: 2 slots; 4 blocks get damaged later): the slots
@@ -14319,6 +14332,7 @@ SCENARIOS = {
     'liveparplanned': scenario_liveparplanned,
     'livepargrow': scenario_livepargrow,
     'livepartrusted': scenario_livepartrusted,
+    'livepartrustedtemp': scenario_livepartrustedtemp,
     'parinplace': scenario_parinplace,
     'parlesscritical': scenario_parlesscritical,
     'parlesstwin': scenario_parlesstwin,
@@ -14744,6 +14758,7 @@ SCENARIO_OPTIONS = {
     'liveparplanned': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
     'livepargrow': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
     'livepartrusted': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
+    'livepartrustedtemp': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=no'],
     'parinplace': ['ParCheck=auto', 'LiveParRepair=no'],
     'parlesscritical': ['HealthCheck=dupe', 'DupeArticleFallback=no'],
     'parlesstwin': ['HealthCheck=dupe', 'DupeArticleFallback=no'],

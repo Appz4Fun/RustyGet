@@ -210,6 +210,9 @@ struct ActiveStreamingSession {
     /// finish a slice a RAM-only article completed whose committed part was not readable yet
     /// (`complete_staged_slices`, M6f: reads only those committed gaps).
     staged_due: AtomicBool,
+    /// Bytes held in RAM for recovery slots that wait for a back-fill (file, offset, run),
+    /// and their total; see [`ActiveStreamingSession::backfill_held`].
+    held_backfill: Mutex<(Vec<(FileId, u64, Vec<u8>)>, u64)>,
     // Drop last, after the session, queue and all owned metadata. Grows with
     // the syndrome slots as damage appears (see `grow_for_damage`).
     budget: Mutex<SessionBudgetLease>,
@@ -346,6 +349,9 @@ struct DeferredArticles {
     /// Queue files whose first article matched no par2 file: not part of the set.
     not_in_set: HashSet<i32>,
 }
+
+/// At most this many bytes wait for the back-fill thread ([`ActiveStreamingSession::backfill_held`]).
+const HELD_BACKFILL_LIMIT: u64 = 64 << 20;
 
 /// At most this many captured-article marks and stashed articles per session.
 const LIVE_MARK_LIMIT: usize = 65536;
@@ -623,6 +629,7 @@ fn build_streaming_session_with(
         trust_revoked: AtomicBool::new(!trust),
         recovery_tees: Mutex::new(HashMap::new()),
         staged_due: AtomicBool::new(false),
+        held_backfill: Mutex::new((Vec::new(), 0)),
     }))
 }
 
@@ -860,11 +867,14 @@ impl ActiveStreamingSession {
 
     /// Recovery slots added after slices were verified (growth past the plan, or a volume
     /// beyond the preallocated exponents) wait for a back-fill of those slices. Bytes still
-    /// held in RAM fill them here (par-rs `backfill_from_bytes`: whole IFSC-verified slices
-    /// only), so the back-fill thread reads from disk only what nobody supplied. `items`
-    /// (offset, bytes) are joined into contiguous runs first: articles are usually smaller
-    /// than a slice. Nothing is copied unless a back-fill is pending.
-    fn backfill_held(&self, id: &FileId, items: &[(u64, &[u8])]) -> usize {
+    /// held in RAM (a cache flush, completion assembly) are kept for it here, joined into
+    /// contiguous runs (articles are usually smaller than a slice), and the back-fill thread
+    /// folds them (`backfill_from_bytes`: whole IFSC-verified slices only) before it reads
+    /// disk ([`Self::apply_held_backfill`]). Copies only: the callers hold the cache flush
+    /// lock, and par-rs's fold waits on a repair's exclusive payload gate, so it never runs
+    /// here. Nothing is copied unless a back-fill is pending; at most `HELD_BACKFILL_LIMIT`
+    /// bytes wait. Returns the bytes kept.
+    fn backfill_held(&self, id: &FileId, items: &[(u64, &[u8])]) -> u64 {
         if items.is_empty() || !self.session.needs_backfill() || self.session.is_cancelled() {
             return 0;
         }
@@ -874,27 +884,52 @@ impl ActiveStreamingSession {
             .filter(|(_, bytes)| !bytes.is_empty())
             .collect();
         sorted.sort_unstable_by_key(|&(offset, _)| offset);
-        let slice = self.session.slice_size();
-        let mut done = 0usize;
-        let mut run_start = 0u64;
-        let mut run: Vec<u8> = Vec::new();
-        let mut flush = |start: u64, run: &mut Vec<u8>| {
-            // A run shorter than a slice holds no whole slice.
-            if run.len() as u64 >= slice.min(self.file_lengths.get(id).copied().unwrap_or(0)).max(1) {
-                if let Ok(n) = self.session.backfill_from_bytes(id, start, run) {
-                    done += n;
-                }
-            }
-            run.clear();
-        };
+        // A run shorter than a slice (or the whole file) holds no whole slice.
+        let floor = self
+            .session
+            .slice_size()
+            .min(self.file_lengths.get(id).copied().unwrap_or(0))
+            .max(1);
+        let mut runs: Vec<(u64, Vec<u8>)> = Vec::new();
         for (offset, bytes) in sorted {
-            if run.is_empty() || run_start + run.len() as u64 != offset {
-                flush(run_start, &mut run);
-                run_start = offset;
+            match runs.last_mut() {
+                Some((start, run)) if *start + run.len() as u64 == offset => {
+                    run.extend_from_slice(bytes);
+                }
+                _ => runs.push((offset, bytes.to_vec())),
             }
-            run.extend_from_slice(bytes);
         }
-        flush(run_start, &mut run);
+        let mut held = self.held_backfill.lock().unwrap_or_else(|e| e.into_inner());
+        let mut kept = 0u64;
+        for (start, run) in runs {
+            let len = run.len() as u64;
+            if len < floor || held.1 + len > HELD_BACKFILL_LIMIT {
+                continue;
+            }
+            held.1 += len;
+            kept += len;
+            held.0.push((*id, start, run));
+        }
+        kept
+    }
+
+    /// Folds the bytes [`Self::backfill_held`] kept into the slots that wait for them, on the
+    /// back-fill thread, before it reads anything from disk. Returns the slices filled.
+    fn apply_held_backfill(&self) -> usize {
+        let runs = {
+            let mut held = self.held_backfill.lock().unwrap_or_else(|e| e.into_inner());
+            held.1 = 0;
+            std::mem::take(&mut held.0)
+        };
+        if !self.session.needs_backfill() {
+            return 0;
+        }
+        let mut done = 0usize;
+        for (id, start, run) in runs {
+            if let Ok(n) = self.session.backfill_from_bytes(&id, start, &run) {
+                done += n;
+            }
+        }
         if done > 0 {
             self.metrics
                 .ram_backfilled_slices
@@ -2022,10 +2057,18 @@ impl ActiveStreamingSession {
     /// par-rs `complete_staged_slices` (M6f): finishes slices whose coverage is complete but
     /// whose committed part was not readable when a RAM-only article completed them, reading
     /// only those committed gaps. Damage it finds asks for recovery as any article would.
+    ///
+    /// Only a cancellation is an error: any other failure (a gap not readable yet) keeps the
+    /// RAM bytes staged in par-rs and is retried after the next flush.
     fn complete_staged_slices(&self, nzb_id: i32) -> Result<(), RepairError> {
-        let outcome = self.timed(nzb_id, || self.session.complete_staged_slices())?;
-        self.unpause(outcome.unpause.as_ref());
-        Ok(())
+        match self.timed(nzb_id, || self.session.complete_staged_slices()) {
+            Ok(outcome) => {
+                self.unpause(outcome.unpause.as_ref());
+                Ok(())
+            }
+            Err(RepairError::Cancelled) => Err(RepairError::Cancelled),
+            Err(_) => Ok(()),
+        }
     }
 
     /// Puts the whole-file read back for this session's remaining repairs: something wrote
@@ -2064,7 +2107,7 @@ struct RecoveryTee {
     size: u64,
     charged: u64,
     bytes: Vec<u8>,
-    written: HashMap<u64, u64>,
+    written: std::collections::BTreeMap<u64, u64>,
     covered: u64,
     void: bool,
 }
@@ -2080,7 +2123,8 @@ impl ActiveStreamingSession {
         let mut tees = self.recovery_tees.lock().unwrap_or_else(|e| e.into_inner());
         if !tees.contains_key(&file_id) {
             // Charge the whole volume up front, as a snapshot would be; a loan of free
-            // ParBuffer covers a shortfall.
+            // ParBuffer covers a shortfall (charged to the snapshot limit, so lent as for one).
+            let teed: u64 = tees.values().map(|tee| tee.charged).sum();
             let charged = (|| {
                 let alloc = usize::try_from(size).ok().filter(|&n| n > 0)?;
                 let mut queue = self.articles.lock().unwrap_or_else(|e| e.into_inner());
@@ -2089,7 +2133,7 @@ impl ActiveStreamingSession {
                 if next > limit {
                     drop(queue);
                     self.lend_memory(&RepairError::StreamingMemoryLimit {
-                        context: "live recovery volume bytes",
+                        context: "live article snapshots",
                         required_bytes: next,
                         limit_bytes: limit,
                     });
@@ -2097,9 +2141,9 @@ impl ActiveStreamingSession {
                     next = queue.bytes.checked_add(size)?;
                     limit = self.article_byte_limit.load(Ordering::Acquire);
                 }
-                // At most half the limit, so a large volume never starves the source
-                // articles' snapshots (each of those is a read-back saved too).
-                if next > limit || size > limit / 2 {
+                // All tees together at most half the limit, so recovery volumes never starve
+                // the source articles' snapshots (each of those is a read-back saved too).
+                if next > limit || teed.saturating_add(size) > limit / 2 {
                     return None;
                 }
                 queue.bytes = next;
@@ -2110,7 +2154,7 @@ impl ActiveStreamingSession {
                     size,
                     charged: size,
                     bytes: vec![0u8; alloc],
-                    written: HashMap::new(),
+                    written: std::collections::BTreeMap::new(),
                     covered: 0,
                     void: false,
                 },
@@ -2118,7 +2162,7 @@ impl ActiveStreamingSession {
                     size,
                     charged: 0,
                     bytes: Vec::new(),
-                    written: HashMap::new(),
+                    written: std::collections::BTreeMap::new(),
                     covered: 0,
                     void: true,
                 },
@@ -2138,13 +2182,28 @@ impl ActiveStreamingSession {
                 tee.void = true;
                 break;
             }
+            // The same article again is fine; any other overlap would make `covered` lie.
             match tee.written.get(&offset) {
-                Some(&known) if known != len => {
+                Some(&known) if known == len => {}
+                Some(_) => {
                     tee.void = true;
                     break;
                 }
-                Some(_) => {}
                 None => {
+                    let before = tee
+                        .written
+                        .range(..offset)
+                        .next_back()
+                        .is_some_and(|(&o, &l)| o + l > offset);
+                    let after = tee
+                        .written
+                        .range(offset..)
+                        .next()
+                        .is_some_and(|(&o, _)| o < offset + len);
+                    if before || after {
+                        tee.void = true;
+                        break;
+                    }
                     tee.written.insert(offset, len);
                     tee.covered += len;
                 }
@@ -2160,7 +2219,7 @@ impl ActiveStreamingSession {
                         size: tee.size,
                         charged: 0,
                         bytes: Vec::new(),
-                        written: HashMap::new(),
+                        written: std::collections::BTreeMap::new(),
                         covered: 0,
                         void: true,
                     },
@@ -2220,7 +2279,7 @@ pub(crate) fn streaming_session_recovery_void(nzb_id: i32, file_id: i32) {
             size,
             charged: 0,
             bytes: Vec::new(),
-            written: HashMap::new(),
+            written: std::collections::BTreeMap::new(),
             covered: 0,
             void: true,
         },
@@ -2237,14 +2296,14 @@ pub(crate) fn streaming_session_needs_backfill(nzb_id: i32) -> bool {
         .is_some_and(|entry| !entry.session.is_cancelled() && entry.session.needs_backfill())
 }
 
-/// Bytes of queue file `identity` RustyGet holds in RAM right after writing them: they fill
+/// Bytes of queue file `identity` RustyGet holds in RAM right after writing them: kept for
 /// recovery slots added after their slices verified, so the back-fill need not read them
-/// from disk (see `backfill_held`). Returns the slices filled.
+/// from disk (see `backfill_held`). Returns the bytes kept.
 pub(crate) fn streaming_session_backfill_held(
     nzb_id: i32,
     identity: (Option<i32>, &[u8], &[u8]),
     items: &[(u64, &[u8])],
-) -> usize {
+) -> u64 {
     let Some(entry) = active_streaming_session(nzb_id) else {
         return 0;
     };
@@ -2255,6 +2314,21 @@ pub(crate) fn streaming_session_backfill_held(
         return 0;
     };
     entry.backfill_held(&id, items)
+}
+
+/// Drops recovery volume `file_id`'s tee and its charge (a lost, deleted or failed volume).
+pub(crate) fn streaming_session_recovery_forget(nzb_id: i32, file_id: i32) {
+    let Some(entry) = active_streaming_session(nzb_id) else {
+        return;
+    };
+    let old = entry
+        .recovery_tees
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&file_id);
+    if let Some(old) = old {
+        entry.release_recovery_tee(old);
+    }
 }
 
 /// Whether job `nzb_id` has a live session that would take recovery volume bytes.
@@ -2689,6 +2763,12 @@ pub(crate) fn streaming_session_process_completed_file_with_start(
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push_back(item);
+    } else if result.is_err() && item.file.par_file {
+        // Not retried: a recovery volume's kept bytes would hold their charge until the
+        // session ends.
+        if let Some(id) = item.file.queued_id.and_then(|id| i32::try_from(id).ok()) {
+            streaming_session_recovery_forget(nzb_id, id);
+        }
     }
     Some(result)
 }
@@ -3482,6 +3562,10 @@ pub fn streaming_session_on_article_failed_permanently(
 /// A recovery volume that was in flight failed outright and left nothing on
 /// disk: stop counting its blocks as coming and fetch a replacement.
 pub(crate) fn streaming_session_on_recovery_volume_lost(nzb_id: i32, queued_id: u64) {
+    // Its kept bytes (if any) are of no use now: give their charge back.
+    if let Ok(file_id) = i32::try_from(queued_id) {
+        streaming_session_recovery_forget(nzb_id, file_id);
+    }
     let _ = with_live_session(nzb_id, |entry| {
         entry
             .queued_blocks
@@ -3632,6 +3716,8 @@ pub(crate) fn streaming_session_kick_backfill(nzb_id: i32) {
             // Charged directly, not through `timed`, whose repair-stat delta could pick up a
             // foreground repair running at the same time.
             let started = std::time::Instant::now();
+            // Bytes a flush or a completion held in RAM go first: never read back.
+            worker.apply_held_backfill();
             let reread = worker.session.io_stats().backfill_bytes_read;
             let backfilled = worker.session.backfill_pending().is_ok();
             let reread = worker.session.io_stats().backfill_bytes_read.saturating_sub(reread);

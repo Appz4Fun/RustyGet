@@ -5799,11 +5799,16 @@ impl NzbgetRsPostJob {
                 let ns = host.nzb_snap(n, false);
                 // The first-16-KiB MD5 of every file downloaded whole, as its first article
                 // gave it: par-rename identifies those without reading them.
-                let known: Vec<(Vec<u8>, [u8; 16])> = (0..host.nzb_completed_files_len(n))
+                // (The analyzer sets hash16k only from a first article of 16 KiB or more, or
+                // from a file's only article, so it is the MD5 of min(16 KiB, file size).)
+                // A name two completed files share is left to the renamer's own read.
+                let mut known: Vec<(Vec<u8>, [u8; 16])> = (0..host.nzb_completed_files_len(n))
                     .map(|i| host.nzb_completed_file_at(n, i))
                     .filter(|f| f.status == crate::queuesubsys_host::CF_SUCCESS && !f.par_file)
                     .filter_map(|f| Some((f.filename, crate::parrenamer::parse_hash16k(&f.hash16k)?)))
                     .collect();
+                let names: Vec<Vec<u8>> = known.iter().map(|(name, _)| name.clone()).collect();
+                known.retain(|(name, _)| names.iter().filter(|other| *other == name).count() == 1);
                 let password = host.nzb_get_param(n, b"*Unpack:Password").unwrap_or_default();
                 let opts = crate::options::active_options();
                 let opt = |id| opts.as_ref().map_or(&b""[..], |o| o.str_bytes(id)).to_vec();

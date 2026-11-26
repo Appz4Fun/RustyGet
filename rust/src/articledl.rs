@@ -18,7 +18,7 @@ use crate::artwritercore::{
     article_writer_finish_disk_ops, article_writer_flush_cache_guarded,
     article_writer_format_dest_file_path, article_writer_format_info_path,
     article_writer_move_completed_files, article_writer_post_process_rename_and_hardlink,
-    article_writer_process_articles, article_writer_resolve_direct_write_ready,
+    article_writer_process_articles_counted, article_writer_resolve_direct_write_ready,
     calc_write_buffer_size, join_c_slices, memory_monitor_step, ArticleWriterFlushItem,
     ArticleWriterProcessItem, PRESSURE_CONSTRAINED, PRESSURE_CRITICAL, PRESSURE_NORMAL,
 };
@@ -2347,7 +2347,7 @@ impl RsArticleWriter {
             .filter(|_| !self.proc_raw_article && !self.proc_skip_disk_write)
             .filter(|live| crate::parchecker::streaming_session_wants_recovery_bytes(live.nzb_id));
         let held = std::cell::RefCell::new(Vec::<(u64, Vec<u8>)>::new());
-        let (crc, commit_err, failed_delta) = article_writer_process_articles(
+        let (crc, commit_err, failed_delta, short_copies) = article_writer_process_articles_counted(
             &items,
             total_articles,
             &self.proc_info_path,
@@ -2425,9 +2425,10 @@ impl RsArticleWriter {
             }
         }
         // An article whose bytes could not be committed (a missing article temporary, whose
-        // range assembly leaves as zeros, or a failed staged copy) may have been verified by
-        // live PAR from RAM: its slices are no proof of what is on disk any more.
-        if commit_err || failed_delta > 0 {
+        // range assembly leaves as zeros, a temporary copied short, or a failed staged copy)
+        // may have been verified by live PAR from RAM: its slices are no proof of what is on
+        // disk any more.
+        if commit_err || failed_delta > 0 || short_copies > 0 {
             if let Some(live) = self.proc_live.as_ref() {
                 crate::parchecker::streaming_session_distrust(
                     live.nzb_id,

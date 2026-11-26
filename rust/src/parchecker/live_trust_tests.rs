@@ -368,8 +368,14 @@ fn slots_added_later_are_back_filled_from_held_bytes() {
         .enumerate()
         .map(|(i, c)| ((i * 1500) as u64, c))
         .collect();
-    let filled = entry.backfill_held(&id, &items);
+    // The flush only keeps the bytes (it holds the cache lock; a fold could wait on a repair).
+    let kept = entry.backfill_held(&id, &items);
+    assert_eq!(kept, f.data.len() as u64, "one contiguous run kept");
+    assert_eq!(entry.metrics.ram_backfilled_slices.load(Ordering::Relaxed), 0);
+    // The back-fill thread folds them first, then reads only what nobody supplied.
+    let filled = entry.apply_held_backfill();
     assert_eq!(filled, 7, "every slice, the short last one too, filled from RAM");
+    assert_eq!(entry.held_backfill.lock().unwrap().1, 0, "the kept bytes are released");
     entry.session.backfill_pending().unwrap();
     let reread = entry.session.io_stats().backfill_bytes_read - before;
     assert_eq!(reread, 0, "nothing read from disk for the new slots");
@@ -469,4 +475,44 @@ fn a_committed_range_reported_before_its_write_reads_zeros() {
             .any(|e| e.state == SliceState::Damaged),
         "the zero gap fails the slice"
     );
+}
+
+/// The recovery tee accepts the same article twice but voids on any other overlap, so its
+/// coverage count never claims bytes that were not written; a void or forgotten tee gives
+/// its charge back.
+#[test]
+fn recovery_tee_voids_on_overlap_and_returns_its_charge() {
+    let f = fixture(0x7a75_000b, 6, 4, 3);
+    let entry = active_streaming_session(f.nzb_id).unwrap();
+    let volume = vec![7u8; 300];
+    streaming_session_recovery_bytes_written(f.nzb_id, 90, 300, &[(0, &volume[..150])]);
+    streaming_session_recovery_bytes_written(f.nzb_id, 90, 300, &[(0, &volume[..150])]);
+    assert_eq!(entry.articles.lock().unwrap().bytes, 300, "charged once, whole volume");
+    // [100, 250) overlaps [0, 150): with it `covered` would reach 300 with [250, 300) unset.
+    streaming_session_recovery_bytes_written(f.nzb_id, 90, 300, &[(100, &volume[100..250])]);
+    assert_eq!(entry.articles.lock().unwrap().bytes, 0, "voided: charge returned");
+    assert!(entry.take_recovery_bytes(90, 300).is_none());
+    // A lost volume's tee goes with its charge.
+    streaming_session_recovery_bytes_written(f.nzb_id, 91, 300, &[(0, &volume[..100])]);
+    assert_eq!(entry.articles.lock().unwrap().bytes, 300);
+    streaming_session_on_recovery_volume_lost(f.nzb_id, 91);
+    assert_eq!(entry.articles.lock().unwrap().bytes, 0);
+    assert!(entry.recovery_tees.lock().unwrap().get(&91).is_none());
+}
+
+/// All recovery tees together stay within half the snapshot limit.
+#[test]
+fn recovery_tees_together_stay_within_half_the_snapshot_limit() {
+    let f = fixture(0x7a75_000c, 6, 4, 3);
+    let entry = active_streaming_session(f.nzb_id).unwrap();
+    let limit = entry.article_byte_limit.load(Ordering::Acquire);
+    let size = limit / 3;
+    let piece = vec![1u8; 16];
+    streaming_session_recovery_bytes_written(f.nzb_id, 1, size, &[(0, &piece)]);
+    streaming_session_recovery_bytes_written(f.nzb_id, 2, size, &[(0, &piece)]);
+    let tees = entry.recovery_tees.lock().unwrap();
+    assert!(!tees[&1].void, "the first fits");
+    assert!(tees[&2].void, "the second would pass half the limit");
+    drop(tees);
+    assert_eq!(entry.articles.lock().unwrap().bytes, size);
 }

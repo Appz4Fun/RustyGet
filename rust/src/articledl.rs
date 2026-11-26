@@ -3249,9 +3249,7 @@ impl NzbgetRsArticleDownloader {
                 let off = crate::ffi::active_workstate().map_or(0, |ws| ws.local_time_offset());
                 sm.add_server_stats(bytes_read, 0, 0, conn.server.id, off);
             }
-            if let Some(pool) = crate::net::active_server_pool() {
-                pool.free_connection(cptr, true);
-            }
+            crate::net::return_connection(cptr, true);
             *downloaded_size = downloaded_size.wrapping_add(bytes_read);
             cs.0 = 0;
         }

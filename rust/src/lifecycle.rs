@@ -1615,6 +1615,16 @@ pub(crate) fn daemon_is_reloading() -> bool {
     dm_is_reloading()
 }
 
+/// Whether this instance is going away: a stop or a config reload has begun.
+/// Work that would outlive the instance (a detached job) is not started then.
+pub(crate) fn daemon_is_winding_down() -> bool {
+    let g = DAEMON_INSTANCE
+        .wait_mutex
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    g.stopped || g.reloading
+}
+
 /// Shuts down the daemon's global subsystems.
 #[cfg(unix)]
 fn shutdown_daemon_globals() {

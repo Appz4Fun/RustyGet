@@ -1518,6 +1518,13 @@ impl QueueSubsysHost {
         if self.use_active && crate::dupefallback::should_defer_to_par_host(self, nzb_ptr) {
             return;
         }
+        // a stop or reload is under way: the job would outlive this queue
+        // (the queue is built anew after a reload, and the repair runs again
+        // when the next file completes, or after the download)
+        #[cfg(unix)]
+        if self.use_active && crate::lifecycle::daemon_is_winding_down() {
+            return;
+        }
         if self.use_active {
             unsafe { crate::qqueue::start_live_repair(nzb_ptr.addr()) };
         }

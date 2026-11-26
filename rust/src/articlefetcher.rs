@@ -54,7 +54,9 @@ impl ConnHandle {
 }
 
 /// A news server, as named in [`NntpHost::get_connection`]'s exclusion list. Only a
-/// host makes these, from servers it reported.
+/// host makes these, from servers it reported. The daemon's host uses the
+/// server's process-unique id, never its address: a list made before a config
+/// reload names no server of the new pool and is never dereferenced.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ServerHandle(usize);
 
@@ -131,7 +133,7 @@ impl NativeNntpHost {
 
 fn server_info(s: &Arc<crate::net::RsNewsServer>) -> ServerInfo {
     ServerInfo {
-        handle: ServerHandle(Arc::as_ptr(s) as usize),
+        handle: ServerHandle(s.uid as usize),
         active: s.active.load(Ordering::SeqCst),
         norm_level: s.norm_level.load(Ordering::SeqCst),
         group: s.group,
@@ -199,9 +201,7 @@ impl NntpHost for NativeNntpHost {
         if !keep_connected || c.is_cancelled() {
             unsafe { c.disconnect() };
         }
-        if let Some(pool) = crate::net::active_server_pool() {
-            pool.free_connection(conn_ptr, true);
-        }
+        crate::net::return_connection(conn_ptr, true);
     }
 
     fn conn_server(&self, conn: ConnHandle) -> Option<ServerInfo> {
@@ -274,12 +274,13 @@ impl NntpHost for NativeNntpHost {
 /// pool as for any fetch.
 fn native_get_connection(level: i32, excluded: &[ServerHandle], light: bool) -> Option<ConnInfo> {
     let pool = crate::net::active_server_pool()?;
-    // SAFETY: server handles come from `server`/`get_connection` and the
-    // pool keeps its servers alive.
-    let failed: Vec<&crate::net::RsNewsServer> = excluded
+    // matched against this pool's own servers: a handle of a server of an
+    // older generation (a config reload since) matches none of them
+    let servers = pool.servers_snapshot();
+    let failed: Vec<&crate::net::RsNewsServer> = servers
         .iter()
-        .filter(|h| h.0 != 0)
-        .map(|h| unsafe { &*(h.0 as *const crate::net::RsNewsServer) })
+        .filter(|s| excluded.contains(&ServerHandle(s.uid as usize)))
+        .map(|s| s.as_ref())
         .collect();
     let conn_ptr = if light {
         match pool.get_light_connection_level(level, &failed) {

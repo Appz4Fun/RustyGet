@@ -1980,6 +1980,75 @@ def scenario_livegate(daemon, t):
             % (h['Status'], live, repaired, integ))
 
 
+def scenario_reloadmidrepair(daemon, t):
+    """6790 SIGSEGV of 2026-11-26 02:40:45 CST: a Settings save in the web
+    interface (saveconfig, then the interface's reload) while a live stream
+    repair was fetching from a duplicate freed the news server connection pool
+    under the repair's batch workers. Same shape as liveoverlap (FileA has a
+    hole, its differently segmented duplicate is queued, the big FileB keeps
+    the download going), but every duplicate article takes 2 s to come, and
+    while a duplicate article request is in flight the settings are saved
+    and reloaded, three times (Server1.Connections changed each time), as
+    the web interface does. The daemon must keep running (the same process answers
+    after each reload) and the release completes SUCCESS byte-identically.
+    The reload cancels the connections in flight first, so whether one is
+    still out when the pool is replaced (a worker that took a new one in
+    between, as on 6790) depends on timing: the counts are reported, not
+    required (the unit test reload_ownership_tests reproduces that window)."""
+    size_a, seg_a = 2_000_000, 200_000
+    size_b, seg_b = 40_000_000, 500_000
+    data_a = _payload(size_a, 7501)
+    data_b = _payload(size_b, 7502)
+    pa = _place_copy(t, 'rlA', data_a, 'a.mkv')
+    pb = _place_copy(t, 'rlB', data_b, 'b.mkv')
+    da = _place_copy(t, 'rlDon', data_a, 'a.mkv')
+    primary = build_multi_nzb([
+        (pa, 'ReloadA.mkv', size_a, seg_a, {4, 5, 6}),
+        (pb, 'ReloadB.mkv', size_b, seg_b, set()),
+    ])
+    donor = build_nzb(da, 'obf-reload.mkv', size_a, 160_000, set())
+    api = daemon.wait_ready()
+    daemon.append(api, 'RlDonor', donor, True, 'reload-key', 50)
+    daemon.append(api, 'RlMain', primary, False, 'reload-key', 100)
+    deadline = time.time() + 90
+    while _grep_log(t, 'Starting live stream repair') == 0 and time.time() < deadline:
+        time.sleep(0.1)
+    started = _grep_log(t, 'Starting live stream repair') > 0
+    reloads = 0
+    if started:
+        for connections in ('10', '6', '8'):
+            # a duplicate article request is held in the proxy right now:
+            # the repair has a connection out when the pool is replaced
+            seen = daemon.proxy.delayed
+            deadline = time.time() + 60
+            while daemon.proxy.delayed == seen and time.time() < deadline:
+                time.sleep(0.05)
+            values = [{'Name': o['Name'],
+                       'Value': connections if o['Name'] == 'Server1.Connections' else o['Value']}
+                      for o in api.loadconfig()]
+            if not api.saveconfig(values):
+                break
+            api = daemon.reload(api)
+            reloads += 1
+            time.sleep(1.0)
+    h = daemon.wait_history(api, 'RlMain', timeout=300)
+    alive = daemon.process.poll() is None
+    try:
+        api.status()
+    except Exception:
+        alive = False
+    still_out = _grep_log(t, 'still in use when the server pool was replaced')
+    freed = _grep_log(t, 'Old server pool freed after its last')
+    ok = h['Status'].startswith('SUCCESS')
+    integ = (_verify_output(t, data_a, '.mkv', dirs=(('main', 'dst'), ('main', 'inter'))) and
+             _verify_output(t, data_b, '.mkv', dirs=(('main', 'dst'), ('main', 'inter'))))
+    return ('reloadmidrepair',
+            ok and integ and alive and started and reloads == 3,
+            'status=%s integrity=%s alive=%s live_started=%s reloads=%d still_out_logs=%d '
+            'old_pool_freed_logs=%d delayed=%d'
+            % (h['Status'], integ, alive, started, reloads, still_out, freed, daemon.proxy.delayed))
+
+
 def scenario_livelastfile(daemon, t):
     """DupeArticleFallback=live with a SINGLE damaged file: when its job is
     captured no other file remains queued, so the live dispatch is skipped
@@ -14066,6 +14135,7 @@ SCENARIOS = {
     'liveoverlap': scenario_liveoverlap,
     'livegate': scenario_livegate,
     'livelastfile': scenario_livelastfile,
+    'reloadmidrepair': scenario_reloadmidrepair,
     'repost': scenario_repost,
     'repostrenamed': scenario_repostrenamed,
     'repostobfuscated': scenario_repostobfuscated,
@@ -14545,6 +14615,8 @@ SCENARIO_OPTIONS = {
     'restartfirstdead': ['DupeArticleFallback=live', 'DirectRename=yes', 'DirectWrite=yes', 'DownloadRate=300'],
     'livegate': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'livelastfile': ['DupeArticleFallback=live', 'ParCheck=auto'],
+    'reloadmidrepair': ['DupeArticleFallback=live', 'ParCheck=auto', 'DownloadRate=6000',
+                        'Server1.Connections=8'],
     # repost: ParCheck=auto runs par-check against a random-bytes stand-in
     # par2; duplicate fallback repairs only archive data and leaves parity
     # untouched - FAILURE/PAR is the EXPECTED final status
@@ -14925,6 +14997,7 @@ SCENARIO_DELAY_PROXY = {'lightburst': [(b'lbLoad', 0.25)], 'clientthreads': [(b'
                         'directunpackkeep': [(b'rel.part03', 2.0)],
                         'directunpackkeepnointer': [(b'rel.part03', 2.0)],
                         'truncatedstate': [(b'tsA/', 0.5)],
+                        'reloadmidrepair': [(b'rlDon/', 2.0)],
                         'streamrestartcredit': [(b'srSlow/', 3.0)],
                         'restartfailover': [(b'rfA/', 0.4)],
                         'ondiskstop': [(b'odB/', 1.0)],

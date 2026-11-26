@@ -783,7 +783,10 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
         })
         .collect();
 
-    let shapes = flush_shapes(&items);
+    let mut shapes = flush_shapes(&items);
+    // Items counted without being written (live PAR certified their target): not reported to
+    // live extraction as written; the finished file is read for them.
+    let dropped = std::cell::RefCell::new(Vec::new());
     let hand_off = (live.is_some() || recovery.is_some()) && !skip_disk_write;
     let (flushed_articles, flushed_size) = flush_cache_then_hand_off(
         &items,
@@ -797,7 +800,10 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
                 &write_context,
                 || qh.file_cache_is_deleted_unparked(file_ptr),
                 discard,
-                not_written,
+                |index| {
+                    dropped.borrow_mut().push(index);
+                    not_written(index);
+                },
                 |msg| {
                     if nzb_ptr.is_some() {
                         qh.nzb_print_message(nzb_ptr, MK_ERROR, msg);
@@ -833,8 +839,11 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
     );
     if direct_write && !skip_disk_write {
         // In their places in the volume: live extraction may read them now (see `livewrite`).
-        // An item counted without being written (live PAR certified its target already) is in
-        // place too: the file holds the certified bytes.
+        for &index in dropped.borrow().iter() {
+            if let Some(shape) = shapes.get_mut(index) {
+                shape.2 = false;
+            }
+        }
         for (offset, len) in flushed_ranges(&shapes, flushed_articles, flushed_size) {
             crate::livewrite::written(nzb_id, file_id, offset, len);
         }

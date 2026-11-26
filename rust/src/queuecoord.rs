@@ -1756,28 +1756,53 @@ fn join_path(dir: &[u8], name: &[u8]) -> Vec<u8> {
     out
 }
 
-/// The IDs of the files of the download's video set: the set of archive volumes (or the bare or
-/// split file) with the most bytes, as stream repair groups them. A frontier cut covers only
-/// these: extras (subs, a sample, a second set) are not lent by the alt.
+/// The IDs of the files of the download's video set: the files whose name has the same set stem
+/// (the name without its volume number: `.partNN.rar`, `.rNN`, `.rar`, `.7z.NNN`, `.zNN`,
+/// `.zip`, `.NNN`) as its largest file. A frontier cut covers only these: extras (subs, a
+/// sample, a second set) are not lent by the alt. (Files already completed have left the
+/// queue's list; the stem needs none of them.)
 #[cfg(unix)]
 fn video_set_file_ids(host: &crate::queuesubsys_host::QueueSubsysHost, nzb_ptr: NzbRef) -> Vec<i32> {
     let files: Vec<_> = (0..host.nzb_file_len(nzb_ptr))
         .map(|j| host.file_snap(host.nzb_file_at(nzb_ptr, j)))
         .filter(|f| !f.par_file)
         .collect();
-    let members: Vec<crate::streamrepair::SetMember> = files
-        .iter()
-        .map(|f| crate::streamrepair::SetMember::new(f.filename.clone(), f.size))
-        .collect();
-    let sets = crate::streamrepair::ContentMapper::group_sets(&members);
-    let total = |s: &crate::streamrepair::MemberSet| -> i64 {
-        s.members.iter().filter_map(|&m| members.get(m as usize)).map(|m| m.size).sum()
+    let Some(largest) = files.iter().max_by_key(|f| f.size) else {
+        return Vec::new();
     };
-    sets.iter()
-        .max_by_key(|s| total(s))
-        .map(|s| s.members.iter().filter_map(|&m| files.get(m as usize)).map(|f| f.id).collect())
-        .unwrap_or_default()
+    let stem = set_stem(&largest.filename);
+    files.iter().filter(|f| set_stem(&f.filename) == stem).map(|f| f.id).collect()
 }
+
+/// A volume's name without its volume number, lower case (see [`video_set_file_ids`]).
+fn set_stem(name: &[u8]) -> Vec<u8> {
+    fn numeric(b: &[u8]) -> bool {
+        !b.is_empty() && b.iter().all(u8::is_ascii_digit)
+    }
+    fn split_ext(n: &[u8]) -> Option<(&[u8], &[u8])> {
+        let dot = n.iter().rposition(|&b| b == b'.')?;
+        Some((&n[..dot], &n[dot + 1..]))
+    }
+    let n = name.to_ascii_lowercase();
+    let Some((base, ext)) = split_ext(&n) else {
+        return n;
+    };
+    if ext == b"rar" {
+        // name.partNN.rar or name.rar
+        if let Some((inner, part)) = split_ext(base) {
+            if part.starts_with(b"part") && numeric(&part[4..]) {
+                return inner.to_vec();
+            }
+        }
+        return base.to_vec();
+    }
+    let numbered = ext.len() >= 2 && matches!(ext[0], b'r' | b's' | b'z') && numeric(&ext[1..]);
+    if numbered || ext == b"zip" || numeric(ext) {
+        return base.to_vec();
+    }
+    n
+}
+
 
 /// The share of a download's data (par2 left out) that came, success or
 /// failure, in permille of its total size.
@@ -6920,6 +6945,10 @@ mod tests {
     #[test]
     fn a_weak_primary_switches_to_a_whole_copy_of_the_same_video() {
         use super::{weak_primary_switch, WeakSwitch, WeakSwitchFacts};
+        assert_eq!(super::set_stem(b"Show.part07.rar"), super::set_stem(b"show.part12.rar"));
+        assert_eq!(super::set_stem(b"Show.r07"), super::set_stem(b"Show.rar"));
+        assert_eq!(super::set_stem(b"movie.7z.003"), b"movie.7z".to_vec());
+        assert_ne!(super::set_stem(b"Subs.part01.rar"), super::set_stem(b"Show.part01.rar"));
         let dune = WeakSwitchFacts {
             held_in_fleet: true,
             tried: 73477,

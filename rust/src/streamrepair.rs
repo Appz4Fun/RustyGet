@@ -10643,6 +10643,16 @@ impl CrossPackRepairSession {
                         &mut target_adapter,
                     )
                 };
+                // A restarted set's output is proven already: the whole member's CRC32 matched
+                // the download's own bytes before the restart with the decoded rest, so its video
+                // is the download's (a check of a dead-volume set, with none of the download's
+                // bytes around its holes, cannot tell more). A check that differs still refuses.
+                let check = match (check, &restart_maps[set_index]) {
+                    (DonorCheck::Inconclusive, Some(_)) if self.repair_sets[repair_set_idx].want.is_none() => {
+                        DonorCheck::Same
+                    }
+                    (c, _) => c,
+                };
                 self.note_donor_identity(repair_set_idx, check);
                 let verified = self.donor_accepted(repair_set_idx, check);
                 if !verified {

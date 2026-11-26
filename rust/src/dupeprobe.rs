@@ -788,7 +788,7 @@ impl NzbgetRsDupeProbe {
             ids.reserve(srvs.len());
             for s in &srvs {
                 active.push(u8::from(s.active.load(Ordering::SeqCst)));
-                groups.push(s.group);
+                groups.push(s.group());
                 norm_levels.push(s.norm_level.load(Ordering::SeqCst));
                 retentions.push(s.retention);
                 ids.push(s.id);

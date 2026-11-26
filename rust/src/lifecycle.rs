@@ -231,6 +231,7 @@ impl LifecycleManager {
                 if crate::options::active_options().is_some_and(|o| !o.remote_client_mode()) {
                     if let Some(sp) = crate::net::active_server_pool() {
                         sp.init_connections();
+                        crate::nntprs_pool::spawn_identification(&sp);
                     }
                     crate::statmeter::init_daemon_statmeter();
                 }

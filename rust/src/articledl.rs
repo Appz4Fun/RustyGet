@@ -3967,6 +3967,12 @@ impl NzbgetRsArticleDownloader {
             let mut failed_servers: Vec<usize> = Vec::with_capacity(servers_cap);
             // backbones that answered 430 for this article (see `BackboneMiss`)
             let mut missing: Vec<BackboneMiss> = Vec::new();
+            // a server or backbone change meanwhile voids those 430s
+            let missing_epoch = crate::articlefetcher::missing_epoch();
+            let mut missing_epoch_seen = missing_epoch;
+            // set when the epoch moved: the next server-list advance starts over at
+            // the first level (a retry of the same server keeps its level)
+            let mut restart_levels = false;
             // every server asked answered 430 (none failed another way)
             let mut asked_430 = 0u32;
             let mut only_430 = true;
@@ -4033,6 +4039,11 @@ impl NzbgetRsArticleDownloader {
             };
 
             loop {
+                if crate::articlefetcher::missing_epoch() != missing_epoch_seen {
+                    missing_epoch_seen = crate::articlefetcher::missing_epoch();
+                    missing.clear();
+                    restart_levels = true;
+                }
                 let (stopped, _, _, _, _, _, _) = runtime_flags();
                 if stopped {
                     break;
@@ -4094,7 +4105,7 @@ impl NzbgetRsArticleDownloader {
                 level = srv.norm_level.load(Ordering::SeqCst);
                 let retention = srv.retention;
                 let server_id = srv.id;
-                let backbone = srv.group;
+                let backbone = srv.group();
                 let join_group = srv.join_group;
                 let mut remained_retries = transient_retries.remained_retries(last_server);
 
@@ -4334,6 +4345,19 @@ impl NzbgetRsArticleDownloader {
                     if push_failed {
                         failed_servers.push(last_server);
                     }
+                    // a server or backbone change since this article began voids the
+                    // backbone 430s: decide from the first level again, minus the
+                    // servers really tried (the level check below passes over the
+                    // levels that are all tried)
+                    if crate::articlefetcher::missing_epoch() != missing_epoch_seen {
+                        missing_epoch_seen = crate::articlefetcher::missing_epoch();
+                        missing.clear();
+                        restart_levels = true;
+                    }
+                    if restart_levels {
+                        restart_levels = false;
+                        level = 0;
+                    }
 
                     let (cand_ptrs, cands): (Vec<usize>, Vec<LevelCandidate>) =
                         crate::net::active_server_pool()
@@ -4349,7 +4373,7 @@ impl NzbgetRsArticleDownloader {
                                             LevelCandidate {
                                                 id: s.id,
                                                 level: s.norm_level.load(Ordering::SeqCst),
-                                                group: s.group,
+                                                group: s.group(),
                                                 retention: s.retention,
                                                 available,
                                             },
@@ -4411,7 +4435,7 @@ impl NzbgetRsArticleDownloader {
                                 )
                             })
                         {
-                            crate::articlefetcher::note_missing_everywhere(&w.message_id);
+                            crate::articlefetcher::note_missing_everywhere_since(&w.message_id, missing_epoch);
                         }
                         status = AD_FAILED;
                         break;

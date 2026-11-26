@@ -113,4 +113,4 @@ Issues and pull requests are welcome in this repository. Write new code in Rust,
 
 RustyGet is free software under the [GNU General Public License](COPYING), version 2 or, at your option, any later version. The copyright notices of everyone whose work it contains stay in the source files.
 
-The binaries also link libraries under other licences, listed with their authors on the License page of the web interface. Among them: nntp-rs (article decoding) under the GNU Affero General Public License, version 3 or later, which adds terms for software that users reach over a network; zipview under the GPL, version 3; and zipfast under the RPL-1.5.
+The binaries also link libraries under other licences, listed with their authors on the License page of the web interface. Among them: nntp-rs (article decoding, and finding servers that share an article store) under the GNU Affero General Public License, version 3 or later, which adds terms for software that users reach over a network; zipview under the GPL, version 3; and zipfast under the RPL-1.5.

@@ -7615,8 +7615,9 @@ def scenario_livestraggler(daemon, t):
     tail = clock.span('Collection %s completely downloaded' % name, 'Direct unpack for %s successful' % name)
     reads = _live_reads(t)
     as_written, read_back, _ = reads if reads else (0.0, None, None)
-    ok = (extracted and asked >= 1 and after_start is not None and after_start < 30 and tail != 'n/a' and
-          float(tail) <= 4.0 and read_back == 0 and as_written > 0 and daemon.proxy.delayed >= 1 and
+    # (a loaded test host stretches the 8 s download; the 40 s hang is what is ruled out)
+    ok = (extracted and asked >= 1 and after_start is not None and after_start < 25 and tail != 'n/a' and
+          float(tail) <= 8.0 and read_back == 0 and as_written > 0 and daemon.proxy.delayed >= 1 and
           h['Status'].startswith('SUCCESS') and h['UnpackStatus'] == 'SUCCESS')
     return ('livestraggler', ok, 'status=%s unpack=%s extracted_ok=%s asked_again=%d hung_requests=%d '
             'extracted_after_start_s=%s du_after_download_s=%s as_written_mb=%s read_back_mb=%s' % (

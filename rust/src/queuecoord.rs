@@ -7525,6 +7525,12 @@ fn discard_temp_files_host(
 
 #[cfg(unix)]
 fn save_partial_state_host(host: &crate::queuesubsys_host::QueueSubsysHost, file_ptr: FileRef) {
+    // Run every second over every file in the queue: check the flag before taking a whole
+    // snapshot (a thousand-item queue's file snapshots were a tenth of the coordinator's
+    // time on 6790).
+    if !host.file_partial_changed(file_ptr) {
+        return;
+    }
     let file = host.file_snap(file_ptr);
     if file.partial_changed {
         let mut dbg = b"Saving partial state for ".to_vec();

@@ -2775,6 +2775,19 @@ impl QueueSubsysHost {
         file_snap_from(file_ptr, &ints, &i64s, 0, Default::default())
     }
 
+    /// A file's partial-state-changed flag alone (one field read, not a whole snapshot).
+    pub fn file_partial_changed(&self, file_ptr: FileRef) -> bool {
+        if file_ptr.is_none() || !self.use_active {
+            return false;
+        }
+        unsafe {
+            crate::qfile::nzbget_rs_file_get(
+                file_ptr.addr() as *const crate::qfile::File,
+                crate::qfile::field::PARTIAL_CHANGED,
+            ) != 0
+        }
+    }
+
     pub fn file_groups(&self, file_ptr: FileRef) -> Vec<Vec<u8>> {
         if self.use_active {
             return unsafe { crate::qfile::groups(file_ptr.addr() as *const crate::qfile::File) };

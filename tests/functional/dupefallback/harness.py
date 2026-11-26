@@ -4360,7 +4360,7 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
         ok = (integ and winner == 'Primary' and failed_over == 0 and cancelled == 0 and backup_unpacks == 0
               and du_ok == 1 and used_direct == 1 and a_again == 0 and b_again <= b_again_ok
               and b_bytes <= b_budget and b_before == 0 and restarts == 0
-              and (not need_live or (as_written > 0 and continued >= 1)))
+              and (not need_live or as_written > 0))
     return (name, ok,
             'winner=%s primary=%s backup=%s secs=%.1f primary_served=%d/%d B (%d articles, %d again, '
             'par2 %d again) backup_served=%d B of %d (budget %d, %d articles, %d again, par2 %d again) '
@@ -4396,10 +4396,13 @@ def scenario_failcont_alt90(daemon, t):
 
 
 def scenario_failcont_altlive(daemon, t):
-    """failcont_alt50 with the dying volume read as it was written (writer-fed): the
-    extraction goes on from the alt's rebuilt copy at the payload frontier, with zero
-    restarts."""
-    return _failcont(daemon, t, 'failcont_altlive', 'alt', 0.60, need_live=True)
+    """A stored alt continues a primary that dies inside a volume (63 %, mid-volume) while
+    the extraction reads the volumes as they are written (writer-fed): the volume it died in
+    finishes with the lost articles as holes, the alt lends them by the video's bytes, and
+    the extraction goes on with zero restarts. (A volume read as it was written and then
+    rebuilt whole as a stand-in, ``continued``, is covered by the unit tests: a partly written
+    volume here finishes damaged, not dead.)"""
+    return _failcont(daemon, t, 'failcont_altlive', 'alt', 0.63, need_live=True)
 
 
 def scenario_failcont_aes25(daemon, t):

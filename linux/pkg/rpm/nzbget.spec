@@ -6,7 +6,7 @@ Provides: nzbget
 Requires: systemd
 Recommends: p7zip unrar >= 6
 Summary: Command-line based binary newsgrabber for nzb files, written in C++
-License: GPLv2
+License: GPL-2.0-or-later AND AGPL-3.0-or-later AND GPL-3.0 AND RPL-1.5
 
 %description
 NZBGet is a command-line based binary newsgrabber for nzb files,

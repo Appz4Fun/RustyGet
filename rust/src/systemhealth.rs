@@ -2666,7 +2666,7 @@ pub const BUNDLED_LIBRARIES: &[(&str, &str)] = &[
     ("zipfast", "0.1.0"),
     ("zipview", "0.1.0"),
     ("par-rs", "0.2.0"),
-    ("nntmux-yenc", "0.1.0"),
+    ("nntp-rs", "0.4.0"),
     ("flate2", "1.1.11"),
     ("zlib-rs", "0.6.8"),
     ("zstd", "0.14.3"),
@@ -2919,7 +2919,7 @@ pub fn system_info_format(
         SystemToolView {
             name: b"yEnc SIMD Decoder",
             version: b"Built-in",
-            path: b"nntmux-yenc",
+            path: b"nntp-rs",
         },
     ];
     let ssl_ver_extracted;

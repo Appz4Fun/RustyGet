@@ -3151,7 +3151,7 @@ impl NzbgetRsArticleDownloader {
             conn_state: Mutex::new((initial_conn, Vec::new())),
             worker: Mutex::new(DlWorker {
                 decoder: Decoder::new(
-                    crate::decoder::yenc_decode_incremental,
+                    crate::decoder::yenc_decode_piece,
                     crate::decoder::yenc_crc,
                 ),
                 writer: RsArticleWriter::default(),

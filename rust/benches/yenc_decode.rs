@@ -1,7 +1,7 @@
 //! yEnc article decode throughput through the real `Decoder` caller:
 //! framing, dot-unstuffing, the SIMD body kernel and the CRC-32 check.
 //! `cargo bench --bench yenc_decode` prints MB/s of encoded input per case.
-use nzbget_rs::decoder::{yenc_crc, yenc_decode_incremental, Decoder, Status};
+use nzbget_rs::decoder::{yenc_crc, yenc_decode_piece, Decoder, Status};
 use std::time::Instant;
 
 /// A 750,000-byte part encoded as a news server sends it: 128-byte lines,
@@ -47,7 +47,7 @@ fn article(seed: u64, size: usize) -> (Vec<u8>, u32) {
 }
 
 fn run(article: &[u8], chunk: usize, scratch: &mut Vec<u8>) -> (usize, Status, u32) {
-    let mut d = Decoder::new(yenc_decode_incremental, yenc_crc);
+    let mut d = Decoder::new(yenc_decode_piece, yenc_crc);
     d.crc_check = true;
     let mut total = 0;
     for piece in article.chunks(chunk) {
@@ -76,20 +76,43 @@ fn main() {
             "crc32fast: {:.1} MB/s",
             data.len() as f64 * 200.0 / t.elapsed().as_secs_f64() / 1e6
         );
-        let mut buf = art.clone();
+        // the body alone: from after the =ypart line to the =yend line, as the
+        // Decoder hands it to its kernel
+        let start = art
+            .windows(7)
+            .position(|w| w == b"\r\n=ypar")
+            .and_then(|p| art[p + 2..].windows(2).position(|w| w == b"\r\n").map(|q| p + 2 + q + 2))
+            .expect("=ypart line");
+        let end = art
+            .windows(7)
+            .rposition(|w| w == b"\r\n=yend")
+            .expect("=yend line");
+        let body = &art[start..end];
+        let mut buf = body.to_vec();
+        let mut state = 0;
+        let step = nzbget_rs::decoder::yenc_decode_piece(&mut buf, 0, body.len(), 0, &mut state);
+        assert_eq!(step.dst, size, "the body kernel decodes the whole part");
         let t = Instant::now();
         for _ in 0..200 {
-            buf.copy_from_slice(&art);
-            std::hint::black_box(nntmux_yenc::decoder::decode_in_place(&mut buf));
+            buf.copy_from_slice(body);
+            let mut state = 0;
+            std::hint::black_box(nzbget_rs::decoder::yenc_decode_piece(
+                &mut buf,
+                0,
+                body.len(),
+                0,
+                &mut state,
+            ));
         }
         println!(
-            "copy+nntmux decode_in_place: {:.1} MB/s",
-            art.len() as f64 * 200.0 / t.elapsed().as_secs_f64() / 1e6
+            "copy+yenc_decode_piece on the body (the Decoder's kernel, no framing, no CRC): {:.1} MB/s",
+            body.len() as f64 * 200.0 / t.elapsed().as_secs_f64() / 1e6
         );
+        let mut whole = art.clone();
         let t = Instant::now();
         for _ in 0..200 {
-            buf.copy_from_slice(std::hint::black_box(&art));
-            std::hint::black_box(&buf);
+            whole.copy_from_slice(std::hint::black_box(&art));
+            std::hint::black_box(&whole);
         }
         println!(
             "copy only: {:.1} MB/s",
@@ -107,9 +130,11 @@ fn main() {
             best = best.min(t.elapsed().as_secs_f64() / (iters / 5) as f64);
         }
         println!(
-            "yenc_decode chunk={chunk:>7}: {:8.1} MB/s (scan kernel {})",
+            "yenc_decode chunk={chunk:>7}: {:8.1} MB/s (SIMD cap setting {})",
             art.len() as f64 / best / 1e6,
-            nzbget_rs::decoder::scan_kernel()
+            std::env::var("NNTP_RS_SIMD")
+                .or_else(|_| std::env::var("RUSTYGET_SIMD"))
+                .unwrap_or_else(|_| "auto".into())
         );
     }
 }

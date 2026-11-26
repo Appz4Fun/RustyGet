@@ -11,6 +11,11 @@ The reference has one fix: the C++ appended the rest of the line buffer to
 itself with an overlapping strncpy (undefined behavior that glibc's vector
 strncpy turns into garbled =yend lines); see the note below.
 
+The Rust decoder (nntp-rs v0.3.2 and later) also drops the NNTP dot-stuffing of
+a UU line whose length character is "." (a 14-byte line); the C++ reference
+decodes such a line shifted. The generator therefore never makes a 14-byte UU
+line (it splits one into 13 + 1); rust/src/decoder.rs tests that case.
+
 The pre-port code is compiled as OldDecoder and linked with a built libnzbget.
 
 Usage: decoder_differential.py BUILD_DIR [ARTICLES]
@@ -104,6 +109,9 @@ static std::string article() {
         a += "begin 644 " + name + "\r\n";
         for (size_t i = 0; i < data.size(); i += 45) {
             size_t n = std::min<size_t>(45, data.size() - i);
+            // no 14-byte line: its length character is '.', dot-stuffed on the
+            // wire, which the Rust decoder unstuffs and the C++ reference does not
+            if (n == 14) n = 13;
             std::string line(1, (char)(' ' + n));
             for (size_t k = 0; k < n; k += 3) {
                 unsigned char b0 = data[i + k], b1 = k + 1 < n ? data[i + k + 1] : 0, b2 = k + 2 < n ? data[i + k + 2] : 0;

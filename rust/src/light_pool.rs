@@ -482,8 +482,10 @@ mod tests {
         assert_eq!(slots.used(), 2);
         let peak = std::sync::atomic::AtomicUsize::new(0);
         std::thread::scope(|s| {
+            // timed from before the spawn: under load the waiter thread may only start
+            // after the slot was released, and would then see no wait at all
+            let start = std::time::Instant::now();
             let waiter = s.spawn(|| {
-                let start = std::time::Instant::now();
                 let _c = slots.take(|| 2, || false).expect("third, once one ends");
                 peak.fetch_max(slots.used(), std::sync::atomic::Ordering::SeqCst);
                 start.elapsed()

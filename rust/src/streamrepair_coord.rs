@@ -3448,10 +3448,12 @@ mod tests {
         assert!(!same_video_label(Some(b"borrowable"), None, None));
         assert!(!same_video_label(Some(b"borrowable"), None, Some(b"unverified")));
         assert!(!same_video_label(Some(b"borrowable-encrypted"), None, Some(b"differ")));
+        assert!(!same_video_label(Some(b"borrowable-encrypted"), None, None));
         assert!(same_video_label(Some(b"unknown"), None, Some(b"same")));
         assert!(!same_video_label(Some(b"borrowable"), Some(b"container"), None));
         assert!(!same_video_label(Some(b"borrowable"), Some(b"other"), None));
         assert!(!same_video_label(None, Some(b"twin:2/3"), None));
+        assert!(!same_video_label(Some(b"unknown"), None, None));
         assert!(!same_video_label(None, None, None));
     }
 

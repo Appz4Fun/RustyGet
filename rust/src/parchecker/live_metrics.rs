@@ -35,6 +35,10 @@ pub(super) struct LiveMetricCounters {
     /// and their bytes: never read back.
     pub recovery_volumes_from_ram: AtomicU64,
     pub recovery_bytes_from_ram: AtomicU64,
+    /// Damaged slices decode-ahead rebuilt while the download went on (par-rs
+    /// `take_rebuilt_slices`), and those re-verified once their file completed.
+    pub rebuilt_ahead_slices: AtomicU64,
+    pub rebuilt_rechecked: AtomicU64,
     pub writer_wait_ns: AtomicU64,
     pub operation_wait_ns: AtomicU64,
     report_sequence: AtomicU64,
@@ -138,7 +142,7 @@ impl ActiveStreamingSession {
         let replay = self.catchup_source_bytes.load(Ordering::Relaxed);
         let mb = |bytes: u64| format!("{:.1}", bytes as f64 / (1024.0 * 1024.0));
         format!(
-            "Live PAR (job {nzb_id}) I/O: source_bytes_read {} MB (par-rs {} MB, RustyGet replay {} MB), backfill_bytes_read {} MB, recovery_bytes_read {} MB, target_verification_bytes_read {} MB, ram_bytes_verified {} MB, ram_backfilled_slices {}, recovery volumes from RAM {} ({} MB), trusted slice checks {}; {} cache miss(es), {} article(s) read from their file by par-rs, {} waited for the cache flush, {} still waiting, {} handed over with the bytes written, {} taken from bytes kept at write, {} file(s) matched by their first article, {} not kept at write (no room), {} taken from bytes kept before the session",
+            "Live PAR (job {nzb_id}) I/O: source_bytes_read {} MB (par-rs {} MB, RustyGet replay {} MB), backfill_bytes_read {} MB, recovery_bytes_read {} MB, target_verification_bytes_read {} MB, ram_bytes_verified {} MB, ram_backfilled_slices {}, recovery volumes from RAM {} ({} MB), trusted slice checks {}; {} cache miss(es), {} article(s) read from their file by par-rs, {} waited for the cache flush, {} still waiting, {} handed over with the bytes written, {} taken from bytes kept at write, {} file(s) matched by their first article, {} not kept at write (no room), {} taken from bytes kept before the session, {} slice(s) rebuilt ahead ({} re-verified at completion)",
             mb(io.source_bytes_read.saturating_add(replay)),
             mb(io.source_bytes_read),
             mb(replay),
@@ -159,6 +163,8 @@ impl ActiveStreamingSession {
             self.metrics.bound_by_first_article.load(Ordering::Relaxed),
             self.metrics.stash_refusals.load(Ordering::Relaxed),
             self.metrics.presession_articles.load(Ordering::Relaxed),
+            self.metrics.rebuilt_ahead_slices.load(Ordering::Relaxed),
+            self.metrics.rebuilt_rechecked.load(Ordering::Relaxed),
         )
     }
 }

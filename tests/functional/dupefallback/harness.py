@@ -12760,6 +12760,31 @@ def scenario_liveparheldvolume(daemon, t):
             'volumes_fetched=%s io=%s' % (h['Status'], intact, live, batch, fetched, io))
 
 
+def scenario_livepardecodeahead(daemon, t):
+    """Decode-ahead (par-rs set_decode_ahead): an article of the first data file is lost
+    early; once the recovery blocks for it are in, every later slice folds straight into the
+    solution, and the lost slice is rebuilt, checked and written into its file within the
+    call that verifies the last other slice ("rebuilt 1 damaged slice(s) ... ahead while
+    downloading"), handed to live extraction at once. So the live repair as the download
+    ends has nothing left to rebuild (repaired 0 block(s)), no batch par-repair runs, and the
+    output is byte-exact. Before: the slice was rebuilt only by that repair."""
+    h, intact, io = _livepar_run(daemon, t, 'lda', 12570, {0: {3}}, 3)
+    log = t.read_file('nzbget.log').decode(errors='replace')
+    rebuilt = re.findall(r'Live PAR \(job \d+\): rebuilt (\d+) damaged slice\(s\) \([\d.]+ MB\) ahead '
+                         r'while downloading', log)
+    ended = re.findall(r'repaired (\d+) block\(s\) with \d+ recovery block\(s\) in [\d.]+ s as the '
+                       r'download ended', log)
+    batch = _grep_log(t, 'PAR repair timings for')
+    before_end = _log_before(t, 'ahead while downloading', 'as the download ended')
+    # Informational: whether the rebuild also came before the last data file finished.
+    before_last = _log_before(t, 'ahead while downloading', 'Successfully downloaded Live/data7.bin')
+    ok = (h['Status'].startswith('SUCCESS') and intact and sum(int(n) for n in rebuilt) >= 1
+          and before_end and bool(ended) and int(ended[-1]) == 0 and batch == 0)
+    return ('livepardecodeahead', ok, 'status=%s intact=%s rebuilt_ahead=%s end_repaired=%s '
+            'before_end=%s before_last_data=%s batch_repairs=%d io=%s'
+            % (h['Status'], intact, rebuilt, ended, before_end, before_last, batch, io))
+
+
 def scenario_parinplace(daemon, t):
     """The batch fallback (live PAR off) repairs in place: only the damaged blocks are
     written into the damaged files, no full-size backup copy is made, and the phase
@@ -15426,6 +15451,7 @@ SCENARIOS = {
     'livepargrow': scenario_livepargrow,
     'liveparzeroreads': scenario_liveparzeroreads,
     'liveparheldvolume': scenario_liveparheldvolume,
+    'livepardecodeahead': scenario_livepardecodeahead,
     'livepartrusted': scenario_livepartrusted,
     'livepartrustedtemp': scenario_livepartrustedtemp,
     'parinplace': scenario_parinplace,
@@ -15890,6 +15916,7 @@ SCENARIO_OPTIONS = {
     'livepargrow': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
     'liveparzeroreads': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
     'liveparheldvolume': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
+    'livepardecodeahead': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
     'livepartrusted': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
     'livepartrustedtemp': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=0', 'DirectWrite=no'],
     'parinplace': ['ParCheck=auto', 'LiveParRepair=no'],

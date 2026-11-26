@@ -360,13 +360,27 @@ pub fn head_path(final_path: &Path) -> Option<PathBuf> {
 /// The writer wrote bytes `offset..offset + len` of file `file_id` into its direct-write
 /// output (the write returned).
 pub fn written(nzb_id: i32, file_id: i32, offset: u64, len: u64) {
+    report(nzb_id, file_id, None, offset, len);
+}
+
+/// Live PAR's decode-ahead rebuilt bytes `offset..offset + len` of file `file_id` (a damaged
+/// slice, checked against its par2 checksums) and wrote them into `path`. Counted as written
+/// only when `path` is the volume's direct-write output: the extraction reads that file.
+pub fn rebuilt(nzb_id: i32, file_id: i32, path: &Path, offset: u64, len: u64) {
+    report(nzb_id, file_id, Some(path), offset, len);
+}
+
+fn report(nzb_id: i32, file_id: i32, path: Option<&Path>, offset: u64, len: u64) {
     if len == 0 {
         return;
     }
     let volume = {
         let map = lock(&VOLUMES);
-        map.get(&nzb_id)
-            .and_then(|l| l.iter().find(|v| v.file_id == file_id).cloned())
+        map.get(&nzb_id).and_then(|l| {
+            l.iter()
+                .find(|v| v.file_id == file_id && path.is_none_or(|p| p == v.out_path))
+                .cloned()
+        })
     };
     let Some(v) = volume else {
         return;

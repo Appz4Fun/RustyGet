@@ -1,4 +1,5 @@
-//! Trusted slice verification (par-rs `set_trust_verified_slices`), recovery volumes from
+//! Trusted slice verification (par-rs `set_trust_verified_slices`), decode-ahead
+//! (`set_decode_ahead`), forged file descriptions, recovery volumes from
 //! RAM (`on_recovery_volume_bytes`) and back-fill from held bytes (`backfill_from_bytes`).
 use super::*;
 use par_rs::create::{build_set, SetOptions, VolumeScheme};
@@ -525,4 +526,238 @@ fn recovery_tees_together_stay_within_half_the_snapshot_limit() {
     assert!(!entry.recovery_tees.lock().unwrap()[&3].void, "a loan makes room");
     assert!(entry.article_byte_limit.load(Ordering::Acquire) >= 4 * size);
     assert_eq!(entry.articles.lock().unwrap().bytes, 2 * size);
+}
+
+/// The recovery volume arrives first; slice `lost` fails for good, every other slice arrives
+/// in order through the entry points the download uses. Returns the index of the slice whose
+/// hand-over brought the rebuilt slice on (`None` when nothing was rebuilt).
+fn feed_with_loss(f: &Fixture, lost: usize) -> Option<usize> {
+    let entry = active_streaming_session(f.nzb_id).unwrap();
+    let (name, volume) = &f.volumes[0];
+    let path = f.dir.join(name);
+    std::fs::write(&path, volume).unwrap();
+    entry.session.on_recovery_volume_arrived(&path, None).unwrap();
+    let id = file_id(f.nzb_id);
+    let mut handed_at = None;
+    for (i, chunk) in f.data.chunks(SLICE).enumerate() {
+        let offset = (i * SLICE) as u64;
+        if i == lost {
+            streaming_session_on_article_failed_permanently(
+                f.nzb_id,
+                &id,
+                offset,
+                chunk.len() as u64,
+            )
+            .unwrap()
+            .unwrap();
+        } else {
+            streaming_session_on_article_finished_by_name(
+                f.nzb_id,
+                b"part01.rar",
+                offset,
+                chunk.len() as u64,
+                par_rs::crc::crc32(chunk),
+                Some(chunk),
+            )
+            .unwrap()
+            .unwrap();
+        }
+        if handed_at.is_none() && entry.metrics.rebuilt_ahead_slices.load(Ordering::Relaxed) > 0 {
+            handed_at = Some(i);
+        }
+    }
+    handed_at
+}
+
+/// Decode-ahead (par-rs #126/#127): a slice lost early is rebuilt, written into its target
+/// and handed on within the call that verifies the last other slice, before any repair call,
+/// so the download's end finds nothing left to repair and the target is whole.
+#[test]
+fn decode_ahead_rebuilds_a_lost_slice_before_the_download_ends() {
+    let f = fixture(0x7a75_000d, 16, 2, 2);
+    let path = f.dir.join("part01.rar");
+    // The lost article's bytes never reach the file.
+    let mut disk = f.data.clone();
+    disk[SLICE..2 * SLICE].fill(0);
+    std::fs::write(&path, &disk).unwrap();
+    let handed_at = feed_with_loss(&f, 1);
+    let last = f.data.len().div_ceil(SLICE) - 1;
+    assert_eq!(handed_at, Some(last), "rebuilt with the last article, not at a repair call");
+    let entry = active_streaming_session(f.nzb_id).unwrap();
+    let status = entry.session.status();
+    assert_eq!(status.damaged, 0, "the lost slice is verified now");
+    assert_eq!(status.verified, status.total);
+    assert_eq!(std::fs::read(&path).unwrap(), f.data, "written into the target");
+    assert_eq!(entry.metrics.rebuilt_ahead_slices.load(Ordering::Relaxed), 1);
+    // The file is still being written: its rebuilt slice waits for a second look.
+    assert_eq!(entry.rebuilt_pending(), 1);
+    let id = file_id(f.nzb_id);
+    with_live_entry(f.nzb_id, &entry, |e| e.recheck_rebuilt(f.nzb_id, id)).unwrap();
+    assert_eq!(entry.rebuilt_pending(), 0);
+    assert_eq!(entry.metrics.rebuilt_rechecked.load(Ordering::Relaxed), 1);
+    assert!(entry.session.diverged_slices().is_empty());
+    let (ok, hashes) = check(f.nzb_id);
+    assert!(ok);
+    assert_eq!(hashes.unwrap().crc32, par_rs::crc::crc32(&f.data));
+    assert!(entry
+        .io_stats_line(f.nzb_id)
+        .ends_with("1 slice(s) rebuilt ahead (1 re-verified at completion)"));
+}
+
+/// The write order of decode-ahead: a late write of a corrupt copy into a slice rebuilt
+/// while its file was still being written undoes the rebuild. The second look at the file's
+/// completion finds the slice diverged, so the trusted check fails the target (and the set
+/// is repaired from disk) instead of passing it.
+#[test]
+fn a_corrupt_write_after_the_rebuild_is_caught_at_completion() {
+    let f = fixture(0x7a75_000e, 16, 2, 2);
+    let path = f.dir.join("part01.rar");
+    let mut disk = f.data.clone();
+    disk[3 * SLICE..4 * SLICE].fill(0);
+    std::fs::write(&path, &disk).unwrap();
+    assert!(feed_with_loss(&f, 3).is_some());
+    assert_eq!(std::fs::read(&path).unwrap(), f.data);
+    // A retry's CRC-failed copy lands after the rebuild.
+    let mut late = f.data.clone();
+    late[3 * SLICE + 100..3 * SLICE + 200].fill(0x5A);
+    std::fs::write(&path, &late).unwrap();
+    let entry = active_streaming_session(f.nzb_id).unwrap();
+    let id = file_id(f.nzb_id);
+    with_live_entry(f.nzb_id, &entry, |e| e.recheck_rebuilt(f.nzb_id, id)).unwrap();
+    assert!(!entry.session.diverged_slices().is_empty());
+    let (ok, hashes) = check(f.nzb_id);
+    assert!(!ok, "the overwritten target fails");
+    assert!(hashes.is_none());
+}
+
+/// A slice rebuilt in a file whose download already completed is final: nothing is read
+/// back for it.
+#[test]
+fn a_slice_rebuilt_in_a_completed_file_is_not_read_again() {
+    let f = fixture(0x7a75_000f, 16, 2, 2);
+    let path = f.dir.join("part01.rar");
+    let mut disk = f.data.clone();
+    disk[2 * SLICE..3 * SLICE].fill(0);
+    std::fs::write(&path, &disk).unwrap();
+    let entry = active_streaming_session(f.nzb_id).unwrap();
+    let id = file_id(f.nzb_id);
+    entry.completed_sources.lock().unwrap().insert(id);
+    assert!(feed_with_loss(&f, 2).is_some());
+    assert_eq!(entry.rebuilt_pending(), 0);
+    let reads = target_reads(f.nzb_id);
+    with_live_entry(f.nzb_id, &entry, |e| e.recheck_rebuilt(f.nzb_id, id)).unwrap();
+    assert_eq!(target_reads(f.nzb_id), reads);
+    assert_eq!(entry.metrics.rebuilt_rechecked.load(Ordering::Relaxed), 0);
+    assert_eq!(std::fs::read(&path).unwrap(), f.data);
+}
+
+/// Rebuilt bytes reach live extraction at once: the volume the download is writing (its
+/// direct-write output is the file par-rs wrote into) counts the rebuilt slice as written,
+/// so an extraction parked on the lost range reads on.
+#[test]
+fn rebuilt_slices_are_handed_to_live_extraction() {
+    let f = fixture(0x7a75_0010, 16, 2, 2);
+    let path = f.dir.join("part01.rar");
+    let mut disk = f.data.clone();
+    disk[5 * SLICE..6 * SLICE].fill(0);
+    std::fs::write(&path, &disk).unwrap();
+    let entry = active_streaming_session(f.nzb_id).unwrap();
+    let id = file_id(f.nzb_id);
+    let queue_id = 41;
+    entry.queue_bindings.lock().unwrap().insert(queue_id, id);
+    entry.note_written(id, &path);
+    {
+        let _operation = entry.operation.lock().unwrap();
+        entry.apply_target_paths().unwrap();
+    }
+    let out = path.as_os_str().as_encoded_bytes().to_vec();
+    crate::livewrite::register(f.nzb_id, queue_id, &out, &out, f.data.len() as u64, false);
+    let volume = crate::livewrite::lookup(f.nzb_id, &out).unwrap();
+    // Everything but the lost slice is written by the download.
+    let len = f.data.len() as u64;
+    crate::livewrite::written(f.nzb_id, queue_id, 0, (5 * SLICE) as u64);
+    crate::livewrite::written(f.nzb_id, queue_id, (6 * SLICE) as u64, len - (6 * SLICE) as u64);
+    assert_eq!(volume.written_end((5 * SLICE) as u64), None);
+    assert!(feed_with_loss(&f, 5).is_some());
+    assert_eq!(volume.written_end(0), Some(len), "one written run now");
+    crate::livewrite::forget(f.nzb_id);
+}
+
+/// par-rs #133: a FileDesc packet edited to an implausible length (its checksum fixed, so it
+/// loads) made finalize allocate gigabytes. RustyGet treats the set as unusable and carries
+/// on: the batch repairer reports insufficient critical data with the reason, and live PAR
+/// does not start, without allocating for the claimed slices.
+#[test]
+fn a_forged_file_description_is_an_unusable_par_set() {
+    use par_rs::packet::{encode_packet, SetId, TYPE_FILEDESC};
+    let dir = std::env::temp_dir().join(format!(
+        "rustyget-forged-filedesc-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let data = bytes(8 * SLICE, 0x0f0f);
+    let built = build_set(
+        "forged",
+        &[("part01.rar", &data)],
+        &SetOptions {
+            slice_size: SLICE,
+            recovery_blocks: 2,
+            first_exponent: 0,
+            volumes: VolumeScheme::Single,
+            creator: "rustyget-test".to_string(),
+            unicode_names: false,
+            kernel: Kernel::detect(),
+        },
+    )
+    .unwrap();
+    // Every FileDesc packet claims 2^40 slices, re-encoded so its MD5 matches again.
+    let mut forged = Vec::new();
+    let mut at = 0;
+    let index = &built.index;
+    while at + 64 <= index.len() {
+        let len = u64::from_le_bytes(index[at + 8..at + 16].try_into().unwrap()) as usize;
+        let packet = &index[at..at + len];
+        if packet[48..64] == TYPE_FILEDESC {
+            let set_id = SetId(packet[32..48].try_into().unwrap());
+            let mut body = packet[64..].to_vec();
+            body[48..56].copy_from_slice(&((SLICE as u64) << 40).to_le_bytes());
+            forged.extend(encode_packet(&set_id, &TYPE_FILEDESC, &body));
+        } else {
+            forged.extend_from_slice(packet);
+        }
+        at += len;
+    }
+    assert_ne!(forged, built.index);
+    let par = dir.join("forged.par2");
+    std::fs::write(&par, &forged).unwrap();
+    std::fs::write(dir.join("part01.rar"), &data).unwrap();
+
+    let mut repairer = RustParRepairer::new(dir.clone(), 1, 64, false, false, Vec::new());
+    assert!(matches!(
+        repairer.preprocess(&par, None),
+        ParResult::InsufficientCriticalData
+    ));
+    let reason = repairer.load_error.clone().unwrap_or_default();
+    assert!(reason.contains("source slices"), "{reason}");
+
+    let nzb_id = 0x7a75_0011;
+    let started = streaming_session_start(
+        nzb_id,
+        &par,
+        &dir,
+        SessionOptions {
+            preallocated_syndrome_slots: 2,
+            max_syndrome_slots: 2,
+            max_syndrome_bytes: (2 * SLICE) as u64,
+            max_working_bytes: 8 << 20,
+            max_staging_bytes: 8 << 20,
+            solve_mem_limit_bytes: 16 << 20,
+            defer_backfill: true,
+            ..SessionOptions::default()
+        },
+    );
+    assert!(started.is_err(), "no live session for a forged set");
+    assert!(active_streaming_session(nzb_id).is_none());
+    let _ = std::fs::remove_dir_all(&dir);
 }

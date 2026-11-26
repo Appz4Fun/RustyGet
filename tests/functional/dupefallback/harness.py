@@ -4548,9 +4548,10 @@ def scenario_streamtimeoutwrites(daemon, t):
     313.8 MB over 131.8 s, but its bytes were credited only when the donor's
     pass ended, so the watchdog stopped it ("nothing recovered for 300
     seconds", DupeStreamTimeout) though it was making progress. Here a slow
-    server (800 ms per response, two connections) makes one donor pass take
-    several times the 4 s timeout; its writes count, so it is never stopped
-    and the movie is whole."""
+    server (800 ms per response, two connections) makes one donor pass write
+    for longer than the 10 s timeout (its identity and map reads take about
+    4 s, its 61 donor articles about 25 s); its writes count, so it is never
+    stopped and the movie is whole."""
     size, seg = 20_000_000, 400_000
     data = _payload(size, 4253)
     pp = _place_copy(t, 'stA', data, 'movie.mkv')
@@ -15112,7 +15113,7 @@ SCENARIO_OPTIONS = {
     'weakswitchalt': PROD_OPTIONS + ['DownloadRate=4000'],
     'weakswitchtwin': PROD_OPTIONS + ['DownloadRate=4000'],
     'streamtimeoutwrites': ['DupeArticleFallback=stream', 'ParCheck=auto', 'Server1.Connections=2',
-                            'DupeStreamTimeout=4'],
+                            'DupeStreamTimeout=10'],
     'failcont_fleetaes': PROD_OPTIONS + ['DownloadRate=4000'],
     'headlostvolume': PROD_OPTIONS + ['DownloadRate=4000'],
     'headlostvolume5': PROD_OPTIONS + ['DownloadRate=4000'],

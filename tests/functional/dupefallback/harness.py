@@ -14992,7 +14992,7 @@ def scenario_fleetbigqueue(daemon, t):
     per primary, held the queue lock nearly all the time and spun at 100% CPU, so a finished
     job waited in PP_QUEUED and the API took minutes to answer. Now: building the queue goes
     quickly, the queue-coord thread stays under 20% of a core over 15 s with the primaries
-    paused and under 50% (a debug build) while the 150 primaries download (Linux, from
+    paused and under 40% (a debug build) while the 150 primaries download (Linux, from
     /proc), listgroups answers within 5 s, and an ordinary rar download added afterwards is unpacked
     and in history as SUCCESS within 90 s."""
     api = daemon.wait_ready()
@@ -15040,15 +15040,16 @@ def scenario_fleetbigqueue(daemon, t):
     primaries = [g['NZBID'] for g in groups if g['NZBName'].endswith('-G0')]
     api.editqueue('GroupResume', 0, '', primaries)
     time.sleep(5)
+    downloading = sum(1 for g in api.listgroups() if g.get('ActiveDownloads', 0) > 0)
     cpu_dl = queue_coord_cpu(15)
     lg_dl = listgroups_secs()
     files = _main_basenames(t)
     pct = lambda c: 'n/a' if c is None else '%.1f%%' % (c * 100)
     ok = (len(groups) == BIGQ_FLEETS * BIGQ_COPIES and held >= BIGQ_FLEETS * (BIGQ_COPIES - 1) and
-          len(primaries) == BIGQ_FLEETS and (cpu is None or cpu < 0.20) and (cpu_dl is None or cpu_dl < 0.50) and
+          len(primaries) == BIGQ_FLEETS and (cpu is None or cpu < 0.20) and downloading > 0 and (cpu_dl is None or cpu_dl < 0.40) and
           lg < 5 and lg_dl < 5 and plain.startswith('SUCCESS') and 'testfile3.dat' in files)
-    return ('fleetbigqueue', ok, 'groups=%d held=%d built=%.1fs queue-coord cpu idle=%s downloading=%s listgroups=%.2fs/%.2fs plain=%s after %.1fs' % (
-        len(groups), held, built, pct(cpu), pct(cpu_dl), lg, lg_dl, plain, plain_s))
+    return ('fleetbigqueue', ok, 'groups=%d held=%d built=%.1fs queue-coord cpu idle=%s downloading=%s (%d primaries fetching) listgroups=%.2fs/%.2fs plain=%s after %.1fs' % (
+        len(groups), held, built, pct(cpu), pct(cpu_dl), downloading, lg, lg_dl, plain, plain_s))
 
 
 def scenario_dupausedunpack(daemon, t):

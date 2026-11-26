@@ -2642,9 +2642,6 @@ pub(crate) enum TextStatus {
     WithScript,
 }
 
-/// A copy of a collection's fields and the values computed from them.
-/// A none handle gives the default snapshot. The caller holds the queue
-/// lock.
 /// The fields the next-article pick reads first (priority, extra priority, paused file
 /// count), without a whole snapshot. `None` for a collection that is gone.
 pub(crate) fn nzb_pick_fields(nzb: NzbRef) -> Option<(i32, bool, i32)> {
@@ -2661,6 +2658,9 @@ pub(crate) fn nzb_dupe_key(nzb: NzbRef) -> Vec<u8> {
     text_bytes(scalars(nzb).cast_const(), 7)
 }
 
+/// A copy of a collection's fields and the values computed from them.
+/// A none handle gives the default snapshot. The caller holds the queue
+/// lock.
 pub(crate) fn nzb_snapshot(
     nzb: NzbRef,
     text_status: TextStatus,

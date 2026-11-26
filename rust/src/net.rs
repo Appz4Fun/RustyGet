@@ -2894,8 +2894,15 @@ struct LightInputs {
 ///   it reaches the one that owns it even when the caller only knows the
 ///   active pool.
 ///
-/// The nntp-rs backend follows the same rule: its pool belongs to a
-/// generation, and a fetch holds an `Arc` of the generation it fetches on.
+/// While a retired generation still has connections out, the provider sees
+/// them beside the new generation's (at most the connections in flight at the
+/// reload; usually a few seconds, as each fetch takes a fresh connection from
+/// the active pool). A provider that refuses the extra ones is handled like
+/// any "too many connections" answer.
+///
+/// Any other connection backend (the coming nntp-rs pool) must follow the
+/// same rule: its pool belongs to a generation, and a fetch holds an `Arc` of
+/// the generation it fetches on.
 pub struct NzbgetRsServerPool {
     servers: std::sync::RwLock<Vec<Arc<RsNewsServer>>>,
     inner: Mutex<ServerPoolInner>,
@@ -3667,9 +3674,9 @@ impl NzbgetRsServerPool {
         conn_ptr: *mut PooledNntpConn,
         used: bool,
     ) -> Option<Option<Arc<NzbgetRsServerPool>>> {
-        let Ok(mut g) = self.inner.lock() else {
-            return None;
-        };
+        // a poisoned lock still frees: a connection never returned would keep
+        // its generation alive for good
+        let mut g = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let inner = &mut *g;
         let c = inner
             .connections
@@ -3712,9 +3719,9 @@ impl NzbgetRsServerPool {
     /// checkouts, idle connections closed now, the ones still out closed as
     /// they come back. Returns how many are still out.
     fn retire(&self) -> usize {
-        let Ok(mut g) = self.inner.lock() else {
-            return 0;
-        };
+        // a poisoned lock still retires: a generation never retired would hand
+        // out connections of an old configuration
+        let mut g = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         self.retired.store(true, Ordering::SeqCst);
         // an idle connection has no lease and nobody holds its pointer
         g.connections.retain(|c| c.in_use.load(Ordering::SeqCst));
@@ -4010,7 +4017,7 @@ pub(crate) fn release_server_pool(pool: Arc<NzbgetRsServerPool>) {
     let out = pool.retire();
     if out > 0 {
         let msg = format!(
-            "News server connections still in use when the server pool was replaced: {out}; they finish on the old pool"
+            "News server connections still in use when the server pool was replaced: {out}; they finish on the old pool (the server briefly sees them beside the new pool's)"
         );
         crate::log::log_active_bytes(crate::log::MK_DETAIL, msg.as_bytes());
     }
@@ -4739,6 +4746,12 @@ mod tests {
         for (i, &c) in held.iter().enumerate() {
             assert!(weak.upgrade().is_some(), "freed before connection {i} came back");
             new.free_connection(c, true);
+        }
+        // (another test returning a connection may hold the old generation for
+        // a moment while it looks it up)
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while weak.upgrade().is_some() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
         }
         assert!(weak.upgrade().is_none(), "the last connection back frees the old generation");
         // the new generation is untouched by the old one's returns

@@ -490,7 +490,12 @@ impl NzbgetRsDupeProbe {
         let mut join_group = false;
         let mut server_name: Vec<u8> = Vec::new();
         let wait_start = now_sec();
-        while conn_ptr == 0 && !self.is_stopped() && now_sec() - wait_start <= CONNECTION_WAIT_SEC {
+        // a pool a config reload retired hands out nothing more: don't wait on it
+        while conn_ptr == 0
+            && !self.is_stopped()
+            && !pool.is_retired()
+            && now_sec() - wait_start <= CONNECTION_WAIT_SEC
+        {
             let raw = crate::light_pool::check_connection_by_server_id(pool, server_id);
             if !raw.is_null() {
                 let c = unsafe { &*raw };

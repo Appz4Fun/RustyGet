@@ -1700,7 +1700,12 @@ impl DonorServerExchange for NntpHealthTransportShared {
             let (mut release, need_join) = loop {
                 let mut conn_ptr = 0usize;
                 let mut need_join = false;
-                while conn_ptr == 0 && !http_stopped() && host_now(ctx, host_cb) - wait_start <= 10 {
+                // a pool a config reload retired hands out nothing more: don't wait on it
+                while conn_ptr == 0
+                    && !http_stopped()
+                    && !pool.is_retired()
+                    && host_now(ctx, host_cb) - wait_start <= 10
+                {
                     let mut known_any = false;
                     for &id in ids.iter().filter(|id| !failed.contains(id)) {
                         let Some(srv) = pool.server_by_id(id) else {

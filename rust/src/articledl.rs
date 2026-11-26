@@ -3121,9 +3121,21 @@ pub struct NzbgetRsArticleDownloader {
     info_name: Vec<u8>,
     status: AtomicI32,
     last_update_time: AtomicI64,
+    /// When the current request started (`liveorder::now_ms`, 0: none yet): a request far
+    /// slower than the others is asked again for a live extraction (see `liveorder`).
+    running_since_ms: std::sync::atomic::AtomicU64,
+    /// Who decides the current request's end: `REQ_READING` while its body is read, then either
+    /// the reader (`REQ_BODY_DONE`: decoded and written from here on) or a restart for a live
+    /// extraction (`REQ_RESTART`, see `restart_for_live`), whichever swaps first.
+    request_state: std::sync::atomic::AtomicU8,
     conn_state: Mutex<(usize, Vec<u8>)>,
     worker: Mutex<DlWorker>,
 }
+
+/// `NzbgetRsArticleDownloader::request_state` values.
+const REQ_READING: u8 = 0;
+const REQ_BODY_DONE: u8 = 1;
+const REQ_RESTART: u8 = 2;
 
 impl Drop for NzbgetRsArticleDownloader {
     fn drop(&mut self) {
@@ -3148,6 +3160,8 @@ impl NzbgetRsArticleDownloader {
             info_name,
             status: AtomicI32::new(AD_UNDEFINED),
             last_update_time: AtomicI64::new(now_sec()),
+            running_since_ms: std::sync::atomic::AtomicU64::new(0),
+            request_state: std::sync::atomic::AtomicU8::new(REQ_READING),
             conn_state: Mutex::new((initial_conn, Vec::new())),
             worker: Mutex::new(DlWorker {
                 decoder: Decoder::new(
@@ -3183,6 +3197,32 @@ impl NzbgetRsArticleDownloader {
 
     pub(crate) fn last_update_time(&self) -> i64 {
         self.last_update_time.load(Ordering::SeqCst)
+    }
+
+    /// When the request running now started (`liveorder::now_ms`); `None` before the first.
+    pub(crate) fn running_since_ms(&self) -> Option<u64> {
+        Some(self.running_since_ms.load(Ordering::SeqCst)).filter(|&ms| ms > 0)
+    }
+
+    /// Stops the request running now so its article is handed out again, for a live extraction
+    /// (`queuecoord::restart_live_stragglers`); false when its body was read already (it is
+    /// decoded and written, and a stop would fetch a committed article again). One swap decides
+    /// it against the reader (`request_state`): a reader that loses stops as if stopped.
+    pub(crate) fn restart_for_live(&self) -> bool {
+        if self
+            .request_state
+            .compare_exchange(REQ_READING, REQ_RESTART, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return false;
+        }
+        self.stop();
+        true
+    }
+
+    /// The text this download logs itself under (`nzb/file [part/count]`).
+    pub(crate) fn info_name(&self) -> &[u8] {
+        &self.info_name
     }
 
     pub(crate) fn stop(&self) {
@@ -3338,6 +3378,11 @@ impl NzbgetRsArticleDownloader {
     fn set_status(&self, st: i32, touch_now: bool) {
         if touch_now {
             self.last_update_time.store(now_sec(), Ordering::SeqCst);
+        }
+        if st == AD_RUNNING && touch_now {
+            self.request_state.store(REQ_READING, Ordering::SeqCst);
+            self.running_since_ms
+                .store(crate::liveorder::now_ms().max(1), Ordering::SeqCst);
         }
         self.status.store(st, Ordering::SeqCst);
     }
@@ -3831,6 +3876,14 @@ impl NzbgetRsArticleDownloader {
             }
         }
 
+        if self
+            .request_state
+            .compare_exchange(REQ_READING, REQ_BODY_DONE, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            // A restart for a live extraction won: this request ends as a stopped one.
+            self.stopped.store(true, Ordering::SeqCst);
+        }
         if host.is_stopped() {
             status = AD_FAILED;
         }

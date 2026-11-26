@@ -1617,6 +1617,8 @@ impl NzbgetRsPrePostProcessor {
             self.nzb_deleted(host, dq_ptr, nzb_ptr);
         } else if action == ASPECT_URL_FAILED {
             self.nzb_completed(host, dq_ptr, nzb_ptr, true);
+        } else if action == crate::queuesubsys_host::ASPECT_LIVE_HEAD {
+            self.live_head_written(host, dq_ptr, nzb_ptr);
         } else if action == ASPECT_FILE_COMPLETED || action == ASPECT_FILE_DELETED {
             if action == ASPECT_FILE_COMPLETED {
                 self.file_downloaded(host, dq_ptr, nzb_ptr, file_ptr);
@@ -2544,6 +2546,39 @@ impl NzbgetRsPrePostProcessor {
         }
 
         ok
+    }
+
+    /// The headers of a set's first volume in download `nzb_ptr` are written (see
+    /// `livewrite::take_new_heads`): direct unpack starts on the same terms as when a volume
+    /// completes, and reads the set as it downloads (a running one picks the volume up itself).
+    fn live_head_written(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        dq_ptr: usize,
+        nzb_ptr: NzbRef,
+    ) {
+        let opts = host.opts();
+        let nzb = host.nzb_snap(nzb_ptr, false);
+        let act = classify_file_downloaded_direct_unpack(
+            opts.direct_unpack,
+            opts.raw_article,
+            opts.skip_write,
+            nzb.skip_disk_write,
+            nzb.direct_unpack_status,
+            nzb.direct_rename_status,
+            nzb.has_unpack_thread,
+        );
+        if act != 1 || !self.can_run_more_jobs(host).0 || self.has_active_unpack(host, dq_ptr, true)
+        {
+            return;
+        }
+        let want_unpack = host
+            .nzb_get_param(nzb_ptr, b"*Unpack:")
+            .as_ref()
+            .map_or(true, |v| v.eq_ignore_ascii_case(b"yes"));
+        if want_unpack {
+            host.direct_unpack_start_job(nzb_ptr);
+        }
     }
 
     fn file_downloaded(

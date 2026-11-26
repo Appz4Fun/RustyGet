@@ -7177,7 +7177,8 @@ def _left_volumes(t, names):
 
 def _live_archive(daemon, t, label, name, tag, volumes, files):
     """A 7z or ZIP set extracted while it downloads: direct unpack maps it once its
-    first and last volume are on disk (the last is moved up the queue), writes each
+    first volume's start and last volume's directory are written (those articles come
+    first), writes each
     member straight into its output as the volumes arrive and is done when the
     download ends; post-processing extracts nothing again and deletes the volumes."""
     h, clock = _live_release(daemon, t, name, tag, volumes, 500_000)
@@ -7484,6 +7485,144 @@ def scenario_livefed7z(daemon, t):
     return _writer_fed(daemon, t, 'livefed7z', 'RelWF7', 'wf7A', volumes, [('movie.mkv', movie)],
                        volumes[0][0])
 
+
+
+# --------------------------------------------------------------------------- #
+# Extraction-order downloads (rust/src/liveorder.rs): a set extracted live is
+# downloaded in its extraction order and read from its first volume's headers on
+# --------------------------------------------------------------------------- #
+
+LIVE_ORDER_WINDOW = 3   # liveorder::WINDOW
+
+
+def _seven_zip_volumes(movie, piece, workdir, prefix='Movie'):
+    """A stored 7z of ``movie.mkv`` cut into ``piece``-byte volumes by 7-Zip (-v)."""
+    with open(os.path.join(workdir, 'movie.mkv'), 'wb') as f:
+        f.write(movie)
+    subprocess.run([generators.SEVENZIP_PATH, 'a', '-bd', '-m0=Copy', '-v%db' % piece, 'out.7z', 'movie.mkv'],
+                   cwd=workdir, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    names = sorted(n for n in os.listdir(workdir) if n.startswith('out.7z.'))
+    return [(prefix + n[len('out'):], open(os.path.join(workdir, n), 'rb').read()) for n in names]
+
+
+def _volume_done(name, vname):
+    """The INFO line of a volume's completion (not its articles' DETAIL lines, which add the
+    part number)."""
+    return 'Successfully downloaded %s/%s\n' % (name, vname)
+
+
+def _live_order(daemon, t, label, name, tag, volumes, movie, nzb_order):
+    """``volumes`` listed in the NZB in ``nzb_order`` (ReorderFiles off: the queue would take
+    them in that order). Direct rename fetches every file's first article first; once the first
+    volume's headers are written direct unpack starts from them, registers the set's
+    extraction order, and the rest downloads in that order: no volume finishes before one
+    ``LIVE_ORDER_WINDOW`` or more below it (``inversions``), the extraction starts before the
+    first volume is complete (``started_before_first_done``), reads nothing back
+    (``read_back_mb=0``) and is done a moment after the download (``du_after_download_s``)."""
+    first = volumes[0][0]
+    done = [_volume_done(name, v[0]) for v in volumes]
+    started = 'Unrar: Extracting from %s' % first
+    members = []
+    for vname, data in volumes:
+        rel = '%s/%s' % (tag, vname)
+        t.write_file(os.path.join('data', rel), data)
+        members.append((rel, vname, len(data), 500_000, set()))
+    api = daemon.wait_ready()
+    clock = _live_clock(t, name, done + [started, 'Live extraction read'])
+    daemon.append(api, name, build_multi_nzb([members[i] for i in nzb_order]), False, tag + '-key', 100)
+    h = daemon.wait_history(api, name, timeout=300)
+    clock.close()
+    extracted = _verify_output(t, movie, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
+    at = [clock.seen.get(d) for d in done]
+    order = sorted(range(len(volumes)), key=lambda i: at[i] if at[i] is not None else float('inf'))
+    # (volume i finished before volume j although j is a window or more below it)
+    inversions = [(i + 1, j + 1) for k, i in enumerate(order) for j in order[k + 1:]
+                  if j + LIVE_ORDER_WINDOW <= i]
+    early = (clock.seen.get(started) is not None and at[0] is not None and clock.seen[started] < at[0])
+    reads = _live_reads(t)
+    as_written, read_back, finished = reads if reads else (0.0, None, None)
+    tail = clock.span('Collection %s completely downloaded' % name, 'Direct unpack for %s successful' % name)
+    du_ok = _grep_log(t, 'Direct unpack for %s successful' % name)
+    stray = _stray_temp_files(t)
+    ok = (extracted and None not in at and not inversions and early and du_ok == 1 and as_written > 0 and
+          read_back == 0 and not stray and tail != 'n/a' and float(tail) <= 5.0 and
+          h['Status'].startswith('SUCCESS') and h['UnpackStatus'] == 'SUCCESS')
+    return (label, ok, 'status=%s unpack=%s extracted_ok=%s completion_order=%s inversions=%s '
+            'started_before_first_done=%s du_ok=%d as_written_mb=%s read_back_mb=%s finished_mb=%s '
+            'stray_temp=%s du_after_download_s=%s' % (
+                h['Status'], h['UnpackStatus'], extracted, [i + 1 for i in order], inversions, early, du_ok,
+                as_written, read_back, finished, stray, tail))
+
+
+def scenario_liveorder7z(daemon, t):
+    """A stored 7z cut into nine volumes, listed in the NZB last volume first: the volumes
+    finish in extraction order (the directory at the end of the last one is fetched first,
+    by offset), and the extraction starts while the first volume is still downloading."""
+    if not generators.HAVE_7Z:
+        return ('liveorder7z', None, 'SKIP: 7z not installed')
+    scale = _live_scale()
+    # (eight whole volumes and a last one of several articles)
+    movie = _video_like(42_500_000 * scale, 7401)
+    with tempfile.TemporaryDirectory(prefix='lo7z-') as workdir:
+        volumes = _seven_zip_volumes(movie, 5_000_000 * scale, workdir)
+    return _live_order(daemon, t, 'liveorder7z', 'RelLO7', 'lo7A', volumes, movie,
+                       list(reversed(range(len(volumes)))))
+
+
+def scenario_liveorderrar(daemon, t):
+    """A RAR5 store set of nine volumes listed in the NZB in a scrambled order: the volumes
+    finish in extraction order and the extraction starts from the first volume's headers,
+    before that volume is complete."""
+    if not generators.HAVE_RAR:
+        return ('liveorderrar', None, 'SKIP: rar not installed')
+    scale = _live_scale()
+    movie = _payload(42_500_000 * scale, 7402)
+    with tempfile.TemporaryDirectory(prefix='lorar-') as workdir:
+        vols = generators.rar5_method_volumes('movie.mkv', movie, 5_000_000 * scale, 0, workdir)
+    volumes = [('Rel.part%02d.rar' % (i + 1), v) for i, v in enumerate(vols)]
+    n = len(volumes)
+    scrambled = list(range(n - 1, 0, -2)) + list(range(n - 2, 0, -2)) + [0]
+    return _live_order(daemon, t, 'liveorderrar', 'RelLOR', 'loRA', volumes, movie, scrambled)
+
+
+# First requests of these articles hang for 40 s (a news server routing them to a slow
+# backend); asked again, they come at once.
+LIVE_STRAGGLERS = [(b'lsA/Rel.part01.rar?3=', 40.0, True), (b'lsA/Rel.part02.rar?6=', 40.0, True),
+                   (b'lsA/Rel.part03.rar?2=', 40.0, True), (b'lsA/Rel.part05.rar?4=', 40.0, True)]
+
+
+def scenario_livestraggler(daemon, t):
+    """A RAR5 store set downloading at a fixed rate (3 MB/s: 8 s for 24 MB) where the first
+    request for four articles hangs for 40 s. A live extraction would wait at each of them,
+    and every volume would finish only with its slowest article. The articles a live
+    extraction will wait for are asked again once they run far longer than the rest
+    ("Asking again for"), so the extracted file is in place a few seconds after the line-rate
+    download (``extracted_after_start_s``, well under the 40 s hang) and moments after the last
+    article (``du_after_download_s``)."""
+    if not generators.HAVE_RAR:
+        return ('livestraggler', None, 'SKIP: rar not installed')
+    movie = _payload(24_000_000, 7403)
+    with tempfile.TemporaryDirectory(prefix='lsrar-') as workdir:
+        vols = generators.rar5_method_volumes('movie.mkv', movie, 4_000_000, 0, workdir)
+    volumes = [('Rel.part%02d.rar' % (i + 1), v) for i, v in enumerate(vols)]
+    name = 'RelLS'
+    start = time.time()
+    h, clock = _live_release(daemon, t, name, 'lsA', volumes, 500_000, needles=['Live extraction read'])
+    extracted = _verify_output(t, movie, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
+    asked = _grep_log(t, 'Asking again for %s/' % name)
+    du_at = clock.seen.get('Direct unpack for %s successful' % name)
+    after_start = (du_at - start) if du_at else None
+    tail = clock.span('Collection %s completely downloaded' % name, 'Direct unpack for %s successful' % name)
+    reads = _live_reads(t)
+    as_written, read_back, _ = reads if reads else (0.0, None, None)
+    # (a loaded test host stretches the 8 s download; the 40 s hang is what is ruled out)
+    ok = (extracted and asked >= 1 and after_start is not None and after_start < 25 and tail != 'n/a' and
+          float(tail) <= 8.0 and read_back == 0 and as_written > 0 and daemon.proxy.delayed >= 1 and
+          h['Status'].startswith('SUCCESS') and h['UnpackStatus'] == 'SUCCESS')
+    return ('livestraggler', ok, 'status=%s unpack=%s extracted_ok=%s asked_again=%d hung_requests=%d '
+            'extracted_after_start_s=%s du_after_download_s=%s as_written_mb=%s read_back_mb=%s' % (
+                h['Status'], h['UnpackStatus'], extracted, asked, daemon.proxy.delayed,
+                '%.1f' % after_start if after_start is not None else 'n/a', tail, as_written, read_back))
 
 
 def scenario_jointwosets(daemon, t):
@@ -14617,6 +14756,9 @@ SCENARIOS = {
     'livefedrar5store': scenario_livefedrar5store,
     'livefedrar5m3': scenario_livefedrar5m3,
     'livefed7z': scenario_livefed7z,
+    'liveorder7z': scenario_liveorder7z,
+    'liveorderrar': scenario_liveorderrar,
+    'livestraggler': scenario_livestraggler,
     'staleprogress': scenario_staleprogress,
     'authrejected': scenario_authrejected,
     'appendlongname': scenario_appendlongname,
@@ -15099,6 +15241,11 @@ SCENARIO_OPTIONS = {
     'livefedrar5store': WRITER_FED_OPTIONS + ['DownloadRate=8000'],
     'livefedrar5m3': WRITER_FED_OPTIONS + ['DownloadRate=6000'],
     'livefed7z': WRITER_FED_OPTIONS + ['DownloadRate=6000'],
+    # Extraction-order downloads: direct rename's first articles show where a set starts,
+    # the NZB's own order is kept (ReorderFiles off), and the line is slower than the decode.
+    'liveorder7z': WRITER_FED_OPTIONS + ['DirectRename=yes', 'ReorderFiles=no', 'DownloadRate=2000'],
+    'liveorderrar': WRITER_FED_OPTIONS + ['DirectRename=yes', 'ReorderFiles=no', 'DownloadRate=2000'],
+    'livestraggler': WRITER_FED_OPTIONS + ['DownloadRate=3000'],
     'directunpacktwoarchives': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1'],
     'directunpackparfailure': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1'],
     'parfailurenodirectunpack': ['Unpack=yes', 'DirectUnpack=no', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1'],
@@ -15310,7 +15457,7 @@ SCENARIO_REWRITE_PROXY = {'notfound451': (b'430 ', b'451 '),
                           'pathtraversalarticle': (b'name=aaaaaaaa.bin', b'name=../../ab.bin'), 'rejectnextserver': (b'=ypart begin=', b'=ypart begxn=')}
 
 # scenarios with a DelayingNntpProxy in front of Server1: [(message-id marker, delay in s)]
-SCENARIO_DELAY_PROXY = {'lightburst': [(b'lbLoad', 0.25)], 'clientthreads': [(b'ctA/', 3.0)], 'xdecomp_slow': [(b'xdzB/', 0.7)], 'damagedfilestate': [(b'?6=500000:', 20.0, True)], 'articledecoyparrestart': [(b'?9=4000000:', 15.0, True), (b'?10=4500000:', 15.0, True)], 'directrenamesubdir': [(b'drA/obf', 0.4)], 'directrenamesubdirjoin': [(b'drA/obf', 0.4)], 'slowprobe': [(b'STAT ', 5.0), (b'spA/', 0.2)],
+SCENARIO_DELAY_PROXY = {'livestraggler': LIVE_STRAGGLERS, 'lightburst': [(b'lbLoad', 0.25)], 'clientthreads': [(b'ctA/', 3.0)], 'xdecomp_slow': [(b'xdzB/', 0.7)], 'damagedfilestate': [(b'?6=500000:', 20.0, True)], 'articledecoyparrestart': [(b'?9=4000000:', 15.0, True), (b'?10=4500000:', 15.0, True)], 'directrenamesubdir': [(b'drA/obf', 0.4)], 'directrenamesubdirjoin': [(b'drA/obf', 0.4)], 'slowprobe': [(b'STAT ', 5.0), (b'spA/', 0.2)],
                         'directunpackkeep': [(b'rel.part03', 2.0)],
                         'directunpackkeepnointer': [(b'rel.part03', 2.0)],
                         'truncatedstate': [(b'tsA/', 0.5)],

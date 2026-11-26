@@ -1041,8 +1041,11 @@ where
         return Err(msg);
     }
 
-    // Check magic header on disk for native 7z or RAR 1.5–4.x
-    if let Ok(mut f) = std::fs::File::open(archive_path) {
+    // Check magic header on disk for native 7z or RAR 1.5–4.x. A first volume direct unpack
+    // starts from while it downloads is read where it is being written.
+    if let Ok(mut f) =
+        std::fs::File::open(crate::progressive_unpack::header_source(archive_path))
+    {
         use std::io::Read;
         let mut sig = [0u8; 8];
         let n = f.read(&mut sig).unwrap_or(0);

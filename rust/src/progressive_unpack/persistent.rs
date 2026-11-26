@@ -323,7 +323,11 @@ pub(super) fn forget_state(req: &Request<'_>) {
 fn first_volume_qualifies(first: &Path, password: &str) -> Result<usize, String> {
     use zipfast::rar5::reader::{Block, Volume};
     let pw = (!password.is_empty()).then_some(password);
-    let mut vol = Volume::open_with_password(first, pw).map_err(|e| format!("headers: {e}"))?;
+    // A first volume still being written is read as far as it is written: its headers past
+    // that are not there yet (members starting later are checked by zipfast when reached).
+    let source = super::header_source(first);
+    let live = source.as_path() != first;
+    let mut vol = Volume::open_with_password(&source, pw).map_err(|e| format!("headers: {e}"))?;
     let mut members = 0;
     for _ in 0..100_000 {
         match vol.next_block() {
@@ -348,6 +352,8 @@ fn first_volume_qualifies(first: &Path, password: &str) -> Result<usize, String>
             }
             Ok(Some(Block::End { .. })) | Ok(None) => break,
             Ok(Some(_)) => {}
+            // The first header not written yet.
+            Err(_) if live && members > 0 => break,
             Err(e) => return Err(format!("headers: {e}")),
         }
     }
@@ -544,6 +550,12 @@ impl VolumeFeed for RememberedHoles {
             return None;
         }
         self.inner.growing(path)
+    }
+    fn urge(&mut self, path: &Path, offset: u64) {
+        self.inner.urge(path, offset)
+    }
+    fn urge_whole(&mut self, path: &Path) {
+        self.inner.urge_whole(path)
     }
 }
 

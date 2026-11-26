@@ -381,6 +381,34 @@ fn note_live_video_match(host: &crate::queuesubsys_host::QueueSubsysHost, nzb_id
     }
 }
 
+/// Takes back the evidence [`note_live_video_match`] left on donor `donor_id` for download
+/// `nzb_id`: a later check compared its video in full and found it different. TwinCheck, nudged,
+/// then labels the copy by its par2 lists again (`container`), never as an alt.
+fn revoke_live_video_match(host: &crate::queuesubsys_host::QueueSubsysHost, nzb_id: i32, donor_id: i32) {
+    let evidence = crate::twin::live_video_value(nzb_id);
+    let cleared = host.with_locked_queue(|dq_ptr| {
+        let Some((donor, in_history)) = find_queued_or_history(host, dq_ptr, donor_id) else {
+            return false;
+        };
+        let held = host
+            .nzb_get_param(donor, crate::twin::LIVE_VIDEO_PARAM)
+            .is_some_and(|v| cstr::until_nul(&v).trim_ascii() == evidence.as_slice());
+        if !held {
+            return false;
+        }
+        host.nzb_set_param(donor, crate::twin::LIVE_VIDEO_PARAM, None);
+        host.nzb_set_int(donor, crate::queuesubsys_host::NZB_INT_CHANGED, 1);
+        if in_history {
+            host.dq_history_changed(dq_ptr);
+        }
+        host.dq_save(dq_ptr);
+        true
+    });
+    if cleared {
+        crate::twin::nudge_and_wake_active();
+    }
+}
+
 /// Whether TwinCheck's labels prove a copy's files differ from this download's: `container`
 /// or `other` (their par2 lists differ), a near twin (`twin:N/M`), or `alt` unless its samples
 /// found the same files cut into other article sizes (`DupeSampled=samefiles`). Container bytes
@@ -2232,6 +2260,7 @@ impl NzbgetRsStreamRepairCtrl {
             }
             if let (Some(id), true) = (dead_nzb_id, session.donor_differed()) {
                 crate::postproc::forget_dead_volume_donor_confirmed(id, donor.id);
+                revoke_live_video_match(q.host, id, donor.id);
             }
         }
     }

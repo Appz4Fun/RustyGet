@@ -372,12 +372,15 @@ pub fn probe_probing_for(nzb_id: i32) -> i32 {
 }
 
 /// True while the dead-pick probe of download `nzb_id` waits for its first connection, for at
-/// most [`CONNECTION_WAIT_SEC`]: the queue then starts no article of that download, so the next
-/// connection a finished article frees goes to the probe. Without that, a download using every
-/// connection of a small server takes each freed one back at once, and the probe, polling for
-/// one, may only get it after the download failed over on its health anyway (functional
-/// `deadpickstray`, two connections).
+/// most [`CONNECTION_WAIT_SEC`]: the queue then picks no article of that download (other
+/// downloads go on), so a connection the download frees goes to the probe. Without that, a
+/// download using every connection of a small server takes each freed one back at once, and
+/// the probe, polling for one, may only get it after the download failed over on its health
+/// anyway (functional `deadpickstray`, two connections).
 pub fn probe_waiting_for_connection(nzb_id: i32) -> bool {
+    if PROBE_COUNT.load(Ordering::SeqCst) == 0 {
+        return false;
+    }
     let Ok(reg) = registry().lock() else {
         return false;
     };

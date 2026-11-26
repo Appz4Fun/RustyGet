@@ -5386,6 +5386,16 @@ impl NzbgetRsQueueCoordinator {
                     crate::queuesubsys_host::MK_WARNING,
                     &crate::releasename::log_name(&msg),
                 );
+                // its direct unpack would wait for its next volume for ever and
+                // keep the alt from downloading (a copy of the key that extracts
+                // counts as active), and its live repair would go on borrowing
+                // for a copy that no longer downloads
+                if nzb.has_unpack_thread {
+                    host.direct_unpack_stop(dq_ptr, nzb.ptr);
+                }
+                if nzb.has_live_repair_thread {
+                    host.live_repair_stop(nzb.ptr);
+                }
                 crate::fleethold::park_on_health_host(host, dq_ptr, &nzb);
                 return;
             }

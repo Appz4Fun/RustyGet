@@ -4739,7 +4739,11 @@ def scenario_headlostvolume5(daemon, t):
 def scenario_headlostvolumepar(daemon, t):
     """headlostvolume5 with a par2 index but no recovery blocks (6790 job 354):
     the rebuilt volume has to count as repaired, or par verification finds
-    the volume still damaged and direct unpack is not resumed."""
+    the volume still damaged and direct unpack is not resumed. (rar 7 writes a
+    quick-open record, so the headers are now rebuilt from it as the volume
+    arrives and direct unpack reads on; par-check is skipped, the archive
+    checksums vouching for the movie. The sibling rebuild written back to disk
+    is left for sets without that record, as headlostvolume's RAR 1.5-4.)"""
     return _headlost_volume(daemon, t, 'headlostvolumepar', rar5=True, par=True)
 
 

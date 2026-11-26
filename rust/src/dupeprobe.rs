@@ -380,8 +380,9 @@ pub fn probe_probing_for(nzb_id: i32) -> i32 {
 }
 
 /// True while the dead-pick probe of download `nzb_id` waits for its first connection, for at
-/// most [`CONNECTION_HOLD_SEC`] (less when its server is blocked, see `end_connection_wait`): the queue then picks no article of that download (other
-/// downloads go on), so a connection the download frees goes to the probe. Without that, a
+/// most [`CONNECTION_HOLD_SEC`] (less when its server is blocked, see `end_connection_wait`):
+/// while that download is next in line the queue starts nothing, so the connection it would
+/// take goes to the probe. Without that, a
 /// download using every connection of a small server takes each freed one back at once, and
 /// the probe, polling for one, may only get it after the download failed over on its health
 /// anyway (functional `deadpickstray`, two connections).

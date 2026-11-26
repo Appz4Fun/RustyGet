@@ -51,7 +51,7 @@ Key options: [`ArticleRetries`](options.md#articleretries), [`ArticleTimeout`](o
 
 ## Logging
 
-Enable `SystemHealthCheck` to expose configuration notices. `LogToFile` writes `LogFile`; every 10 MB the file is moved aside as `rustyget-2026-11-15.1.log` (`.2` and so on) and gzipped to `.log.gz`. `LogRotations` sets how many of those are kept (default 10, `0` keeps all); the oldest are deleted first. A device such as `/dev/stdout` is written as it is. Messages of each download go into the same file. The log targets control file and screen output. `LogBuffer` sets how many messages stay in memory for the web interface and each download's Log tab, and `0` keeps every message.
+Enable `SystemHealthCheck` to expose configuration notices. `LogToFile` writes `LogFile`; every 10 MB the file is moved aside as `rustyget-2026-11-15.1.log` (`.2` and so on) and gzipped to `.log.gz`. `LogRotations` sets how many of those are kept (default 500, `0` keeps all; with DETAIL messages from hundreds of connections a file fills in about a minute, so 10 kept only minutes); the oldest are deleted first. A device such as `/dev/stdout` is written as it is. Messages of each download go into the same file. The log targets control file and screen output. `LogBuffer` sets how many messages stay in memory for the web interface and each download's Log tab, and `0` keeps every message.
 
 Use debug output when investigating a specific issue, then return to the level you normally use. Before sharing logs, remove credentials, private URLs, and identifying download details. The Messages tab and a download's History details provide context for failures.
 

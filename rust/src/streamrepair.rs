@@ -8750,6 +8750,26 @@ fn holes_form_one_run(holes: &[crate::dupefallback::NzbgetRsByteRange]) -> bool 
     true
 }
 
+/// The decision of [`CrossPackRepairSession::dying_at_frontier`]: the download is `kept` for
+/// borrowing and its lost video bytes `holes` form one run reaching `arrived_end`, the end of
+/// what arrived of it.
+fn holes_die_at_frontier(kept: bool, holes: &[crate::dupefallback::NzbgetRsByteRange], arrived_end: i64) -> bool {
+    let hole_end = holes.iter().map(|h| h.offset + h.size).max().unwrap_or(0);
+    kept && holes_form_one_run(holes) && hole_end >= arrived_end
+}
+
+/// Whether an earlier run's restart outcome for this download is reused: `restart_from` is the
+/// member output offset its restart decoded from (`None`: the backup was found not
+/// restartable). While downloading (`allow_decompress` false) either outcome stands. After the
+/// download a refusal is not reused (the backup is extracted whole instead), and a restart only
+/// when it covers every hole left (`first_hole`, the lowest hole offset; `None`: none left).
+fn earlier_restart_reusable(restart_from: Option<u64>, allow_decompress: bool, first_hole: Option<i64>) -> bool {
+    match restart_from {
+        Some(from) => !allow_decompress || first_hole.is_none_or(|o| o >= 0 && o as u64 >= from),
+        None => !allow_decompress,
+    }
+}
+
 /// Host callback boundary for [`CrossPackRepairSession::process_donor`].
 pub trait CrossPackDonorEnv {
     fn is_stopped(&mut self) -> bool;
@@ -10305,11 +10325,11 @@ impl CrossPackRepairSession {
             return false;
         };
         let arrived_end = map.runs().iter().map(|r| r.inner_offset + r.size).max().unwrap_or(0);
-        let hole_end = set.inner_holes.iter().map(|h| h.offset + h.size).max().unwrap_or(0);
-        self.dead_nzb_id > 0
-            && crate::queuecoord::was_kept_for_borrowing(self.dead_nzb_id)
-            && holes_form_one_run(&set.inner_holes)
-            && hole_end >= arrived_end
+        holes_die_at_frontier(
+            self.dead_nzb_id > 0 && crate::queuecoord::was_kept_for_borrowing(self.dead_nzb_id),
+            &set.inner_holes,
+            arrived_end,
+        )
     }
 
     /// Records a donor's identity check against repair set `repair_set_idx`: a confirmed one is
@@ -10471,9 +10491,12 @@ impl CrossPackRepairSession {
                             .map(|h| h.offset)
                             .min();
                         let earlier = crate::restartlend::earlier(self.dead_nzb_id, &restart_key)
-                            .filter(|e| match e {
-                                Ok(r) => !allow_decompress || first_hole.is_none_or(|o| o as u64 >= r.from),
-                                Err(_) => !allow_decompress,
+                            .filter(|e| {
+                                earlier_restart_reusable(
+                                    e.as_ref().ok().map(|r| r.from),
+                                    allow_decompress,
+                                    first_hole,
+                                )
                             });
                         if let Some(earlier) = earlier {
                             set_tried[set_index] = true;
@@ -13146,6 +13169,46 @@ pub fn process_m1_donor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A restart for a dying download is tried only when the queue keeps it to borrow and its
+    /// lost video bytes are the tail of what arrived: one run (gaps under a MiB joined) reaching
+    /// the arrived end.
+    #[test]
+    fn dying_at_frontier_needs_kept_download_and_one_tail_run() {
+        let r = |offset, size| NzbgetRsByteRange { offset, size };
+        const MB: i64 = 1 << 20;
+        // A volume died part way: everything from 40 MB to the arrived end (50 MB) is lost,
+        // with one article that came between failed ones.
+        let tail = [r(40 * MB, 4 * MB), r(44 * MB + 300_000, 6 * MB - 300_000)];
+        assert!(holes_die_at_frontier(true, &tail, 50 * MB));
+        // The same holes, but the queue does not keep the download to borrow: no restart.
+        assert!(!holes_die_at_frontier(false, &tail, 50 * MB));
+        // A lone hole with data after it is left to range donors and par2.
+        assert!(!holes_die_at_frontier(true, &[r(10 * MB, MB)], 50 * MB));
+        // Two runs more than a MiB apart are no tail, even when the second reaches the end.
+        assert!(!holes_die_at_frontier(true, &[r(10 * MB, MB), r(45 * MB, 5 * MB)], 50 * MB));
+        // No holes: nothing to restart for.
+        assert!(!holes_die_at_frontier(true, &[], 50 * MB));
+    }
+
+    /// An earlier run's restart outcome is reused while downloading either way; after the
+    /// download only a restart that covers every hole left is reused, and a refusal is not (the
+    /// backup is downloaded and extracted whole instead).
+    #[test]
+    fn earlier_restart_reused_after_download_only_when_it_covers_every_hole() {
+        // While downloading: a restart and a refusal both stand.
+        assert!(earlier_restart_reusable(Some(1000), false, Some(10)));
+        assert!(earlier_restart_reusable(None, false, Some(10)));
+        // After the download: a refusal is never reused.
+        assert!(!earlier_restart_reusable(None, true, Some(10)));
+        assert!(!earlier_restart_reusable(None, true, None));
+        // After the download: a restart from 1000 covers holes at or after 1000 only.
+        assert!(earlier_restart_reusable(Some(1000), true, Some(1000)));
+        assert!(earlier_restart_reusable(Some(1000), true, Some(5000)));
+        assert!(earlier_restart_reusable(Some(1000), true, None));
+        assert!(!earlier_restart_reusable(Some(1000), true, Some(999)));
+        assert!(!earlier_restart_reusable(Some(1000), true, Some(-1)));
+    }
 
     /// The UI showed "978 MB borrowed, 0 holes" for cross-packing passes: a
     /// hole they close completely counts, one filled in part does not.

@@ -4316,6 +4316,10 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
       its backup is a twin (the same encrypted volumes: they swap in one for
       one) or an alt (another RAR5 AES store set with other volume sizes and
       another password: an OPEN ITEM, the release completes from the alt);
+    - ``rar5m3other``: as ``rar5m3`` (the intake read the video the same), but
+      TwinCheck labelled it ``DupeKind=other`` (its video differs): that verdict
+      stands, so it is never restarted and never lends a byte; the primary fails
+      over to it, with the reason logged;
     - ``other``: another video of the same size in another stored rar set,
       labelled ``container`` (another container, the video inside not
       verified): it never lends a byte (no earlier confirmation stands in for
@@ -4414,6 +4418,9 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
         elif backup in ('rar5m3', 'rar5m3aes'):
             # no DupeKind (TwinCheck without par2 leaves none): the intake's verdict alone
             labels = [('DupeCopyKind', 'unborrowable'), ('DupeVideo', 'same')]
+        elif backup == 'rar5m3other':
+            # TwinCheck's DupeKind=other overrides the intake's DupeVideo=same
+            labels = [('DupeCopyKind', 'unborrowable'), ('DupeVideo', 'same'), ('DupeKind', 'other')]
         else:
             labels = [('DupeCopyKind', 'unborrowable')]
     donor_members = []
@@ -4507,6 +4514,13 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
     elif backup in ('compressed', 'norestart'):
         ok = (integ and winner == 'Backup' and failed_over == 1 and
               _grep_log(t, 'cannot continue the extraction of Primary') >= 1)
+    elif backup == 'rar5m3other':
+        # refused before any restart: nothing of it lent, no restart tried or refused
+        lent = (_grep_log(t, 'from duplicate Backup') + _grep_log(t, 'from a duplicate; direct unpack reads it')
+                + _grep_log(t, 'Wrote dead volume'))
+        ok = (integ and winner == 'Backup' and failed_over == 1 and lent == 0
+              and _grep_log(t, 'Cannot restart the compressed video') == 0
+              and _grep_log(t, 'cannot continue the extraction of Primary') >= 1)
     elif backup == 'other':
         # the backup's own (other) video, whole: nothing of it was lent into the primary's
         integ = _verify_output(t, donor_movie, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
@@ -4611,6 +4625,10 @@ def scenario_failcont_rar5m3(daemon, t):
 
 def scenario_failcont_rar5m3aes(daemon, t):
     return _failcont(daemon, t, 'failcont_rar5m3aes', 'rar5m3aes', 0.50)
+
+
+def scenario_failcont_rar5m3other(daemon, t):
+    return _failcont(daemon, t, 'failcont_rar5m3other', 'rar5m3other', 0.50)
 
 
 def scenario_failcont_lzma2(daemon, t):
@@ -15059,6 +15077,7 @@ SCENARIOS = {
     'failcont_aestwin': scenario_failcont_aestwin,
     'failcont_aesalt': scenario_failcont_aesalt,
     'failcont_rar5m3': scenario_failcont_rar5m3,
+    'failcont_rar5m3other': scenario_failcont_rar5m3other,
     'failcont_rar5m3aes': scenario_failcont_rar5m3aes,
     'failcont_lzma2': scenario_failcont_lzma2,
     'failcont_norestart': scenario_failcont_norestart,
@@ -15527,6 +15546,7 @@ SCENARIO_OPTIONS = {
     'failcont_aestwin': PROD_OPTIONS + ['DownloadRate=4000'],
     'failcont_aesalt': PROD_OPTIONS + ['DownloadRate=4000'],
     'failcont_rar5m3': PROD_OPTIONS + ['DownloadRate=4000'],
+    'failcont_rar5m3other': PROD_OPTIONS + ['DownloadRate=4000'],
     'failcont_rar5m3aes': PROD_OPTIONS + ['DownloadRate=4000'],
     'failcont_lzma2': PROD_OPTIONS + ['DownloadRate=4000'],
     'failcont_norestart': PROD_OPTIONS + ['DownloadRate=4000'],
@@ -15597,7 +15617,7 @@ def _promote_fallback(options, mode):
 FALLBACK_MODE_BOUND = {'livegate', 'streamrestartcredit', 'wholefilerestart', 'wholefilestale'}
 # scenarios that read nserv's request log (nserv.log)
 CAPTURE_REQUESTS = {'repost', 'wholefileproofcost', 'dropnzbdir', 'fleetstaysqueued', 'fleetprimaryfirst'} | {
-    'failcont_twin25', 'failcont_twin50', 'failcont_twin90', 'failcont_alt25', 'failcont_alt50', 'failcont_altlive', 'failcont_alt90', 'failcont_aes25', 'failcont_aes50', 'failcont_aes90', 'failcont_compressed', 'failcont_othervideo', 'failcont_twinlabel', 'failcont_fleettwin', 'failcont_fleetalt', 'failcont_fleetaes', 'failcont_aestwin', 'failcont_aesalt', 'failcont_rar5m3', 'failcont_rar5m3aes', 'failcont_lzma2', 'failcont_norestart', 'weakswitchalt', 'weakswitchtwin', 'weakswitchaes', 'weakswitchm3'}
+    'failcont_twin25', 'failcont_twin50', 'failcont_twin90', 'failcont_alt25', 'failcont_alt50', 'failcont_altlive', 'failcont_alt90', 'failcont_aes25', 'failcont_aes50', 'failcont_aes90', 'failcont_compressed', 'failcont_othervideo', 'failcont_twinlabel', 'failcont_fleettwin', 'failcont_fleetalt', 'failcont_fleetaes', 'failcont_aestwin', 'failcont_aesalt', 'failcont_rar5m3', 'failcont_rar5m3aes', 'failcont_rar5m3other', 'failcont_lzma2', 'failcont_norestart', 'weakswitchalt', 'weakswitchtwin', 'weakswitchaes', 'weakswitchm3'}
 # extra nserv arguments per scenario (-w: response latency in ms)
 SCENARIO_NSERV_ARGS = {'streamtimeoutwrites': ['-w', '800'], 'fleetslowprobe': ['-x', '2000'], 'fleetprobespeed': ['-w', '300'], 'fleetprobebusy': ['-w', '300'], 'fleetprobehealthfail': ['-w', '800'], 'finaldeletemidway': ['-w', '300'], 'finaldeleterestart': ['-w', '300'], 'restartmidway': ['-w', '300'], 'xpacklatency': ['-w', '1000'], 'deadpickprobe': ['-w', '500'], 'deadpickafterreload': ['-w', '500'],
                        'deadpickpartial': ['-w', '100'], 'deadpickstray': ['-w', '500'], 'forcefailover': ['-w', '500'], 'copybackup': ['-w', '500'], 'copyoffailed': ['-w', '500'], 'deaddownloadstray2': ['-w', '300'], 'deaddownloadrestart': ['-w', '300'], 'deadbackupsonly': ['-w', '500'], 'backuporder': ['-w', '500'], 'deaddownloadlate': ['-w', '300'], 'deadpickservers': ['-w', '200'],

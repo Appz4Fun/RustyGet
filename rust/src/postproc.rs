@@ -2911,6 +2911,12 @@ pub(crate) fn forget_dead_volume_donor_confirmed(nzb_id: i32, donor_id: i32) {
     dead_volume_donor_confirmations().remove(&(nzb_id, donor_id));
 }
 
+/// Forgets every video match download or donor `nzb_id` takes part in: a pack merge or split
+/// changed its files, so a match made on its earlier files proves nothing of them now.
+pub(crate) fn forget_dead_volume_confirmations_of(nzb_id: i32) {
+    dead_volume_donor_confirmations().retain(|&(id, donor), _| id != nzb_id && donor != nzb_id);
+}
+
 /// True when the video of donor `donor_id` matched the one of download `nzb_id` in an earlier
 /// live repair run, by a check that compared in full, and no check of that run found it
 /// different. A later dead volume then has none of the download's own bytes around it to

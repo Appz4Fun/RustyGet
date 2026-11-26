@@ -2468,6 +2468,9 @@ impl NzbgetRsQueueCoordinator {
         ] {
             host.nzb_set_param(dest_ptr, param, None);
         }
+        // a live video match made on either side's earlier files no longer stands
+        crate::postproc::forget_dead_volume_confirmations_of(dest.id);
+        crate::postproc::forget_dead_volume_confirmations_of(src.id);
 
         merge_dupe_par_params(host, dest_ptr, src_ptr);
         // what the source borrowed moves with its files, like its par2 counts
@@ -2579,6 +2582,8 @@ impl NzbgetRsQueueCoordinator {
         for param in SPLIT_DROPPED_PARAMS {
             host.nzb_set_param(new_nzb_ptr, param, None);
         }
+        // the source lost files: a live video match made on them no longer stands
+        crate::postproc::forget_dead_volume_confirmations_of(src_snap.id);
 
         let new_init_snap = host.nzb_snap(new_nzb_ptr, false);
         let mut sc = pack_merge_split_counters(&src_snap);

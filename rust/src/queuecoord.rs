@@ -614,6 +614,11 @@ pub(crate) fn backup_may_lend_while_extracting(
     )
 }
 
+/// Set by `get_next_article` when it passed over a download only because its dead-pick probe
+/// waits for a connection (see `dupeprobe::probe_waiting_for_connection`): the queue has work
+/// left, so it neither idles nor, in standalone mode, ends with the download unfinished.
+static PROBE_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 static KEPT_FOR_BORROWING: std::sync::Mutex<Option<std::collections::HashSet<i32>>> =
     std::sync::Mutex::new(None);
 
@@ -2044,7 +2049,9 @@ impl NzbgetRsQueueCoordinator {
             host.with_locked_queue(|dq_ptr| {
                 let opts = host.opts();
                 let next_pair = self.get_next_article(host, &opts, dq_ptr);
-                let has_more_articles = next_pair.is_some();
+                // a download held for its probe's connection has articles left all the same
+                let has_more_articles = next_pair.is_some()
+                    || PROBE_HELD.load(std::sync::atomic::Ordering::Relaxed);
                 let active_len = host.active_downloads_len();
                 article_downloads_running = active_len > 0;
                 host.self_set_has_more_jobs(has_more_articles || article_downloads_running);
@@ -2094,7 +2101,9 @@ impl NzbgetRsQueueCoordinator {
                 });
             }
 
-            let standby = !article_downloads_running;
+            // (a download held for its probe's connection resumes as soon as the probe has one)
+            let standby =
+                !article_downloads_running && !PROBE_HELD.load(std::sync::atomic::Ordering::Relaxed);
             if standby != was_standby {
                 host.stat_meter_enter_leave_standby(standby);
                 host.work_state_set_downloading(!standby);
@@ -2737,6 +2746,7 @@ impl NzbgetRsQueueCoordinator {
         crate::queuesubsys_host::FileSnap,
         crate::queuesubsys_host::ArticleSnap,
     )> {
+        PROBE_HELD.store(false, std::sync::atomic::Ordering::Relaxed);
         let mut checked_files: Vec<FileRef> = Vec::new();
         let cur_date = opts.cur_time;
 
@@ -2771,13 +2781,17 @@ impl NzbgetRsQueueCoordinator {
 
                 // a download whose dead-pick probe still waits for a connection leaves the
                 // next free one to the probe (see `dupeprobe::probe_waiting_for_connection`);
-                // the other downloads go on
-                if nzb_higher
+                // the other downloads go on. It still has work: the queue stays busy for it
+                // (`PROBE_HELD`), never idle or done.
+                let eligible = nzb_higher
                     && !nzb_paused
                     && !self.has_active_dupe(host, dq_ptr, &nzb)
-                    && !crate::dupeprobe::probe_waiting_for_connection(nzb.id)
-                    && ((!opts.pause_download && !opts.quota_reached) || nzb.force_priority)
-                {
+                    && ((!opts.pause_download && !opts.quota_reached) || nzb.force_priority);
+                let held = eligible && crate::dupeprobe::probe_waiting_for_connection(nzb.id);
+                if held {
+                    PROBE_HELD.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                if eligible && !held {
                     let propagation_delay = opts.propagation_delay;
                     for j in 0..flen {
                         let fp = host.nzb_file_at(nzb_ptr, j);

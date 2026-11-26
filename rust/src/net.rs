@@ -3694,6 +3694,13 @@ impl NzbgetRsServerPool {
             .sum()
     }
 
+    /// Whether a download was refused a connection within
+    /// [`DOWNLOAD_STARVED_WINDOW_MS`] (checks past their first then wait).
+    pub fn download_starved_now(&self) -> bool {
+        let at = self.download_starved_at_ms.load(Ordering::SeqCst);
+        !check_connection_allowed(1, 1, at, pool_now_ms())
+    }
+
     /// Probe requests the servers [`Self::primary_connections`] counts may
     /// have at once (`crate::fleetprobe::probe_reads`): their light
     /// connections raised to the probe floor, 0 with no light reserve.
@@ -4716,6 +4723,7 @@ mod tests {
         let probes: Vec<_> = (0..4).map(|_| pool.get_probe_connection(&srv)).collect();
         assert!(probes.iter().all(|c| !c.is_null()));
         assert_eq!(srv.check_in_use.load(Ordering::SeqCst), 4);
+        assert!(pool.download_starved_now());
         // no fifth, and a plain check gets none past the probes' either
         pool.free_connection(dl.pop().unwrap(), true);
         assert!(pool.get_probe_connection(&srv).is_null());

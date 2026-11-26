@@ -1688,8 +1688,9 @@ impl DonorServerExchange for NntpHealthTransportShared {
             }
 
             let mut wait_start = host_now(ctx, host_cb);
-            // while a fleet is being probed, a slot of the probe reads first:
-            // its connection may be one of the probe floor's
+            // while a fleet is probed beside a download that wants every
+            // connection, a slot of the probe reads first: its connection
+            // may be one of the probe floor's
             let Ok(_slot) = crate::fleetprobe::stat_slot(|| {
                 http_stopped() || host_now(ctx, host_cb) - wait_start > 10
             }) else {
@@ -2646,9 +2647,12 @@ fn spawn_fleet_intake_later(host_cb: DupeHostFn, job: IntakeLater) {
     // set before the thread starts, so a failover check right after the reply
     // already waits for these copies
     let pending = IntakePendingGuard::enter(job.pending.iter().map(|(id, _, _)| *id).collect());
+    // its reads of the backups are fleet probe reads too (the probe floor)
+    let probing = crate::fleetprobe::FleetProbing::start();
     let run = move || {
         let _guard = guard;
         let _pending = pending;
+        let _probing = probing;
         fleet_intake_later(ptr::null_mut(), host_cb, job)
     };
     let _ = std::thread::Builder::new()

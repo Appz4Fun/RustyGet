@@ -18,9 +18,12 @@
 //! [`PROBE_READ_FLOOR`] at once per server ([`probe_reads`]): the light
 //! connections, plus idle connections of the probe share the main pool
 //! already grants them, taken even while a download was refused one (never a
-//! connection a download holds). Every request on the floor, a BODY read or a
-//! STAT exchange, holds a slot of [`crate::light_pool::PROBE_READS`], so the
-//! slots never outnumber the connections the floor allows. A flaky server
+//! connection a download holds). While the floor is what admits them (a
+//! download was refused a connection just now, downloads not held), every
+//! probe request, a BODY read or a STAT exchange, holds a slot of
+//! [`crate::light_pool::PROBE_READS`], so the slots never outnumber the
+//! connections the floor allows; otherwise STAT exchanges take their check
+//! connections as before (up to the probe share). A flaky server
 //! stays at one, a server with few connections at its light count; with no
 //! fleet being probed (a duplicate search's checks) nothing changes.
 
@@ -107,20 +110,32 @@ pub fn probe_reads_now(max: usize) -> usize {
 }
 
 /// A slot of [`crate::light_pool::PROBE_READS`] for a STAT exchange while a
-/// fleet is being probed (none needed otherwise: the exchange takes no
-/// connection past the usual one), so its connection on the probe floor is
-/// counted with the BODY reads'. `Err(())` when `give_up()` said so first.
+/// fleet is being probed and the probe floor is what admits its connection
+/// (a download was refused a connection just now and downloads are not
+/// held), so that connection is counted with the BODY reads'. None needed
+/// otherwise: with no fleet probed it gets no connection past the usual one,
+/// and with downloads idle or held it takes idle check connections of the
+/// probe share as before. `Err(())` when `give_up()` said so first.
 #[cfg(unix)]
 pub fn stat_slot(
     give_up: impl Fn() -> bool,
 ) -> Result<Option<crate::light_pool::ReadSlot<'static>>, ()> {
-    if !fleet_probing() {
+    let downloads_held = crate::ffi::active_workstate().is_some_and(|w| w.download_held());
+    let starved = crate::net::active_server_pool().is_some_and(|p| p.download_starved_now());
+    if !stat_slot_needed(fleet_probing(), downloads_held, starved) {
         return Ok(None);
     }
     crate::light_pool::PROBE_READS
         .take(|| probe_reads_now(usize::MAX), give_up)
         .map(Some)
         .ok_or(())
+}
+
+/// Whether a STAT exchange takes a probe read slot ([`stat_slot`]): only
+/// while a fleet is probed, downloads are not held and a download was
+/// refused a connection just now (the probe floor is what admits it).
+pub fn stat_slot_needed(fleet_probing: bool, downloads_held: bool, download_starved: bool) -> bool {
+    fleet_probing && !downloads_held && download_starved
 }
 
 /// A free connection of `srv` for a probe request, or null when none is
@@ -362,5 +377,10 @@ mod tests {
             assert!(fleet_probing());
         }
         assert_eq!(fleet_probing(), before);
+        // review: STAT exchanges queue for a slot only on the floor
+        assert!(stat_slot_needed(true, false, true));
+        assert!(!stat_slot_needed(false, false, true), "no fleet probed");
+        assert!(!stat_slot_needed(true, true, true), "downloads held: the probe share as before");
+        assert!(!stat_slot_needed(true, false, false), "downloads idle: the probe share as before");
     }
 }

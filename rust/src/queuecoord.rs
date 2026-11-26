@@ -465,6 +465,10 @@ pub fn eval_dead_download(
 /// delete it and download and extract the backup from its first byte. A download whose
 /// articles are mostly gone (`dead_rate`) still fails over, unless direct unpack of it runs
 /// (`extracting`): the backup then feeds the rest of that extraction, however much is gone.
+/// A direct unpack still waiting for an unpack slot counts as running (its status is Running
+/// from its start; see `unpackslots`, where an active download goes first): another download's
+/// extraction holding the slots never makes a weak primary fail over and its backup download
+/// whole (6790 XB copy 02/05, X54: a paused download's direct unpack held the one unpack lock).
 ///
 /// A backup whose kind is not known yet (an alt nested in another container, say: its first
 /// file is an archive, not the video) lends too once a borrow from it is underway, or while

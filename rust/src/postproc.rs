@@ -32,11 +32,14 @@ pub const PAR_SCAN_EXTENDED: i32 = 1;
 pub const PAR_SCAN_FULL: i32 = 2;
 pub const PAR_SCAN_DUPE: i32 = 3;
 
-static UNPACK_MUTEX: Mutex<()> = Mutex::new(());
-
-/// An extraction (unrar, 7-Zip, direct unpack) holds the unpack lock right now.
+/// An extraction (unrar, 7-Zip, direct unpack) holds an unpack slot right now.
 pub(crate) fn extraction_running() -> bool {
-    matches!(UNPACK_MUTEX.try_lock(), Err(std::sync::TryLockError::WouldBlock))
+    crate::unpackslots::in_use() > 0
+}
+
+/// The message logged once when an extraction waits for an unpack slot.
+fn slot_wait_message(in_use: usize, cap: usize) -> Vec<u8> {
+    format!("Waiting for an unpack slot ({in_use} of {cap} in use, option UnpackSlots)").into_bytes()
 }
 
 #[inline]
@@ -2195,7 +2198,15 @@ impl NzbgetRsUnpackController {
         }
         q.set_progress_label(b"");
 
-        let _unpack_guard = UNPACK_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(_unpack_slot) = crate::unpackslots::acquire(
+            q.nzb_id(),
+            crate::unpackslots::Kind::Post,
+            &mut || crate::unpackslots::Class::Finished,
+            &mut || q.is_stopped(),
+            &mut |in_use, cap| self.print_message(q, st, MK_INFO, &slot_wait_message(in_use, cap)),
+        ) else {
+            return;
+        };
         self.exec_thread_key
             .store(current_thread_key(), Ordering::Release);
         self.unpacking.store(true, Ordering::Release);
@@ -2256,7 +2267,7 @@ impl NzbgetRsUnpackController {
 
         self.unpacking.store(false, Ordering::Release);
         self.exec_thread_key.store(0, Ordering::Release);
-        drop(_unpack_guard);
+        drop(_unpack_slot);
 
         st.log_prefix = None;
         q.set_progress_label(b"");
@@ -4486,6 +4497,21 @@ pub struct NzbgetRsDirectUnpack {
     unpacking: AtomicBool,
     terminated: AtomicBool,
     exec_thread_key: AtomicUsize,
+    /// The unpack slot this extraction holds while it extracts (`unpackslots`): given back
+    /// while it waits for a volume, taken again when it goes on.
+    slot: Mutex<Option<crate::unpackslots::Slot>>,
+    /// "Waiting for an unpack slot" was logged for this download.
+    slot_wait_told: AtomicBool,
+}
+
+/// Gives the direct unpack's slot back when the extraction step that took it ends, however it
+/// ends.
+struct SlotBack<'a>(&'a NzbgetRsDirectUnpack);
+
+impl Drop for SlotBack<'_> {
+    fn drop(&mut self) {
+        self.0.yield_slot();
+    }
 }
 
 impl NzbgetRsDirectUnpack {
@@ -4502,7 +4528,78 @@ impl NzbgetRsDirectUnpack {
             unpacking: AtomicBool::new(false),
             terminated: AtomicBool::new(false),
             exec_thread_key: AtomicUsize::new(0),
+            slot: Mutex::new(None),
+            slot_wait_told: AtomicBool::new(false),
         }
+    }
+
+    /// Takes an unpack slot for this extraction unless it holds one, waiting while none is
+    /// free for it (see `unpackslots`); false when the download was stopped meanwhile. Called
+    /// on the extraction's own thread only, never with the queue locked.
+    fn take_slot(&self, host: &QueueSubsysHost) -> bool {
+        if self.slot.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+            return true;
+        }
+        let slot = crate::unpackslots::acquire(
+            self.nzb_id,
+            crate::unpackslots::Kind::Direct,
+            &mut || self.slot_class(host),
+            &mut || self.is_stopped_or_terminated(host),
+            &mut |in_use, cap| {
+                if self.slot_wait_told.swap(true, Ordering::AcqRel) {
+                    return;
+                }
+                let msg = cstr::nul_terminated(&slot_wait_message(in_use, cap));
+                host.with_locked_queue(|dq_ptr| {
+                    let n = host.queue_find_by_id(dq_ptr, self.nzb_id);
+                    if n.is_some() {
+                        Self::nzb_message(host, n, MK_INFO, &msg);
+                    }
+                });
+            },
+        );
+        match slot {
+            Some(slot) => {
+                *self.slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(slot);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Gives the unpack slot back (the extraction waits for a volume, or ended).
+    fn yield_slot(&self) {
+        let slot = self.slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+        drop(slot);
+    }
+
+    /// The extraction takes a slot (or `wait`s for a volume and gives it back) on its own
+    /// thread, as the session tells it it waits or goes on.
+    fn slot_on_wait(&self, host: &QueueSubsysHost, wait: bool) {
+        if wait {
+            self.yield_slot();
+        } else {
+            // (stopped meanwhile: it goes on without one, and ends at its next look)
+            let _ = self.take_slot(host);
+        }
+    }
+
+    /// Where this download's extraction stands in the queue for a slot.
+    fn slot_class(&self, host: &QueueSubsysHost) -> crate::unpackslots::Class {
+        let opts = host.opts();
+        host.with_locked_queue(|dq_ptr| {
+            let n = host.queue_find_by_id(dq_ptr, self.nzb_id);
+            if n.is_none() {
+                return crate::unpackslots::Class::Paused;
+            }
+            let ns = host.nzb_snap(n, false);
+            crate::unpackslots::download_class(
+                host.nzb_file_len(n),
+                ns.paused_file_count,
+                (opts.pause_download || opts.quota_reached) && !ns.force_priority,
+                crate::fleethold::is_held(host, n),
+            )
+        })
     }
 
     fn lock_vol(&self) -> std::sync::MutexGuard<'_, DirectUnpackVolumeState> {
@@ -5138,8 +5235,8 @@ impl NzbgetRsDirectUnpack {
         // asked for by offset while it waits for them (`livefeed::try_map`).
         crate::liveorder::set_order(self.nzb_id, &set.volumes);
 
-        let _unpack_guard = UNPACK_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        if self.is_stopped(host) {
+        let _slot_back = SlotBack(self);
+        if !self.take_slot(host) || self.is_stopped(host) {
             return;
         }
         self.set_waiting(false);
@@ -5207,7 +5304,10 @@ impl NzbgetRsDirectUnpack {
                 self.apply_releases(host);
                 self.is_stopped_or_terminated(host)
             },
-            &|waiting| self.set_waiting(waiting),
+            &|waiting| {
+                self.set_waiting(waiting);
+                self.slot_on_wait(host, waiting);
+            },
         );
         drop(cell);
         if let Some(summary) = crate::livewrite::read_summary(reads, crate::livewrite::read_counts()) {
@@ -5270,8 +5370,8 @@ impl NzbgetRsDirectUnpack {
     ) {
         local.all_ok_received = false;
 
-        let _unpack_guard = UNPACK_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        if self.is_stopped(host) {
+        let _slot_back = SlotBack(self);
+        if !self.take_slot(host) || self.is_stopped(host) {
             return;
         }
         self.set_waiting(false);
@@ -5334,12 +5434,20 @@ impl NzbgetRsDirectUnpack {
                 self.add_message(host, msg_kind, msg.as_bytes(), local);
                 // A volume wait signalled through a log line holds the extractor here; RAR sets
                 // read by the progressive session wait in the session and never block here.
+                let log_wait = self.waiting_volume.load(Ordering::Acquire)
+                    && !session_parked.load(Ordering::Acquire);
+                if log_wait {
+                    self.yield_slot();
+                }
                 while self.waiting_volume.load(Ordering::Acquire)
                     && !session_parked.load(Ordering::Acquire)
                     && !self.is_stopped_or_terminated(host)
                 {
                     std::thread::sleep(Duration::from_millis(20));
                     self.apply_releases(host);
+                }
+                if log_wait {
+                    let _ = self.take_slot(host);
                 }
             },
             &mut || {
@@ -5354,6 +5462,7 @@ impl NzbgetRsDirectUnpack {
                 on_wait: Some(&|waiting| {
                     session_parked.store(waiting, Ordering::Release);
                     self.set_waiting(waiting);
+                    self.slot_on_wait(host, waiting);
                 }),
                 guard: Some(&guard),
             },
@@ -5374,7 +5483,7 @@ impl NzbgetRsDirectUnpack {
         self.set_unpacking(false);
         self.exec_thread_key.store(0, Ordering::Release);
         self.set_waiting(false);
-        drop(_unpack_guard);
+        drop(_slot_back);
 
         local.unpack_ok = res.is_ok()
             && local.all_ok_received

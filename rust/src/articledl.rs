@@ -4774,7 +4774,14 @@ impl NzbgetRsArticleDownloader {
             let pooled = crate::nntprs_pool::shared();
             #[cfg(not(unix))]
             let pooled: Option<std::sync::Arc<()>> = None;
-            if pooled.as_ref().is_some_and(|s| s.generation() != server_config_gen) {
+            if cut_at_frontier && pooled.is_some() {
+                // (the per-connection loop below checks it at its top)
+                host.log(
+                    MK_DETAIL,
+                    &join_c_slices(&[b"Not fetching ", &self.info_name, b": its download is cut at its frontier, the alt lends the rest"]),
+                );
+                status = AD_NOT_FOUND;
+            } else if pooled.as_ref().is_some_and(|s| s.generation() != server_config_gen) {
                 status = AD_RETRY;
             } else if let Some(shared) = pooled {
                 status = self.download_pooled(

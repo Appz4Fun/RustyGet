@@ -15636,7 +15636,8 @@ SCENARIO_OPTIONS = {
     'liveorder7z': WRITER_FED_OPTIONS + ['DirectRename=yes', 'ReorderFiles=no', 'DownloadRate=2000'],
     'liveorderrar': WRITER_FED_OPTIONS + ['DirectRename=yes', 'ReorderFiles=no', 'DownloadRate=2000'],
     # eight connections: the four hung first requests leave download connections free while
-    # they hang (nntp-rs keeps its light reserve beside starved downloads, G22)
+    # they hang (nntp-rs keeps its light reserve beside starved downloads, G22; TODO: back to
+    # four connections once nntp-rs ships G22)
     'livestraggler': WRITER_FED_OPTIONS + ['DownloadRate=3000', 'Server1.Connections=8'],
     'directunpacktwoarchives': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1'],
     'directunpackparfailure': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1'],

@@ -637,9 +637,13 @@ impl NzbgetRsDupeProbe {
         probed: &mut BTreeSet<i32>,
     ) -> (bool, ServerResult) {
         let mut result = ServerResult::default();
-        let Some(srv) = pool.server_by_id(server_id) else {
-            self.end_connection_wait();
-            return (false, result);
+        // a pool a config reload retired hands out nothing more, as in the slotted wait
+        let srv = match pool.server_by_id(server_id) {
+            Some(srv) if !pool.is_retired() => srv,
+            _ => {
+                self.end_connection_wait();
+                return (false, result);
+            }
         };
         if pool.is_server_blocked(&srv) {
             // a blocked server frees no connection for the probe
@@ -656,9 +660,10 @@ impl NzbgetRsDupeProbe {
             return (false, result);
         }
         let name = srv.name.to_bytes().to_vec();
-        let (answered, unreachable) = self.walk_pooled(shared, idx, &name, false, &mut result);
-        // the walk had its connection (or gave up waiting): the download goes on
+        // starting downloads takes no nntp-rs connection from a Priority::Next
+        // checkout: the download need not hold back for the walk
         self.end_connection_wait();
+        let (answered, unreachable) = self.walk_pooled(shared, idx, &name, false, &mut result);
         result.unreachable = unreachable;
         (answered, result)
     }

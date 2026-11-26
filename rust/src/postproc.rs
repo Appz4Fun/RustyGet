@@ -5799,8 +5799,10 @@ impl NzbgetRsPostJob {
                 let ns = host.nzb_snap(n, false);
                 // The first-16-KiB MD5 of every file downloaded whole, as its first article
                 // gave it: par-rename identifies those without reading them.
-                // (The analyzer sets hash16k only from a first article of 16 KiB or more, or
-                // from a file's only article, so it is the MD5 of min(16 KiB, file size).)
+                // (The analyzer sets hash16k only for a first article whose NZB size is at
+                // least 16 KiB, or a file's only article: the MD5 of min(16 KiB, file size),
+                // except for a first article that decodes to just under 16 KiB, where the
+                // hash is short and par-rename misses the file as DirectRename already does.)
                 // A name two completed files share is left to the renamer's own read.
                 let mut known: Vec<(Vec<u8>, [u8; 16])> = (0..host.nzb_completed_files_len(n))
                     .map(|i| host.nzb_completed_file_at(n, i))

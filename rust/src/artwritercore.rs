@@ -1021,6 +1021,11 @@ pub fn article_writer_process_articles_counted(
                 commit_error = true;
             }
         } else if !raw_article && !direct_write && !skip_disk_write {
+            // Overlapping parts land at the current position, not their own offset: as
+            // untrustworthy for live PAR as a short copy.
+            if item.segment_offset > -1 && position_fn() != item.segment_offset {
+                short_copies += 1;
+            }
             if let Some(mut infile) = item
                 .result_filename
                 .filter(|p| crate::fsops::file_exists(p, &crate::fsops::posix_stat))

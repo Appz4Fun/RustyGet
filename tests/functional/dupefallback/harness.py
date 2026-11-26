@@ -11792,9 +11792,9 @@ def scenario_livepartrusted(daemon, t):
 
 
 def scenario_livepartrustedtemp(daemon, t):
-    """livepartrusted with DirectWrite=no: articles go to article temporaries and are
-    joined at completion. The bytes live PAR verifies are still the bytes joined, so the
-    trusted check reads nothing again and the output is byte-exact."""
+    """livepartrusted with DirectWrite=no and no article cache: every article goes to an
+    article temporary and is joined at completion. The bytes live PAR verifies are still the
+    bytes joined, so the trusted check reads nothing again and the output is byte-exact."""
     h, intact, io = _livepar_run(daemon, t, 'ltt', 12540, {2: {7}, 6: {18}}, 3)
     live = _grep_log(t, 'as the download ended')
     batch = _grep_log(t, 'PAR repair timings for')
@@ -14758,7 +14758,7 @@ SCENARIO_OPTIONS = {
     'liveparplanned': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
     'livepargrow': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
     'livepartrusted': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
-    'livepartrustedtemp': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=no'],
+    'livepartrustedtemp': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=0', 'DirectWrite=no'],
     'parinplace': ['ParCheck=auto', 'LiveParRepair=no'],
     'parlesscritical': ['HealthCheck=dupe', 'DupeArticleFallback=no'],
     'parlesstwin': ['HealthCheck=dupe', 'DupeArticleFallback=no'],

@@ -876,6 +876,13 @@ impl ActiveStreamingSession {
     /// bytes wait. Returns the bytes kept.
     fn backfill_held(&self, id: &FileId, items: &[(u64, &[u8])]) -> u64 {
         if items.is_empty() || !self.session.needs_backfill() || self.session.is_cancelled() {
+            // Nothing waits for held bytes any more: release what an earlier flush kept.
+            if !items.is_empty() {
+                let mut held = self.held_backfill.lock().unwrap_or_else(|e| e.into_inner());
+                if held.1 > 0 && !self.session.needs_backfill() {
+                    *held = (Vec::new(), 0);
+                }
+            }
             return 0;
         }
         let mut sorted: Vec<(u64, &[u8])> = items

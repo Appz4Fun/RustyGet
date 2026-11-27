@@ -140,6 +140,7 @@ impl CurrentQueueLock {
         if let Some(q) = unsafe { q.as_ref() } {
             q.lock.lock();
         }
+        crate::statesaver::queue_lock_acquired();
         Self(q)
     }
 
@@ -154,6 +155,8 @@ impl Drop for CurrentQueueLock {
         if let Some(q) = unsafe { self.0.as_ref() } {
             q.lock.unlock();
         }
+        // Saves queued under the lock reach the disk before this thread goes on.
+        crate::statesaver::queue_lock_released();
     }
 }
 

@@ -1803,6 +1803,29 @@ def scenario_truncatedstate(daemon, t):
         state, h['Status'], integ, _grep_log(t, 'Discarding damaged download state')))
 
 
+def scenario_queuesyncslow(daemon, t):
+    """Every sync of a saved state file takes a second (RUSTYGET_TEST_STATE_SYNC_DELAY_MS,
+    as on 6790 while a post-processing move saturated the queue disk with FlushQueue=yes).
+    The queue coordinator saves the partial states and the progress once a second; it must
+    not wait for those syncs, or no articles are handed out meanwhile and the rate falls
+    to a fraction (6790: 108 MB/s to 4-20 MB/s, 10-50 of 205 connections busy). Six files
+    of 30 articles each, every article delayed 0.3 s by the proxy, 6 connections: about
+    9 s of transfer. Waiting for the syncs (two or more seconds of every second) makes it
+    take several times that; the bound is 30 s."""
+    seg, size, nfiles = 100_000, 3_000_000, 6
+    members = []
+    for i in range(nfiles):
+        data = _payload(size, 4400 + i)
+        members.append((_place_copy(t, 'qsA', data, 'f%d.bin' % i), 'qs%d.bin' % i, size, seg, set()))
+    api = daemon.wait_ready()
+    start = time.time()
+    daemon.append(api, 'RelQS', build_multi_nzb(members), False, 'qs-key', 100)
+    h = daemon.wait_history(api, 'RelQS', timeout=240)
+    elapsed = time.time() - start
+    ok = h['Status'].startswith('SUCCESS') and elapsed < 30.0
+    return ('queuesyncslow', ok, 'status=%s elapsed=%.1fs bound=30s' % (h['Status'], elapsed))
+
+
 def scenario_streamtimeout(daemon, t):
     """DupeStreamTimeout: the only duplicate is stalled (every request for its
     articles waits 8 s, longer than the timeout), so the repair of the
@@ -15265,6 +15288,7 @@ SCENARIOS = {
     'manydonors': scenario_manydonors,
     'stream': scenario_stream,
     'truncatedstate': scenario_truncatedstate,
+    'queuesyncslow': scenario_queuesyncslow,
     'streamrestartcredit': scenario_streamrestartcredit,
     'streamtimeout': scenario_streamtimeout,
     'streamdeaddonor': scenario_streamdeaddonor,
@@ -15702,6 +15726,8 @@ SCENARIO_ENV = {
     'persistdeadprimary': {'RUSTYGET_PERSISTENT_UNPACK': '1'},
     'persistrestart': {'RUSTYGET_PERSISTENT_UNPACK': '1'},
     'persistrestartdamaged': {'RUSTYGET_PERSISTENT_UNPACK': '1'},
+    # each state-file sync takes 1 s (diskstate_format::test_state_sync_delay)
+    'queuesyncslow': {'RUSTYGET_TEST_STATE_SYNC_DELAY_MS': '1000'},
 }
 SCENARIO_ENV_KEYS = sorted({k for env in SCENARIO_ENV.values() for k in env})
 
@@ -15753,6 +15779,7 @@ SCENARIO_OPTIONS = {
     'jsonpoff': ['DupeArticleFallback=yes', 'Server1.Password=harness-secret'],
     'stream': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'truncatedstate': ['ContinuePartial=yes', 'FlushQueue=yes', 'Server1.Connections=1'],
+    'queuesyncslow': ['ContinuePartial=yes', 'FlushQueue=yes', 'Server1.Connections=6'],
     'streamrestartcredit': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'streamdeaddonor': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'rejectnextserver': ['DupeArticleFallback=article', 'ArticleRetries=0'],
@@ -16209,6 +16236,7 @@ SCENARIO_DELAY_PROXY = {'fleetbigqueue': [(b'-0-', 600.0)], 'dupausedunpack': [(
                         'directunpackkeep': [(b'rel.part03', 2.0)],
                         'directunpackkeepnointer': [(b'rel.part03', 2.0)],
                         'truncatedstate': [(b'tsA/', 0.5)],
+                        'queuesyncslow': [(b'qsA/', 0.3)],
                         'reloadmidrepair': [(b'rlDon/', 2.0)],
                         'streamrestartcredit': [(b'srSlow/', 3.0)],
                         'restartfailover': [(b'rfA/', 0.4)],

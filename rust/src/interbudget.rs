@@ -1,15 +1,19 @@
 //! The InterDir disk budget: a download that has not started yet starts only when the
 //! file system it downloads into (InterDir, or DestDir when InterDir is empty) has room
-//! for what it still has to fetch, after what the downloads already started will still
-//! write, and after `DiskSpace` and a reserve for the queue's state files.
+//! for what it still has to fetch and unpack, after what the downloads already started will
+//! still write, and after `DiskSpace` and a reserve for the queue's state files.
 //!
 //! 6790, 2026-11-27: about 450 GB of downloads started together in a 470 GB InterDir; the
 //! disk filled up, the state saves failed and a partial state was lost. `DiskSpace` alone
 //! pauses all downloading once the disk is already nearly full, by which time every started
 //! download is stuck half done. The budget keeps the next one from starting instead.
+//!
+//! With InterDir empty the global DestDir is measured; a category DestDir on another file
+//! system is not (DiskSpace still pauses there). `DiskSpace` <= 0 turns the budget off.
 
-/// MB kept free for the queue's state files (they live with the downloads on 6790), on top
-/// of `DiskSpace`. Test hook: `RUSTYGET_TEST_STATE_RESERVE_MB`.
+/// MB kept free on top of `DiskSpace`: the queue's state files (they live with the downloads
+/// on 6790) and the articles the article cache holds but has not written yet. Test hook:
+/// `RUSTYGET_TEST_STATE_RESERVE_MB`.
 const STATE_RESERVE_MB: i64 = 1024;
 
 /// What is still to be written counts 10 % more (yEnc overhead is decoded away, but par2
@@ -27,10 +31,12 @@ fn state_reserve_mb() -> i64 {
     })
 }
 
-/// The room a download still needs: its unpaused remaining bytes plus the margin.
-pub(crate) fn need_bytes(remaining: i64, paused: i64) -> i64 {
+/// The room a download still needs: its unpaused remaining bytes plus the margin, plus
+/// `unpack` bytes its unpack will still write (next to the archives, before they are
+/// cleaned up; 0 when it does not unpack or has unpacked already).
+pub(crate) fn need_bytes(remaining: i64, paused: i64, unpack: i64) -> i64 {
     let left = remaining.saturating_sub(paused).max(0);
-    left.saturating_mul(MARGIN_PERCENT) / 100
+    (left.saturating_mul(MARGIN_PERCENT) / 100).saturating_add(unpack.max(0))
 }
 
 /// Whether a download has started: some of it came (or failed), or an article is in flight.
@@ -46,6 +52,9 @@ pub(crate) fn fits(avail: i64, reserved: i64, need: i64, keep_mb: i64) -> bool {
     avail.saturating_sub(reserved).saturating_sub(need) >= keep
 }
 
+/// A download's priority as the pick orders it: extra priority first, then priority.
+pub(crate) type Rank = (bool, i32);
+
 /// The budget as it stood at the last check, recomputed at most once per second.
 #[derive(Default)]
 struct Budget {
@@ -54,11 +63,19 @@ struct Budget {
     /// Off: `DiskSpace` <= 0, no directory, or its free space unknown.
     on: bool,
     avail: i64,
+    total: i64,
     /// Still to be written by started downloads, plus the downloads admitted since `sec`.
     reserved: i64,
     keep_mb: i64,
     /// Downloads admitted since `sec`: not counted as started yet, but already reserved.
     admitted: Vec<i32>,
+    /// Downloads held since `sec`: free space and reservations cannot improve within the
+    /// second, so the pick skips them without asking again.
+    held: std::collections::HashSet<i32>,
+    /// The highest rank held since `sec` (of a download that fits the file system at all):
+    /// unstarted downloads ranked below it wait too, so smaller lower-priority ones never
+    /// take its room.
+    hold_below: Option<Rank>,
     /// Downloads whose hold has been logged (once each, until admitted).
     logged: std::collections::HashSet<i32>,
 }
@@ -86,20 +103,45 @@ fn inputs() -> Option<(std::ffi::CString, i64)> {
     Some((std::ffi::CString::new(dir).ok()?, disk_space))
 }
 
+/// Whether the unpack of downloads is on (option `Unpack`).
+pub(crate) fn unpack_on() -> bool {
+    crate::options::active_options().is_some_and(|o| o.scalars().unpack != 0)
+}
+
 /// One queue item as the budget sees it.
 pub(crate) struct Item {
     pub id: i32,
-    pub remaining: i64,
-    pub paused: i64,
     pub started: bool,
+    /// What it will still write when it counts (started, and not held back as a duplicate
+    /// copy of another download); 0 otherwise.
+    pub reserve: i64,
 }
 
-/// Free bytes of the budget's directory and the MB to keep free, from the live options and
-/// the file system; None: the budget is off.
-fn probe() -> Option<(i64, i64)> {
+/// The download a pick would start.
+pub(crate) struct Pick {
+    pub id: i32,
+    pub need: i64,
+    pub rank: Rank,
+    /// FORCE priority: it starts regardless, but its room is reserved all the same.
+    pub force: bool,
+}
+
+/// Free and total bytes of the budget's directory and the MB to keep free, from the live
+/// options and the file system; None: the budget is off (logged once when the directory
+/// cannot be measured).
+fn probe() -> Option<(i64, i64, i64)> {
+    static UNMEASURED_LOGGED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
     let (dir, disk_space) = inputs()?;
-    let (avail, _) = crate::fsops::get_disk_state(&dir)?;
-    Some((avail, disk_space.saturating_add(state_reserve_mb())))
+    let Some((avail, total)) = crate::fsops::get_disk_state(&dir) else {
+        if !UNMEASURED_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            let mut msg = b"InterDir disk budget off: cannot read the free space of ".to_vec();
+            msg.extend_from_slice(dir.as_bytes());
+            crate::log::log_active_bytes(crate::log::MK_WARNING, &msg);
+        }
+        return None;
+    };
+    Some((avail, total, disk_space.saturating_add(state_reserve_mb())))
 }
 
 /// Recomputes the budget when a second has passed since the last time. `probe` and `items`
@@ -107,7 +149,7 @@ fn probe() -> Option<(i64, i64)> {
 fn refresh(
     b: &mut Budget,
     now: i64,
-    probe: &mut dyn FnMut() -> Option<(i64, i64)>,
+    probe: &mut dyn FnMut() -> Option<(i64, i64, i64)>,
     items: &mut dyn FnMut() -> Vec<Item>,
 ) {
     if b.sec != 0 && now == b.sec {
@@ -115,18 +157,21 @@ fn refresh(
     }
     b.sec = now;
     b.admitted.clear();
-    let Some((avail, keep_mb)) = probe() else {
+    b.held.clear();
+    b.hold_below = None;
+    let Some((avail, total, keep_mb)) = probe() else {
         b.on = false;
         return;
     };
     b.on = true;
     b.avail = avail;
+    b.total = total;
     b.keep_mb = keep_mb;
     let all = items();
     b.reserved = all
         .iter()
         .filter(|i| i.started)
-        .map(|i| need_bytes(i.remaining, i.paused))
+        .map(|i| i.reserve)
         .fold(0i64, i64::saturating_add);
     // An item that is gone or has started is no longer held: log it again if it is held
     // again later.
@@ -137,46 +182,79 @@ fn refresh(
     }
 }
 
-/// The outcome of a budget check for one unstarted download.
-pub(crate) enum Verdict {
-    Start,
-    /// Held; `Some((need_mb, free_mb))` the first time, to be logged.
-    Hold(Option<(i64, i64)>),
+/// Why a download is held, the first time (to be logged).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct HoldLog {
+    pub need_mb: i64,
+    pub free_mb: i64,
+    /// It needs more than the whole file system: it never starts by itself.
+    pub never_fits: bool,
 }
 
-/// Whether the unstarted download `id` (needing `need` bytes) may start now. Admitting it
-/// reserves its room at once, so a second unstarted download picked within the same second
-/// does not count on the same free space.
-pub(crate) fn check(now: i64, id: i32, need: i64, items: &mut dyn FnMut() -> Vec<Item>) -> Verdict {
+/// The outcome of a budget check for one unstarted download.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Verdict {
+    Start,
+    /// Held; `Some` the first time, to be logged.
+    Hold(Option<HoldLog>),
+}
+
+/// Whether the unstarted download `pick` may start now. Admitting it reserves its room at
+/// once, so a second unstarted download picked within the same second does not count on the
+/// same free space.
+pub(crate) fn check(now: i64, pick: &Pick, items: &mut dyn FnMut() -> Vec<Item>) -> Verdict {
     let mut guard = BUDGET.lock().unwrap_or_else(|e| e.into_inner());
     let b = guard.get_or_insert_with(Budget::default);
-    check_with(b, now, id, need, &mut probe, items)
+    check_with(b, now, pick, &mut probe, items)
+}
+
+/// Whether the pick's walk can skip the unstarted download `id` of rank `rank` at once: it
+/// was held this second, or a download ranked above it was.
+pub(crate) fn held_now(now: i64, id: i32, rank: Rank) -> bool {
+    let guard = BUDGET.lock().unwrap_or_else(|e| e.into_inner());
+    guard.as_ref().is_some_and(|b| held_with(b, now, id, rank))
+}
+
+fn held_with(b: &Budget, now: i64, id: i32, rank: Rank) -> bool {
+    b.on && b.sec == now && (b.held.contains(&id) || b.hold_below.is_some_and(|r| rank < r))
 }
 
 fn check_with(
     b: &mut Budget,
     now: i64,
-    id: i32,
-    need: i64,
-    probe: &mut dyn FnMut() -> Option<(i64, i64)>,
+    pick: &Pick,
+    probe: &mut dyn FnMut() -> Option<(i64, i64, i64)>,
     items: &mut dyn FnMut() -> Vec<Item>,
 ) -> Verdict {
     refresh(b, now, probe, items);
-    if !b.on || b.admitted.contains(&id) {
+    if !b.on || b.admitted.contains(&pick.id) {
         return Verdict::Start;
     }
-    if fits(b.avail, b.reserved, need, b.keep_mb) {
-        b.reserved = b.reserved.saturating_add(need);
-        b.admitted.push(id);
-        b.logged.remove(&id);
+    let below = b.hold_below.is_some_and(|r| pick.rank < r);
+    if pick.force || (!below && fits(b.avail, b.reserved, pick.need, b.keep_mb)) {
+        b.reserved = b.reserved.saturating_add(pick.need);
+        b.admitted.push(pick.id);
+        b.logged.remove(&pick.id);
         return Verdict::Start;
     }
-    if b.logged.insert(id) {
+    b.held.insert(pick.id);
+    let never_fits = pick
+        .need
+        .saturating_add(b.keep_mb.saturating_mul(1024 * 1024))
+        > b.total;
+    if !never_fits && b.hold_below.is_none_or(|r| pick.rank > r) {
+        b.hold_below = Some(pick.rank);
+    }
+    if b.logged.insert(pick.id) {
         // Free: what the started downloads leave (DiskSpace and the reserve not taken off;
         // they are in the need).
         let free = b.avail.saturating_sub(b.reserved).max(0);
         let mb = |v: i64| v / (1024 * 1024);
-        return Verdict::Hold(Some((mb(need) + b.keep_mb, mb(free))));
+        return Verdict::Hold(Some(HoldLog {
+            need_mb: mb(pick.need) + b.keep_mb,
+            free_mb: mb(free),
+            never_fits,
+        }));
     }
     Verdict::Hold(None)
 }
@@ -188,11 +266,15 @@ mod tests {
     const MB: i64 = 1024 * 1024;
 
     #[test]
-    fn need_counts_unpaused_remaining_plus_ten_percent() {
-        assert_eq!(need_bytes(100 * MB, 0), 110 * MB);
-        assert_eq!(need_bytes(100 * MB, 40 * MB), 66 * MB);
-        assert_eq!(need_bytes(10, 20), 0);
-        assert_eq!(need_bytes(i64::MAX, 0), i64::MAX / 100);
+    fn need_counts_unpaused_remaining_plus_ten_percent_and_the_unpack() {
+        assert_eq!(need_bytes(100 * MB, 0, 0), 110 * MB);
+        assert_eq!(need_bytes(100 * MB, 40 * MB, 0), 66 * MB);
+        assert_eq!(need_bytes(10, 20, 0), 0);
+        assert_eq!(need_bytes(i64::MAX, 0, 0), i64::MAX / 100);
+        // downloaded, unpack still to come: its extracted size
+        assert_eq!(need_bytes(0, 0, 90 * MB), 90 * MB);
+        assert_eq!(need_bytes(100 * MB, 0, 90 * MB), 200 * MB);
+        assert_eq!(need_bytes(i64::MAX, 0, i64::MAX), i64::MAX);
     }
 
     #[test]
@@ -218,34 +300,196 @@ mod tests {
     }
 
     fn item(id: i32, remaining_mb: i64, started: bool) -> Item {
-        Item { id, remaining: remaining_mb * MB, paused: 0, started }
+        Item {
+            id,
+            started,
+            reserve: need_bytes(remaining_mb * MB, 0, 0),
+        }
+    }
+
+    fn pick(id: i32, need: i64) -> Pick {
+        Pick {
+            id,
+            need,
+            rank: (false, 0),
+            force: false,
+        }
+    }
+
+    fn hold_log(v: &Verdict) -> Option<&HoldLog> {
+        match v {
+            Verdict::Hold(Some(log)) => Some(log),
+            _ => None,
+        }
     }
 
     /// The scenario's numbers: a 64 MB file system, A and B 30 MB each, 5 MB to keep.
     #[test]
     fn a_second_download_waits_until_the_first_is_done() {
         let mut b = Budget::default();
-        let mut probe = || Some((60 * MB, 5));
-        let need = need_bytes(30 * MB, 0);
+        let mut probe = || Some((60 * MB, 64 * MB, 5));
+        let need = need_bytes(30 * MB, 0, 0);
         // second 1: neither started; A is admitted, B (same second) counts A's room
         let mut q = || vec![item(1, 30, false), item(2, 30, false)];
-        assert!(matches!(check_with(&mut b, 1, 1, need, &mut probe, &mut q), Verdict::Start));
-        assert!(matches!(check_with(&mut b, 1, 1, need, &mut probe, &mut q), Verdict::Start));
-        assert!(matches!(
-            check_with(&mut b, 1, 2, need, &mut probe, &mut q),
-            Verdict::Hold(Some((38, 27)))
-        ));
+        assert_eq!(
+            check_with(&mut b, 1, &pick(1, need), &mut probe, &mut q),
+            Verdict::Start
+        );
+        assert_eq!(
+            check_with(&mut b, 1, &pick(1, need), &mut probe, &mut q),
+            Verdict::Start
+        );
+        assert_eq!(
+            check_with(&mut b, 1, &pick(2, need), &mut probe, &mut q),
+            Verdict::Hold(Some(HoldLog {
+                need_mb: 38,
+                free_mb: 27,
+                never_fits: false
+            }))
+        );
+        assert!(held_with(&b, 1, 2, (false, 0)));
+        assert!(
+            !held_with(&b, 2, 2, (false, 0)),
+            "a new second judges again"
+        );
         // logged once
-        assert!(matches!(check_with(&mut b, 1, 2, need, &mut probe, &mut q), Verdict::Hold(None)));
+        assert_eq!(
+            check_with(&mut b, 1, &pick(2, need), &mut probe, &mut q),
+            Verdict::Hold(None)
+        );
         // second 2: A started, half done; still no room for B
         let mut q = || vec![item(1, 15, true), item(2, 30, false)];
-        let mut probe2 = || Some((45 * MB, 5));
-        assert!(matches!(check_with(&mut b, 2, 2, need, &mut probe2, &mut q), Verdict::Hold(None)));
+        let mut probe2 = || Some((45 * MB, 64 * MB, 5));
+        assert_eq!(
+            check_with(&mut b, 2, &pick(2, need), &mut probe2, &mut q),
+            Verdict::Hold(None)
+        );
         // second 3: A done and gone from the queue: B starts
         let mut q = || vec![item(2, 30, false)];
-        let mut probe3 = || Some((30 * MB + 33 * MB, 5));
-        assert!(matches!(check_with(&mut b, 3, 2, need, &mut probe3, &mut q), Verdict::Start));
+        let mut probe3 = || Some((30 * MB + 33 * MB, 64 * MB, 5));
+        assert_eq!(
+            check_with(&mut b, 3, &pick(2, need), &mut probe3, &mut q),
+            Verdict::Start
+        );
         assert!(b.logged.is_empty());
+    }
+
+    #[test]
+    fn a_downloaded_item_still_to_unpack_keeps_its_room() {
+        let mut b = Budget::default();
+        // A: fully downloaded (remaining 0), 30 MB to extract next to its archives
+        let mut probe = || Some((60 * MB, 128 * MB, 5));
+        let mut q = || {
+            vec![
+                Item {
+                    id: 1,
+                    started: true,
+                    reserve: need_bytes(0, 0, 30 * MB),
+                },
+                item(2, 30, false),
+            ]
+        };
+        assert!(hold_log(&check_with(
+            &mut b,
+            1,
+            &pick(2, need_bytes(30 * MB, 0, 0)),
+            &mut probe,
+            &mut q
+        ))
+        .is_some());
+    }
+
+    #[test]
+    fn a_held_download_holds_lower_ranked_ones_but_not_higher_or_started() {
+        let mut b = Budget::default();
+        let mut probe = || Some((40 * MB, 100 * MB, 0));
+        let mut q = || Vec::new();
+        let big = Pick {
+            id: 1,
+            need: 60 * MB,
+            rank: (false, 50),
+            force: false,
+        };
+        assert!(hold_log(&check_with(&mut b, 1, &big, &mut probe, &mut q)).is_some());
+        // a small one of lower priority does not take its room
+        let small_low = Pick {
+            id: 2,
+            need: MB,
+            rank: (false, 0),
+            force: false,
+        };
+        assert!(held_with(&b, 1, 2, small_low.rank));
+        assert!(matches!(
+            check_with(&mut b, 1, &small_low, &mut probe, &mut q),
+            Verdict::Hold(_)
+        ));
+        // the same priority or higher still may
+        let small_same = Pick {
+            id: 3,
+            need: MB,
+            rank: (false, 50),
+            force: false,
+        };
+        assert_eq!(
+            check_with(&mut b, 1, &small_same, &mut probe, &mut q),
+            Verdict::Start
+        );
+        let small_extra = Pick {
+            id: 4,
+            need: MB,
+            rank: (true, -100),
+            force: false,
+        };
+        assert_eq!(
+            check_with(&mut b, 1, &small_extra, &mut probe, &mut q),
+            Verdict::Start
+        );
+    }
+
+    #[test]
+    fn one_larger_than_the_disk_says_so_and_holds_nobody_else() {
+        let mut b = Budget::default();
+        let mut probe = || Some((90 * MB, 100 * MB, 0));
+        let mut q = || Vec::new();
+        let huge = Pick {
+            id: 1,
+            need: 200 * MB,
+            rank: (false, 50),
+            force: false,
+        };
+        let log = check_with(&mut b, 1, &huge, &mut probe, &mut q);
+        assert!(hold_log(&log).is_some_and(|l| l.never_fits));
+        let small_low = Pick {
+            id: 2,
+            need: MB,
+            rank: (false, 0),
+            force: false,
+        };
+        assert_eq!(
+            check_with(&mut b, 1, &small_low, &mut probe, &mut q),
+            Verdict::Start
+        );
+    }
+
+    #[test]
+    fn force_starts_but_reserves_its_room() {
+        let mut b = Budget::default();
+        let mut probe = || Some((50 * MB, 100 * MB, 0));
+        let mut q = || Vec::new();
+        let forced = Pick {
+            id: 1,
+            need: 60 * MB,
+            rank: (false, 900),
+            force: true,
+        };
+        assert_eq!(
+            check_with(&mut b, 1, &forced, &mut probe, &mut q),
+            Verdict::Start
+        );
+        assert!(matches!(
+            check_with(&mut b, 1, &pick(2, MB), &mut probe, &mut q),
+            Verdict::Hold(_)
+        ));
     }
 
     #[test]
@@ -257,15 +501,22 @@ mod tests {
             calls += 1;
             Vec::new()
         };
-        assert!(matches!(check_with(&mut b, 9, 1, i64::MAX, &mut probe, &mut q), Verdict::Start));
+        assert_eq!(
+            check_with(&mut b, 9, &pick(1, i64::MAX), &mut probe, &mut q),
+            Verdict::Start
+        );
+        assert!(!held_with(&b, 9, 1, (false, 0)));
         assert_eq!(calls, 0);
-        let mut probe = || Some((MB, 0));
+        let mut probe = || Some((MB, 100 * MB, 0));
         let mut q = || {
             calls += 1;
             vec![item(1, 1000, true)]
         };
         for _ in 0..5 {
-            assert!(matches!(check_with(&mut b, 10, 2, MB, &mut probe, &mut q), Verdict::Hold(_)));
+            assert!(matches!(
+                check_with(&mut b, 10, &pick(2, MB), &mut probe, &mut q),
+                Verdict::Hold(_)
+            ));
         }
         assert_eq!(calls, 1);
     }
@@ -273,12 +524,19 @@ mod tests {
     #[test]
     fn a_hold_is_logged_again_after_the_item_left_the_queue() {
         let mut b = Budget::default();
-        let mut probe = || Some((MB, 0));
+        let mut probe = || Some((MB, 1000 * MB, 0));
         let mut q = || vec![item(5, 100, false)];
-        let need = need_bytes(100 * MB, 0);
-        assert!(matches!(check_with(&mut b, 1, 5, need, &mut probe, &mut q), Verdict::Hold(Some(_))));
+        let need = need_bytes(100 * MB, 0, 0);
+        assert!(hold_log(&check_with(&mut b, 1, &pick(5, need), &mut probe, &mut q)).is_some());
         let mut gone = || Vec::new();
-        assert!(matches!(check_with(&mut b, 2, 6, MB * 2, &mut probe, &mut gone), Verdict::Hold(Some(_))));
+        assert!(hold_log(&check_with(
+            &mut b,
+            2,
+            &pick(6, MB * 2),
+            &mut probe,
+            &mut gone
+        ))
+        .is_some());
         assert!(!b.logged.contains(&5));
     }
 }

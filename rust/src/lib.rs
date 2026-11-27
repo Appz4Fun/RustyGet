@@ -134,6 +134,7 @@ pub mod qhist;
 pub(crate) mod qlist;
 pub(crate) mod qqueue;
 pub mod queuecoord;
+pub mod interbudget;
 pub(crate) mod queuesubsys_host;
 pub mod sevenzraw;
 pub mod frontiercut;

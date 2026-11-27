@@ -2012,6 +2012,63 @@ def scenario_diskfullrestart(daemon, t):
             print('       diskfullrestart: unmount of %s failed, lazy unmount rc=%d' % (mnt, rc))
 
 
+def scenario_interdirbudget(daemon, t):
+    """6790, 2026-11-27: about 450 GB of downloads started together in a 470 GB InterDir,
+    which filled up. Here InterDir is a 64 MB file system of its own, DiskSpace=4 and the
+    state reserve 1 MB (RUSTYGET_TEST_STATE_RESERVE_MB), and two 30 MB downloads are
+    added at once: each needs 33 MB (remaining plus 10 %), so B must not start while A
+    downloads (no article of B requested before A's last one); once A has moved to
+    DestDir, B starts. Both end SUCCESS and byte-exact, and B's hold is logged once."""
+    seg, size = 500_000, 30_000_000
+    data_a, data_b = _payload(size, 7101), _payload(size, 7102)
+    pa = _place_copy(t, 'bgA', data_a, 'a.bin')
+    pb = _place_copy(t, 'bgB', data_b, 'b.bin')
+    api = daemon.wait_ready()
+    try:
+        api.shutdown()
+    except Exception:
+        pass
+    t.procs[-1].wait(timeout=60)
+    mnt = t.path('main', 'small')
+    umount, why = _small_fs_mount(t, mnt, 64)
+    if umount is None:
+        return ('interdirbudget', None, 'SKIP: %s' % why)
+    try:
+        os.makedirs(os.path.join(mnt, 'inter'))
+        conf = t.path(daemon.conf_rel)
+        with open(conf, 'ab') as f:
+            f.write(('InterDir=%s\n' % os.path.join(mnt, 'inter')).encode())
+        daemon.start()
+        api = daemon.wait_ready()
+        daemon.append(api, 'BudgetA', build_nzb(pa, 'a.bin', size, seg, set()), False, 'bud-a', 100)
+        time.sleep(0.3)
+        daemon.append(api, 'BudgetB', build_nzb(pb, 'b.bin', size, seg, set()), False, 'bud-b', 100)
+        ha = daemon.wait_history(api, 'BudgetA', timeout=180)
+        hb = daemon.wait_history(api, 'BudgetB', timeout=180)
+        ids = _failcont_requests(t)
+        last_a = max([i for i, m in enumerate(ids) if m.startswith('bgA/')] or [-1])
+        first_b = min([i for i, m in enumerate(ids) if m.startswith('bgB/')] or [len(ids)])
+        overlap = sum(1 for m in ids[:last_a] if m.startswith('bgB/'))
+        integ = _verify_output(t, data_a) and _verify_output(t, data_b)
+        held = _grep_log(t, 'Holding BudgetB: needs')
+        held_a = _grep_log(t, 'Holding BudgetA: needs')
+        ok = (ha['Status'].startswith('SUCCESS') and hb['Status'].startswith('SUCCESS') and integ
+              and last_a >= 0 and first_b > last_a and held == 1 and held_a == 0)
+        return ('interdirbudget', ok,
+                'statusA=%s statusB=%s integrity=%s last_a=%d first_b=%d b_before_a_done=%d '
+                'held_logs_b=%d held_logs_a=%d' % (ha['Status'], hb['Status'], integ, last_a,
+                                                    first_b, overlap, held, held_a))
+    finally:
+        for p in t.procs:
+            if p.poll() is None:
+                p.kill()
+                p.wait(timeout=30)
+        if subprocess.run(umount, capture_output=True).returncode != 0:
+            lazy = umount[:-1] + ['-l', umount[-1]] if umount[0] == 'sudo' else umount
+            rc = subprocess.run(lazy, capture_output=True).returncode
+            print('       interdirbudget: unmount of %s failed, lazy unmount rc=%d' % (mnt, rc))
+
+
 def scenario_streamtimeout(daemon, t):
     """DupeStreamTimeout: the only duplicate is stalled (every request for its
     articles waits 8 s, longer than the timeout), so the repair of the
@@ -15833,6 +15890,7 @@ SCENARIOS = {
     'truncatedstate': scenario_truncatedstate,
     'queuesyncslow': scenario_queuesyncslow,
     'diskfullrestart': scenario_diskfullrestart,
+    'interdirbudget': scenario_interdirbudget,
     'queuebatchstart': scenario_queuebatchstart,
     'streamrestartcredit': scenario_streamrestartcredit,
     'streamtimeout': scenario_streamtimeout,
@@ -16282,6 +16340,7 @@ SCENARIO_ENV = {
     'corruptpartdurar5': {'RUSTYGET_PERSISTENT_UNPACK': '1'},
     # each state-file sync takes 1 s (diskstate_format::test_state_sync_delay)
     'queuesyncslow': {'RUSTYGET_TEST_STATE_SYNC_DELAY_MS': '1000'},
+    'interdirbudget': {'RUSTYGET_TEST_STATE_RESERVE_MB': '1'},
     # each pass of the queue coordinator takes 100 ms (queuecoord::test_coord_pass_delay)
     'queuebatchstart': {'RUSTYGET_TEST_COORD_PASS_DELAY_MS': '100'},
     # Each cache flush holds its file's flush lock 150 ms before writing (articledl.rs
@@ -16342,6 +16401,7 @@ SCENARIO_OPTIONS = {
     'truncatedstate': ['ContinuePartial=yes', 'FlushQueue=yes', 'Server1.Connections=1'],
     'queuesyncslow': ['ContinuePartial=yes', 'FlushQueue=yes', 'Server1.Connections=6'],
     'diskfullrestart': ['ContinuePartial=yes', 'FlushQueue=yes', 'DiskSpace=0', 'Server1.Connections=4'],
+    'interdirbudget': ['DiskSpace=4', 'Server1.Connections=4'],
     'queuebatchstart': ['Server1.Connections=30'],
     'streamrestartcredit': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'streamdeaddonor': ['DupeArticleFallback=stream', 'ParCheck=auto'],

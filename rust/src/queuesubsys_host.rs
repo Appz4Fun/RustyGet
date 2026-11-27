@@ -2137,6 +2137,15 @@ impl QueueSubsysHost {
         crate::qnzb::nzb_pick_fields(nzb_ptr).unwrap_or((0, false, 0))
     }
 
+    /// Remaining, paused, success and failed sizes and articles in flight, as `nzb_snap`
+    /// has them, without the rest of the snapshot (the InterDir budget). None on a mock host.
+    pub fn nzb_budget_fields(&self, nzb_ptr: NzbRef) -> Option<(i64, i64, i64, i64, i32)> {
+        if nzb_ptr.is_none() || !self.use_active {
+            return None;
+        }
+        crate::qnzb::nzb_budget_fields(nzb_ptr)
+    }
+
     /// The duplicate key, as `nzb_snap` has it, without the rest of the snapshot.
     pub fn nzb_dupe_key(&self, nzb_ptr: NzbRef) -> Vec<u8> {
         if nzb_ptr.is_none() || !self.use_active {

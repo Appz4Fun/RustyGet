@@ -2650,6 +2650,14 @@ pub(crate) fn nzb_pick_fields(nzb: NzbRef) -> Option<(i32, bool, i32)> {
     Some((s.priority, s.extraPriority > 0, s.pausedFileCount))
 }
 
+/// What the InterDir budget reads of a collection, without the rest of the snapshot:
+/// remaining size, paused size, success and failed sizes, and articles in flight.
+pub(crate) fn nzb_budget_fields(nzb: NzbRef) -> Option<(i64, i64, i64, i64, i32)> {
+    nzb_data(nzb)?;
+    let s = unsafe { &*scalars(nzb).cast_const() };
+    Some((s.remainingSize, s.pausedSize, s.successSize, s.failedSize, s.activeDownloads))
+}
+
 /// A collection's duplicate key alone (empty when unset or gone).
 pub(crate) fn nzb_dupe_key(nzb: NzbRef) -> Vec<u8> {
     if nzb_data(nzb).is_none() {

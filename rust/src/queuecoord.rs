@@ -3226,6 +3226,9 @@ impl NzbgetRsQueueCoordinator {
                         || entry.snap(host).force_priority)
                 {
                     let nzb = entry.snap(host);
+                    if !nzb.force_priority && !interdir_budget_admits(host, &queue, entry, cur_date) {
+                        continue;
+                    }
                     let propagation_delay = opts.propagation_delay;
                     let order = cached_live_order(&mut orders, host, nzb_ptr, nzb.id);
                     // A par2 file with articles to fetch seen earlier in the list: the window
@@ -7767,6 +7770,59 @@ fn downloaded_ranges(
     let mut merged = par_rs::damage::normalize_ranges(&ranges);
     merged.shrink_to_fit();
     merged
+}
+
+/// The InterDir budget (see `interbudget`) for a queue item the pick would take: a download
+/// that has started always may go on; one that has not starts only when the disk has room
+/// for it after what the started ones will still write. Held, it says why once.
+#[cfg(unix)]
+fn interdir_budget_admits(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    queue: &[PickEntry],
+    entry: &PickEntry,
+    now: i64,
+) -> bool {
+    let Some((remaining, paused, success, failed, active)) = host.nzb_budget_fields(entry.ptr)
+    else {
+        return true;
+    };
+    if crate::interbudget::started(success, failed, active) {
+        return true;
+    }
+    let nzb = entry.snap(host);
+    let need = crate::interbudget::need_bytes(remaining, paused);
+    let mut items = || {
+        queue
+            .iter()
+            .filter_map(|e| {
+                let (remaining, paused, success, failed, active) = host.nzb_budget_fields(e.ptr)?;
+                Some(crate::interbudget::Item {
+                    id: e.snap(host).id,
+                    remaining,
+                    paused,
+                    started: crate::interbudget::started(success, failed, active),
+                })
+            })
+            .collect()
+    };
+    match crate::interbudget::check(now, nzb.id, need, &mut items) {
+        crate::interbudget::Verdict::Start => true,
+        crate::interbudget::Verdict::Hold(log) => {
+            if let Some((need_mb, free_mb)) = log {
+                let mut msg = b"Holding ".to_vec();
+                msg.extend_from_slice(&nzb.name);
+                msg.extend_from_slice(
+                    format!(
+                        ": needs {} MB in InterDir, {} MB free (option DiskSpace)",
+                        need_mb, free_mb
+                    )
+                    .as_bytes(),
+                );
+                host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_INFO, &msg);
+            }
+            false
+        }
+    }
 }
 
 /// A queue item as `get_next_article` reads it: the fields its pick reads first, and the

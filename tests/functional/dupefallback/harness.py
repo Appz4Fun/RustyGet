@@ -2072,14 +2072,17 @@ def scenario_cachecommitfull(daemon, t):
         more = re.findall(r'Could not commit (\d+) more cached articles', log)
         saved = re.findall(r'Saved (\d+) articles', log)
         reason = re.findall(r'Could not commit cached article for [^:]*: ([^;\n]*)', log)
+        handed_n = sum(int(n) for n, _ in handed)
+        downloaded_mb = h.get('DownloadedSizeMB', 0)
+        # The handed-back articles came again: more than the file was downloaded in all.
         ok = (h['Status'].startswith('SUCCESS') and integ and lost_logs > 0 and paused > 0
-              and refetch_logs > 0)
+              and refetch_logs > 0 and handed_n > 0 and downloaded_mb > size // 1048576)
         return ('cachecommitfull', ok,
                 'status=%s integrity=%s commit_errors=%d paused_logs=%d refetch_logs=%d '
                 'requests_before_resume=%d total_requests=%d repeated_requests=%d repeated_after_resume=%d '
-                'handed_back=%s more=%s reason=%s paused_state=%s saved=%s'
+                'handed_back=%s more=%s reason=%s paused_state=%s saved=%s downloaded_mb=%s'
                 % (h['Status'], integ, lost_logs, paused, refetch_logs, requests_before, len(ids),
-                   again, again_after, handed, more, reason[:2], state, saved[:12]))
+                   again, again_after, handed, more, reason[:2], state, saved[:12], downloaded_mb))
     finally:
         if filler:
             filler.release()

@@ -2128,6 +2128,36 @@ impl NzbgetRsStreamRepairCtrl {
                 recovered_holes: &'a mut i32,
             }
 
+            impl NativeCrossPackEnv<'_> {
+                fn begin_multi(&mut self, parts: &[(i32, i32)], wave: bool) -> bool {
+                    let mut ids = Vec::with_capacity(parts.len());
+                    for &(member, part) in parts {
+                        let msg = usize::try_from(member)
+                            .ok()
+                            .and_then(|m| self.donor_files.get(m))
+                            .and_then(|df| {
+                                let pi = usize::try_from(part).ok()?;
+                                let id = df.article_msg_ids.get(pi)?;
+                                let edge = is_edge_part(pi, df.article_msg_ids.len());
+                                Some((id.clone(), Arc::clone(&df.groups), edge))
+                            });
+                        // Every part must map to a request, or the delivery order would shift.
+                        let Some(id) = msg else {
+                            return false;
+                        };
+                        ids.push(id);
+                    }
+                    let (requests, plan) = plan_prefetch(self.ctrl.nzb_id, ids);
+                    {
+                        let mut st = self.ctrl.fetch_stats.lock().unwrap_or_else(|e| e.into_inner());
+                        st.count_batch(requests.len(), wave);
+                    }
+                    *self.ctrl.prefetch_plan.lock().unwrap_or_else(|e| e.into_inner()) = plan;
+                    self.ctrl.batch_fetcher.begin(requests);
+                    true
+                }
+            }
+
             impl CrossPackDonorEnv for NativeCrossPackEnv<'_> {
                 fn is_stopped(&mut self) -> bool {
                     // Still asks the queue for new dead volumes while a volume finishes, so
@@ -2218,31 +2248,11 @@ impl NzbgetRsStreamRepairCtrl {
                 }
 
                 fn begin_donor_prefetch_multi(&mut self, parts: &[(i32, i32)]) -> bool {
-                    let mut ids = Vec::with_capacity(parts.len());
-                    for &(member, part) in parts {
-                        let msg = usize::try_from(member)
-                            .ok()
-                            .and_then(|m| self.donor_files.get(m))
-                            .and_then(|df| {
-                                let pi = usize::try_from(part).ok()?;
-                                let id = df.article_msg_ids.get(pi)?;
-                                let edge = is_edge_part(pi, df.article_msg_ids.len());
-                                Some((id.clone(), Arc::clone(&df.groups), edge))
-                            });
-                        // Every part must map to a request, or the delivery order would shift.
-                        let Some(id) = msg else {
-                            return false;
-                        };
-                        ids.push(id);
-                    }
-                    let (requests, plan) = plan_prefetch(self.ctrl.nzb_id, ids);
-                    {
-                        let mut st = self.ctrl.fetch_stats.lock().unwrap_or_else(|e| e.into_inner());
-                        st.count_batch(requests.len(), true);
-                    }
-                    *self.ctrl.prefetch_plan.lock().unwrap_or_else(|e| e.into_inner()) = plan;
-                    self.ctrl.batch_fetcher.begin(requests);
-                    true
+                    self.begin_multi(parts, true)
+                }
+
+                fn begin_donor_prefetch_edges(&mut self, parts: &[(i32, i32)]) -> bool {
+                    self.begin_multi(parts, false)
                 }
 
                 fn next_donor_prefetch(&mut self) -> Option<FetchedDonorArticle> {

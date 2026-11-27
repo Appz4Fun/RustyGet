@@ -147,6 +147,7 @@ mod reload_ownership_tests;
 
 pub mod deadpostings;
 pub mod dupeintake;
+pub mod donorstore;
 pub mod dupewatch;
 pub mod streamcompare;
 pub mod streampatchparts;

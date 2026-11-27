@@ -1955,10 +1955,26 @@ fn run_twin_job(token: usize, qdir: &[u8]) {
                         ..Default::default()
                     });
                 }
+                // a sample (a volume's header or tail among them) fetched by an earlier
+                // check, map or repair run of this process is not fetched again
+                if let Some(held) = crate::donorstore::get(spec.primary_id, id) {
+                    return Some(crate::articlefetcher::FetchedArticle {
+                        data: held.data,
+                        offset: held.offset,
+                        file_size: held.file_size,
+                        success: true,
+                        ..Default::default()
+                    });
+                }
                 let groups: Vec<Vec<u8>> = e.groups.iter().map(|g| g.as_bytes().to_vec()).collect();
                 // (a fetch that every server answers 430 for is recorded, so
                 // the next attempt skips it too)
-                Some(fetcher.fetch(id, &groups))
+                let got = fetcher.fetch(id, &groups);
+                if got.success {
+                    // kept for the payload map and the borrow that may follow
+                    crate::donorstore::put(spec.primary_id, id, got.offset, got.file_size, &got.data);
+                }
+                Some(got)
             };
         // both articles of a pair; the second only when the first was read,
         // since the pair can't be compared otherwise

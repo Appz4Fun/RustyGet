@@ -1800,6 +1800,7 @@ impl NzbgetRsPrePostProcessor {
         crate::parlive::forget_download_writes(nzb2.id);
         crate::livewrite::forget(nzb2.id);
         crate::postproc::forget_dead_volume_verdicts(nzb2.id);
+        crate::donorstore::forget(nzb2.id);
         crate::postproc::forget_put_back(nzb2.id);
         dupe_gate_forget(nzb2.id);
         crate::postproc::direct_unpack_join_live_par_repair(nzb2.id);

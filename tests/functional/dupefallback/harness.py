@@ -5268,6 +5268,78 @@ def scenario_deadvolumeunlabelled(daemon, t):
             % (hp['Status'], hb['Status'], failed_over, _grep_log(t, 'lends the lost parts'), late))
 
 
+def scenario_altfetchonce(daemon, t):
+    """Audit finding 6 (2026-11-26): borrowing from an alt fetched each donor article from the
+    network once. A stored rar set without par2 loses one volume whole and two articles of a
+    later one: two holes, so two repair runs, each of which maps the alt again (the first and
+    last article of every one of its 90 volumes: 180 articles, more than the 64-article memo
+    of recent articles holds, and the 72 MB the download fetches between the two runs pushes
+    them out of nntp-rs's 64 MB body cache too). The alt is the same 90 MB movie in another
+    stored rar (1 MB volumes, 50 KB articles; the download's are 3 MB and 100 KB), in
+    history, labelled an alt. Every donor article the maps, TwinCheck and the
+    borrows read must reach the network once (no message-id asked twice), and the donor bytes
+    fetched stay within the borrowed range plus one first and last article per donor volume,
+    plus the batch margin around each hole (DONOR_PATCH_MARGIN_PARTS articles each side, and
+    the article each hole edge falls in)."""
+    tag = 'afo'
+    seg = 100_000
+    donor_seg = 50_000
+    movie = _payload(90_000_000, 23090)
+    vols = generators.rar3_store_volumes_valid('movie.mkv', movie, 3_000_000)
+    dead_vol, holed_vol, holes = 3, 27, {10, 11}
+    members = []
+    lost = 0
+    for i, data in enumerate(vols):
+        name = 'Show.part%02d.rar' % (i + 1)
+        rel = '%sA/%s' % (tag, name)
+        t.write_file(os.path.join('data', rel), data)
+        parts = (len(data) + seg - 1) // seg
+        missing = set(range(1, parts + 1)) if i == dead_vol else (holes if i == holed_vol else set())
+        lost += sum(min(seg, len(data) - (k - 1) * seg) for k in missing)
+        members.append((rel, name, len(data), seg, missing))
+    alt = generators.rar3_store_volumes_valid('movie.mkv', movie, 1_000_000)
+    donor_members = []
+    edges = 0
+    for i, data in enumerate(alt):
+        name = 'Other.part%02d.rar' % (i + 1)
+        rel = '%sB/%s' % (tag, name)
+        t.write_file(os.path.join('data', rel), data)
+        donor_members.append((rel, name, len(data), donor_seg, set()))
+        parts = (len(data) + donor_seg - 1) // donor_seg
+        last = len(data) - (parts - 1) * donor_seg
+        edges += donor_seg + (last if parts > 1 else 0)
+    api = daemon.wait_ready()
+    daemon.append(api, 'Primary', build_multi_nzb(members), True, tag + '-key', 100)
+    _ds_append(api, 'Backup', build_multi_nzb(donor_members), tag + '-key', 90, paused=False,
+               params=[{'Name': 'DupeCopyKind', 'Value': 'borrowable'}, {'Name': 'DupeVideo', 'Value': 'same'},
+                       {'Name': 'DupeKind', 'Value': 'alt'}])
+    daemon.wait_history(api, 'Backup', timeout=60)
+    api.editqueue('GroupResume', 0, '', [g['NZBID'] for g in api.listgroups() if g['NZBName'] == 'Primary'])
+    hp = daemon.wait_history(api, 'Primary', timeout=300)
+    integ = _verify_output(t, movie, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
+    ids = _failcont_requests(t)
+    served, count, again, _ = _failcont_bytes(ids, tag + 'B/')
+    donor_ids = [m for m in ids if m.startswith(tag + 'B/')]
+    twice = sorted({m for m in donor_ids if donor_ids.count(m) > 1})
+    holes_n = 2
+    margin = holes_n * (2 * 2 + 2) * donor_seg
+    bound = lost + edges + margin
+    runs = _grep_log(t, 'Fetch cost of borrowing from Backup')
+    stored = len(re.findall(r'[1-9]\d* from the fetched-article store', _log_text(t)))
+    # two repair runs at least (one per hole), and a later one served from the store: the
+    # case the store exists for was exercised, not avoided
+    ok = (integ and hp['Status'].startswith('SUCCESS') and again == 0 and not twice and served <= bound
+          and runs >= 2 and stored >= 1)
+    costs = [m.group(1, 2, 3, 4, 5) for m in re.finditer(
+        r'Fetch cost of borrowing from Backup: ([\d.]+) MB.*?; (\d+) single.*?of (\d+) article.*?'
+        r'(\d+) taken from memory(?:, (\d+) from the fetched-article store)?', _log_text(t))]
+    return ('altfetchonce', ok,
+            'status=%s extracted_ok=%s donor_bytes=%d bound=%d (lost %d + edges %d + margin %d) '
+            'donor_articles=%d asked_twice=%d %s cost_lines=%d store_served_lines=%d costs=%s'
+            % (hp['Status'], integ, served, bound, lost, edges, margin, count, len(twice), twice[:4], runs, stored,
+               costs))
+
+
 def scenario_deadvolumetwincheck(daemon, t):
     """deadvolumenestednopar without injected labels: TwinCheck itself must
     label the nested backup (another container, by its sampled articles: its
@@ -15822,6 +15894,7 @@ SCENARIOS = {
     'headlostvolumepar': scenario_headlostvolumepar,
     'deadvolumeunlabelled': scenario_deadvolumeunlabelled,
     'deadvolumetwincheck': scenario_deadvolumetwincheck,
+    'altfetchonce': scenario_altfetchonce,
     'deadvolumeothervideo': scenario_deadvolumeothervideo,
     'deadvolumeothersize': scenario_deadvolumeothersize,
     'deadvolumetwolenders': scenario_deadvolumetwolenders,
@@ -16315,6 +16388,7 @@ SCENARIO_OPTIONS = {
     'headlostvolumepar': PROD_OPTIONS + ['DownloadRate=4000'],
     'deadvolumeunlabelled': PROD_OPTIONS + ['DownloadRate=4000'],
     'deadvolumetwincheck': PROD_OPTIONS + ['DownloadRate=1000'],
+    'altfetchonce': PROD_OPTIONS + ['DownloadRate=8000'],
     'deadvolumeothervideo': PROD_OPTIONS + ['DownloadRate=1000'],
     'deadvolumeothersize': PROD_OPTIONS + ['DownloadRate=1000'],
     'deadvolumetwolenders': PROD_OPTIONS + ['DownloadRate=1000'],
@@ -16365,7 +16439,7 @@ def _promote_fallback(options, mode):
 # finished job is rightly not redone
 FALLBACK_MODE_BOUND = {'livegate', 'streamrestartcredit', 'wholefilerestart', 'wholefilestale'}
 # scenarios that read nserv's request log (nserv.log)
-CAPTURE_REQUESTS = {'repost', 'wholefileproofcost', 'dropnzbdir', 'fleetstaysqueued', 'fleetprimaryfirst'} | {
+CAPTURE_REQUESTS = {'repost', 'altfetchonce', 'wholefileproofcost', 'dropnzbdir', 'fleetstaysqueued', 'fleetprimaryfirst'} | {
     'failcont_twin25', 'failcont_twin50', 'failcont_twin90', 'failcont_alt25', 'failcont_alt50', 'failcont_altlive', 'failcont_alt90', 'failcont_aes25', 'failcont_aes50', 'failcont_aes90', 'failcont_compressed', 'failcont_othervideo', 'failcont_twinlabel', 'failcont_fleettwin', 'failcont_fleetalt', 'failcont_fleetaes', 'failcont_aestwin', 'failcont_aesalt', 'failcont_rar5m3', 'failcont_rar5m3aes', 'failcont_rar5m3other', 'failcont_lzma2', 'failcont_norestart', 'weakswitchalt', 'weakswitchtwin', 'weakswitchaes', 'weakswitchm3', 'failcont_aescontainer', 'failcont_alt25busy'}
 # extra nserv arguments per scenario (-w: response latency in ms)
 SCENARIO_NSERV_ARGS = {'streamtimeoutwrites': ['-w', '800'], 'fleetslowprobe': ['-x', '2000'], 'fleetprobespeed': ['-w', '300'], 'fleetprobebusy': ['-w', '300'], 'fleetprobehealthfail': ['-w', '800'], 'finaldeletemidway': ['-w', '300'], 'finaldeleterestart': ['-w', '300'], 'restartmidway': ['-w', '300'], 'xpacklatency': ['-w', '1000'], 'deadpickprobe': ['-w', '500'], 'deadpickafterreload': ['-w', '500'],

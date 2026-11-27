@@ -2139,6 +2139,16 @@ fn fetch_any_article_via_host(
     groups: &[String],
     deadline: i64,
 ) -> FetchedArticleResult {
+    // an article this process fetched already (a header or tail an earlier map, check or
+    // repair run read) is not fetched again
+    if let Some(held) = crate::donorstore::get(crate::donorstore::NO_OWNER, message_id) {
+        return FetchedArticleResult {
+            success: true,
+            offset: held.offset,
+            file_size: held.file_size,
+            data: held.data,
+        };
+    }
     let Some(nntp_host) = get_nntp_fetch_host(host_ctx, host_cb) else {
         return FetchedArticleResult::default();
     };
@@ -2166,6 +2176,9 @@ fn fetch_any_article_via_host(
         move |bracketed_id, grp_slice| {
             let g_vecs: Vec<Vec<u8>> = grp_slice.iter().map(|g| g.as_bytes().to_vec()).collect();
             let art = fetcher.fetch(bracketed_id, &g_vecs);
+            if art.success {
+                crate::donorstore::put(crate::donorstore::NO_OWNER, bracketed_id, art.offset, art.file_size, &art.data);
+            }
             Ok(FetchedArticleResult {
                 success: art.success,
                 offset: art.offset,

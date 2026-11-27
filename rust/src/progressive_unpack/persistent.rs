@@ -749,6 +749,13 @@ struct InlineRefill {
     /// No password: every member is plain, so `refill_from_packed` joins the open group
     /// (`PartialLimits::group_refills`) and is used even for a span with good bytes in it.
     plain: bool,
+    /// (member, volume, packed range) of every `DeclaredBad` hole (a stored part that failed its
+    /// own check) not closed yet. The whole part is a hole, but only the slices live PAR
+    /// repaired are read back for it (`refill_declared`).
+    declared: Vec<(MemberKey, u32, std::ops::Range<u64>)>,
+    /// Packed ranges live PAR found bad, by volume (`declare_late_damage`): what its repair
+    /// rewrites in that volume.
+    slices: std::collections::HashMap<u32, Vec<std::ops::Range<u64>>>,
 }
 
 /// How often a running session asks whether the volumes of its holes were repaired. Patching
@@ -838,6 +845,94 @@ fn read_span(f: &mut dyn ReadSeek, range: &std::ops::Range<u64>) -> std::io::Res
     Ok(buf)
 }
 
+/// Closes the `DeclaredBad` holes of member `key` on repaired volume `v` by reading back only
+/// the slices live PAR repaired in them (`PartialFile::refill_declared_from_packed`): zipfast
+/// keeps the output the extraction wrote and lets the part's own check decide. Without known
+/// slices, or when zipfast cannot decide from them, the hole is left to `refill_from_packed`,
+/// which reads the whole part. Returns the volume bytes read for the holes it closed.
+fn refill_declared<F>(
+    inline: &mut InlineRefill,
+    key: &MemberKey,
+    name: &[u8],
+    file: &mut PartialFile,
+    v: u32,
+    volume: &str,
+    f: &mut Box<dyn ReadSeek>,
+    log_cb: &mut F,
+) -> u64
+where
+    F: FnMut(i32, &str),
+{
+    use zipfast::partial::{DeclaredRefillFailure, PartialErrorKind};
+    let mut read = 0u64;
+    let holes: Vec<std::ops::Range<u64>> = inline
+        .declared
+        .iter()
+        .filter(|(k, hv, _)| k == key && *hv == v)
+        .map(|(_, _, r)| r.clone())
+        .collect();
+    for hole in holes {
+        let mut repaired: Vec<std::ops::Range<u64>> = inline
+            .slices
+            .get(&v)
+            .map(|s| {
+                s.iter()
+                    .map(|r| r.start.max(hole.start)..r.end.min(hole.end))
+                    .filter(|r| r.start < r.end)
+                    .collect()
+            })
+            .unwrap_or_default();
+        repaired.sort_by_key(|r| r.start);
+        repaired.dedup();
+        let mut merged: Vec<std::ops::Range<u64>> = Vec::with_capacity(repaired.len());
+        for r in repaired {
+            match merged.last_mut() {
+                Some(last) if r.start <= last.end => last.end = last.end.max(r.end),
+                _ => merged.push(r),
+            }
+        }
+        if merged.is_empty() {
+            continue;
+        }
+        let bytes: u64 = merged.iter().map(|r| r.end - r.start).sum();
+        let display = String::from_utf8_lossy(name);
+        match file.refill_declared_from_packed(v, hole.clone(), &merged, f) {
+            Ok(_) => {
+                read += bytes;
+                inline.declared.retain(|(k, hv, r)| !(k == key && *hv == v && *r == hole));
+                inline.pending.retain(|(k, hv, r)| {
+                    !(k == key && *hv == v && hole.start <= r.start && r.end <= hole.end)
+                });
+                log_cb(
+                    0,
+                    &format!(
+                        "Unrar: patched {display} from repaired {volume}: {bytes} bytes live PAR repaired, the rest of its {} byte damaged part checked against the part's own check",
+                        hole.end - hole.start
+                    ),
+                );
+            }
+            Err(e) => {
+                let unprovable = matches!(
+                    e.kind,
+                    PartialErrorKind::DeclaredRefill(DeclaredRefillFailure::Unprovable)
+                );
+                if unprovable {
+                    // Nothing was read: zipfast cannot decide this hole from slices.
+                    inline.declared.retain(|(k, hv, r)| !(k == key && *hv == v && *r == hole));
+                }
+                log_cb(
+                    if unprovable { 3 } else { 2 },
+                    &format!(
+                        "Unrar: patching {display} from the {bytes} bytes live PAR repaired in {volume} did not close its damaged part ({:?}); reading the whole part back",
+                        e.kind
+                    ),
+                );
+            }
+        }
+    }
+    read
+}
+
 /// Reads the holes of `inline` whose volume the repair has released back into their members.
 /// `force` skips the rate limit (the session ended). Runs on the session's own thread,
 /// between its steps and while it is parked. zipfast takes a fill on a member's handle while
@@ -897,6 +992,11 @@ fn refill_released<F>(
             None => continue,
         };
         let mut patched: Vec<(String, u64)> = Vec::new();
+        for (key, file, member) in handles.iter_mut() {
+            if inline.declared.iter().any(|(k, hv, _)| k == key && *hv == v) {
+                refill_declared(inline, key, &member.name, file, v, &volume, &mut f, log_cb);
+            }
+        }
         let mut left = Vec::new();
         // One `fill_packed` call takes at most the handle's fill limit (see `Run::extract`).
         let window = u64::from(tuning().2).max(1 << 20);
@@ -1084,6 +1184,11 @@ fn declare_late_damage<F>(
         if bad.is_empty() {
             continue;
         }
+        inline
+            .slices
+            .entry(v as u32)
+            .or_default()
+            .extend(bad.iter().map(|&(off, l)| off..off + l));
         let spans = match super::place_holes(&path, &bad) {
             HolePlacement::Data(spans) => spans,
             _ => {
@@ -1412,6 +1517,9 @@ impl<'a> Run<'a> {
                             ),
                         );
                         if report.cause == zipfast::partial::HoleCause::DeclaredBad {
+                            self.inline.declared.extend(report.packed.iter().map(|s| {
+                                (report.member.clone(), s.volume, s.range.clone())
+                            }));
                             // A stored part that failed its own check: its volume was handed
                             // out whole, so nothing repairs it unless it is held now. Refilling
                             // from the file as it is would write the same wrong bytes back.
@@ -1637,6 +1745,26 @@ impl<'a> Run<'a> {
                 Step::GaveUp
             });
         }
+        // Slices live PAR found bad after the session stopped asking: what its repair rewrote in
+        // the volumes of parts that failed their own check.
+        let mut declared_volumes: Vec<u32> = self.inline.declared.iter().map(|(_, v, _)| *v).collect();
+        declared_volumes.sort_unstable();
+        declared_volumes.dedup();
+        for v in declared_volumes {
+            let Some(name) = self.plan.names.get(v as usize) else {
+                continue;
+            };
+            let late = self
+                .feed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .late_damage(&self.plan.dir.join(name));
+            self.inline
+                .slices
+                .entry(v)
+                .or_default()
+                .extend(late.into_iter().map(|(off, l)| off..off + l));
+        }
         let mut volumes: Vec<u32> = if self.adopted_holed.is_empty() {
             self.holes
                 .iter()
@@ -1687,6 +1815,11 @@ impl<'a> Run<'a> {
                 let len = f
                     .seek(std::io::SeekFrom::End(0))
                     .map_err(|e| Step::Fallback(format!("repaired volume {}: {e}", path.display())))?;
+                if self.inline.declared.iter().any(|(k, hv, _)| k == key && *hv == v) {
+                    let volume = name.to_string_lossy().into_owned();
+                    refilled +=
+                        refill_declared(&mut self.inline, key, &member.name, file, v, &volume, &mut f, log_cb);
+                }
                 // A limit or any other refusal here is zipfast's, not damage: the progressive
                 // path extracts the repaired set again.
                 let r = file.refill_from_packed(v, 0..len, &mut f).map_err(|e| {

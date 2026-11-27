@@ -7039,6 +7039,8 @@ struct CorruptPart {
     late: Vec<(PathBuf, (u64, u64))>,
     repaired: bool,
     volumes: u64,
+    /// Live PAR names the slice only after the part failed its own check (prybar N3).
+    late_after_check: bool,
 }
 
 impl VolumeFeed for CorruptPart {
@@ -7054,6 +7056,9 @@ impl VolumeFeed for CorruptPart {
         self.holdable
     }
     fn late_damage(&mut self, path: &Path) -> Vec<(u64, u64)> {
+        if self.late_after_check && self.declared.lock().unwrap().is_empty() {
+            return Vec::new();
+        }
         let (mine, rest): (Vec<_>, Vec<_>) =
             std::mem::take(&mut self.late).into_iter().partition(|(p, _)| p == path);
         self.late = rest;
@@ -7090,6 +7095,17 @@ type CorruptRun = (
 );
 
 fn corrupt_part_run(tag: &str, holdable: bool, late: bool) -> CorruptRun {
+    corrupt_part_run_with(tag, holdable, late.then_some((32_768, 16_384)), false)
+}
+
+/// `late`: the slice live PAR reports, relative to the part's payload; `late_after_check`: only
+/// once the part failed its own check.
+fn corrupt_part_run_with(
+    tag: &str,
+    holdable: bool,
+    late: Option<(u64, u64)>,
+    late_after_check: bool,
+) -> CorruptRun {
     let t = TestDir::new(tag);
     let data = pattern(600_000);
     let chunk = 100_000;
@@ -7108,13 +7124,12 @@ fn corrupt_part_run(tag: &str, holdable: bool, late: bool) -> CorruptRun {
         holdable,
         declared: declared.clone(),
         // As live PAR reports it: the 16 KiB slice around the wrong byte.
-        late: if late {
-            vec![(v3, (p3 + 32_768, 16_384))]
-        } else {
-            Vec::new()
-        },
+        late: late
+            .map(|(off, len)| vec![(v3, (p3 + off, len))])
+            .unwrap_or_default(),
         repaired: false,
         volumes: vols.len() as u64,
+        late_after_check,
     };
     let mut log = Vec::new();
     let out = t.out();
@@ -7194,4 +7209,139 @@ fn a_slice_live_par_found_bad_is_never_read_and_only_it_is_refilled() {
     );
     assert_eq!(declared.len(), 1, "{declared:?}");
     assert_eq!(declared[0].1, vec![(p3 + 32_768, 16_384)]);
+}
+
+/// The member data of RAR 5.0 volume `path`'s first file block: (offset, length).
+fn rar5_first_data(path: &Path) -> (u64, u64) {
+    first_member_data(path).expect("a file block")
+}
+
+#[test]
+fn compressed_hole_is_not_skippable_but_stored_hole_is() {
+    // prybar N1: a lost article inside compressed (-m3) data was placed as `Data`, handed to the
+    // session as a skippable hole, and the decoder failed with DataHole, cancelling direct unpack.
+    let t = TestDir::new("comphole");
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/testdata/rarrenamer");
+    let v2 = t.dl().join("testfile5.part02.rar");
+    std::fs::copy(src.join("testfile5.part02.rar"), &v2).unwrap();
+    let (at, len) = rar5_first_data(&v2);
+    assert!(len > 2000, "the part holds compressed data");
+    let hole = (at + len / 2, 500);
+    assert_eq!(place_holes(&v2, &[hole]), HolePlacement::Compressed);
+    assert!(skippable_placed(&HolePlacement::Compressed, &[], 10_000).is_empty());
+    // A header hole stays a header hole.
+    assert_eq!(place_holes(&v2, &[(at - 4, 8)]), HolePlacement::Header);
+    // Stored data is still read past.
+    let data = pattern(300_000);
+    let vols = rar5_volumes("stored.bin", &data, 100_000);
+    let first = write_set(&t.dl(), &vols);
+    let _ = first;
+    let s2 = t.dl().join(volume_name(1, vols.len()));
+    let p2 = payload_offset(&vols[1], 100_000) as u64;
+    let stored_hole = (p2 + 1000, 500);
+    assert_eq!(place_holes(&s2, &[stored_hole]), HolePlacement::Data(vec![stored_hole]));
+}
+
+#[test]
+fn compressed_member_waits_at_a_damaged_volume_and_resumes_after_repair() {
+    // prybar N1: the damaged volume of a compressed member split over three volumes is held (no
+    // skippable holes) until it is repaired in place; the session parks with its decoder state
+    // and finishes the member from the repaired bytes instead of failing.
+    let t = TestDir::new("compwait");
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/testdata/rarrenamer");
+    let names: Vec<PathBuf> = (1..=3)
+        .map(|i| t.dl().join(format!("testfile5.part0{i}.rar")))
+        .collect();
+    for n in &names {
+        std::fs::copy(src.join(n.file_name().unwrap()), n).unwrap();
+    }
+    let good = std::fs::read(&names[1]).unwrap();
+    let (at, len) = rar5_first_data(&names[1]);
+    let hole = (at + len / 2, 500);
+    let mut dmg = good.clone();
+    dmg[hole.0 as usize..(hole.0 + hole.1) as usize].fill(0);
+    std::fs::write(&names[1], &dmg).unwrap();
+    struct Held {
+        names: Vec<PathBuf>,
+        hole: (u64, u64),
+        repaired: Arc<AtomicBool>,
+        waited: Arc<AtomicUsize>,
+    }
+    impl VolumeFeed for Held {
+        fn volume(&mut self, path: &Path) -> VolumeView {
+            if path == self.names[1] && !self.repaired.load(Ordering::Acquire) {
+                // What `prepost` hands out for a damaged volume: its skippable holes, or a hold.
+                let placement = place_holes(path, &[self.hole]);
+                let skippable = skippable_placed(&placement, &[], 0);
+                if skippable.is_empty() {
+                    self.waited.fetch_add(1, Ordering::Relaxed);
+                    return VolumeView::NotYet;
+                }
+                return VolumeView::Ready { holes: skippable };
+            }
+            if self.names.iter().any(|n| n == path) {
+                VolumeView::Ready { holes: Vec::new() }
+            } else {
+                VolumeView::Missing
+            }
+        }
+    }
+    let repaired = Arc::new(AtomicBool::new(false));
+    let waited = Arc::new(AtomicUsize::new(0));
+    let feed = Held {
+        names: names.clone(),
+        hole,
+        repaired: repaired.clone(),
+        waited: waited.clone(),
+    };
+    let (path2, rep, w) = (names[1].clone(), repaired.clone(), waited.clone());
+    let repairer = std::thread::spawn(move || {
+        // Repair in place once the session is waiting on the volume.
+        for _ in 0..400 {
+            if w.load(Ordering::Relaxed) > 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::write(&path2, &good).unwrap();
+        rep.store(true, Ordering::Release);
+    });
+    let (r, log) = run(&names[0], &t.out(), Box::new(feed));
+    repairer.join().unwrap();
+    expect_ok(r, &log);
+    assert!(waited.load(Ordering::Relaxed) > 0, "the session waited for the repair: {log:#?}");
+    assert_eq!(
+        std::fs::metadata(t.out().join("testfile5.dat")).unwrap().len(),
+        68161
+    );
+    assert!(!log.iter().any(|l| l.contains("DataHole")), "{log:#?}");
+}
+
+#[test]
+fn a_part_failing_its_own_check_reads_back_only_the_slice_live_par_repaired() {
+    // prybar N3: the part failed its own check before live PAR named the bad slice, so the whole
+    // part became a DeclaredBad hole. Once repaired, only the slice is read back; zipfast checks
+    // the rest of the part against its own CRC (`refill_declared_from_packed`).
+    let (r, log, data, t, _, _) =
+        corrupt_part_run_with("persist_declslice", true, Some((32_768, 16_384)), true);
+    expect_ok(r, &log);
+    assert!(persistent(&log), "{log:?}");
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    assert!(log.iter().any(|l| l.contains("failed its own check in set.part03.rar")), "{log:?}");
+    assert!(
+        log.iter().any(|l| l.contains("patched movie.mkv from repaired set.part03.rar: 16384 bytes live PAR repaired")),
+        "{log:?}"
+    );
+    assert!(!log.iter().any(|l| l.contains("reading the whole part back")), "{log:?}");
+}
+
+#[test]
+fn a_slice_that_misses_the_wrong_byte_falls_back_to_the_whole_part() {
+    // The slice named does not hold the wrong byte: the part's check fails, the hole stays and
+    // the whole part is read back; the output is still right.
+    let (r, log, data, t, _, _) =
+        corrupt_part_run_with("persist_declslice_miss", true, Some((70_000, 8_192)), true);
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    assert!(log.iter().any(|l| l.contains("reading the whole part back")), "{log:?}");
 }

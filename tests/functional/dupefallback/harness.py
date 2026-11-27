@@ -321,9 +321,10 @@ class LocalTarget:
     def spawn(self, args, output_rel=None):
         if output_rel:
             with open(self.path(output_rel), 'wb') as output:
-                p = subprocess.Popen(args, stdout=output, stderr=subprocess.STDOUT)
+                p = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=output,
+                                     stderr=subprocess.STDOUT)
         else:
-            p = subprocess.Popen(args, stdout=subprocess.DEVNULL,
+            p = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                   stderr=subprocess.DEVNULL)
         self.procs.append(p)
         return p

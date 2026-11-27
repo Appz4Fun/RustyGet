@@ -3591,8 +3591,16 @@ body.phone,
 }
 
 /* TLS optimizer tables keep every server and outcome reachable on a phone. */
-#TlsCipherDialog { width: min(1040px, calc(100vw - 24px)); max-width: calc(100vw - 24px); left: 50%; margin-left: 0; transform: translateX(-50%); }
-#TlsCipherDialog .modal-body { max-height: 65vh; overflow-y: auto; }
+/* The dialog is a column no taller than the window: the body scrolls between a
+   header and footer that stay on screen, however many servers are listed. */
+#TlsCipherDialog { width: min(1040px, calc(100vw - 24px)); max-width: calc(100vw - 24px); left: 50%; top: 50%; margin: 0;
+  transform: translate(-50%, -50%); max-height: calc(100vh - 24px); max-height: calc(100dvh - 24px); overflow: hidden;
+  flex-direction: column; }
+/* Bootstrap marks a shown modal "in" and sets an inline display: block. */
+#TlsCipherDialog.in { display: flex !important; }
+#TlsCipherDialog .modal-header, #TlsCipherDialog .modal-footer { flex: 0 0 auto; }
+#TlsCipherDialog .modal-body { flex: 1 1 auto; min-height: 0; max-height: none; overflow-y: auto; }
+#TlsCipherServers .tls-cipher-retry { margin-left: 8px; }
 #TlsCipherDialog .tls-cipher-table { overflow-x: auto; max-width: 100%; margin-bottom: 16px; }
 #TlsCipherDialog table { width: 100%; margin-bottom: 0; }
 #TlsCipherDialog td, #TlsCipherDialog th { white-space: nowrap; text-align: left; }
@@ -3601,8 +3609,8 @@ body.phone,
 #TlsCipherDialog .modal-footer { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 #TlsCipherDialog .modal-footer .btn { margin-left: 0; }
 @media (max-width: 767px) {
-  #TlsCipherDialog { position: fixed; top: 12px; right: auto; }
-  #TlsCipherDialog .modal-body { max-height: calc(100dvh - 180px); padding: 12px; }
+  #TlsCipherDialog { position: fixed; top: 12px; right: auto; transform: translateX(-50%); }
+  #TlsCipherDialog .modal-body { padding: 12px; }
 }
 
 /* ---------------------------------------------------------------------------

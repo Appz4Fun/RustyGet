@@ -4871,6 +4871,7 @@ var Config = (new function($)
 		setServerSaving(true);
 		$('.config-server-save, .config-cipher__optimize', $ConfigData).prop('disabled', true);
 		setServerStatus(serverText('saving', 'Saving…'), 'busy');
+		forgetMovedCipher(multiid);
 		var request = serverOnlySaveRequest();
 		var structure = serverStructure();
 		var editor = config;
@@ -4913,6 +4914,36 @@ var Config = (new function($)
 			serverSaveFailed(result && result.error ? result.error.message : String(value));
 		});
 	};
+
+	// A cipher chosen for another host, port or encryption setting says nothing
+	// about this one. When those changed and the cipher was left as it was, it is
+	// cleared, so the save tests the server again and a failed test leaves the
+	// system default instead of the old host's cipher.
+	function forgetMovedCipher(multiid)
+	{
+		var saved = {};
+		(config.values || []).forEach(function(item) { saved[item.Name.toLowerCase()] = String(item.Value); });
+		var prefix = 'server' + multiid + '.';
+		var encryption = findOptionByName('Server' + multiid + '.Encryption');
+		var cipher = findOptionByName('Server' + multiid + '.Cipher');
+		if (!encryption || !cipher || String(getOptionValue(encryption)).toLowerCase() !== 'yes' || !getOptionValue(cipher))
+		{
+			return;
+		}
+		var moved = ['Host', 'Port', 'Encryption'].some(function(name)
+		{
+			var option = findOptionByName('Server' + multiid + '.' + name);
+			var key = prefix + name.toLowerCase();
+			var now = option ? String(getOptionValue(option)) : '';
+			var before = saved.hasOwnProperty(key) ? saved[key] : null;
+			return name === 'Encryption' ? before === null || before.toLowerCase() !== now.toLowerCase() : before !== now;
+		});
+		if (moved && saved[prefix + 'cipher'] === String(getOptionValue(cipher)))
+		{
+			setOptionValue(cipher, '');
+			syncCipher($('#' + cipher.formId).siblings('select.config-cipher__menu'));
+		}
+	}
 
 	function serverSaveFailed(message)
 	{
@@ -4958,9 +4989,16 @@ var Config = (new function($)
 				{
 					finish(serverText('cipher_chosen', 'Cipher') + ': ' + server.SelectedCipher);
 				}
+				else if (forced)
+				{
+					finish(server.Message || result.Message || '');
+				}
 				else
 				{
-					finish(forced ? (server.Message || result.Message || '') : '');
+					// an automatic test that failed (DNS, deadline, login) keeps the system default
+					var why = server.Message || result.Message || '';
+					finish(serverText('cipher_failed', 'Cipher test failed') + (why ? ': ' + why : '') + ' ' +
+						serverText('cipher_default_kept', 'The system default cipher is used.'));
 				}
 			}, function()
 			{

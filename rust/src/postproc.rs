@@ -3744,10 +3744,7 @@ pub(crate) fn live_repair_should_defer_post(nzb_id: i32) -> bool {
                 && options.scalars().par_check != crate::queuesubsys_host::PC_MANUAL
         })
         && crate::parchecker::streaming_session_download_end_targets(nzb_id).is_some();
-    // Articles still queued for the session (not folded yet) are slices it has not seen: a
-    // cover sealed now would count them not arrived and send the job to a par-check.
     let pending = running
-        || crate::parchecker::streaming_session_pending_article_jobs().contains(&nzb_id)
         || crate::parchecker::streaming_session_pending_completed_jobs().contains(&nzb_id)
         || crate::parchecker::streaming_session_completion_drain_active(nzb_id)
         || end_repair_due;

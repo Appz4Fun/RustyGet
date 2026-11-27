@@ -42,3 +42,9 @@ rustyget (unreleased)
       at a lost article: it waits at that volume until live PAR repairs it,
       then goes on from where it stopped. Before, it failed with "DataHole"
       and post-processing extracted the whole set again after the download.
+    - When a volume part of a stored RAR set fails its own check (an article
+      with wrong bytes but a good yEnc checksum), direct unpack now reads back
+      only the slices live PAR repaired (3.84 MB in a 4 GiB test) instead of
+      the whole part (102 MB). Rollback note: the direct unpack state of a job
+      interrupted in that window is written in a newer format that an older
+      RustyGet refuses; it then extracts that set again from the start.

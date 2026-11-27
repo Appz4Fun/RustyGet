@@ -7039,6 +7039,8 @@ struct CorruptPart {
     late: Vec<(PathBuf, (u64, u64))>,
     repaired: bool,
     volumes: u64,
+    /// Live PAR names the slice only after the part failed its own check (prybar N3).
+    late_after_check: bool,
 }
 
 impl VolumeFeed for CorruptPart {
@@ -7054,6 +7056,9 @@ impl VolumeFeed for CorruptPart {
         self.holdable
     }
     fn late_damage(&mut self, path: &Path) -> Vec<(u64, u64)> {
+        if self.late_after_check && self.declared.lock().unwrap().is_empty() {
+            return Vec::new();
+        }
         let (mine, rest): (Vec<_>, Vec<_>) =
             std::mem::take(&mut self.late).into_iter().partition(|(p, _)| p == path);
         self.late = rest;
@@ -7090,6 +7095,17 @@ type CorruptRun = (
 );
 
 fn corrupt_part_run(tag: &str, holdable: bool, late: bool) -> CorruptRun {
+    corrupt_part_run_with(tag, holdable, late.then_some((32_768, 16_384)), false)
+}
+
+/// `late`: the slice live PAR reports, relative to the part's payload; `late_after_check`: only
+/// once the part failed its own check.
+fn corrupt_part_run_with(
+    tag: &str,
+    holdable: bool,
+    late: Option<(u64, u64)>,
+    late_after_check: bool,
+) -> CorruptRun {
     let t = TestDir::new(tag);
     let data = pattern(600_000);
     let chunk = 100_000;
@@ -7108,13 +7124,12 @@ fn corrupt_part_run(tag: &str, holdable: bool, late: bool) -> CorruptRun {
         holdable,
         declared: declared.clone(),
         // As live PAR reports it: the 16 KiB slice around the wrong byte.
-        late: if late {
-            vec![(v3, (p3 + 32_768, 16_384))]
-        } else {
-            Vec::new()
-        },
+        late: late
+            .map(|(off, len)| vec![(v3, (p3 + off, len))])
+            .unwrap_or_default(),
         repaired: false,
         volumes: vols.len() as u64,
+        late_after_check,
     };
     let mut log = Vec::new();
     let out = t.out();
@@ -7300,4 +7315,33 @@ fn compressed_member_waits_at_a_damaged_volume_and_resumes_after_repair() {
         68161
     );
     assert!(!log.iter().any(|l| l.contains("DataHole")), "{log:#?}");
+}
+
+#[test]
+fn a_part_failing_its_own_check_reads_back_only_the_slice_live_par_repaired() {
+    // prybar N3: the part failed its own check before live PAR named the bad slice, so the whole
+    // part became a DeclaredBad hole. Once repaired, only the slice is read back; zipfast checks
+    // the rest of the part against its own CRC (`refill_declared_from_packed`).
+    let (r, log, data, t, _, _) =
+        corrupt_part_run_with("persist_declslice", true, Some((32_768, 16_384)), true);
+    expect_ok(r, &log);
+    assert!(persistent(&log), "{log:?}");
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    assert!(log.iter().any(|l| l.contains("failed its own check in set.part03.rar")), "{log:?}");
+    assert!(
+        log.iter().any(|l| l.contains("patched movie.mkv from repaired set.part03.rar: 16384 bytes live PAR repaired")),
+        "{log:?}"
+    );
+    assert!(!log.iter().any(|l| l.contains("reading the whole part back")), "{log:?}");
+}
+
+#[test]
+fn a_slice_that_misses_the_wrong_byte_falls_back_to_the_whole_part() {
+    // The slice named does not hold the wrong byte: the part's check fails, the hole stays and
+    // the whole part is read back; the output is still right.
+    let (r, log, data, t, _, _) =
+        corrupt_part_run_with("persist_declslice_miss", true, Some((70_000, 8_192)), true);
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    assert!(log.iter().any(|l| l.contains("reading the whole part back")), "{log:?}");
 }

@@ -72,6 +72,15 @@ jobs:
           rustc -Vv
           uname -sm
 
+      # This leg's labels name no instruction set, so which SIMD kernels it
+      # ran depends on the CPU it landed on; the isa workflow tests each
+      # tier on a runner labelled with it (docs/CPU_TIERS.md, "CI tiers").
+      - name: Report the CPU's instruction sets (informational)
+        run: |
+          for t in avx512 avx2 neon apple-m; do
+            sh scripts/ci/isa-assert.sh "$t" 2>&1 | sed "s/^/[$t] /"
+          done
+
       - name: Cache Rust builds
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:

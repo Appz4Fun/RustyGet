@@ -1,0 +1,74 @@
+# One instruction-set tier of the `isa` workflow (called from isa.yml): runs on
+# a self-hosted runner whose labels name the tier, fails unless the CPU really
+# has it, then runs scripts/ci/isa-tests.sh with every kernel cap of the tier.
+# Tiers, labels and the tests behind them: docs/CPU_TIERS.md, "CI tiers".
+name: isa tier
+
+on:
+  workflow_call:
+    inputs:
+      tier:
+        description: avx512, avx2, neon or apple-m
+        required: true
+        type: string
+      runs-on:
+        description: JSON array of the runner labels that name the tier
+        required: true
+        type: string
+    secrets:
+      CRATES_READ_TOKEN:
+        description: optional read token for the private git dependencies (nntp-rs)
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_BUILD_JOBS: 3
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+
+jobs:
+  isa:
+    name: isa (${{ inputs.tier }})
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          clean: true
+
+      # Before anything builds: a runner without the tagged flags would pass on
+      # the fallback kernels and prove nothing, so this fails rather than skips.
+      - name: Assert the runner has the ${{ inputs.tier }} instruction set
+        env:
+          TIER: ${{ inputs.tier }}
+        run: sh scripts/ci/isa-assert.sh "$TIER"
+
+      - name: Check the runner's tools
+        working-directory: rust
+        run: |
+          for t in cargo rustup just python3 par2 git; do
+            command -v "$t" >/dev/null || { echo "missing tool on this runner: $t"; exit 1; }
+          done
+          rustup show active-toolchain || rustup toolchain install
+          rustc -Vv
+          uname -sm
+
+      - name: Instruction-set tests (${{ inputs.tier }})
+        env:
+          TIER: ${{ inputs.tier }}
+          CRATES_READ_TOKEN: ${{ secrets.CRATES_READ_TOKEN }}
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          # Private git dependencies: a token if the repository has one, for
+          # this step's processes only; otherwise the runner's cargo cache.
+          if [ -n "$CRATES_READ_TOKEN" ]; then
+            export CARGO_NET_GIT_FETCH_WITH_CLI=true GIT_CONFIG_COUNT=1 \
+              GIT_CONFIG_KEY_0="url.https://x-access-token:${CRATES_READ_TOKEN}@github.com/Appz4Fun/.insteadOf" \
+              GIT_CONFIG_VALUE_0=https://github.com/Appz4Fun/
+          fi
+          unset CRATES_READ_TOKEN
+          scripts/ci/isa-tests.sh "$TIER" 3

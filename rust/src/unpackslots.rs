@@ -53,6 +53,9 @@ struct Waiter {
     ticket: u64,
     class: Class,
     kind: Kind,
+    /// Its class as asked now, before aging ([`aged`]): only this one preempts a holder, so
+    /// paused downloads that waited do not take turns on the slot.
+    base: Class,
     since: std::time::Instant,
 }
 
@@ -165,13 +168,32 @@ fn room_for_finished_in(cap: usize, st: &State, starting: usize) -> bool {
 /// before and still found no slot).
 pub const OVERDUE: Duration = Duration::from_secs(2 * AGE_STEP.as_secs());
 
+/// Why a holder gives its slot up ([`yields_to`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum YieldFor {
+    /// A waiter of a greater class (not counting aging): an active download, or a finished
+    /// job, for a paused or held download's extraction.
+    GoesFirst,
+    /// A finished job's unpack that waited [`OVERDUE`].
+    Overdue,
+}
+
 /// Whether a direct unpack of class `own` holding a slot should give it up at a safe point
-/// for one of `waiters` (class, kind, waited): one of a greater class, or a finished job's
-/// unpack that waited [`OVERDUE`].
-pub fn yields_to(own: Class, waiters: &[(Class, Kind, Duration)]) -> bool {
-    waiters
+/// for one of `waiters` (class before aging, kind, waited), and why: one of a greater class,
+/// or a finished job's unpack that waited [`OVERDUE`]. Aging decides who gets a free slot but
+/// preempts no one, so paused downloads do not take turns on the slot (each turn a seek on a
+/// disk).
+pub fn yields_to(own: Class, waiters: &[(Class, Kind, Duration)]) -> Option<YieldFor> {
+    if waiters.iter().any(|&(base, _, _)| base > own) {
+        Some(YieldFor::GoesFirst)
+    } else if waiters
         .iter()
-        .any(|&(class, kind, waited)| class > own || (kind == Kind::Post && waited >= OVERDUE))
+        .any(|&(_, kind, waited)| kind == Kind::Post && waited >= OVERDUE)
+    {
+        Some(YieldFor::Overdue)
+    } else {
+        None
+    }
 }
 
 /// Whether someone waits for a slot (cheap; asked before the class of a holder is worked out).
@@ -183,15 +205,15 @@ pub fn anyone_waiting() -> bool {
 /// `own` now, should give it up at its next safe point (between volumes or members, where it
 /// would also stop to wait for a volume) and ask again ([`acquire`]), which puts it behind
 /// that waiter.
-pub fn should_yield(slot: &Slot, own: Class) -> bool {
+pub fn should_yield(slot: &Slot, own: Class) -> Option<YieldFor> {
     let st = lock();
     if !st.holders.iter().any(|h| h.ticket == slot.ticket && h.kind == Kind::Direct) {
-        return false;
+        return None;
     }
     let waiters: Vec<(Class, Kind, Duration)> = st
         .waiters
         .iter()
-        .map(|w| (w.class, w.kind, w.since.elapsed()))
+        .map(|w| (w.base, w.kind, w.since.elapsed()))
         .collect();
     drop(st);
     yields_to(own, &waiters)
@@ -283,15 +305,20 @@ pub fn acquire(
         if stopped() {
             return None;
         }
-        let my_class = aged(class(), since.elapsed());
+        let base = class();
+        let my_class = aged(base, since.elapsed());
         let cap = capacity();
         let mut st = lock();
         match st.waiters.iter_mut().find(|w| w.ticket == ticket) {
-            Some(w) => w.class = my_class,
+            Some(w) => {
+                w.class = my_class;
+                w.base = base;
+            }
             None => st.waiters.push(Waiter {
                 ticket,
                 class: my_class,
                 kind,
+                base,
                 since,
             }),
         }
@@ -424,6 +451,7 @@ mod tests {
                     ticket: 50 + i as u64,
                     class,
                     kind,
+                    base: class,
                     since: std::time::Instant::now(),
                 })
                 .collect(),
@@ -453,20 +481,23 @@ mod tests {
     fn a_holder_gives_way_to_a_greater_class_or_an_overdue_finished_unpack() {
         use Class::*;
         use Kind::*;
+        use YieldFor::*;
         let s = Duration::from_secs;
         // nobody waiting
-        assert!(!yields_to(Paused, &[]));
+        assert_eq!(yields_to(Paused, &[]), None);
         // a paused or held download's extraction gives way to an active download and to a
         // finished job
-        assert!(yields_to(Paused, &[(Active, Direct, s(0))]));
-        assert!(yields_to(Paused, &[(Finished, Post, s(0))]));
-        assert!(!yields_to(Paused, &[(Paused, Direct, s(0))]));
+        assert_eq!(yields_to(Paused, &[(Active, Direct, s(0))]), Some(GoesFirst));
+        assert_eq!(yields_to(Paused, &[(Finished, Post, s(0))]), Some(GoesFirst));
+        assert_eq!(yields_to(Paused, &[(Paused, Direct, s(0))]), None);
+        // paused downloads do not take turns: one that waited (aged) preempts no one
+        assert_eq!(yields_to(Paused, &[(Paused, Direct, s(600))]), None);
         // the active download's extraction goes first: a finished job waits until it idles
         // (between articles) or is overdue
-        assert!(!yields_to(Active, &[(Finished, Post, s(0))]));
-        assert!(!yields_to(Active, &[(Active, Post, s(59))]));
-        assert!(yields_to(Active, &[(Active, Post, OVERDUE)]));
+        assert_eq!(yields_to(Active, &[(Finished, Post, s(0))]), None);
+        assert_eq!(yields_to(Active, &[(Finished, Post, s(59))]), None);
+        assert_eq!(yields_to(Active, &[(Finished, Post, OVERDUE)]), Some(Overdue));
         // a paused download that waited long does not interrupt an active one
-        assert!(!yields_to(Active, &[(Active, Direct, s(600))]));
+        assert_eq!(yields_to(Active, &[(Paused, Direct, s(600))]), None);
     }
 }

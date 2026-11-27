@@ -191,6 +191,7 @@ fn run(dir: &Path, set: &LiveSet, feed: &mut DiskFeed) -> (Outcome, Vec<String>)
         set,
         password: "",
     };
+    let boundaries = std::cell::Cell::new(0u32);
     let outcome = extract(
         &req,
         feed,
@@ -198,8 +199,10 @@ fn run(dir: &Path, set: &LiveSet, feed: &mut DiskFeed) -> (Outcome, Vec<String>)
         &mut |_, m| lines.push(m.to_string()),
         &mut || false,
         &|_| {},
-        &|| {},
+        &|| boundaries.set(boundaries.get() + 1),
     );
+    // (the safe points a direct unpack may give its unpack slot up at)
+    lines.push(format!("safe points: {}", boundaries.get()));
     (outcome, lines)
 }
 
@@ -248,6 +251,11 @@ fn a_byte_split_zip_is_extracted_as_its_volumes_arrive() {
     assert!(lines
         .iter()
         .any(|l| l == "Unrar: Extracting from Movie.zip.001"));
+    // each pass that wrote something is a safe point (`on_boundary`)
+    assert!(
+        lines.iter().any(|l| l.starts_with("safe points: ") && l != "safe points: 0"),
+        "{lines:?}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -4797,13 +4797,13 @@ impl NzbgetRsDirectUnpack {
             *last = Some(std::time::Instant::now());
         }
         let class = self.slot_class(host);
-        let yield_now = self
+        let why = self
             .slot
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
-            .is_some_and(|slot| crate::unpackslots::should_yield(slot, class));
-        if yield_now {
+            .and_then(|slot| crate::unpackslots::should_yield(slot, class));
+        if let Some(why) = why {
             self.yield_slot();
             host.with_locked_queue(|dq_ptr| {
                 let n = host.queue_find_by_id(dq_ptr, self.nzb_id);
@@ -4811,7 +4811,14 @@ impl NzbgetRsDirectUnpack {
                     let name = host.nzb_snap(n, false).name;
                     let mut msg = b"Giving the unpack slot of ".to_vec();
                     msg.extend_from_slice(crate::cstr::until_nul(&name));
-                    msg.extend_from_slice(b" to a download that goes first (option UnpackSlots)");
+                    msg.extend_from_slice(match why {
+                        crate::unpackslots::YieldFor::GoesFirst => {
+                            b" to a download that goes first (option UnpackSlots)".as_slice()
+                        }
+                        crate::unpackslots::YieldFor::Overdue => {
+                            b" to a finished download that waited a minute (option UnpackSlots)".as_slice()
+                        }
+                    });
                     Self::nzb_message(host, n, MK_INFO, &cstr::nul_terminated(&msg));
                 }
             });

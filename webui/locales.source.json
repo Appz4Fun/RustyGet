@@ -6061,16 +6061,16 @@
     "description": "History repair badge: data files had failed articles and nothing repaired them."
   },
   "repair_live": {
-    "message": "Repaired live · $1 slices",
-    "description": "$1: par2 slices repaired by live PAR while downloading."
+    "message": "Repaired live · $1",
+    "description": "$1: par2 slices repaired by live PAR while downloading, e.g. \"12 slices\"."
   },
   "repair_par": {
-    "message": "Repaired after download · $1 slices",
-    "description": "$1: par2 slices rebuilt by par-repair after the download."
+    "message": "Repaired after download · $1",
+    "description": "$1: par2 slices rebuilt by par-repair after the download, e.g. \"3 slices\"."
   },
   "repair_borrowed": {
-    "message": "Borrowed $1 articles $2",
-    "description": "$1: articles borrowed from duplicates; $2: where from, e.g. (twin)."
+    "message": "Borrowed $1 $2",
+    "description": "$1: articles swapped in one for one, e.g. \"5 articles\"; $2: where from, e.g. (twin)."
   },
   "repair_mixed": {
     "message": "Repaired: $1",
@@ -6097,21 +6097,17 @@
   },
   "repair_from_alt": {
     "message": "(alt)",
-    "description": "An alt: the same video in another container (re-RAR)."
-  },
-  "repair_from_payload": {
-    "message": "(video bytes from a twin or alt)",
-    "description": "Matched by the bytes of the video file itself."
+    "description": "An alt: the same video file in a different container (other volume sizes, archive format or password, or a re-RAR)."
   },
   "repair_from_unlabelled": {
-    "message": "(unlabelled copy)",
-    "description": "A duplicate that TwinCheck has not labelled twin or alt."
+    "message": "(not labelled by TwinCheck)",
+    "description": "A duplicate TwinCheck has not labelled yet."
   },
   "repair_borrowed_label": {
     "message": "Borrowed from duplicates"
   },
   "repair_damaged": {
-    "message": "Failed articles"
+    "message": "Size of failed articles"
   },
   "repair_damaged_value": {
     "message": "$1 in data files · $2 in par2 files"
@@ -6137,5 +6133,55 @@
   },
   "repair_short_unlabelled": {
     "message": "unlabelled copy"
+  },
+  "repair_payload": {
+    "message": "Video bytes from a twin or alt · $1",
+    "description": "Stream repair matched the bytes of the video file itself; $1: how much."
+  },
+  "repair_incomplete": {
+    "message": "Par-check failed · $1",
+    "description": "$1: what was repaired; it was not enough."
+  },
+  "repair_slices_one": {
+    "message": "$1 slice"
+  },
+  "repair_articles_one": {
+    "message": "$1 article"
+  },
+  "repair_holes": {
+    "message": "$1 holes"
+  },
+  "repair_holes_one": {
+    "message": "$1 hole"
+  },
+  "repair_volumes": {
+    "message": "$1 dead volumes",
+    "description": "Archive volumes no server had, rebuilt from a duplicate's video bytes."
+  },
+  "repair_volumes_one": {
+    "message": "$1 dead volume"
+  },
+  "repair_from_container": {
+    "message": "(another container, video not verified yet)",
+    "description": "TwinCheck label \"container\" (or a near-twin): another container whose video is not verified yet."
+  },
+  "repair_from_other": {
+    "message": "(other video)",
+    "description": "TwinCheck label \"other\": a copy with a different video file."
+  },
+  "repair_short_container": {
+    "message": "container"
+  },
+  "repair_short_other": {
+    "message": "other video"
+  },
+  "repair_payload_label": {
+    "message": "Video bytes from a twin or alt"
+  },
+  "repair_result": {
+    "message": "Par-check"
+  },
+  "repair_result_failed": {
+    "message": "Failed: the repair was not enough"
   }
 }

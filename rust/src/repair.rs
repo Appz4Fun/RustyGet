@@ -1462,9 +1462,7 @@ impl crate::postproc::ParCheckerHooks for RepairParHooks<'_> {
     }
 
     fn note_repaired(&self, repaired: u64, available: u64) {
-        let ctrl = self.ctrl.snap(self.q);
-        let id = inspect_nzb(self.q.host, ctrl.nzb_ptr).id;
-        crate::repairsummary::note_post(id, repaired, available);
+        crate::repairsummary::note_post(self.q.nzb_id(), repaired, available);
     }
 
     fn request_twin_index(&self) -> Vec<u8> {

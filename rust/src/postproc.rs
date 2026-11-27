@@ -3424,7 +3424,10 @@ pub(crate) fn direct_unpack_set_virtual(
     let st = map.entry(id).or_default();
     st.offered
         .retain(|k, _| !k.eq_ignore_ascii_case(full_path));
-    st.virtuals.insert(full_path.to_vec(), volume);
+    let borrowed = volume.data_len;
+    if st.virtuals.insert(full_path.to_vec(), volume).is_none() {
+        crate::repairsummary::note_dead_volume(id, borrowed);
+    }
     // The extractor derives volume names from part 1's spelling, a dead job keeps its posted
     // spelling: match the hold case-blind.
     if let Some(i) = st.held.iter().position(|p| p.eq_ignore_ascii_case(full_path)) {
@@ -4451,8 +4454,10 @@ pub(crate) fn live_par_time_settle(
         host.nzb_set_int(nzb_ptr, NZB_INT_LIVE_PAR_SEC, live);
         host.nzb_set_int(nzb_ptr, NZB_INT_REPAIR_SEC, repair);
     }
-    // after the times: the repair record carries the settled repair time
-    crate::repairsummary::settle(host, nzb_ptr, keep);
+    // after the times: the repair record carries the settled repair time, and what
+    // live PAR's session (still open here; it is forgotten later) read back from disk
+    let read_back = crate::parchecker::streaming_session_take_read_back(nzb.id);
+    crate::repairsummary::settle(host, nzb_ptr, keep, read_back);
 }
 
 /// Queue checkpoint: moves the whole seconds of a queued job's live PAR time into its

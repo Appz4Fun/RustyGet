@@ -2960,6 +2960,8 @@ impl NzbgetRsQueueCoordinator {
                 .saturating_add(src.dupe_recovered_bytes),
         );
 
+        // its repair counts move with its files
+        crate::repairsummary::merge(host, dest_ptr, src_ptr);
         host.disk_discard_files(src_ptr);
         crate::dupefallback::par_damage_forget_all(src.id);
         crate::postproc::live_par_time_discard(src.id);
@@ -4426,12 +4428,13 @@ impl NzbgetRsQueueCoordinator {
                     if file.par_file {
                         note_dupe_par_article(host, nzb.ptr, file.id, true);
                     }
-                    let donor = crate::repairsummary::find_item(host, dq_ptr, donor_id);
-                    crate::repairsummary::note_borrow(
-                        nzb.id,
-                        donor_id,
-                        crate::repairsummary::donor_label(host, donor),
-                    );
+                    // the donor's label is looked up once per job (history scan)
+                    let label = crate::repairsummary::cached_label(nzb.id, donor_id)
+                        .unwrap_or_else(|| {
+                            let donor = crate::repairsummary::find_item(host, dq_ptr, donor_id);
+                            crate::repairsummary::donor_label(host, donor)
+                        });
+                    crate::repairsummary::note_borrow(nzb.id, donor_id, label);
                     file.dupe_recovered_articles = next_file_rec;
                     nzb.dupe_recovered_articles = next_nzb_rec;
                     host.file_set_int(

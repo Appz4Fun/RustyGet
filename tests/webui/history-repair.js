@@ -11,27 +11,39 @@ const { installDetailsFixture } = require('./details-fixture');
 const MB = 1048576;
 // name -> [RepairStats value, expected badge text, badge kind]
 const CASES = [
-  ['Example.Live.Repair', `v=1;live=12/12/37;par=0/0/0;readback=${3 * MB};twin=0;alt=0;unlabelled=0;payload=0;faildata=${9 * MB};failpar=0;sec=4;method=live`,
+  ['Example.Live.Repair', `v=2;live=12/12/37;par=0/0/0;readback=${3 * MB};twin=0;alt=0;container=0;other=0;unlabelled=0;payload=0/0/0;volumes=0;faildata=${9 * MB};failpar=0;sec=4;result=ok;method=live`,
     'Repaired live · 12 slices', 'live'],
-  ['Example.Post.Repair', `v=1;live=0/0/0;par=30/30/80;readback=0;twin=0;alt=0;unlabelled=0;payload=0;faildata=${22 * MB};failpar=0;sec=95;method=par`,
+  ['Example.Post.Repair', `v=2;live=0/0/0;par=30/30/80;readback=0;twin=0;alt=0;container=0;other=0;unlabelled=0;payload=0/0/0;volumes=0;faildata=${22 * MB};failpar=0;sec=95;result=ok;method=par`,
     'Repaired after download · 30 slices', 'par'],
-  ['Example.Twin.Borrow', 'v=1;live=0/0/0;par=0/0/0;readback=0;twin=40;alt=0;unlabelled=0;payload=0;faildata=0;failpar=0;sec=0;method=twin',
+  ['Example.Twin.Borrow', 'v=2;live=0/0/0;par=0/0/0;readback=0;twin=40;alt=0;container=0;other=0;unlabelled=0;payload=0/0/0;volumes=0;donors=12:twin;faildata=0;failpar=0;sec=0;result=ok;method=twin',
     'Borrowed 40 articles (twin)', 'borrow'],
-  ['Example.Alt.Borrow', 'v=1;live=0/0/0;par=0/0/0;readback=0;twin=0;alt=7;unlabelled=0;payload=0;faildata=0;failpar=0;sec=0;method=alt',
+  ['Example.Alt.Borrow', 'v=2;live=0/0/0;par=0/0/0;readback=0;twin=0;alt=7;container=0;other=0;unlabelled=0;payload=0/0/0;volumes=0;faildata=0;failpar=0;sec=0;result=ok;method=alt',
     'Borrowed 7 articles (alt)', 'borrow'],
-  ['Example.Mixed.Repair', `v=1;live=5/5/20;par=0/0/0;readback=${MB};twin=8;alt=0;unlabelled=0;payload=0;faildata=${4 * MB};failpar=0;sec=2;method=live+twin`,
+  ['Example.Container.Borrow', 'v=2;live=0/0/0;par=0/0/0;readback=0;twin=0;alt=0;container=1;other=0;unlabelled=0;payload=0/0/0;volumes=0;faildata=0;failpar=0;sec=0;result=ok;method=container',
+    'Borrowed 1 article (another container, video not verified yet)', 'borrow'],
+  // live stream repair fills holes with video bytes, no whole articles
+  ['Example.Payload.Repair', `v=2;live=0/0/0;par=0/0/0;readback=0;twin=0;alt=0;container=0;other=0;unlabelled=0;payload=0/${6 * MB}/3;volumes=1;faildata=${6 * MB};failpar=0;sec=0;result=ok;method=payload`,
+    'Video bytes from a twin or alt · 6.00 MB', 'borrow'],
+  ['Example.Mixed.Repair', `v=2;live=5/5/20;par=0/0/0;readback=${MB};twin=8;alt=0;container=0;other=0;unlabelled=0;payload=0/0/0;volumes=0;faildata=${4 * MB};failpar=0;sec=2;result=ok;method=live+twin`,
     'Repaired: live PAR + twin · 5 slices, 8 articles', 'mixed'],
-  ['Example.Par2.Only', `v=1;live=0/0/0;par=0/0/0;readback=0;twin=0;alt=0;unlabelled=0;payload=0;faildata=0;failpar=${700 * MB};sec=0;method=par2only`,
+  ['Example.Failed.Repair', `v=2;live=2/2/4;par=0/0/0;readback=0;twin=0;alt=0;container=0;other=0;unlabelled=0;payload=0/0/0;volumes=0;faildata=${80 * MB};failpar=0;sec=30;result=failed;method=live`,
+    'Par-check failed · Repaired live · 2 slices', 'failed'],
+  ['Example.Par2.Only', `v=2;live=0/0/0;par=0/0/0;readback=0;twin=0;alt=0;container=0;other=0;unlabelled=0;payload=0/0/0;volumes=0;faildata=0;failpar=${700 * MB};sec=0;result=ok;method=par2only`,
     'Nothing to repair', 'none'],
-  ['Example.Clean', 'v=1;live=0/0/0;par=0/0/0;readback=0;twin=0;alt=0;unlabelled=0;payload=0;faildata=0;failpar=0;sec=0;method=clean',
+  ['Example.Clean', 'v=2;live=0/0/0;par=0/0/0;readback=0;twin=0;alt=0;container=0;other=0;unlabelled=0;payload=0/0/0;volumes=0;faildata=0;failpar=0;sec=0;result=ok;method=clean',
     'Not needed', 'none'],
-  ['Example.Not.Repaired', `v=1;live=0/0/0;par=0/0/0;readback=0;twin=0;alt=0;unlabelled=0;payload=0;faildata=${5 * MB};failpar=0;sec=0;method=unrepaired`,
+  ['Example.Not.Repaired', `v=2;live=0/0/0;par=0/0/0;readback=0;twin=0;alt=0;container=0;other=0;unlabelled=0;payload=0/0/0;volumes=0;faildata=${5 * MB};failpar=0;sec=0;result=ok;method=unrepaired`,
     'Not repaired', 'failed'],
+  // a record written before this format (v=1, payload as one number) still reads
+  ['Example.Older.Record', 'v=1;live=3/3/9;par=0/0/0;readback=0;twin=0;alt=0;unlabelled=0;payload=0;faildata=0;failpar=0;sec=1;method=live',
+    'Repaired live · 3 slices', 'live'],
   // still queued when written (no method): no badge; injected markup stays text
-  ['Example.Unsettled', 'v=1;live=1/1/1;par=0/0/0;readback=0;twin=0;alt=0;unlabelled=0', null, null],
+  ['Example.Unsettled', 'v=2;live=1/1/1;par=0/0/0;readback=0;twin=0;alt=0;unlabelled=0', null, null],
   // an unknown method name is no record; the markup never renders
   ['Example.Hostile', 'method=<img src=x onerror=alert(1)>live;live=1/1/1', null, null],
-  ['Example.Hostile.Mixed', 'method=live+<b>x</b>+twin+live;live=2/2/4;twin=1', 'Repaired: live PAR + twin · 2 slices, 1 articles', 'mixed'],
+  ['Example.Hostile.Mixed', 'method=live+<b>x</b>+twin+live;live=2/2/4;twin=1', 'Repaired: live PAR + twin · 2 slices, 1 article', 'mixed'],
+  // ways without amounts: no dangling separator
+  ['Example.Empty.Mixed', 'method=live+twin', 'Repaired: live PAR + twin', 'mixed'],
 ];
 
 function withRepair(result) {
@@ -107,6 +119,11 @@ function withRepair(result) {
         await page.waitForFunction(() => document.querySelectorAll('#HistoryTable tbody tr').length === 2, null, { timeout: 5000 });
         const big = await page.locator('#HistoryTable tbody tr a[data-nzbid]').allTextContents();
         assert.deepEqual(big.map(n => n.trim()).sort(), ['Example Post Repair', 'Example Twin Borrow']);
+        // free text matches names, not the repair way ("twin" is not in "Mixed Repair")
+        await search.fill('twin');
+        await search.press('Enter');
+        await page.waitForFunction(() => document.querySelectorAll('#HistoryTable tbody tr').length === 1, null, { timeout: 5000 });
+        assert.match(await page.locator('#HistoryTable tbody tr a[data-nzbid]').first().textContent(), /Twin Borrow/);
         await search.fill('');
         await search.press('Enter');
         await page.waitForFunction(n => document.querySelectorAll('#HistoryTable tbody tr').length === n, all, { timeout: 5000 });
@@ -124,7 +141,8 @@ function withRepair(result) {
         await section.waitFor({ state: 'visible' });
         const text = await section.innerText();
         assert.match(text, /REPAIR/i);
-        assert.match(text, /Failed articles\s*4(\.0+)? MB in data files · 0(\.0+)? MB in par2 files/);
+        assert.match(text, /Size of failed articles\s*4(\.0+)? MB in data files · 0(\.0+)? MB in par2 files/);
+        assert.equal(await section.evaluate(el => document.getElementById(el.getAttribute('aria-labelledby')).textContent), 'Repair');
         assert.match(text, /Live PAR while downloading\s*5 slices · 5 of 20 recovery blocks used/);
         assert.match(text, /Borrowed from duplicates\s*8 articles \(twin\)/);
         assert.match(text, /Read back from disk\s*1(\.0+)? MB/);
@@ -145,7 +163,19 @@ function withRepair(result) {
         await page.locator('#HistoryEditDialog').waitFor({ state: 'hidden' });
         await row('Example.Par2.Only').locator('a[data-nzbid]').first().click();
         await page.locator('#HistoryEditDialog').waitFor({ state: 'visible' });
-        assert.match(await section.innerText(), /Nothing to repair[\s\S]*0(\.0+)? MB in data files · 700(\.0+)? MB in par2 files/);
+        const par2 = await section.innerText();
+        assert.match(par2, /Nothing to repair[\s\S]*0(\.0+)? MB in data files · 700(\.0+)? MB in par2 files/);
+        assert.doesNotMatch(par2, /Repair time|Read back/, 'rows without a value are left out');
+        await page.keyboard.press('Escape');
+        await page.locator('#HistoryEditDialog').waitFor({ state: 'hidden' });
+        await row('Example.Payload.Repair').locator('a[data-nzbid]').first().click();
+        await page.locator('#HistoryEditDialog').waitFor({ state: 'visible' });
+        assert.match(await section.innerText(), /Video bytes from a twin or alt\s*6(\.0+)? MB · 3 holes · 1 dead volume/);
+        await page.keyboard.press('Escape');
+        await page.locator('#HistoryEditDialog').waitFor({ state: 'hidden' });
+        await row('Example.Failed.Repair').locator('a[data-nzbid]').first().click();
+        await page.locator('#HistoryEditDialog').waitFor({ state: 'visible' });
+        assert.match(await section.innerText(), /Par-check\s*Failed: the repair was not enough/);
         await page.keyboard.press('Escape');
         await page.locator('#HistoryEditDialog').waitFor({ state: 'hidden' });
         await row('Example.Completed.Release').locator('a[data-nzbid]').first().click();

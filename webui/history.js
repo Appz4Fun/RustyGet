@@ -192,7 +192,7 @@ var History = (new function($)
 		Util.show($HistoryTabBadgeEmpty, history.length === 0 && UISettings.miniTheme);
 	}
 
-	var SEARCH_FIELDS = ['name', 'status', 'priority', 'category', 'age', 'size', 'time', 'repair'];
+	var SEARCH_FIELDS = ['name', 'status', 'priority', 'category', 'age', 'size', 'time'];
 
 	function redraw_table()
 	{
@@ -211,7 +211,8 @@ var History = (new function($)
 			hist.time = Util.formatDateTime(hist.HistoryTime + UISettings.timeZoneCorrection*60*60);
 			hist.category = kind !== 'DUP' ? hist.Category : '';
 			hist.dupe = DownloadsUI.buildDupeText(hist.DupeKey, hist.DupeScore, hist.DupeMode);
-			// search "repair:live", "repair:twin" or "repaired>0" (slices plus borrowed articles)
+			// field search only (not free text): "repair:live", "repair:twin" or "repaired>0"
+			// (slices plus borrowed articles)
 			var repairRecord = HistoryUI.repairRecord(hist);
 			hist.repair = repairRecord ? repairRecord.method.replace(/\+/g, ' ') + ' ' + HistoryUI.repairText(repairRecord) : '';
 			hist.repaired = repairRecord ? repairRecord.slices + repairRecord.borrowed : 0;
@@ -788,6 +789,9 @@ var HistoryUI = (new function($)
 	// The repair record the daemon keeps in the RepairStats parameter (see
 	// rust/src/repairsummary.rs): how much was repaired, and how. Null for
 	// entries that finished before it existed, or that never reached history.
+	var DONORS = ['twin', 'alt', 'container', 'other', 'unlabelled'];
+	var WAYS = ['live', 'par'].concat(DONORS, ['payload']);
+
 	this.repairRecord = function(hist)
 	{
 		var value = hist.Kind === 'NZB' ? DownloadsUI.parameterValue(hist.Parameters, 'RepairStats') : null;
@@ -795,24 +799,23 @@ var HistoryUI = (new function($)
 		{
 			return null;
 		}
-		var r = { live: [0, 0, 0], par: [0, 0, 0], readback: 0, twin: 0, alt: 0, unlabelled: 0, payload: 0,
-			faildata: 0, failpar: 0, sec: 0, method: '' };
+		var r = { live: [0, 0, 0], par: [0, 0, 0], payload: [0, 0, 0], readback: 0, twin: 0, alt: 0, container: 0,
+			other: 0, unlabelled: 0, volumes: 0, faildata: 0, failpar: 0, sec: 0, result: '', method: '' };
+		var num = function(v) { var n = parseInt(v, 10); return isFinite(n) ? n : 0; };
 		String(value).split(';').forEach(function(pair)
 		{
 			var eq = pair.indexOf('=');
 			if (eq < 0) return;
 			var key = pair.substring(0, eq).trim(), val = pair.substring(eq + 1).trim();
-			var num = function(v) { var n = parseInt(v, 10); return isFinite(n) ? n : 0; };
-			if (key === 'live' || key === 'par') r[key] = val.split('/').concat([0, 0, 0]).slice(0, 3).map(num);
-			else if (key === 'method') r.method = val;
-			else if (r.hasOwnProperty(key) && key !== 'live' && key !== 'par') r[key] = num(val);
+			if (key === 'live' || key === 'par' || key === 'payload') r[key] = val.split('/').concat([0, 0, 0]).slice(0, 3).map(num);
+			else if (key === 'method' || key === 'result') r[key] = val;
+			else if (r.hasOwnProperty(key)) r[key] = num(val);
 		});
 		if (!r.method)
 		{
 			return null; // still queued: not settled yet
 		}
 		// only the names the daemon writes; anything else is dropped
-		var known = ['live', 'par', 'twin', 'alt', 'payload', 'unlabelled'];
 		if (/^(clean|par2only|unrepaired)$/.test(r.method))
 		{
 			r.methods = [];
@@ -820,28 +823,65 @@ var HistoryUI = (new function($)
 		else
 		{
 			r.methods = r.method.split('+').map(function(m) { return m.trim(); }).filter(function(m, i, all) {
-				return known.indexOf(m) > -1 && all.indexOf(m) === i;
+				return WAYS.indexOf(m) > -1 && all.indexOf(m) === i;
 			});
 			if (!r.methods.length) return null;
 			r.method = r.methods.join('+');
 		}
-		r.slices = r.live[0] + r.par[0];
-		r.borrowed = Math.max(0, r.twin) + Math.max(0, r.alt) + Math.max(0, r.unlabelled) + Math.max(0, r.payload);
+		r.failed = r.result === 'failed';
+		r.slices = Math.max(0, r.live[0]) + Math.max(0, r.par[0]);
+		r.swapped = DONORS.reduce(function(sum, m) { return sum + Math.max(0, r[m]); }, 0);
+		r.borrowed = r.swapped + Math.max(0, r.payload[0]);
 		return r;
 	};
 
+	// "$1 slices" / "1 slice": keys with an _one variant for a count of one.
+	function count(key, n)
+	{
+		return I18n.translate(n === 1 ? key + '_one' : key, String(n));
+	}
+
 	function repairKind(r)
 	{
+		if (r.method === 'unrepaired' || r.failed) return 'failed';
 		if (r.method === 'clean' || r.method === 'par2only') return 'none';
-		if (r.method === 'unrepaired') return 'failed';
 		if (r.methods.length > 1) return 'mixed';
 		return r.methods[0] === 'live' ? 'live' : r.methods[0] === 'par' ? 'par' : 'borrow';
 	}
 
 	function borrowSource(m)
 	{
-		return I18n.translate(m === 'twin' ? 'repair_from_twin' : m === 'alt' ? 'repair_from_alt' :
-			m === 'payload' ? 'repair_from_payload' : 'repair_from_unlabelled');
+		return I18n.translate('repair_from_' + m);
+	}
+
+	function mb(bytes)
+	{
+		return Util.formatSizeMB(Math.floor(bytes / 1048576), bytes % 4294967296);
+	}
+
+	// What the ways repaired, shortest first: slices, articles, video bytes.
+	function amounts(r)
+	{
+		var out = [];
+		if (r.slices > 0) out.push(count('repair_slices', r.slices));
+		if (r.borrowed > 0) out.push(count('repair_articles', r.borrowed));
+		else if (r.payload[1] > 0) out.push(mb(r.payload[1]));
+		return out.join(', ');
+	}
+
+	function repairWays(r)
+	{
+		if (r.methods.length > 1)
+		{
+			var names = r.methods.map(function(m) { return I18n.translate('repair_short_' + m); }).join(' + ');
+			var much = amounts(r);
+			return I18n.translate('repair_mixed', names) + (much ? ' · ' + much : '');
+		}
+		var m = r.methods[0];
+		if (m === 'live') return I18n.translate('repair_live', count('repair_slices', r.live[0]));
+		if (m === 'par') return I18n.translate('repair_par', count('repair_slices', r.par[0]));
+		if (m === 'payload') return I18n.translate('repair_payload', amounts(r) || mb(0));
+		return I18n.translate('repair_borrowed', count('repair_articles', Math.max(0, r[m])), borrowSource(m));
 	}
 
 	// One line for the overview: what happened and how much.
@@ -853,19 +893,8 @@ var HistoryUI = (new function($)
 			case 'par2only': return I18n.translate('repair_nothing');
 			case 'unrepaired': return I18n.translate('repair_not_repaired');
 		}
-		if (r.methods.length > 1)
-		{
-			var names = r.methods.map(function(m) { return I18n.translate('repair_short_' + m); }).join(' + ');
-			var amounts = [];
-			if (r.slices > 0) amounts.push(I18n.translate('repair_slices', String(r.slices)));
-			if (r.borrowed > 0) amounts.push(I18n.translate('repair_articles', String(r.borrowed)));
-			return I18n.translate('repair_mixed', names) + ' · ' + amounts.join(', ');
-		}
-		var m = r.methods[0];
-		if (m === 'live') return I18n.translate('repair_live', String(r.live[0]));
-		if (m === 'par') return I18n.translate('repair_par', String(r.par[0]));
-		var count = m === 'twin' ? r.twin : m === 'alt' ? r.alt : m === 'payload' ? r.payload : r.unlabelled;
-		return I18n.translate('repair_borrowed', String(count), borrowSource(m));
+		var text = repairWays(r);
+		return r.failed ? I18n.translate('repair_incomplete', text) : text;
 	};
 
 	// The overview badge; empty for entries without a repair record.
@@ -877,9 +906,10 @@ var HistoryUI = (new function($)
 			return '';
 		}
 		var kind = repairKind(r);
-		var title = r.method === 'par2only' ? I18n.translate('repair_nothing_title') : HistoryUI.repairText(r);
+		var text = HistoryUI.repairText(r);
+		var title = r.method === 'par2only' ? I18n.translate('repair_nothing_title') : text;
 		return ' <span class="label repair-badge repair-badge--' + kind + '" title="' + Util.textToAttr(title) + '">' +
-			Util.textToHtml(HistoryUI.repairText(r)) + '</span>';
+			Util.textToHtml(text) + '</span>';
 	};
 
 	function bar(used, available)
@@ -891,11 +921,6 @@ var HistoryUI = (new function($)
 		var pct = Math.max(0, Math.min(100, Math.round(used * 100 / available)));
 		return '<div class="repair-bar" role="img" aria-label="' + Util.textToAttr(I18n.translate('repair_blocks', String(used), String(available))) +
 			'"><div class="repair-bar__fill" style="width:' + pct + '%"></div></div>';
-	}
-
-	function mb(bytes)
-	{
-		return Util.formatSizeMB(Math.floor(bytes / 1048576), bytes % 4294967296);
 	}
 
 	// The Repair section of the details panel.
@@ -915,24 +940,42 @@ var HistoryUI = (new function($)
 		row(I18n.translate('repair_damaged'), I18n.translate('repair_damaged_value', mb(r.faildata), mb(r.failpar)));
 		if (r.live[0] > 0)
 		{
-			row(I18n.translate('repair_how_live'), I18n.translate('repair_slices', String(r.live[0])) +
+			row(I18n.translate('repair_how_live'), count('repair_slices', r.live[0]) +
 				(r.live[2] > 0 ? ' · ' + I18n.translate('repair_blocks', String(r.live[1]), String(r.live[2])) : ''), bar(r.live[1], r.live[2]));
 		}
 		if (r.par[0] > 0)
 		{
-			row(I18n.translate('repair_how_par'), I18n.translate('repair_slices', String(r.par[0])) +
+			row(I18n.translate('repair_how_par'), count('repair_slices', r.par[0]) +
 				(r.par[2] > 0 ? ' · ' + I18n.translate('repair_blocks', String(r.par[0]), String(r.par[2])) : ''), bar(r.par[0], r.par[2]));
 		}
-		var donors = ['twin', 'alt', 'payload', 'unlabelled'].filter(function(m) { return r[m] > 0; });
+		var donors = DONORS.filter(function(m) { return r[m] > 0; });
 		if (donors.length)
 		{
 			row(I18n.translate('repair_borrowed_label'), donors.map(function(m) {
-				return I18n.translate('repair_articles', String(r[m])) + ' ' + borrowSource(m);
+				return count('repair_articles', r[m]) + ' ' + borrowSource(m);
 			}).join(' · '));
 		}
-		row(I18n.translate('stat_repair_time'), Util.formatTimeHMS(r.sec));
-		row(I18n.translate('repair_readback'), mb(r.readback));
-		return '<div class="repair-head"><span class="repair-title">' + Util.textToHtml(I18n.translate('repair_title')) + '</span>' +
+		if (r.payload[0] > 0 || r.payload[1] > 0 || r.payload[2] > 0 || r.volumes > 0)
+		{
+			var parts = [mb(r.payload[1])];
+			if (r.payload[0] > 0) parts.push(count('repair_articles', r.payload[0]));
+			if (r.payload[2] > 0) parts.push(count('repair_holes', r.payload[2]));
+			if (r.volumes > 0) parts.push(count('repair_volumes', r.volumes));
+			row(I18n.translate('repair_payload_label'), parts.join(' · '));
+		}
+		if (r.failed)
+		{
+			row(I18n.translate('repair_result'), I18n.translate('repair_result_failed'));
+		}
+		if (r.sec > 0)
+		{
+			row(I18n.translate('stat_repair_time'), Util.formatTimeHMS(r.sec));
+		}
+		if (r.readback > 0)
+		{
+			row(I18n.translate('repair_readback'), mb(r.readback));
+		}
+		return '<div class="repair-head"><span class="repair-title" id="HistoryEdit_RepairTitle">' + Util.textToHtml(I18n.translate('repair_title')) + '</span>' +
 			HistoryUI.buildRepairBadge(hist) + '</div>' + rows.join('');
 	};
 

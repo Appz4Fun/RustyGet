@@ -4191,7 +4191,7 @@ a.fleet-member:hover {
 	background: var(--fill-quaternary);
 }
 .repair-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--space-1) var(--space-2); margin-bottom: var(--space-2); }
-.repair-head .repair-badge { margin-left: 0; max-width: 100%; white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; text-align: left; }
+.repair-head .repair-badge { margin-left: 0; height: auto; line-height: 1.4; padding-top: 2px; padding-bottom: 2px; max-width: 100%; white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; text-align: left; }
 .repair-title { font-family: var(--font-mono); font-size: 0.72rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--label-secondary); }
 .repair-row { display: grid; grid-template-columns: minmax(8em, 34%) minmax(0, 1fr); gap: 2px var(--space-2); padding: 3px 0; border-top: 1px solid var(--separator); font-size: 13px; }
 .repair-row:first-of-type { border-top: 0; }

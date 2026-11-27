@@ -2054,6 +2054,8 @@ def scenario_cachecommitfull(daemon, t):
         lost_logs = _grep_log(t, 'Could not commit cached article')
         paused = _grep_log(t, 'Pausing download')
         time.sleep(2)
+        g = [x for x in api.listgroups() if x['NZBName'] == 'RelCC']
+        state = (g[0].get('RemainingSizeMB'), g[0].get('SuccessArticles'), g[0].get('ActiveDownloads')) if g else None
         filler.release()
         filler = None
         before = _failcont_requests(t)
@@ -2068,15 +2070,16 @@ def scenario_cachecommitfull(daemon, t):
         log = t.read_file('nzbget.log').decode(errors='replace')
         handed = re.findall(r'(\d+) article\(s\) could not be written and will be downloaded again, (\d+) counted as failed', log)
         more = re.findall(r'Could not commit (\d+) more cached articles', log)
+        saved = re.findall(r'Saved (\d+) articles', log)
         reason = re.findall(r'Could not commit cached article for [^:]*: ([^;\n]*)', log)
         ok = (h['Status'].startswith('SUCCESS') and integ and lost_logs > 0 and paused > 0
               and refetch_logs > 0)
         return ('cachecommitfull', ok,
                 'status=%s integrity=%s commit_errors=%d paused_logs=%d refetch_logs=%d '
                 'requests_before_resume=%d total_requests=%d repeated_requests=%d repeated_after_resume=%d '
-                'handed_back=%s more=%s reason=%s'
+                'handed_back=%s more=%s reason=%s paused_state=%s saved=%s'
                 % (h['Status'], integ, lost_logs, paused, refetch_logs, requests_before, len(ids),
-                   again, again_after, handed, more, reason[:2]))
+                   again, again_after, handed, more, reason[:2], state, saved[:12]))
     finally:
         if filler:
             filler.release()

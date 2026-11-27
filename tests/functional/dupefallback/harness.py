@@ -15408,7 +15408,7 @@ def scenario_fleetsalvage(daemon, t):
 
 # ---- F16 review fixes (becee83b review) ----
 
-def _par_copy(t, tag, data, files=2, missing=(), vol=True):
+def _par_copy(t, tag, data, files=2, missing=(), vol=True, vol_articles=1):
     """A posting of ``data`` cut into ``files`` data files, with a par2 index
     and (``vol``) a par2 volume, the extra par2 a download pauses at first."""
     size = len(data) // files
@@ -15422,7 +15422,8 @@ def _par_copy(t, tag, data, files=2, missing=(), vol=True):
     members.append((tag + '/rel.par2', 'Hold.Movie.par2', len(par), 500_000, set()))
     if vol:
         t.write_file(os.path.join('data', tag, 'rel.vol00+01.par2'), par)
-        members.append((tag + '/rel.vol00+01.par2', 'Hold.Movie.vol00+01.par2', len(par), 500_000, set()))
+        members.append((tag + '/rel.vol00+01.par2', 'Hold.Movie.vol00+01.par2', len(par),
+                        500_000 if vol_articles == 1 else len(par) // vol_articles + 1, set()))
     return build_multi_nzb(members)
 
 
@@ -15499,6 +15500,189 @@ def scenario_fleetholdfiles(daemon, t):
           any(rel + '_1' in line for line in fleet_lines if 'Releasing ' in line) and not secret)
     return ('fleetholdfiles', ok, 'free=%s b_held=%s b_files=%s b_prio=%s c_files=%s c_prio=%s secret_in_fleet_lines=%s' % (
         free, b_held, b_after, b_priority, c_after, c_priority, secret))
+
+
+def scenario_fleetparpaused(daemon, t):
+    """6790 throughput (2026-11-27): copies added by appendfleet keep their
+    extra par2 volumes paused. The primary a probe releases, and the backup
+    released when the primary goes, download their data and the par2 index
+    only; a recovery volume is fetched only when repair needs it. Before, the
+    release resumed every file and the volumes stayed unpaused, so every
+    download fetched all of its recovery volumes (dead ones too) after its
+    data, holding every connection on 430s."""
+    data = _payload(1_200_000, 16501)
+    rel = 'Hold.Movie.2024.1080p.WEB-DL.x264-GRP'
+    key = 'dupes:hold.movie.2024.1080p.web.dl.x264.grp'
+    api = daemon.wait_ready()
+    api.pausedownload()
+    _fleet(daemon, [(rel + '.nzb', _par_copy(t, 'fpA', data)),
+                    (rel + '_1.nzb', _par_copy(t, 'fpB', data))], key=key, timeout=60)
+    items = _wait_probed(api, key, 2)
+    def fresh(files):
+        return (files.get('Hold.Movie.part0.bin') is False and files.get('Hold.Movie.part1.bin') is False and
+                files.get('Hold.Movie.par2') is False and files.get('Hold.Movie.vol00+01.par2') is True)
+
+    def settled(nzb_id, timeout=10):
+        # (the release may clear DupeHeld before it changes the files: read until settled)
+        deadline = time.time() + timeout
+        files = _files_of(api, nzb_id)
+        while time.time() < deadline and not fresh(files):
+            time.sleep(0.3)
+            files = _files_of(api, nzb_id)
+        return files
+    deadline = time.time() + 30
+    free = []
+    while time.time() < deadline:
+        free = [g for g in _queued(api, key) if _params(g).get('DupeHeld') != 'yes']
+        if free:
+            break
+        time.sleep(0.3)
+    primary = settled(free[0]['NZBID']) if free else {}
+    held = [g for g in _queued(api, key) if _params(g).get('DupeHeld') == 'yes']
+    backup = {}
+    if free and held:
+        api.editqueue('GroupDelete', 0, '', [free[0]['NZBID']])
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            g = next((x for x in _queued(api, key) if x['NZBID'] == held[0]['NZBID']), None)
+            if g and _params(g).get('DupeHeld') != 'yes':
+                backup = settled(g['NZBID'])
+                break
+            time.sleep(0.3)
+    ok = len(items) == 2 and fresh(primary) and fresh(backup)
+    return ('fleetparpaused', ok, 'copies=%d primary=%s backup=%s' % (len(items), primary, backup))
+
+
+def _fleet_par_download(daemon, t, tag, restart):
+    """Two intact copies with a par2 index and a recovery volume, sent by
+    appendfleet; the primary downloads (after a daemon restart when
+    ``restart``). Returns (history status, recovery-volume downloads logged)."""
+    data = _payload(1_200_000, 16511)
+    rel = 'Hold.Movie.2024.1080p.WEB-DL.x264-GRP'
+    key = 'dupes:hold.movie.2024.1080p.web.dl.x264.grp'
+    api = daemon.wait_ready()
+    api.pausedownload()
+    _fleet(daemon, [(rel + '.nzb', _par_copy(t, tag + 'A', data, vol_articles=4)),
+                    (rel + '_1.nzb', _par_copy(t, tag + 'B', data, vol_articles=4))], key=key, timeout=60)
+    _wait_probed(api, key, 2)
+    if restart:
+        try:
+            api.shutdown()
+        except Exception:
+            pass
+        t.procs[-1].wait(timeout=60)
+        daemon.start()
+        api = daemon.wait_ready()
+    api.resumedownload()
+    deadline = time.time() + 120
+    done = {}
+    while time.time() < deadline:
+        done = next((h for h in _history_of(api, key) if h['Status'].startswith(('SUCCESS', 'FAILURE'))), {})
+        if done:
+            break
+        time.sleep(0.5)
+    return done.get('Status', 'none'), len(re.findall(r'INFO\tSuccessfully downloaded [^\n]*vol00\+01\.par2', t.read_file('nzbget.log').decode(errors='replace')))
+
+
+def scenario_fleetparskip(daemon, t):
+    """6790 throughput (2026-11-27): an undamaged fleet copy downloads its
+    data and par2 index, never its recovery volume (ParCheck=auto: extra par2
+    stay paused until a repair needs them). On 6790 every copy fetched all
+    of its recovery volumes after its data, dead ones too."""
+    status, vols = _fleet_par_download(daemon, t, 'fps', False)
+    return ('fleetparskip', status.startswith('SUCCESS') and vols == 0, 'status=%s vol_downloads=%s' % (status, vols))
+
+
+def scenario_fleetparskiprestart(daemon, t):
+    """As fleetparskip, with a daemon restart between the fleet's probe and
+    the download: the extra par2 stay paused across the restart."""
+    status, vols = _fleet_par_download(daemon, t, 'fpr', True)
+    return ('fleetparskiprestart', status.startswith('SUCCESS') and vols == 0, 'status=%s vol_downloads=%s' % (status, vols))
+
+
+def scenario_fleetparpausedmany(daemon, t):
+    """As fleetparpaused with six copies (6790 adds fleets of six to twelve
+    copies, released while the rest are still added) and a daemon restart:
+    no queued copy has an unpaused recovery volume, before or after."""
+    data = _payload(1_200_000, 16521)
+    rel = 'Hold.Movie.2024.1080p.WEB-DL.x264-GRP'
+    key = 'dupes:hold.movie.2024.1080p.web.dl.x264.grp'
+    api = daemon.wait_ready()
+    api.pausedownload()
+    _fleet(daemon, [(rel + ('_%d' % i if i else '') + '.nzb', _par_copy(t, 'fm%d' % i, data, vol_articles=4))
+                    for i in range(6)], key=key, timeout=90)
+    _wait_probed(api, key, 6)
+    time.sleep(3)
+
+    # (DownloadRate=50: after the restart the primary downloads slowly; the
+    # census sees it while it does)
+    def census(api):
+        out = []
+        for g in _queued(api, key):
+            files = _files_of(api, g['NZBID'])
+            out.append((g['NZBID'], _params(g).get('DupeHeld') == 'yes', files.get('Hold.Movie.vol00+01.par2'),
+                        files.get('Hold.Movie.part0.bin')))
+        return sorted(out)
+    before = census(api)
+    try:
+        api.shutdown()
+    except Exception:
+        pass
+    t.procs[-1].wait(timeout=60)
+    daemon.start()
+    api = daemon.wait_ready()
+    time.sleep(2)
+    after = census(api)
+    good = lambda c: len(c) == 6 and all(vol is True and (part is True or not held) for _, held, vol, part in c)
+    return ('fleetparpausedmany', good(before) and good(after), 'before=%s after=%s' % (before, after))
+
+
+def scenario_pressureowncgroup(daemon, t):
+    """6790 throughput (2026-11-27): another program's memory stalls on the
+    host (its /proc/pressure/memory: full avg10=8.03) never throttle a daemon
+    running in a cgroup of its own whose memory.pressure is calm; the host's
+    PSI counts only for a daemon in the root cgroup (the control). On 6790 the
+    host's PSI flapped the monitor to CRITICAL every minute or two, cutting
+    the downloads to a quarter while the service's own PSI was 0.00."""
+    mock = t.path('pressure-mock')
+    host_psi = 'some avg10=8.03 avg60=8.18 avg300=6.55 total=1\nfull avg10=8.03 avg60=8.16 avg300=6.52 total=1\n'
+    calm = 'some avg10=0.00 avg60=0.00 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=1\n'
+    service = os.path.join(mock, 'sys', 'fs', 'cgroup', 'system.slice', 'rustyget.service')
+    os.makedirs(os.path.join(mock, 'proc', 'self'), exist_ok=True)
+    os.makedirs(os.path.join(mock, 'proc', 'pressure'), exist_ok=True)
+    os.makedirs(service, exist_ok=True)
+
+    def put(path, text):
+        with open(path, 'w') as f:
+            f.write(text)
+    put(os.path.join(mock, 'proc', 'pressure', 'memory'), host_psi)
+    put(os.path.join(mock, 'proc', 'meminfo'), 'MemTotal: 40000000 kB\nMemFree: 6000000 kB\nMemAvailable: 11000000 kB\n')
+    put(os.path.join(mock, 'proc', 'self', 'cgroup'), '0::/system.slice/rustyget.service\n')
+    put(os.path.join(service, 'memory.pressure'), calm)
+    put(os.path.join(service, 'memory.current'), '800000000\n')
+    put(os.path.join(service, 'memory.max'), 'max\n')
+    api = daemon.wait_ready()
+    try:
+        api.shutdown()
+    except Exception:
+        pass
+    t.procs[-1].wait(timeout=60)
+    os.environ['NZBGET_MEMORY_PRESSURE_MOCK_ROOT'] = mock
+    try:
+        daemon.start()
+    finally:
+        os.environ.pop('NZBGET_MEMORY_PRESSURE_MOCK_ROOT', None)
+    daemon.wait_ready()
+    needle = 'System memory pressure CRITICAL'
+    time.sleep(6)
+    own = _grep_log(t, needle)
+    # the control: the same daemon moved to the root cgroup sees the host's stalls
+    put(os.path.join(mock, 'proc', 'self', 'cgroup'), '0::/\n')
+    deadline = time.time() + 20
+    while time.time() < deadline and _grep_log(t, needle) == own:
+        time.sleep(0.5)
+    root = _grep_log(t, needle) - own
+    return ('pressureowncgroup', own == 0 and root >= 1, 'critical_in_own_cgroup=%d critical_in_root_cgroup=%d' % (own, root))
 
 
 def scenario_fleetendnolive(daemon, t):
@@ -15865,6 +16049,11 @@ SCENARIOS = {
     'fleetfailoverkeepsalive': scenario_fleetfailoverkeepsalive,
     'fleetsalvage': scenario_fleetsalvage,
     'fleetholdfiles': scenario_fleetholdfiles,
+    'fleetparpaused': scenario_fleetparpaused,
+    'pressureowncgroup': scenario_pressureowncgroup,
+    'fleetparskip': scenario_fleetparskip,
+    'fleetparpausedmany': scenario_fleetparpausedmany,
+    'fleetparskiprestart': scenario_fleetparskiprestart,
     'fleetendnolive': scenario_fleetendnolive,
     'fleetprobehealthfail': scenario_fleetprobehealthfail,
     'fleetendkeephistory0': scenario_fleetendkeephistory0,
@@ -16377,6 +16566,10 @@ SCENARIO_OPTIONS = {
     'fleetfailoverkeepsalive': ['HealthCheck=dupe', 'DupeArticleFallback=article', 'DupeWatch=yes'],
     'fleetsalvage': ['HealthCheck=dupe', 'DupeArticleFallback=article'],
     'fleetholdfiles': ['HealthCheck=dupe', 'DupeArticleFallback=no'],
+    'fleetparpaused': ['HealthCheck=dupe', 'DupeArticleFallback=live'],
+    'fleetparskip': ['HealthCheck=dupe', 'DupeArticleFallback=live', 'ParCheck=auto', 'ParRepair=yes', 'ParRename=yes', 'DirectRename=yes', 'ReorderFiles=yes', 'ParScan=dupe', 'DupeWatch=yes', 'DupeHealthPreset=medium', 'PostStrategy=aggressive'],
+    'fleetparpausedmany': ['HealthCheck=dupe', 'DupeArticleFallback=live', 'ParCheck=auto', 'ParRepair=yes', 'ParRename=yes', 'DirectRename=yes', 'ReorderFiles=yes', 'ParScan=dupe', 'DupeWatch=yes', 'DupeHealthPreset=medium', 'PostStrategy=aggressive', 'DownloadRate=50'],
+    'fleetparskiprestart': ['HealthCheck=dupe', 'DupeArticleFallback=live', 'ParCheck=auto', 'ParRepair=yes', 'ParRename=yes', 'DirectRename=yes', 'ReorderFiles=yes', 'ParScan=dupe', 'DupeWatch=yes', 'DupeHealthPreset=medium', 'PostStrategy=aggressive'],
     'fleetendnolive': ['HealthCheck=dupe', 'DupeArticleFallback=no', 'ParCheck=always'],
     'fleetprobehealthfail': ['HealthCheck=dupe', 'DupeArticleFallback=no'],
     'fleetendkeephistory0': ['HealthCheck=dupe', 'DupeArticleFallback=no', 'ParCheck=always', 'KeepHistory=0'],

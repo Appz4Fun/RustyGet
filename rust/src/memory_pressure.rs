@@ -213,8 +213,14 @@ pub fn sample_system_metrics(mock_root: Option<&Path>) -> MemoryMetrics {
         parse_psi(&content, &mut metrics);
     }
 
-    // 2. Linux Cgroups v2 (hierarchy-aware via /proc/self/cgroup & /proc/self/mountinfo)
-    sample_cgroup_v2_hierarchy(final_mock_root, &mut metrics);
+    // 2. Linux Cgroups v2 (hierarchy-aware via /proc/self/cgroup & /proc/self/mountinfo).
+    // In a cgroup of its own below the cgroup root (a systemd service, a container sharing
+    // the host's cgroup namespace) the PSI that counts is that cgroup's: the host's also
+    // stalls on other programs' memory (a big job swapping on a shared server), and
+    // shedding our cache then only cut our downloads. A process at the root of its cgroup
+    // namespace keeps /proc/pressure/memory. An explicit NZBGET_PSI_PATH still wins.
+    let psi_pinned = std::env::var("NZBGET_PSI_PATH").is_ok_and(|p| !p.is_empty());
+    sample_cgroup_v2_hierarchy(final_mock_root, &mut metrics, !psi_pinned);
 
     // 3. Linux Cgroups v1 (hierarchy-aware with inactive_file subtraction)
     sample_cgroup_v1_hierarchy(final_mock_root, &mut metrics);
@@ -375,7 +381,7 @@ fn build_cgroup_hierarchy_dirs(
     dirs
 }
 
-fn sample_cgroup_v2_hierarchy(mock_root: Option<&Path>, m: &mut MemoryMetrics) {
+fn sample_cgroup_v2_hierarchy(mock_root: Option<&Path>, m: &mut MemoryMetrics, own_psi: bool) {
     let proc_cg = std::fs::read_to_string(resolve_subpath(mock_root, "proc/self/cgroup")).ok();
     let mountinfo = std::fs::read_to_string(resolve_subpath(mock_root, "proc/self/mountinfo")).ok();
 
@@ -390,6 +396,20 @@ fn sample_cgroup_v2_hierarchy(mock_root: Option<&Path>, m: &mut MemoryMetrics) {
 
     let dirs =
         build_cgroup_hierarchy_dirs(mock_root, "sys/fs/cgroup", v2_mount, v2_cg_path.as_deref());
+
+    // with a cgroup path pushed, the leaf comes first and the mount's root last, so more
+    // than one dir means the leaf is a cgroup below the root; its memory.pressure replaces
+    // the host's PSI, both lines together (memory PSI always has "some" and "full")
+    if own_psi && dirs.len() > 1 {
+        if let Ok(content) = std::fs::read_to_string(dirs[0].join("memory.pressure")) {
+            let mut own = MemoryMetrics::default();
+            parse_psi(&content, &mut own);
+            if own.psi_some_avg10.is_some() {
+                m.psi_some_avg10 = own.psi_some_avg10;
+                m.psi_full_avg10 = own.psi_full_avg10;
+            }
+        }
+    }
 
     let mut leaf_cur: Option<u64> = None;
     let mut max_pct: Option<f64> = None;
@@ -914,6 +934,50 @@ mod tests {
 
         set_override_tier(-1); // Reset
         assert_eq!(evaluate_state(&m), PressureTier::Critical);
+    }
+
+    #[test]
+    fn test_own_cgroup_psi_replaces_host_psi() {
+        let _guard = MP_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("nzbget_cg_psi_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let proc_self = tmp.join("proc/self");
+        let proc_pressure = tmp.join("proc/pressure");
+        let cg_root = tmp.join("sys/fs/cgroup");
+        let cg_service = cg_root.join("system.slice/rustyget.service");
+        std::fs::create_dir_all(&proc_self).unwrap();
+        std::fs::create_dir_all(&proc_pressure).unwrap();
+        std::fs::create_dir_all(&cg_service).unwrap();
+        // the host stalls on another program's memory (6790, 2026-11-27: full avg10=8.03)
+        let host_psi = "some avg10=8.03 avg60=8.18 avg300=6.55 total=1\nfull avg10=8.03 avg60=8.16 avg300=6.52 total=1\n";
+        let calm = "some avg10=0.00 avg60=0.00 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=1\n";
+        std::fs::write(proc_pressure.join("memory"), host_psi).unwrap();
+        std::fs::write(cg_root.join("memory.pressure"), host_psi).unwrap();
+        std::fs::write(cg_service.join("memory.current"), "800000000\n").unwrap();
+        std::fs::write(cg_service.join("memory.max"), "max\n").unwrap();
+
+        // no cgroup of our own: the host's PSI counts
+        std::fs::write(proc_self.join("cgroup"), "0::/\n").unwrap();
+        let m_root = sample_system_metrics(Some(&tmp));
+        assert_eq!(m_root.psi_full_avg10, Some(8.03));
+        assert_eq!(evaluate_state(&m_root), PressureTier::Critical);
+
+        // our own service cgroup, calm: no throttling for the host's stalls
+        std::fs::write(proc_self.join("cgroup"), "0::/system.slice/rustyget.service\n").unwrap();
+        std::fs::write(cg_service.join("memory.pressure"), calm).unwrap();
+        let m_own = sample_system_metrics(Some(&tmp));
+        assert_eq!(m_own.psi_some_avg10, Some(0.0));
+        assert_eq!(m_own.psi_full_avg10, Some(0.0));
+        assert_eq!(evaluate_state(&m_own), PressureTier::Normal);
+
+        // our own cgroup stalling: critical as before
+        std::fs::write(cg_service.join("memory.pressure"), host_psi).unwrap();
+        assert_eq!(evaluate_state(&sample_system_metrics(Some(&tmp))), PressureTier::Critical);
+
+        // a cgroup without memory.pressure (an old kernel): the host's PSI is kept
+        std::fs::remove_file(cg_service.join("memory.pressure")).unwrap();
+        assert_eq!(sample_system_metrics(Some(&tmp)).psi_full_avg10, Some(8.03));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

@@ -2017,9 +2017,11 @@ def scenario_interdirbudget(daemon, t):
     which filled up. Here InterDir is a 64 MB file system of its own, DiskSpace=4 and the
     state reserve 1 MB (RUSTYGET_TEST_STATE_RESERVE_MB), and two 30 MB downloads are
     added at once: each needs 33 MB (remaining plus 10 %), so B must not start while A
-    downloads (no article of B requested before A's last one); once A has moved to
-    DestDir, B starts. Both end SUCCESS and byte-exact, and B's hold is logged once."""
-    seg, size = 500_000, 30_000_000
+    is in the queue. A comes in 4 articles over 8 connections, each request held 2 s
+    (nserv -w), so without the budget B's articles run beside A's: the API is sampled
+    and B must show no active download or downloaded byte while A is queued. Once A has
+    moved to DestDir, B starts. Both end SUCCESS and byte-exact, B's hold is logged once."""
+    seg, size = 7_500_000, 30_000_000
     data_a, data_b = _payload(size, 7101), _payload(size, 7102)
     pa = _place_copy(t, 'bgA', data_a, 'a.bin')
     pb = _place_copy(t, 'bgB', data_b, 'b.bin')
@@ -2043,21 +2045,32 @@ def scenario_interdirbudget(daemon, t):
         daemon.append(api, 'BudgetA', build_nzb(pa, 'a.bin', size, seg, set()), False, 'bud-a', 100)
         time.sleep(0.3)
         daemon.append(api, 'BudgetB', build_nzb(pb, 'b.bin', size, seg, set()), False, 'bud-b', 100)
+        samples = a_seen = overlap = 0
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            groups = {g['NZBName']: g for g in api.listgroups()}
+            a, b = groups.get('BudgetA'), groups.get('BudgetB')
+            if a is None:
+                break
+            samples += 1
+            if a.get('ActiveDownloads', 0) > 0:
+                a_seen += 1
+            if b is not None and (b.get('ActiveDownloads', 0) > 0 or b.get('DownloadedSizeMB', 0) > 0):
+                overlap += 1
+            time.sleep(0.2)
         ha = daemon.wait_history(api, 'BudgetA', timeout=180)
         hb = daemon.wait_history(api, 'BudgetB', timeout=180)
         ids = _failcont_requests(t)
-        last_a = max([i for i, m in enumerate(ids) if m.startswith('bgA/')] or [-1])
-        first_b = min([i for i, m in enumerate(ids) if m.startswith('bgB/')] or [len(ids)])
-        overlap = sum(1 for m in ids[:last_a] if m.startswith('bgB/'))
+        got_b = sum(1 for m in ids if m.startswith('bgB/'))
         integ = _verify_output(t, data_a) and _verify_output(t, data_b)
         held = _grep_log(t, 'Holding BudgetB: needs')
         held_a = _grep_log(t, 'Holding BudgetA: needs')
         ok = (ha['Status'].startswith('SUCCESS') and hb['Status'].startswith('SUCCESS') and integ
-              and last_a >= 0 and first_b > last_a and held == 1 and held_a == 0)
+              and a_seen > 0 and overlap == 0 and got_b > 0 and held == 1 and held_a == 0)
         return ('interdirbudget', ok,
-                'statusA=%s statusB=%s integrity=%s last_a=%d first_b=%d b_before_a_done=%d '
-                'held_logs_b=%d held_logs_a=%d' % (ha['Status'], hb['Status'], integ, last_a,
-                                                    first_b, overlap, held, held_a))
+                'statusA=%s statusB=%s integrity=%s samples=%d a_active_samples=%d '
+                'b_active_while_a_queued=%d b_requests=%d held_logs_b=%d held_logs_a=%d'
+                % (ha['Status'], hb['Status'], integ, samples, a_seen, overlap, got_b, held, held_a))
     finally:
         for p in t.procs:
             if p.poll() is None:
@@ -16401,7 +16414,7 @@ SCENARIO_OPTIONS = {
     'truncatedstate': ['ContinuePartial=yes', 'FlushQueue=yes', 'Server1.Connections=1'],
     'queuesyncslow': ['ContinuePartial=yes', 'FlushQueue=yes', 'Server1.Connections=6'],
     'diskfullrestart': ['ContinuePartial=yes', 'FlushQueue=yes', 'DiskSpace=0', 'Server1.Connections=4'],
-    'interdirbudget': ['DiskSpace=4', 'Server1.Connections=4'],
+    'interdirbudget': ['DiskSpace=4', 'Server1.Connections=8'],
     'queuebatchstart': ['Server1.Connections=30'],
     'streamrestartcredit': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'streamdeaddonor': ['DupeArticleFallback=stream', 'ParCheck=auto'],
@@ -16833,7 +16846,7 @@ FALLBACK_MODE_BOUND = {'livegate', 'streamrestartcredit', 'wholefilerestart', 'w
 CAPTURE_REQUESTS = {'repost', 'diskfullrestart', 'interdirbudget', 'altfetchonce', 'wholefileproofcost', 'dropnzbdir', 'fleetstaysqueued', 'fleetprimaryfirst'} | {
     'failcont_twin25', 'failcont_twin50', 'failcont_twin90', 'failcont_alt25', 'failcont_alt50', 'failcont_altlive', 'failcont_alt90', 'failcont_aes25', 'failcont_aes50', 'failcont_aes90', 'failcont_compressed', 'failcont_othervideo', 'failcont_twinlabel', 'failcont_fleettwin', 'failcont_fleetalt', 'failcont_fleetaes', 'failcont_aestwin', 'failcont_aesalt', 'failcont_rar5m3', 'failcont_rar5m3aes', 'failcont_rar5m3other', 'failcont_lzma2', 'failcont_norestart', 'weakswitchalt', 'weakswitchtwin', 'weakswitchaes', 'weakswitchm3', 'failcont_aescontainer', 'failcont_alt25busy'}
 # extra nserv arguments per scenario (-w: response latency in ms)
-SCENARIO_NSERV_ARGS = {'diskfullrestart': ['-w', '300'], 'interdirbudget': ['-w', '100'], 'streamtimeoutwrites': ['-w', '800'], 'fleetslowprobe': ['-x', '2000'], 'fleetprobespeed': ['-w', '300'], 'fleetprobebusy': ['-w', '300'], 'fleetprobehealthfail': ['-w', '800'], 'finaldeletemidway': ['-w', '300'], 'finaldeleterestart': ['-w', '300'], 'restartmidway': ['-w', '300'], 'xpacklatency': ['-w', '1000'], 'deadpickprobe': ['-w', '500'], 'deadpickafterreload': ['-w', '500'],
+SCENARIO_NSERV_ARGS = {'diskfullrestart': ['-w', '300'], 'interdirbudget': ['-w', '2000'], 'streamtimeoutwrites': ['-w', '800'], 'fleetslowprobe': ['-x', '2000'], 'fleetprobespeed': ['-w', '300'], 'fleetprobebusy': ['-w', '300'], 'fleetprobehealthfail': ['-w', '800'], 'finaldeletemidway': ['-w', '300'], 'finaldeleterestart': ['-w', '300'], 'restartmidway': ['-w', '300'], 'xpacklatency': ['-w', '1000'], 'deadpickprobe': ['-w', '500'], 'deadpickafterreload': ['-w', '500'],
                        'deadpickpartial': ['-w', '100'], 'deadpickstray': ['-w', '500'], 'forcefailover': ['-w', '500'], 'copybackup': ['-w', '500'], 'copyoffailed': ['-w', '500'], 'deaddownloadstray2': ['-w', '300'], 'deaddownloadrestart': ['-w', '300'], 'deadbackupsonly': ['-w', '500'], 'backuporder': ['-w', '500'], 'deaddownloadlate': ['-w', '300'], 'deadpickservers': ['-w', '200'],
                        'deadpickfewservers': ['-w', '200'],
                        # a missing article answers late, so the dead volumes fail one after another and later

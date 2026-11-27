@@ -5922,6 +5922,30 @@ fn a_directory_entry_keeps_the_persistent_session() {
 }
 
 #[test]
+fn persistent_unpack_preserves_strict_handling_of_a_damaged_continuation_header() {
+    let t = TestDir::new("persistent_header_salvage");
+    let data = pattern(80_000);
+    let mut volumes = rar5_volumes("movie.mkv", &data, 40_000);
+    let second_header = SIG.len() + main_block(true, Some(1)).len();
+    // Change the stored CRC on the continuation header. Its fields and payload are intact.
+    volumes[1][second_header] ^= 1;
+    for (i, volume) in volumes.iter().enumerate() {
+        std::fs::write(t.dl().join(volume_name(i, volumes.len())), volume).unwrap();
+    }
+    let first = t.dl().join(volume_name(0, volumes.len()));
+    let damaged = Damaged {
+        holes: Vec::new(),
+        repair: Vec::new(),
+        handed: false,
+    };
+    let (result, log) = run_downloading(&first, &t.out(), damaged, volumes.len() as u64);
+    assert!(log.iter().any(|line| line.contains("persistent partial files")), "{log:?}");
+    assert!(matches!(result, Err(Error::Failed(Failure::Checksum(_)))), "{log:?}");
+    assert!(!t.out().join("movie.mkv").exists());
+    assert!(!persistent_state_left(&t.out()));
+}
+
+#[test]
 fn a_trailing_empty_directory_entry_keeps_the_persistent_session() {
     // Scene releases end with their folder's entry; an empty one must survive publishing.
     let t = TestDir::new("direntry_persist_tail");

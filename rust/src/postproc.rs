@@ -3424,10 +3424,9 @@ pub(crate) fn direct_unpack_set_virtual(
     let st = map.entry(id).or_default();
     st.offered
         .retain(|k, _| !k.eq_ignore_ascii_case(full_path));
-    let borrowed = volume.data_len;
-    if st.virtuals.insert(full_path.to_vec(), volume).is_none() {
-        crate::repairsummary::note_dead_volume(id, borrowed);
-    }
+    st.virtuals.insert(full_path.to_vec(), volume);
+    // counted once per volume, whatever the spelling
+    crate::repairsummary::note_dead_volume(id, full_path);
     // The extractor derives volume names from part 1's spelling, a dead job keeps its posted
     // spelling: match the hold case-blind.
     if let Some(i) = st.held.iter().position(|p| p.eq_ignore_ascii_case(full_path)) {

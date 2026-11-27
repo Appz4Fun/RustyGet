@@ -6132,7 +6132,7 @@
     "message": "video bytes"
   },
   "repair_short_unlabelled": {
-    "message": "unlabelled copy"
+    "message": "not labelled"
   },
   "repair_payload": {
     "message": "Video bytes from a twin or alt · $1",

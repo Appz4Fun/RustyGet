@@ -14,7 +14,10 @@
 //! way live PAR's time is (`postproc::live_par_time_settle`). At history the
 //! parameter also gets the method and the failed-article split, and the job's
 //! log gets one summary line. Notes arriving after that (live work that ended
-//! after history) are dropped until the job returns to the queue.
+//! after history) are dropped until the job returns to the queue. Live PAR's
+//! read-back is taken from its session when the job settles (or when the
+//! session ends earlier), not at checkpoints: a restart loses the session and
+//! what it read.
 //!
 //! A job that leaves the queue deleted (also one kept in history as a health,
 //! dupe or manual delete) keeps no record, like its live PAR time. A merged
@@ -102,7 +105,7 @@ pub(crate) struct Counts {
     pub payload_bytes: u64,
     pub payload_holes: u64,
     /// Dead volumes rebuilt from a duplicate's video bytes (their bytes are in
-    /// `payload_bytes`).
+    /// `payload_bytes`, from the stream repair pass that filled them).
     pub volumes: u64,
 }
 
@@ -160,13 +163,32 @@ struct Pending {
     /// Borrowed articles taken back whose donor label was not at hand: resolved
     /// against the saved donor list at the next checkpoint.
     unresolved: Vec<i32>,
+    /// Dead volumes already counted (lower-case paths).
+    volumes: std::collections::HashSet<Vec<u8>>,
 }
+
+/// Settled jobs remembered for dropping late notes; the oldest are forgotten past this.
+const MAX_CLOSED: usize = 4096;
 
 #[derive(Default)]
 struct State {
     jobs: HashMap<i32, Pending>,
-    /// Jobs already settled into history: later notes are dropped.
+    /// Jobs already settled into history (newest last): later notes are dropped.
     closed: std::collections::HashSet<i32>,
+    closed_order: std::collections::VecDeque<i32>,
+}
+
+impl State {
+    fn close(&mut self, nzb_id: i32) {
+        if self.closed.insert(nzb_id) {
+            self.closed_order.push_back(nzb_id);
+            while self.closed_order.len() > MAX_CLOSED {
+                if let Some(old) = self.closed_order.pop_front() {
+                    self.closed.remove(&old);
+                }
+            }
+        }
+    }
 }
 
 static STATE: LazyLock<Mutex<State>> = LazyLock::new(|| Mutex::new(State::default()));
@@ -231,11 +253,15 @@ pub(crate) fn note_payload(nzb_id: i32, articles: u64, bytes: u64, holes: u64) {
     });
 }
 
-/// A dead volume of job `nzb_id` was rebuilt from `bytes` of a duplicate's video bytes.
-pub(crate) fn note_dead_volume(nzb_id: i32, bytes: u64) {
+/// Dead volume `path` of job `nzb_id` was rebuilt from a duplicate's video bytes (handed
+/// to direct unpack, or written to disk by post-processing). Counted once per volume,
+/// whatever the spelling; its bytes are counted by the stream repair pass that filled it
+/// ([`note_payload`]).
+pub(crate) fn note_dead_volume(nzb_id: i32, path: &[u8]) {
     with(nzb_id, |p| {
-        p.counts.volumes = p.counts.volumes.saturating_add(1);
-        p.counts.payload_bytes = p.counts.payload_bytes.saturating_add(bytes);
+        if p.volumes.insert(path.to_ascii_lowercase()) {
+            p.counts.volumes = p.counts.volumes.saturating_add(1);
+        }
     });
 }
 
@@ -279,20 +305,23 @@ pub(crate) fn donor_label(host: &QueueSubsysHost, donor: NzbRef) -> Donor {
     {
         return Donor::Twin;
     }
-    let sampled = host.nzb_get_param(donor, b"DupeSampled");
-    if kind == b"alt"
-        || sampled
-            .as_deref()
-            .map(<[u8]>::trim_ascii)
-            .is_some_and(|s| s.starts_with(b"rerar"))
-    {
+    if kind == b"alt" {
         return Donor::Alt;
+    }
+    // a verdict on the video or the container outranks an older re-RAR sample
+    if kind == b"other" {
+        return Donor::Other;
     }
     if kind == b"container" || kind.starts_with(b"twin:") {
         return Donor::Container;
     }
-    if kind == b"other" {
-        return Donor::Other;
+    let sampled = host.nzb_get_param(donor, b"DupeSampled");
+    if sampled
+        .as_deref()
+        .map(<[u8]>::trim_ascii)
+        .is_some_and(|s| s.starts_with(b"rerar"))
+    {
+        return Donor::Alt;
     }
     Donor::Unlabelled
 }
@@ -314,7 +343,9 @@ pub(crate) fn find_item(host: &QueueSubsysHost, dq_ptr: usize, id: i32) -> NzbRe
 pub(crate) fn discard(nzb_id: i32) {
     let mut st = state();
     st.jobs.remove(&nzb_id);
-    st.closed.remove(&nzb_id);
+    if st.closed.remove(&nzb_id) {
+        st.closed_order.retain(|&id| id != nzb_id);
+    }
 }
 
 /// Takes job `nzb_id`'s waiting counts and unresolved take-backs, keeping its donor
@@ -322,7 +353,7 @@ pub(crate) fn discard(nzb_id: i32) {
 fn take(nzb_id: i32, close: bool) -> (Counts, HashMap<i32, Donor>, Vec<i32>) {
     let mut st = state();
     if close {
-        st.closed.insert(nzb_id);
+        st.close(nzb_id);
         return st
             .jobs
             .remove(&nzb_id)
@@ -778,7 +809,8 @@ mod tests {
         note_post(id, 3, 30);
         note_read_back(id, 5);
         note_payload(id, 1, 100, 1);
-        note_dead_volume(id, 50);
+        note_dead_volume(id, b"/d/Movie.part02.rar");
+        note_dead_volume(id, b"/d/movie.PART02.rar"); // same volume, other spelling
         assert_eq!(cached_label(id, 12), Some(Donor::Alt));
         let (c, donors, unresolved) = take(id, false);
         assert_eq!((c.twin, c.alt, c.unlabelled), (1, 1, 0));
@@ -795,7 +827,7 @@ mod tests {
                 c.payload_holes,
                 c.volumes
             ),
-            (1, 150, 1, 1)
+            (1, 100, 1, 1)
         );
         assert_eq!(donors.len(), 2);
         let (again, kept, none) = take(id, false);

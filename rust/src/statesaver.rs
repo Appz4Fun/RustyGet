@@ -23,7 +23,8 @@
 //! Across files there is no crash-time ordering beyond that: after a crash the disk
 //! can hold a newer `progress` next to an older `queue`. The loader never relied on
 //! more (a partial state could already be newer than `queue`, `files` is checked
-//! against the queued file count, `ids` is a floor written inline). A delete that
+//! against the queued file count, `ids` is a floor the queue's save writes just before
+//! the queue file, and the loader takes the highest id in the queue dir too). A delete that
 //! must follow a write of another file (`progress` after `queue`) waits for it
 //! ([`JobKind::Delete`] `after`) and is dropped if that write never succeeds.
 //!
@@ -75,6 +76,10 @@ pub(crate) enum JobKind {
         bytes: Vec<u8>,
         transactional: bool,
         sync: bool,
+        /// A file written best-effort just before this one, as (path, bytes): the
+        /// queue's `ids` floor. Part of the same job, so it reaches the disk no later
+        /// than the queue it covers; never retried, never counted unsaved.
+        floor: Option<(Vec<u8>, Vec<u8>)>,
     },
     /// Delete the file, and `temp` too when `temp_too`. With `after`, only once no
     /// job for that file is queued or running: `progress` is deleted after the `queue`
@@ -155,6 +160,92 @@ thread_local! {
     /// Saves this thread queued under the queue lock: (file, seq), waited for on release.
     static TICKETS: std::cell::RefCell<Vec<(Vec<u8>, u64)>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// How deep this thread is in [`DeferWaits`] scopes.
+    static DEFER_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// Saves this thread queued in a [`DeferWaits`] scope, waited for when it ends.
+    static DEFERRED: std::cell::RefCell<Vec<Ticket>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A save queued under the queue lock: its file and the seq a waiter waits for.
+pub(crate) type Ticket = (Vec<u8>, u64);
+
+/// Where a [`DeferWaits`] scope on another thread hands its saves over.
+pub(crate) type Handoff = Arc<Mutex<Vec<Ticket>>>;
+
+/// While alive, this thread does not wait for its saves each time it releases the
+/// queue lock: they are collected and waited for once, when the outermost scope ends
+/// (or handed to the thread that asked for the work, [`DeferWaits::handing_to`],
+/// which waits for them in its own scope). A fleet adds its members one by one, each
+/// add a queue save; on a busy disk each sync took 0.3-2 s and 40 members took 30 s
+/// past the fleet's limit. The caller still gets its answer only once every save it
+/// made is on disk.
+/// The scope is per thread (its depth and saves are thread-local): never `Send`.
+pub(crate) struct DeferWaits {
+    handoff: Option<Handoff>,
+    saver: Arc<Saver>,
+    _not_send: std::marker::PhantomData<*const ()>,
+}
+
+impl DeferWaits {
+    pub(crate) fn enter() -> Self {
+        Self::on(Arc::clone(global()), None)
+    }
+
+    /// A scope whose saves go to `handoff` when it ends, nobody waiting for them here.
+    pub(crate) fn handing_to(handoff: Handoff) -> Self {
+        Self::on(Arc::clone(global()), Some(handoff))
+    }
+
+    /// A scope that waits on `saver` (the daemon's, or a test's).
+    fn on(saver: Arc<Saver>, handoff: Option<Handoff>) -> Self {
+        DEFER_DEPTH.with(|d| d.set(d.get() + 1));
+        Self {
+            handoff,
+            saver,
+            _not_send: std::marker::PhantomData,
+        }
+    }
+}
+
+impl Drop for DeferWaits {
+    fn drop(&mut self) {
+        let depth = DEFER_DEPTH.with(|d| {
+            let v = d.get().saturating_sub(1);
+            d.set(v);
+            v
+        });
+        if let Some(h) = &self.handoff {
+            // this scope's saves (an outer scope's too, on this thread) go to the
+            // thread that waits for them
+            let tickets = DEFERRED.with(|t| std::mem::take(&mut *t.borrow_mut()));
+            h.lock().unwrap_or_else(|e| e.into_inner()).extend(tickets);
+            return;
+        }
+        if depth == 0 {
+            let tickets = DEFERRED.with(|t| std::mem::take(&mut *t.borrow_mut()));
+            if !tickets.is_empty() {
+                self.saver.wait_for(&tickets);
+            }
+        }
+    }
+}
+
+/// This thread is in a [`DeferWaits`] scope.
+pub(crate) fn deferring() -> bool {
+    DEFER_DEPTH.with(|d| d.get() > 0)
+}
+
+/// Saves another thread made for this one ([`DeferWaits::handing_to`]): waited for
+/// when this thread's scope ends, or now when it is in none.
+pub(crate) fn adopt(tickets: Vec<Ticket>) {
+    if tickets.is_empty() {
+        return;
+    }
+    if deferring() {
+        DEFERRED.with(|t| t.borrow_mut().extend(tickets));
+    } else {
+        global().wait_for(&tickets);
+    }
 }
 
 /// While alive (the coordinator's loop), saves are queued for the saver thread; on drop,
@@ -199,7 +290,11 @@ pub(crate) fn queue_lock_released() {
     if depth == 0 {
         let tickets = TICKETS.with(|t| std::mem::take(&mut *t.borrow_mut()));
         if !tickets.is_empty() {
-            global().wait_for(&tickets);
+            if deferring() {
+                DEFERRED.with(|t| t.borrow_mut().extend(tickets));
+            } else {
+                global().wait_for(&tickets);
+            }
         }
     }
 }
@@ -705,6 +800,7 @@ mod tests {
                 bytes: content.as_bytes().to_vec(),
                 transactional: true,
                 sync: true,
+                floor: None,
             },
             retry: Retry::default(),
         }
@@ -878,6 +974,48 @@ mod tests {
         releaser.join().unwrap();
     }
 
+    #[test]
+    fn saves_in_a_defer_scope_are_waited_for_once_by_the_thread_that_asked() {
+        let (saver, done, gate) = recording();
+        hold(&saver, &gate);
+        saver.lock().queue_saves = true;
+        let deferred = || DEFERRED.with(|t| t.borrow().len());
+        // the scanner adds a fleet member: its save under the queue lock is not
+        // waited for there but handed to the fleet when the add is done
+        let handoff: Handoff = Arc::new(Mutex::new(Vec::new()));
+        {
+            let _scope = DeferWaits::on(Arc::clone(&saver), Some(Arc::clone(&handoff)));
+            queue_lock_acquired();
+            assert!(saver.submit(write("queue", "q1"), &mut |_, _| {}));
+            queue_lock_released();
+            assert_eq!(deferred(), 1, "kept, not waited for at the lock's release");
+            assert!(handoff.lock().unwrap().is_empty());
+        }
+        assert_eq!(deferred(), 0);
+        let tickets = std::mem::take(&mut *handoff.lock().unwrap());
+        assert_eq!(tickets.len(), 1);
+        assert_eq!(tickets[0].0, b"queue".to_vec());
+        // the fleet keeps them until its outermost scope ends, and then waits for them
+        let ender = {
+            let gate = Arc::clone(&gate);
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(30));
+                gate.store(false, Ordering::SeqCst);
+            })
+        };
+        {
+            let _outer = DeferWaits::on(Arc::clone(&saver), None);
+            adopt(tickets.clone());
+            drop(DeferWaits::on(Arc::clone(&saver), None));
+            assert_eq!(deferred(), 1, "an inner scope leaves them to the outer one");
+        }
+        // the outer scope's end waited for the queued save
+        assert_eq!(summary(&done), ["hold=0", "queue=q1"]);
+        assert_eq!(deferred(), 0);
+        assert!(!deferring());
+        ender.join().unwrap();
+    }
+
     /// A saver whose writes fail while `full` is set (a full disk); it records the
     /// jobs that succeeded and counts every attempt.
     fn disk_full() -> (
@@ -1032,6 +1170,7 @@ mod tests {
                 bytes: b"newer".to_vec(),
                 transactional: true,
                 sync: true,
+                floor: None,
             },
             retry: Retry::default(),
         };
@@ -1089,6 +1228,7 @@ mod tests {
                 bytes: content.as_bytes().to_vec(),
                 transactional: true,
                 sync: true,
+                floor: None,
             },
             retry: Retry::default(),
         };

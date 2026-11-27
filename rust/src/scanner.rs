@@ -361,6 +361,9 @@ struct ScanQueueData {
     params: Vec<(CString, CString)>,
     url_info: usize,
     result_slot: Option<ResultSlot>,
+    /// The adding thread is in a `statesaver::DeferWaits` scope: the saves of this
+    /// add go to it instead of being waited for here.
+    handoff: Option<crate::statesaver::Handoff>,
 }
 
 struct ScannerInner {
@@ -457,6 +460,8 @@ pub struct NzbgetRsScanner {
     host_env: Mutex<Option<NzbgetRsScannerEnv>>,
     requested_nzb_dir_scan: AtomicBool,
     scanning: AtomicBool,
+    /// Notified when a pass ends, for a caller waiting for its file (`scan_nzb_dir`).
+    scan_done: (Mutex<()>, std::sync::Condvar),
     nzb_dir_interval: AtomicI32,
     #[cfg(unix)]
     work_params: Mutex<Vec<(CString, CString)>>,
@@ -1304,6 +1309,7 @@ impl NzbgetRsScanner {
             host_env: Mutex::new(None),
             requested_nzb_dir_scan: AtomicBool::new(false),
             scanning: AtomicBool::new(false),
+            scan_done: (Mutex::new(()), std::sync::Condvar::new()),
             nzb_dir_interval: AtomicI32::new(0),
             #[cfg(unix)]
             work_params: Mutex::new(Vec::new()),
@@ -1359,11 +1365,18 @@ impl NzbgetRsScanner {
                 crate::scheduler::wake_active_service_coord();
             }
         }
+        // woken when the pass ends (a fleet adds its members one after another: a
+        // fixed 100 ms nap per member added seconds); the timeout stays a fallback
+        let (lock, cv) = &self.scan_done;
+        let mut g = lock.lock().unwrap_or_else(|e| e.into_inner());
         while sync_mode
             && (self.scanning.load(Ordering::SeqCst)
                 || self.requested_nzb_dir_scan.load(Ordering::SeqCst))
         {
-            std::thread::sleep(Duration::from_millis(100));
+            g = cv
+                .wait_timeout(g, Duration::from_millis(100))
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
         }
     }
 
@@ -1448,6 +1461,11 @@ impl NzbgetRsScanner {
         Self::flush_fleet_pending(&mut inner, env);
 
         self.scanning.store(false, Ordering::SeqCst);
+        {
+            let (lock, cv) = &self.scan_done;
+            let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+            cv.notify_all();
+        }
 
         let (next_iv, next_p) = next_pass(
             rt.nzb_dir_interval,
@@ -1571,6 +1589,10 @@ impl NzbgetRsScanner {
             }
         }
 
+        // an add whose caller collects its saves: they go to it, not waited for here
+        let _defer = matched_idx
+            .and_then(|idx| inner.queue_list[idx].handoff.clone())
+            .map(crate::statesaver::DeferWaits::handing_to);
         if let Some(host) = &env.host {
             host.clear_work_params();
         }
@@ -1944,6 +1966,7 @@ impl NzbgetRsScanner {
                     params: captured_params.clone(),
                     url_info: if index == 0 { env.url_info as usize } else { 0 },
                     result_slot: Some(slots[index].clone()),
+                    handoff: None,
                 });
             }
             self.requested_nzb_dir_scan.store(true, Ordering::SeqCst);
@@ -2022,6 +2045,8 @@ impl NzbgetRsScanner {
             unsafe { std::slice::from_raw_parts(env.buf_ptr.cast::<u8>(), env.buf_len as usize) }
         };
         let slot: ResultSlot = Arc::new(Mutex::new((AS_SKIPPED, None)));
+        let handoff: Option<crate::statesaver::Handoff> =
+            crate::statesaver::deferring().then(|| Arc::new(Mutex::new(Vec::new())));
 
         {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -2109,11 +2134,16 @@ impl NzbgetRsScanner {
                 params: captured_params,
                 url_info: env.url_info as usize,
                 result_slot: Some(slot.clone()),
+                handoff: handoff.clone(),
             });
             self.requested_nzb_dir_scan.store(true, Ordering::SeqCst);
         }
 
         self.scan_nzb_dir(true, env);
+        if let Some(h) = handoff {
+            let tickets = std::mem::take(&mut *h.lock().unwrap_or_else(|e| e.into_inner()));
+            crate::statesaver::adopt(tickets);
+        }
 
         let (status, nzb_id_opt) = *slot.lock().unwrap_or_else(|e| e.into_inner());
         if !env.out_nzb_id.is_null() {

@@ -7316,6 +7316,13 @@ pub unsafe fn fleet_append(
     let Some(key_guard) = key_lock.try_lock_for(key_wait_ms) else {
         return emit_fleet_result(out, 0, false, b"KEY_BUSY", &[]);
     };
+    // A client's fleet that got its key inside the add reserve (woken late) has no
+    // time left to fetch, check or add a copy: it answers as a key wait that ran out,
+    // and the client sends it again.
+    if !grouped && donor_now_ms() + FINISH_RESERVE_MS > deadline_ms {
+        drop(key_guard);
+        return emit_fleet_result(out, 0, false, b"KEY_BUSY", &[]);
+    }
     let mut key_guard = Some(key_guard);
 
     let fetched_slots: Vec<Mutex<(bool, i32, Vec<u8>)>> = (0..members.len())
@@ -8699,6 +8706,11 @@ pub unsafe fn fleet_append(
     } else {
         running_id
     };
+    // Each member added (and each mark written) is a queue save. Their syncs are
+    // waited for once, before the key goes, not one by one: on a busy disk each took
+    // 0.3-2 s, and a fleet of 40 overran its limit by 30 s while a resent fleet
+    // waiting for the key gave up (KEY_BUSY).
+    let saves = crate::statesaver::DeferWaits::enter();
     let mut any_added = false;
     for (rank_zero, &idx) in ranked_idx.iter().enumerate() {
         let cand = &candidates[idx];
@@ -8874,6 +8886,10 @@ pub unsafe fn fleet_append(
                 .map_or(0, |q| q.id)
         });
     }
+    // its saves are on disk before the key goes: a call waiting for the key names
+    // these copies from memory, and its reply must mean they are on disk too
+    drop(saves);
+    let saves = crate::statesaver::DeferWaits::enter();
     drop(key_guard);
 
     let mut chosen = 0i32;
@@ -9027,6 +9043,8 @@ pub unsafe fn fleet_append(
         );
     }
 
+    // what this call saved is on disk before it answers
+    drop(saves);
     let summary_log =
         fleet_format_summary_log(members.len() as i32, &dupe_key, chosen, &reason, complete);
     fleet_log(host_ctx, host_cb, MK_INFO, &summary_log);

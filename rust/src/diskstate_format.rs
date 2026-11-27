@@ -1331,6 +1331,18 @@ pub fn save_id_floor_file(queue_dir: &[u8], sep: u8, nzb_id: i32, file_id: i32) 
     true
 }
 
+/// Writes `bytes` to `<path>.new` and renames it over `path`, no sync; false on
+/// failure (the temporary file removed), as [`save_id_floor_file`] does.
+fn write_floor_file(path: &[u8], bytes: &[u8]) -> bool {
+    let temp = diskstate_format_new_path(path);
+    let (p, t) = (crate::fsops::path(path), crate::fsops::path(&temp));
+    if std::fs::write(t, bytes).is_err() || std::fs::rename(t, p).is_err() {
+        let _ = std::fs::remove_file(t);
+        return false;
+    }
+    true
+}
+
 /// `DiskState::RaiseIdsPastQueueDir` filename classifier.
 /// Returns `Some((id, is_nzb_log))` when the filename is `"n<id>.log"` or `"<id>"` / `"<id>s"` / `"<id>c"`.
 pub fn classify_queue_dir_id(filename: &[u8]) -> Option<(i32, bool)> {
@@ -4610,7 +4622,14 @@ pub(crate) fn run_state_job(
             bytes,
             transactional,
             sync,
-        } => (bytes, *transactional, *sync),
+            floor,
+        } => {
+            if let Some((floor_path, floor_bytes)) = floor {
+                // best-effort, as it was written inline: a failure is not this save's
+                write_floor_file(floor_path, floor_bytes);
+            }
+            (bytes, *transactional, *sync)
+        }
     };
     let fd = crate::fsops::open_cloexec_fd(&temp_c, 2, 0, 1, 2);
     if fd == -1 {
@@ -4829,6 +4848,17 @@ impl RsStateFile {
         w: Vec<u8>,
         flush_queue: bool,
     ) -> bool {
+        unsafe { self.finish_write_with(env, w, flush_queue, None) }
+    }
+
+    /// [`Self::finish_write`], writing `floor` (path, bytes) best-effort just before.
+    unsafe fn finish_write_with(
+        &self,
+        env: &NzbgetRsDiskStateEnv,
+        w: Vec<u8>,
+        flush_queue: bool,
+        floor: Option<(Vec<u8>, Vec<u8>)>,
+    ) -> bool {
         let job = crate::statesaver::Job {
             seq: 0,
             path: self.dest.clone(),
@@ -4838,6 +4868,7 @@ impl RsStateFile {
                 bytes: w,
                 transactional: self.transactional,
                 sync: self.flush && flush_queue,
+                floor,
             },
             retry: Default::default(),
         };
@@ -6805,6 +6836,15 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                     b"Saving queue and history to disk",
                 );
                 let mut ok = true;
+                // The id floor is written by the queue's own save, just before it: written
+                // inline under the queue lock, its rename waited 0.06-0.45 s on a busy
+                // journal, once per NZB added. Without a queue to write it goes inline.
+                let last_nzb = call_ctrl(env, DiskCtrl::LastNzbId);
+                let last_file = call_ctrl(env, DiskCtrl::LastFileId);
+                let floor = (
+                    crate::artwritercore::article_writer_format_dest_file_path(qdir, sep, b"ids"),
+                    diskstate_format_ids_line(last_nzb, last_file),
+                );
                 let queue_len = call_ctrl(env, DiskCtrl::QueueLen);
                 let q_sf = RsStateFile::new(
                     qdir,
@@ -6822,8 +6862,9 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                         emit_log(env, DiskLogLevel::Debug, b"Saving nzb list to disk");
                         save_nzb_section(env, &mut w, NzbSource::Queue, queue_len);
                     }
-                    ok = unsafe { q_sf.finish_write(env, w, flush_queue) };
+                    ok = unsafe { q_sf.finish_write_with(env, w, flush_queue, Some(floor)) };
                 } else {
+                    let _ = save_id_floor_file(qdir, sep, last_nzb, last_file);
                     q_sf.discard();
                 }
 
@@ -6862,10 +6903,6 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                 // Obsolete once this queue save is on disk: deleted after it, never while it
                 // fails (statesaver retries it; the progress since the last good queue stays).
                 p_sf.discard_after(&q_sf.dest);
-
-                let last_nzb = call_ctrl(env, DiskCtrl::LastNzbId);
-                let last_file = call_ctrl(env, DiskCtrl::LastFileId);
-                let _ = save_id_floor_file(qdir, sep, last_nzb, last_file);
                 c_int::from(ok)
             } else if op == DiskOp::SaveProgress {
                 let changed_count = call_ctrl(env, DiskCtrl::ChangedNzbCount);

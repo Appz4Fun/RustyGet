@@ -1124,9 +1124,11 @@ pub enum LostArticle {
 pub const MAX_LOST_REFETCHES: u32 = 3;
 
 /// The fate of a lost article: `completed`/`total` its file's counts (the lost article still
-/// among the completed), `refetches` how often it was fetched again already.
-pub fn lost_article_fate(completed: i32, total: i32, refetches: u32) -> LostArticle {
-    if completed >= total || refetches >= MAX_LOST_REFETCHES {
+/// among the completed), `refetches` how often it was fetched again already, `open` whether
+/// the file still downloads (not deleted, not cut over to a donor: the pick never hands out
+/// articles of such a file, so a reset one would wait forever).
+pub fn lost_article_fate(completed: i32, total: i32, refetches: u32, open: bool) -> LostArticle {
+    if !open || completed >= total || refetches >= MAX_LOST_REFETCHES {
         LostArticle::Fail
     } else {
         LostArticle::Refetch
@@ -1178,44 +1180,53 @@ static LOST_REFETCHES: std::sync::Mutex<Option<std::collections::HashMap<(i32, i
     std::sync::Mutex::new(None);
 const LOST_REFETCH_TRACKED: usize = 65536;
 
-/// Articles of file `file_id` (download `nzb_id`) that the cache flush counted as finished
-/// but could not write (a full disk, an I/O error; `article_ptrs`): their bytes are gone, so
-/// each goes back to the queue to be downloaded again, or, when that is no longer possible,
-/// counts as failed. Never leaves a hole counted as downloaded. Takes the queue lock; the
-/// caller holds neither the cache flush lock nor the file's busy mark. A file that left the
-/// queue meanwhile (deleted) needs nothing.
+/// Articles of file `file_id` that the cache flush counted as finished but could not write
+/// (a full disk, an I/O error; `article_ptrs`): their bytes are gone, so each goes back to
+/// the queue to be downloaded again, or, when that is no longer possible, counts as failed.
+/// Never leaves a hole counted as downloaded.
+///
+/// The caller still holds the cache flush lock (not the file's busy mark), and the flush left
+/// these articles in the file's cached count: a completion of this file that starts meanwhile
+/// sees cached articles, waits for the flush lock and so reads the articles' new status, never
+/// the finished one of bytes that are not on disk. The cached count is taken down here. Takes
+/// the queue lock. A file that left the queue (deleted) needs nothing. Returns how many
+/// articles were handed back (fetched again, failed).
 #[cfg(unix)]
 pub(crate) fn articles_uncommitted(
     host: &crate::queuesubsys_host::QueueSubsysHost,
-    nzb_id: i32,
     file_id: i32,
     article_ptrs: &[usize],
-) {
+) -> (u32, u32) {
+    use crate::queuesubsys_host as h;
     host.with_locked_queue(|dq_ptr| {
+        // By file id across the queue: a split or merge may have moved the file to another job.
         let Some(file_ptr) = (0..host.queue_len(dq_ptr))
             .map(|i| host.queue_at(dq_ptr, i))
-            .filter(|&n| host.nzb_snap(n, false).id == nzb_id)
-            .flat_map(|n| (0..host.nzb_file_len(n)).map(move |j| (n, j)))
-            .map(|(n, j)| host.nzb_file_at(n, j))
+            .flat_map(|n| (0..host.nzb_file_len(n)).map(move |j| host.nzb_file_at(n, j)))
             .find(|&f| host.file_snap(f).id == file_id)
         else {
-            return;
+            return (0, 0);
         };
-        let mut refetched = 0;
-        let mut failed = 0;
+        let cached = host.file_snap(file_ptr).cached_articles;
+        let lost_count = i32::try_from(article_ptrs.len()).unwrap_or(i32::MAX);
+        host.file_set_int(
+            file_ptr,
+            h::FILE_INT_CACHED_ARTICLES,
+            cached.saturating_sub(lost_count).max(0),
+        );
+        let mut refetched = 0u32;
+        let mut failed = 0u32;
         for &art_ptr in article_ptrs {
-            let file = host.file_snap(file_ptr);
-            let Some(art) = (0..file.articles_len)
-                .map(|i| host.article_at(file_ptr, i))
-                .find(|a| a.ptr == art_ptr)
-            else {
+            let Some((_, art)) = host.file_find_article(file_ptr, art_ptr) else {
                 continue;
             };
-            if art.status != crate::queuesubsys_host::AI_FINISHED {
+            if art.status != h::AI_FINISHED {
                 continue;
             }
+            let file = host.file_snap(file_ptr);
             let nzb = host.nzb_snap(file.nzb_ptr, false);
-            let key = (nzb_id, file_id, art.part_number);
+            let open = !file.deleted && !file.dupe_deleted && !file.dupe_cutover;
+            let key = (nzb.id, file_id, art.part_number);
             let fate = {
                 let mut g = LOST_REFETCHES.lock().unwrap_or_else(|e| e.into_inner());
                 let map = g.get_or_insert_with(Default::default);
@@ -1223,7 +1234,8 @@ pub(crate) fn articles_uncommitted(
                     map.clear();
                 }
                 let n = map.entry(key).or_insert(0);
-                let fate = lost_article_fate(file.completed_articles, file.articles_len as i32, *n);
+                let fate =
+                    lost_article_fate(file.completed_articles, file.articles_len as i32, *n, open);
                 if fate == LostArticle::Refetch {
                     *n += 1;
                 } else {
@@ -1248,7 +1260,29 @@ pub(crate) fn articles_uncommitted(
                 nzb_paused_size: nzb.paused_size,
             };
             apply_lost_article(&mut c, art.size, file.par_file, file.paused, fate);
-            use crate::queuesubsys_host as h;
+            // As `count_as_failed`: a lost article no longer backs a live repair source claim,
+            // and a borrowed one no longer counts as recovered. A borrowed article keeps its
+            // donor's message id: donors lend one for one only as proven twins, so fetching it
+            // again from there gives the same bytes.
+            host.invalidate_source_replacement(file_ptr, art.ptr);
+            if !art.dupe_proactive
+                && !art.dupe_original_message_id.is_empty()
+                && art.message_id != art.dupe_original_message_id
+            {
+                host.file_set_int(
+                    file_ptr,
+                    h::FILE_INT_DUPE_RECOVERED_ARTICLES,
+                    file.dupe_recovered_articles.saturating_sub(1).max(0),
+                );
+                host.nzb_set_int(
+                    nzb.ptr,
+                    h::NZB_INT_DUPE_RECOVERED_ARTICLES,
+                    nzb.dupe_recovered_articles.saturating_sub(1).max(0),
+                );
+                if file.par_file {
+                    note_dupe_par_article(host, nzb.ptr, file_id, false);
+                }
+            }
             match fate {
                 LostArticle::Refetch => {
                     host.article_edit(art.ptr, crate::qarticle::ArticleEdit::ResetForRetry);
@@ -1285,10 +1319,11 @@ pub(crate) fn articles_uncommitted(
                 )
                 .as_bytes(),
             );
-            host.nzb_print_message(file.nzb_ptr, crate::queuesubsys_host::MK_WARNING, &msg);
+            host.nzb_print_message(file.nzb_ptr, h::MK_WARNING, &msg);
             host.dq_save_changed(dq_ptr);
         }
-    });
+        (refetched, failed)
+    })
 }
 
 /// Applies article completion success counters to file and NZB counters in `QueueCoordinator::ArticleCompleted`.
@@ -8011,12 +8046,13 @@ type CopiesByKey = std::collections::HashMap<Vec<u8>, Vec<usize>>;
 mod tests {
 
     #[test]
-    fn a_lost_article_is_fetched_again_until_the_file_is_decided_or_it_was_lost_too_often() {
+    fn a_lost_article_is_fetched_again_until_the_file_is_decided_closed_or_it_was_lost_too_often() {
         use super::{lost_article_fate, LostArticle, MAX_LOST_REFETCHES};
-        assert_eq!(lost_article_fate(5, 10, 0), LostArticle::Refetch);
-        assert_eq!(lost_article_fate(9, 10, MAX_LOST_REFETCHES - 1), LostArticle::Refetch);
-        assert_eq!(lost_article_fate(10, 10, 0), LostArticle::Fail, "completion is decided");
-        assert_eq!(lost_article_fate(5, 10, MAX_LOST_REFETCHES), LostArticle::Fail);
+        assert_eq!(lost_article_fate(5, 10, 0, true), LostArticle::Refetch);
+        assert_eq!(lost_article_fate(9, 10, MAX_LOST_REFETCHES - 1, true), LostArticle::Refetch);
+        assert_eq!(lost_article_fate(10, 10, 0, true), LostArticle::Fail, "completion is decided");
+        assert_eq!(lost_article_fate(5, 10, MAX_LOST_REFETCHES, true), LostArticle::Fail);
+        assert_eq!(lost_article_fate(5, 10, 0, false), LostArticle::Fail, "deleted or cut over");
     }
 
     #[test]

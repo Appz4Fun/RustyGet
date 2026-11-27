@@ -1239,7 +1239,7 @@ pub fn article_writer_flush_cache(
 /// `uncommitted` names each item whose write failed (a full disk, an I/O error): counted and
 /// discarded too, so the cache gives its memory back and a stop can finish, but its bytes
 /// are not on disk; the caller downloads the article again (see
-/// `queuecoord::article_uncommitted`). The items after a failed write are not tried (on a full
+/// `queuecoord::articles_uncommitted`). The items after a failed write are not tried (on a full
 /// disk they would fail too) but handed back the same way, so none stays held in memory and
 /// what was written is still the items before the first failure.
 #[allow(clippy::too_many_arguments)]
@@ -1325,7 +1325,12 @@ pub(crate) fn article_writer_flush_cache_guarded(
                     .create(true)
                     .truncate(true)
                     .open(crate::fsops::path(&temporary))?;
-                file.write_all(&item.segment_content[..length])?;
+                if let Err(error) = file.write_all(&item.segment_content[..length]) {
+                    // A short temporary would pass for the article later: it is fetched again.
+                    drop(file);
+                    let _ = std::fs::remove_file(crate::fsops::path(&temporary));
+                    return Err(error);
+                }
                 drop(file);
                 let source = std::ffi::CString::new(temporary)
                     .map_err(|_| std::io::ErrorKind::InvalidInput)?;

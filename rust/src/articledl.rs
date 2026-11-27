@@ -901,16 +901,21 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
             crate::livewrite::written(nzb_id, file_id, offset, len);
         }
     }
-    let skip_after = qh.file_cache_flush_finish(file_ptr, flushed_articles)
-        || crate::options::active_options().is_some_and(|o| o.scalars().skip_write != 0);
     let lost: Vec<usize> = lost.borrow().iter().filter_map(|&i| metas.get(i).map(|m| m.0)).collect();
+    // The lost articles stay in the file's cached count until they are handed back: a
+    // completion of the file that starts meanwhile then waits for the flush lock instead of
+    // reading them as finished (`articles_uncommitted`).
+    let lost_n = i32::try_from(lost.len()).unwrap_or(i32::MAX);
+    let skip_after = qh.file_cache_flush_finish(file_ptr, flushed_articles.saturating_sub(lost_n))
+        || crate::options::active_options().is_some_and(|o| o.scalars().skip_write != 0);
     // The busy mark goes first: `delete_file_info` waits for it holding the queue lock,
-    // which handing the lost articles back takes.
+    // which handing the lost articles back takes. The flush lock stays (flush lock, then
+    // queue lock, as everywhere).
     drop(_busy_guard);
-    cache_unlock_flush();
     if !lost.is_empty() {
-        crate::queuecoord::articles_uncommitted(&qh, nzb_id, file_id, &lost);
+        crate::queuecoord::articles_uncommitted(&qh, file_id, &lost);
     }
+    cache_unlock_flush();
     let flushed_mb = (flushed_size as f64) / 1024.0 / 1024.0;
     let prefix = if skip_after {
         format!(

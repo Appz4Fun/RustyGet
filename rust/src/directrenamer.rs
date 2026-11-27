@@ -586,6 +586,7 @@ pub(crate) fn run_par_loader(
         }
     }
 
+    rename_test_delay(stopped);
     host.with_locked_queue(|dq_ptr| {
         let opts = host.opts();
         let nzb_ptr = host.queue_find_by_id(dq_ptr, nzb_id);
@@ -596,6 +597,35 @@ pub(crate) fn run_par_loader(
             }
         }
     });
+}
+
+/// Test hook (functional harness only): `RUSTYGET_TEST_DIRECT_RENAME_DELAY_MS` delays
+/// a direct rename's completion that long after its par2 files were read, so the
+/// queue changes in between (a fleet holds the copy) before the rename completes.
+/// Logged once when set; unset (production) it costs one load.
+#[cfg(unix)]
+fn rename_test_delay(stopped: &std::sync::atomic::AtomicBool) {
+    static DELAY_MS: std::sync::LazyLock<u64> = std::sync::LazyLock::new(|| {
+        let ms = std::env::var("RUSTYGET_TEST_DIRECT_RENAME_DELAY_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map_or(0, |ms| ms.min(30_000));
+        if ms > 0 {
+            crate::log::log_active_bytes(
+                crate::queuesubsys_host::MK_WARNING,
+                format!("Test hook RUSTYGET_TEST_DIRECT_RENAME_DELAY_MS: each direct rename completes {ms} ms late")
+                    .as_bytes(),
+            );
+        }
+        ms
+    });
+    if *DELAY_MS == 0 {
+        return;
+    }
+    let end = std::time::Instant::now() + std::time::Duration::from_millis(*DELAY_MS);
+    while std::time::Instant::now() < end && !stopped.load(std::sync::atomic::Ordering::Acquire) {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
 #[cfg(unix)]

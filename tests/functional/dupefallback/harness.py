@@ -158,6 +158,7 @@ import re
 import shutil
 import socket
 import subprocess
+import zlib
 import sys
 import tempfile
 import uuid
@@ -15408,15 +15409,18 @@ def scenario_fleetsalvage(daemon, t):
 
 # ---- F16 review fixes (becee83b review) ----
 
-def _par_copy(t, tag, data, files=2, missing=(), vol=True, vol_articles=1):
+def _par_copy(t, tag, data, files=2, missing=(), vol=True, vol_articles=1, obfuscate=False):
     """A posting of ``data`` cut into ``files`` data files, with a par2 index
-    and (``vol``) a par2 volume, the extra par2 a download pauses at first."""
+    and (``vol``) a par2 volume, the extra par2 a download pauses at first.
+    With ``obfuscate`` the data files are posted under random names (a direct
+    rename names them from the par2 index)."""
     size = len(data) // files
     parts = [data[i * size:(i + 1) * size if i < files - 1 else len(data)] for i in range(files)]
     members = []
     for i, part in enumerate(parts):
         path = _place_copy(t, tag, part, 'part%d.bin' % i)
-        members.append((path, 'Hold.Movie.part%d.bin' % i, len(part), 100_000, set(missing) if i == 0 else set()))
+        name = 'q%07x' % (zlib.crc32(('%s%d' % (tag, i)).encode()) & 0xfffffff) if obfuscate else 'Hold.Movie.part%d.bin' % i
+        members.append((path, name, len(part), 100_000, set(missing) if i == 0 else set()))
     par = generators.par2_index([('Hold.Movie.part%d.bin' % i, part) for i, part in enumerate(parts)], pad=0)
     t.write_file(os.path.join('data', tag, 'rel.par2'), par)
     members.append((tag + '/rel.par2', 'Hold.Movie.par2', len(par), 500_000, set()))
@@ -15683,6 +15687,49 @@ def scenario_pressureowncgroup(daemon, t):
         time.sleep(0.5)
     root = _grep_log(t, needle) - own
     return ('pressureowncgroup', own == 0 and root >= 1, 'critical_in_own_cgroup=%d critical_in_root_cgroup=%d' % (own, root))
+
+
+def scenario_fleetholdrename(daemon, t):
+    """6790 (2026-11-27): a copy held by its fleet while its direct rename runs
+    (Wonka: held 09:18:33, rename done 09:18:34) stays paused while held, and
+    when released downloads its data only: its par2 files stay paused. Before,
+    the rename's completion resumed the whole held copy (GroupResume), so held
+    copies downloaded with nothing paused (DupeHeld=yes, PausedSizeMB 0).
+    RUSTYGET_TEST_DIRECT_RENAME_DELAY_MS lets the hold land between the rename's
+    par2 read and its completion."""
+    data = _payload(3_000_000, 16531)
+    rel = 'Hold.Movie.2024.1080p.WEB-DL.x264-GRP'
+    key = 'dupes:hold.movie.2024.1080p.web.dl.x264.grp'
+    api = daemon.wait_ready()
+    b_name = rel + '_1'
+    _ds_append(api, b_name, _par_copy(t, 'hrB', data, vol_articles=4, obfuscate=True), key, 100, paused=False)
+    b = _wait_free(api, b_name)
+    deadline = time.time() + 30
+    while time.time() < deadline and not _grep_log(t, 'Directly checking renamed files for ' + b_name):
+        time.sleep(0.1)
+    started = _grep_log(t, 'Directly checking renamed files for ' + b_name) > 0
+    # a better copy arrives while b's direct rename runs
+    _ds_append(api, rel, _par_copy(t, 'hrA', data, vol_articles=4, obfuscate=True), key, 200, paused=False)
+    b_held = _wait_held(api, b_name)
+    done = 'renamed files found for %s' % b_name, 'file(s) for %s' % b_name
+    deadline = time.time() + 30
+    while time.time() < deadline and not any(_grep_log(t, d) for d in done):
+        time.sleep(0.2)
+    completed = any(_grep_log(t, d) for d in done)
+    time.sleep(1)
+    held_files = _files_of(api, b['NZBID'])
+    a = _group_named(api, rel)
+    api.editqueue('GroupDelete', 0, '', [a['NZBID']]) if a else None
+    b2 = _wait_free(api, b_name)
+    time.sleep(1)
+    after = _files_of(api, b['NZBID'])
+    pars = [k for k in after if k.endswith('.par2')]
+    held_ok = bool(held_files) and all(held_files.values())
+    ok = (started and completed and _params(b_held).get('DupeHeld') == 'yes' and held_ok and bool(b2)
+          and all(after[k] for k in pars) and not all(after.values()))
+    return ('fleetholdrename', ok, 'started=%s completed=%s unpaused_held=%s unpaused_after=%s' % (
+        started, completed, sorted(k for k, v in held_files.items() if not v),
+        sorted(k for k, v in after.items() if not v)))
 
 
 def scenario_fleetendnolive(daemon, t):
@@ -16050,6 +16097,7 @@ SCENARIOS = {
     'fleetsalvage': scenario_fleetsalvage,
     'fleetholdfiles': scenario_fleetholdfiles,
     'fleetparpaused': scenario_fleetparpaused,
+    'fleetholdrename': scenario_fleetholdrename,
     'pressureowncgroup': scenario_pressureowncgroup,
     'fleetparskip': scenario_fleetparskip,
     'fleetparpausedmany': scenario_fleetparpausedmany,
@@ -16537,6 +16585,9 @@ SCENARIO_ENV = {
     # Each cache flush holds its file's flush lock 150 ms before writing (articledl.rs
     # `flush_test_hold`): captures land while their file is flushed.
     'liveparflushrace': {'RUSTYGET_TEST_FLUSH_HOLD_MS': '150'},
+    # each direct rename completes 8 s after its par2 read (directrenamer.rs
+    # `rename_test_delay`): the fleet holds the copy in between.
+    'fleetholdrename': {'RUSTYGET_TEST_DIRECT_RENAME_DELAY_MS': '8000'},
 }
 SCENARIO_ENV_KEYS = sorted({k for env in SCENARIO_ENV.values() for k in env})
 
@@ -16568,6 +16619,7 @@ SCENARIO_OPTIONS = {
     'fleetholdfiles': ['HealthCheck=dupe', 'DupeArticleFallback=no'],
     'fleetparpaused': ['HealthCheck=dupe', 'DupeArticleFallback=live'],
     'fleetparskip': ['HealthCheck=dupe', 'DupeArticleFallback=live', 'ParCheck=auto', 'ParRepair=yes', 'ParRename=yes', 'DirectRename=yes', 'ReorderFiles=yes', 'ParScan=dupe', 'DupeWatch=yes', 'DupeHealthPreset=medium', 'PostStrategy=aggressive'],
+    'fleetholdrename': ['HealthCheck=dupe', 'DupeArticleFallback=live', 'ParCheck=auto', 'ParRepair=yes', 'ParRename=yes', 'DirectRename=yes', 'ReorderFiles=yes', 'ParScan=dupe', 'DupeWatch=yes', 'DupeHealthPreset=medium', 'PostStrategy=aggressive', 'DownloadRate=100'],
     'fleetparpausedmany': ['HealthCheck=dupe', 'DupeArticleFallback=live', 'ParCheck=auto', 'ParRepair=yes', 'ParRename=yes', 'DirectRename=yes', 'ReorderFiles=yes', 'ParScan=dupe', 'DupeWatch=yes', 'DupeHealthPreset=medium', 'PostStrategy=aggressive', 'DownloadRate=50'],
     'fleetparskiprestart': ['HealthCheck=dupe', 'DupeArticleFallback=live', 'ParCheck=auto', 'ParRepair=yes', 'ParRename=yes', 'DirectRename=yes', 'ReorderFiles=yes', 'ParScan=dupe', 'DupeWatch=yes', 'DupeHealthPreset=medium', 'PostStrategy=aggressive'],
     'fleetendnolive': ['HealthCheck=dupe', 'DupeArticleFallback=no', 'ParCheck=always'],

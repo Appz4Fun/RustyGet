@@ -383,6 +383,9 @@ struct PendingCopy {
     full_filename: Vec<u8>,
     category: Vec<u8>,
     key: Vec<u8>,
+    /// When it was first held back for a sibling still waiting its
+    /// NzbDirFileAge ([`single_waits_for_sibling`]); 0 if never.
+    held_since: i64,
 }
 
 /// Copies of one release that land in NzbDir within this many seconds of a
@@ -423,6 +426,30 @@ pub fn plan_fleets(
     }
     single.sort_unstable();
     (fleets, single)
+}
+
+/// Whether a copy alone in its pass waits for the next pass: another `.nzb` of
+/// the same release (`key`) in the same directory was seen but is still
+/// waiting its NzbDirFileAge. The scanner stamps a file when a pass first sees
+/// it, in whole seconds, so files dropped together can become ready one pass
+/// apart; without the wait the first is added alone and the rest form a fleet
+/// without it. `waiting` lists the files seen and not ready yet.
+pub fn single_waits_for_sibling(pending_full: &[u8], key: &[u8], waiting: &[&[u8]]) -> bool {
+    let split = |f: &[u8]| f.iter().rposition(|&b| b == b'/' || b == b'\\').map_or(0, |i| i + 1);
+    let cut = split(pending_full);
+    let dir = &pending_full[..cut];
+    waiting.iter().any(|&f| {
+        if f == pending_full {
+            return false;
+        }
+        let c = split(f);
+        if &f[..c] != dir {
+            return false;
+        }
+        let base = &f[c..];
+        let is_nzb = base.len() > 4 && base[base.len() - 4..].eq_ignore_ascii_case(b".nzb");
+        is_nzb && crate::releasename::group_key(base).eq_ignore_ascii_case(key)
+    })
 }
 
 pub struct NzbgetRsScanner {
@@ -1537,6 +1564,7 @@ impl NzbgetRsScanner {
                         full_filename: full_filename.to_vec(),
                         category: category.to_vec(),
                         key,
+                        held_since: 0,
                     });
                 }
                 return;
@@ -1705,8 +1733,29 @@ impl NzbgetRsScanner {
             .map(|(c, k, _)| (c.clone(), k.clone()))
             .collect();
         let (fleets, single) = plan_fleets(&keys, &recent);
+        // a copy alone in its pass waits (up to FLEET_WINDOW_SEC) while a file
+        // of its release next to it still waits its NzbDirFileAge
+        let waiting: Vec<Vec<u8>> = inner
+            .file_list
+            .iter()
+            .filter(|f| std::fs::metadata(crate::fsops::path(&f.filename)).is_ok_and(|m| m.is_file()))
+            .map(|f| f.filename.clone())
+            .collect();
+        let waiting_refs: Vec<&[u8]> = waiting.iter().map(Vec::as_slice).collect();
+        let mut held: Vec<PendingCopy> = Vec::new();
         for i in single {
             let p = &pending[i];
+            let within = p.held_since == 0 || (now >= p.held_since && now - p.held_since <= FLEET_WINDOW_SEC);
+            if within && single_waits_for_sibling(&p.full_filename, &p.key, &waiting_refs) {
+                held.push(PendingCopy {
+                    base_filename: p.base_filename.clone(),
+                    full_filename: p.full_filename.clone(),
+                    category: p.category.clone(),
+                    key: p.key.clone(),
+                    held_since: if p.held_since == 0 { now } else { p.held_since },
+                });
+                continue;
+            }
             Self::process_incoming_file(
                 inner,
                 &p.base_filename,
@@ -1764,6 +1813,7 @@ impl NzbgetRsScanner {
             let use_cat = resolve_category(env, &category, &copies[0].0);
             spawn_nzbdir_fleet(key, use_cat, priority.unwrap_or(0), copies, env.clone());
         }
+        inner.fleet_pending.extend(held);
     }
 
     fn add_archive_bytes_with_params(
@@ -2669,6 +2719,21 @@ mod tests {
         assert_eq!(fleets, vec![vec![0]]);
         assert!(single.is_empty());
         assert_eq!(fleet_key_for(b"X.nzb", b".zip"), None);
+        // a copy alone in its pass waits for a file of its release next to it
+        // that the scanner saw a pass later (still waiting its NzbDirFileAge)
+        let key = crate::releasename::group_key(format!("{base}.nzb").as_bytes());
+        let first = format!("/nzb/{base}.nzb");
+        let late = format!("/nzb/{base}_1.nzb");
+        let elsewhere = format!("/nzb/movies/{base}_2.nzb");
+        let unrelated = format!("/nzb/{other}.nzb");
+        let waits = |w: &[&str]| {
+            let w: Vec<&[u8]> = w.iter().map(|s| s.as_bytes()).collect();
+            single_waits_for_sibling(first.as_bytes(), &key, &w)
+        };
+        assert!(waits(&[&first, &late]));
+        assert!(!waits(&[&first]));
+        assert!(!waits(&[&elsewhere, &unrelated]));
+        assert!(!waits(&[&format!("/nzb/{base}_1.nzb.queued")]));
         // finding 8: a busy key or a stop puts the copies back for the next scan
         assert!(fleet_never_ran(b"KEY_BUSY", false));
         assert!(fleet_never_ran(b"SHUTDOWN", false));

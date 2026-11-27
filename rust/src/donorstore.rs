@@ -110,7 +110,10 @@ fn remove_stale(base: &Path) {
         else {
             continue;
         };
-        if pid <= 0 || pid as u32 == std::process::id() || process_alive(pid) {
+        // One of this process id is from an earlier run (a container's daemon gets the same
+        // small id each start): this process makes its own only after this cleanup.
+        let own = pid as u32 == std::process::id();
+        if pid <= 0 || (!own && process_alive(pid)) {
             continue;
         }
         let path = de.path();
@@ -399,6 +402,24 @@ mod tests {
             .expect("entry");
         std::fs::write(&file, b"0123").unwrap();
         assert!(get(7010, &id).is_none());
+        assert!(!contains(&id));
+    }
+
+    #[test]
+    fn a_file_of_another_article_is_never_served() {
+        let id = format!("<donorstore-key-{}@x>", std::process::id()).into_bytes();
+        put(7040, &id, 0, 4, b"abcd");
+        let file = lock()
+            .as_ref()
+            .and_then(|s| s.entries.get(key(&id)).map(|e| e.file.clone()))
+            .expect("entry");
+        // the same size, the bytes of an article under another message-id of equal length
+        let other = key(&id).iter().map(|&b| if b == b'k' { b'K' } else { b }).collect::<Vec<u8>>();
+        let mut forged = (other.len() as u32).to_le_bytes().to_vec();
+        forged.extend_from_slice(&other);
+        forged.extend_from_slice(b"wxyz");
+        std::fs::write(&file, &forged).unwrap();
+        assert!(get(7040, &id).is_none());
         assert!(!contains(&id));
     }
 

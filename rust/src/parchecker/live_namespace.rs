@@ -1,5 +1,5 @@
 //! Bounded source namespace identity, independent of source I/O and GF work.
-use super::{live_error, live_hash16k, FileId, PacketSet, RepairError};
+use super::{live_error, live_hint_hash16k, FileId, PacketSet, RepairError};
 use crate::parlive::ControlLease;
 use std::cmp::Ordering;
 use std::mem::size_of;
@@ -351,7 +351,7 @@ impl NamespaceProof {
             // the article itself; the hashed first bytes were damaged or not
             // the file's start), so the name stands and slice CRCs verify it.
             let known = if hint.is_empty() { &self.facts.rows[row].hash16k[..] } else { hint };
-            if let Some(hash) = live_hash16k(known) {
+            if let Some(hash) = live_hint_hash16k(known) {
                 let matches = self
                     .hash_order
                     .iter()
@@ -413,7 +413,7 @@ impl NamespaceProof {
         if hint.is_empty() {
             return Ok(None);
         }
-        let hash = live_hash16k(hint).ok_or_else(|| invalid("malformed hash hint"))?;
+        let hash = live_hint_hash16k(hint).ok_or_else(|| invalid("malformed hash hint"))?;
         let Ok(at) = self
             .hash_order
             .binary_search_by_key(&hash, |&i| self.catalog[i].hash)
@@ -472,7 +472,7 @@ impl NamespaceProof {
             if let Some(bound) = self.bindings[row] {
                 if !hint.is_empty()
                     && candidate.is_none()
-                    && live_hash16k(hint) != Some(self.catalog[bound].hash)
+                    && live_hint_hash16k(hint) != Some(self.catalog[bound].hash)
                 {
                     return Err(invalid("bound source hash identity changed"));
                 }

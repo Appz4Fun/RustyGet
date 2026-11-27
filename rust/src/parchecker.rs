@@ -1183,10 +1183,10 @@ impl ActiveStreamingSession {
         drop(queue);
         // The first article: bind the file by its 16k hash, never by one several share.
         let hint = first_article_hash16k(&bytes);
-        let bound = live_hash16k(hint.as_bytes())
+        let bound = live_hint_hash16k(&hint)
             .filter(|hash| !self.shared_hash16k.contains(hash))
             .and_then(|_| {
-                resolve_live_source_id(self, Some(queue_id), identity.1, hint.as_bytes()).ok()
+                resolve_live_source_id(self, Some(queue_id), identity.1, &hint).ok()
             })
             .filter(|id| {
                 let length = self.file_lengths[id];
@@ -3252,7 +3252,7 @@ fn resolve_live_source_id(
     entry
         .session
         .file_id_by_name(name)
-        .or_else(|| live_hash16k(hash16k).and_then(|hash| entry.session.file_id_by_hash16k(&hash)))
+        .or_else(|| live_hint_hash16k(hash16k).and_then(|hash| entry.session.file_id_by_hash16k(&hash)))
         .or_else(|| {
             // Bound earlier by its first article's 16k hash (an obfuscated name).
             let queue_id = queue_id?;
@@ -3266,31 +3266,24 @@ fn resolve_live_source_id(
         .ok_or(RepairError::UnknownFile(FileId([0; 16])))
 }
 
-/// The par2 16k hash (hex) of a file whose first article is `bytes`: the MD5 of its first
-/// 16 KiB, or of the whole article when shorter (then right only for a file that short).
-fn first_article_hash16k(bytes: &[u8]) -> String {
+/// The par2 16k hash of a file whose first article is `bytes` (the MD5 of its first 16 KiB,
+/// or of the whole article when shorter: then right only for a file that short), printed the
+/// way the queue stores `Hash16k` (`renameanalyzer::print`), so every hint live PAR gets is
+/// in one form and read by one parser, [`live_hint_hash16k`].
+fn first_article_hash16k(bytes: &[u8]) -> [u8; 32] {
     use md5::{Digest, Md5};
     let digest = Md5::digest(&bytes[..bytes.len().min(16 * 1024)]);
-    digest.iter().map(|b| format!("{b:02x}")).collect()
+    let printed = crate::renameanalyzer::print(&digest);
+    printed[..32].try_into().expect("32 hex digits")
 }
 
-fn live_hash16k(bytes: &[u8]) -> Option<[u8; 16]> {
-    fn digit(n: u8) -> Option<u8> {
-        match n {
-            b'0'..=b'9' => Some(n - b'0'),
-            b'a'..=b'f' => Some(n - b'a' + 10),
-            b'A'..=b'F' => Some(n - b'A' + 10),
-            _ => None,
-        }
-    }
-    if bytes.len() != 32 {
-        return None;
-    }
-    let mut hash = [0; 16];
-    for (i, pair) in bytes.chunks_exact(2).enumerate() {
-        hash[i] = digit(pair[0])? * 16 + digit(pair[1])?;
-    }
-    Some(hash)
+/// The digest (par2 byte order) of a 16k hash hint handed to live PAR: the queue's
+/// `Hash16k` text or [`first_article_hash16k`], both printed nzbget-style (bytes last to
+/// first). Before, live PAR read the queue's text in digest order, so a hash never matched
+/// its par2 entry: renamed or obfuscated files could not bind by hash, and a file bound by
+/// its first article then failed "bound source hash identity changed" on its next write.
+pub(crate) fn live_hint_hash16k(hint: &[u8]) -> Option<[u8; 16]> {
+    crate::parrenamer::parse_printed_hash16k(hint)
 }
 
 #[cfg(test)]
@@ -4067,7 +4060,7 @@ pub(crate) fn streaming_session_source_length(
 ) -> Option<u64> {
     let entry = active_streaming_session(nzb_id)?;
     let id = entry.session.file_id_by_name(name).or_else(|| {
-        live_hash16k(hash16k).and_then(|hash| entry.session.file_id_by_hash16k(&hash))
+        live_hint_hash16k(hash16k).and_then(|hash| entry.session.file_id_by_hash16k(&hash))
     })?;
     entry.file_lengths.get(&id).copied()
 }

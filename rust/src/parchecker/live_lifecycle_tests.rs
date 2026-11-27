@@ -482,7 +482,7 @@ fn live_obfuscated_article_uses_checked_hash_mapping_and_owned_ram() {
     let desc = &set.file_descs[&fid];
     let data = std::fs::read(fx.0.join(desc.local_name())).unwrap();
     let bytes = data.len() as u64;
-    let hash: String = desc.hash_16k.iter().map(|b| format!("{b:02x}")).collect();
+    let hash: String = queue_hash16k(&desc.hash_16k);
     streaming_session_defer_article(
         id,
         (b"obfuscated-name", hash.as_bytes()),
@@ -514,7 +514,7 @@ fn live_obfuscated_completed_source_reads_its_committed_path() {
     let desc = &set.file_descs[&fid];
     let path = fx.0.join("obfuscated.dat");
     std::fs::rename(fx.0.join(desc.local_name()), &path).unwrap();
-    let hash: String = desc.hash_16k.iter().map(|b| format!("{b:02x}")).collect();
+    let hash: String = queue_hash16k(&desc.hash_16k);
     let source = LiveCompletedFile {
         nzb_id: id,
         base_dir: fx.0.clone(),
@@ -646,7 +646,7 @@ fn live_repair_takes_an_obfuscated_target_and_certifies_it_through_par_rename() 
     drop(disk);
     assert!(streaming_session_status(id).unwrap().early_cutover_possible);
     // Its queue file (id 40) is matched to the par2 file by its 16k hash.
-    let hash: String = desc.hash_16k.iter().map(|b| format!("{b:02x}")).collect();
+    let hash: String = queue_hash16k(&desc.hash_16k);
     assert_eq!(
         streaming_session_par_name_of(id, (Some(40), b"a8f3k2q9z", hash.as_bytes())).as_deref(),
         Some(desc.name.as_slice())
@@ -697,7 +697,7 @@ fn live_repair_refuses_a_target_whose_name_and_binding_disagree() {
         return;
     }
     let (a, b) = (&set.file_descs[&ids[0]], &set.file_descs[&ids[1]]);
-    let hash_b: String = b.hash_16k.iter().map(|x| format!("{x:02x}")).collect();
+    let hash_b: String = queue_hash16k(&b.hash_16k);
     // Queue file 41 holds b's bytes but sits under a's name.
     assert!(streaming_session_par_name_of(id, (Some(41), b"zz-unknown", hash_b.as_bytes())).is_some());
     let result = streaming_session_prepare_repair(
@@ -2304,5 +2304,78 @@ fn live_cache_miss_with_wrong_downloaded_bytes_is_damage() {
     defer_uncached(id, name, path, &wrong, (0, wrong.len()), 1000);
     streaming_session_drain_articles(id).unwrap().unwrap();
     assert!(streaming_session_status(id).unwrap().damaged > 0);
+    streaming_session_forget(id);
+}
+
+/// A 16k hash as the queue stores it (`FileStr::Hash16k`): printed nzbget-style, bytes
+/// last to first in upper-case hex.
+fn queue_hash16k(digest: &[u8; 16]) -> String {
+    String::from_utf8(crate::renameanalyzer::print(digest)[..32].to_vec()).unwrap()
+}
+
+#[test]
+fn live_hint_hash16k_reads_printed_known_vectors() {
+    // MD5("") = d41d8cd98f00b204e9800998ecf8427e; nzbget prints it bytes last to first.
+    let empty: [u8; 16] = [
+        0xd4, 0x1d, 0x8c, 0xd9, 0x8f, 0x00, 0xb2, 0x04, 0xe9, 0x80, 0x09, 0x98, 0xec, 0xf8, 0x42,
+        0x7e,
+    ];
+    assert_eq!(queue_hash16k(&empty), "7E42F8EC980980E904B2008FD98C1DD4");
+    assert_eq!(live_hint_hash16k(b"7E42F8EC980980E904B2008FD98C1DD4"), Some(empty));
+    assert_eq!(live_hint_hash16k(b"7e42f8ec980980e904b2008fd98c1dd4"), Some(empty));
+    // The digest-order text is another hash, not this one (the old misreading).
+    assert_ne!(live_hint_hash16k(b"d41d8cd98f00b204e9800998ecf8427e"), Some(empty));
+    // The first article's own hint is printed the same way.
+    assert_eq!(&first_article_hash16k(b""), b"7E42F8EC980980E904B2008FD98C1DD4");
+    for bad in [
+        &b""[..],
+        b"7E42F8EC980980E904B2008FD98C1DD",
+        b"7E42F8EC980980E904B2008FD98C1DD4A",
+        b"7E42F8EC980980E904B2008FD98C1DDG",
+    ] {
+        assert_eq!(live_hint_hash16k(bad), None, "{}", String::from_utf8_lossy(bad));
+    }
+}
+
+#[test]
+fn live_hint_hash16k_round_trips_printed_and_first_article() {
+    use md5::{Digest, Md5};
+    for seed in 0u8..=255 {
+        let digest: [u8; 16] =
+            std::array::from_fn(|i| seed.wrapping_mul(31).wrapping_add(i as u8 * 17));
+        assert_eq!(live_hint_hash16k(queue_hash16k(&digest).as_bytes()), Some(digest));
+    }
+    // Longer than 16 KiB: only the first 16 KiB count, as in a par2 file description.
+    let article: Vec<u8> = (0..40_000u32).map(|i| (i * 7 % 251) as u8).collect();
+    let digest: [u8; 16] = Md5::digest(&article[..16 * 1024]).into();
+    assert_eq!(live_hint_hash16k(&first_article_hash16k(&article)), Some(digest));
+    let short = &article[..1000];
+    let digest: [u8; 16] = Md5::digest(short).into();
+    assert_eq!(live_hint_hash16k(&first_article_hash16k(short)), Some(digest));
+}
+
+/// The queue's printed hash binds an obfuscated file to its par2 entry and gives its length;
+/// the digest-order text names none (before, live PAR read the queue's text that way, so
+/// no queue hash ever matched).
+#[test]
+fn live_queue_printed_hash_binds_an_obfuscated_file() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900119;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 << 20).unwrap();
+    let fid = set.main.as_ref().unwrap().recoverable_file_ids[0];
+    let desc = &set.file_descs[&fid];
+    let printed = queue_hash16k(&desc.hash_16k);
+    assert_eq!(
+        streaming_session_par_name_of(id, (Some(40), b"x9q2obf", printed.as_bytes())).as_deref(),
+        Some(desc.name.as_slice())
+    );
+    assert_eq!(
+        streaming_session_source_length(id, b"x9q2obf", printed.as_bytes()),
+        Some(desc.file_length)
+    );
+    // The digest-order text names no par2 file.
+    let digest_order: String = desc.hash_16k.iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(streaming_session_source_length(id, b"x9q2obf", digest_order.as_bytes()), None);
     streaming_session_forget(id);
 }

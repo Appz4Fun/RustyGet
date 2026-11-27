@@ -4982,7 +4982,7 @@ def scenario_slotfinishedlive(daemon, t):
     if _grep_log(t, 'Directly unpacking RelA') == 0:
         return ('slotfinishedlive', False, 'RelA: its direct unpack did not start')
     data = _payload(1_500_000, 7503)
-    archive = generators.seven_zip_copy([('clip.mkv', data)])
+    archive = generators.seven_zip_copy_checked([('clip.mkv', data)])
     t.write_file(os.path.join('data', 'sflB/rel.7z'), archive)
     daemon.append(api, 'RelB', build_multi_nzb([('sflB/rel.7z', 'RelB.7z', len(archive), 300_000, set())]),
                   False, 'sfl-b', 100)

@@ -1287,7 +1287,16 @@ impl<'a> Run<'a> {
             let mut current_member = Member::default();
             let mut current_volume = self.req.first_volume.to_path_buf();
             let mut meta_cache = MetaCache::default();
+            // Set once a volume was opened or a member finished: the next turn, after that
+            // event was handled and before the session works again, is a safe point
+            // (`Request::on_boundary`).
+            let mut at_boundary = false;
             loop {
+                if std::mem::take(&mut at_boundary) {
+                    if let Some(cb) = self.req.on_boundary {
+                        cb();
+                    }
+                }
                 let event = drive.next_event_or_tick(is_cancelled, &mut || {
                     refill_released(
                         &mut self.inline,
@@ -1321,6 +1330,12 @@ impl<'a> Run<'a> {
                     self.plan,
                     &self.feed,
                     log_cb,
+                );
+                at_boundary = matches!(
+                    event,
+                    Ok(Some(
+                        ProgressiveEvent::VolumeOpened { .. } | ProgressiveEvent::MemberFinished { .. }
+                    ))
                 );
                 match event {
                     Ok(None) => break,

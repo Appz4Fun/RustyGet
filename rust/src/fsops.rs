@@ -1173,7 +1173,9 @@ impl PosixDirBrowser {
                 if entry.is_null() {
                     return std::ptr::null();
                 }
-                let ptr = unsafe { (*entry).d_name.as_ptr() };
+                // Not `(*entry).d_name.as_ptr()`: that makes a `&[c_char; 256]`, but libc allocates only
+                // as much of the entry as the name needs, so the reference would run past it.
+                let ptr = unsafe { std::ptr::addr_of!((*entry).d_name).cast::<libc::c_char>() };
                 let name = unsafe { CStr::from_ptr(ptr).to_bytes() };
                 if crate::util::dir_browser_is_dot_or_dotdot(name) == 0 {
                     return ptr;

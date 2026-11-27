@@ -1597,20 +1597,16 @@ mod tests {
                 assert_eq!(b, expected);
             }
             let mut b = *b"ababX\0";
-            reduce_str(
-                b.as_mut_ptr().cast(),
-                c"ab".as_ptr(),
-                b.as_ptr().add(4).cast(),
-            );
+            // one pointer for both operands: a shared borrow of `b` taken first would be
+            // invalidated by the writes through the mutable one
+            let bp = b.as_mut_ptr();
+            reduce_str(bp.cast(), c"ab".as_ptr(), bp.add(4).cast_const().cast());
             assert_eq!(&b, b"XbX\0\0\0");
             // Initially equal operands are not a no-op: the first copy
             // truncates the aliased replacement, so the next deletes 'a'.
             let mut b = *b"aa\0";
-            reduce_str(
-                b.as_mut_ptr().cast(),
-                c"a".as_ptr(),
-                b.as_ptr().add(1).cast(),
-            );
+            let bp = b.as_mut_ptr();
+            reduce_str(bp.cast(), c"a".as_ptr(), bp.add(1).cast_const().cast());
             assert_eq!(&b, b"\0\0\0");
         }
     }

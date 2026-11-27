@@ -225,7 +225,9 @@ const TEXTS: usize = 10;
 /// null string (only the name starts unset).
 #[repr(C)]
 struct NzbData {
-    s: NzbScalars,
+    // Behind an `UnsafeCell` because the scalars are changed through raw pointers while
+    // `&NzbData` borrows are alive (a plain field would make those writes undefined behavior).
+    s: std::cell::UnsafeCell<NzbScalars>,
     texts: Mutex<[Option<CString>; TEXTS]>,
     coll: Mutex<Coll>,
     files: Mutex<Files>,
@@ -233,7 +235,13 @@ struct NzbData {
     msgs: Mutex<std::collections::VecDeque<(u32, i32, i64, CString)>>,
     // host handles, indexed by [`Slot`]
     slots: [std::sync::atomic::AtomicUsize; SLOTS],
+    // Orders every change of the scalars against the snapshot's read of them: writers come from
+    // the queue, post-processing and download threads that do not all hold the queue lock.
+    scalar_lock: Mutex<()>,
 }
+
+// SAFETY: the scalars (the only non-`Sync` field) are plain integers changed under `scalar_lock`.
+unsafe impl Sync for NzbData {}
 
 const SLOTS: usize = 5;
 
@@ -403,6 +411,10 @@ fn nzb_data<'a>(nzb: NzbRef) -> Option<&'a NzbData> {
 }
 
 impl NzbData {
+    fn scalar_lock(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.scalar_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn slot(&self, s: Slot) -> &std::sync::atomic::AtomicUsize {
         &self.slots[s as usize]
     }
@@ -889,9 +901,12 @@ fn scalars_mut<'a>(nzb: NzbRef) -> Option<(*mut NzbScalars, &'a mut NzbScalars, 
 /// Sets an integer or flag field (NzbInfo's int setters).
 pub(crate) fn set_int(nzb: NzbRef, field: NzbInt, v: i32) {
     use std::sync::atomic::Ordering::SeqCst;
-    let Some((_, s, d)) = scalars_mut(nzb) else {
+    let Some(d) = nzb_data(nzb) else {
         return;
     };
+    let _scalars = d.scalar_lock();
+    // Only now: making the `&mut` is itself a write as far as another thread's read is concerned.
+    let s = unsafe { &mut *scalars(nzb) };
     match field {
         NzbInt::Id => set_id(s, v),
         NzbInt::DeleteStatus => s.deleteStatus = v,
@@ -1254,7 +1269,8 @@ pub extern "C" fn nzbget_rs_nzb_scalars_new() -> *mut NzbScalars {
         }
     }
     let data = Box::new(NzbData {
-        s: NzbScalars::default(),
+        s: std::cell::UnsafeCell::new(NzbScalars::default()),
+        scalar_lock: Mutex::new(()),
         texts: Mutex::new(texts),
         coll: Mutex::new(Coll::default()),
         files: Mutex::new(Files::default()),
@@ -2605,9 +2621,8 @@ fn calc_critical_health(s: &NzbScalars, allow_estimation: bool) -> i32 {
 
 /// NzbInfo::IsDownloadCompleted over the file list, ignoring paused par files and strictly,
 /// from one read of the list. (Strict implies the other, so it is only checked then.)
-fn download_completed(p: *const NzbScalars) -> (bool, bool) {
+fn download_completed(p: *const NzbScalars, active: c_int) -> (bool, bool) {
     use crate::qfile::field;
-    let active = unsafe { (*p).activeDownloads };
     if active != 0 {
         return (false, false);
     }
@@ -2681,7 +2696,12 @@ pub(crate) fn nzb_snapshot(
         return crate::queuesubsys_host::NzbSnap::default();
     }
     let p = scalars(nzb).cast_const();
-    let s = unsafe { &*p };
+    // One consistent copy: the writers (see `NzbData::scalar_lock`) are on other threads.
+    let copy = {
+        let _scalars = data(p).scalar_lock();
+        unsafe { std::ptr::read(p) }
+    };
+    let s = &copy;
     let script_total = script_total_status(nzb);
     let post = slot(p, Slot::Post) as *const Post;
     let post_flag = |f| !post.is_null() && post_get(post, PostField::Int(f)) != 0;
@@ -2691,7 +2711,7 @@ pub(crate) fn nzb_snapshot(
     let health = calc_health(s);
     let critical_est = calc_critical_health(s, true);
     let critical_exact = calc_critical_health(s, false);
-    let completed = download_completed(p);
+    let completed = download_completed(p, s.activeDownloads);
     let health_check_dupe = crate::options::active_options()
         .is_some_and(|o| o.scalars().health_check == HEALTH_CHECK_DUPE);
     let is_dupe_success = crate::downloadinfo::is_dupe_success(
@@ -2868,6 +2888,7 @@ fn log_messages(
     // the scalars are C++-owned plain memory; these two fields change only
     // under this lock
     let sp = p.cast_mut();
+    let scalars = data(p).scalar_lock();
     for (kind, text) in new {
         let id = unsafe { (*sp).idMessageGen.wrapping_add(1) };
         unsafe { (*sp).idMessageGen = id };
@@ -2877,6 +2898,7 @@ fn log_messages(
         }
     }
     unsafe { (*sp).cachedMessageCount = m.len() as i32 };
+    drop(scalars);
     m.len()
 }
 
@@ -3174,6 +3196,40 @@ mod tests {
             nzbget_rs_post_free(p);
             nzbget_rs_nzb_scalars_free(n);
         }
+    }
+
+    /// Post-processing and download threads change the scalars (message log, active downloads,
+    /// statuses) while the queue thread snapshots the download. ThreadSanitizer reported a data
+    /// race between these before the scalars had one lock; a plain run only checks the values.
+    #[test]
+    fn scalars_changed_on_other_threads_are_snapshotted_without_a_race() {
+        let n = nzbget_rs_nzb_scalars_new() as usize;
+        const ROUNDS: i32 = 300;
+        let writers: Vec<_> = (0..2)
+            .map(|w| {
+                std::thread::spawn(move || {
+                    let nzb = NzbRef::from_addr(n);
+                    for i in 0..ROUNDS {
+                        if w == 0 {
+                            set_int(nzb, NzbInt::ActiveDownloads, i % 3);
+                            set_int(nzb, NzbInt::UnpackStatus, i % 4);
+                        } else {
+                            add_message(nzb, 0, CString::new("m").unwrap(), 0, 50);
+                        }
+                    }
+                })
+            })
+            .collect();
+        let nzb = NzbRef::from_addr(n);
+        for _ in 0..ROUNDS {
+            let snap = nzb_snapshot(nzb, TextStatus::Off);
+            assert!((0..=50).contains(&snap.cached_message_count));
+        }
+        for w in writers {
+            w.join().unwrap();
+        }
+        assert_eq!(nzb_snapshot(nzb, TextStatus::Off).cached_message_count, 50);
+        unsafe { nzbget_rs_nzb_scalars_free(n as *mut NzbScalars) };
     }
 
     #[test]

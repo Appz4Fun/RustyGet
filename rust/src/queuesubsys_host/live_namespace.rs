@@ -505,7 +505,7 @@ mod tests {
         let ctx = std::ptr::from_mut(&mut visits).cast::<c_void>();
         assert_eq!(nzb.walk(ctx, stop), 0);
         assert_eq!(visits, 1);
-        visits = 0;
+        unsafe { *ctx.cast::<i32>() = 0 }; // not `visits = 0`: a write through the owner ends `ctx`'s validity
         assert_eq!(nzb.walk(ctx, stop), 0);
         assert_eq!(visits, 1);
         // Assembly may still have its final downloader registered. Neither
@@ -516,7 +516,7 @@ mod tests {
         }
         for active in [0, 1] {
             unsafe { nzbget_rs_file_set(first, field::ACTIVE_DOWNLOADS, active) };
-            visits = 0;
+            unsafe { *ctx.cast::<i32>() = 0 }; // not `visits = 0`: a write through the owner ends `ctx`'s validity
             assert_eq!(nzb.walk(ctx, stop), 2);
             assert_eq!(visits, 0);
             assert_eq!(nzb.walk(ctx, stop), 2);

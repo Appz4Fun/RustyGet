@@ -817,6 +817,11 @@ fn a_file_rebuilt_ahead_is_certified_once_by_the_end_repair() {
         crate::parlive::reserve_control(f.nzb_id, 4096, 500 << 20).unwrap(),
     )
     .unwrap();
+    // Every slice verified, but the file is not certified yet: post-processing may not
+    // take live PAR's word for it until the end repair has.
+    let named = [(42, b"part01.rar".to_vec())];
+    let early = streaming_session_verified_cover(f.nzb_id, &f.dir, &named).unwrap_err();
+    assert!(early.contains("rebuilt ahead"), "{early}");
     let lease = request.acquire().unwrap();
     let (report, released) = lease
         .repair_and_publish(|verified| verified.len(), || ())
@@ -825,6 +830,7 @@ fn a_file_rebuilt_ahead_is_certified_once_by_the_end_repair() {
     assert_eq!(released, 1, "certified");
     assert_eq!(streaming_session_download_end_targets(f.nzb_id), None);
     assert_eq!(std::fs::read(&path).unwrap(), f.data);
+    assert!(streaming_session_verified_cover(f.nzb_id, &f.dir, &named).is_ok());
 }
 
 /// Feeds the set with slices `lost` failed for good (recovery first), repairs and publishes the
@@ -933,4 +939,104 @@ fn a_live_repair_reads_nothing_back() {
             if decode_ahead { lost.len() as u64 } else { 0 }
         );
     }
+}
+
+fn cover(f: &Fixture) -> Result<LiveCover, String> {
+    streaming_session_verified_cover(f.nzb_id, &f.dir, &[(40, b"part01.rar".to_vec())])
+}
+
+/// Every slice verified, the file under its par2 name at its par2 length: post-processing
+/// may take that instead of a par-check. Until then it may not.
+#[cfg(unix)]
+#[test]
+fn verified_cover_needs_every_slice_verified() {
+    let f = fixture(0x7a75_0020, 6, 2, 2);
+    let entry = active_streaming_session(f.nzb_id).unwrap();
+    let id = file_id(f.nzb_id);
+    let half = f.data.chunks(SLICE).count() / 2;
+    for (i, chunk) in f.data.chunks(SLICE).enumerate().take(half) {
+        entry
+            .session
+            .on_article_finished_memory_only(
+                &id,
+                (i * SLICE) as u64,
+                chunk,
+                par_rs::crc::crc32(chunk),
+            )
+            .unwrap();
+    }
+    let partial = cover(&f).unwrap_err();
+    assert!(partial.contains("slice(s) verified"), "{partial}");
+    feed_all(&f);
+    let full = cover(&f).unwrap();
+    assert_eq!(full.files, 1);
+    assert_eq!(full.par_name, b"trust.par2".to_vec());
+    // Asked again with nothing changed: still covered.
+    assert!(cover(&f).is_ok());
+    // Not the folder live PAR verified, or no file under the par2 name: not covered.
+    let elsewhere = f.dir.join("x");
+    let named = [(40, b"part01.rar".to_vec())];
+    assert!(streaming_session_verified_cover(f.nzb_id, &elsewhere, &named).is_err());
+    let obfuscated = [(40, b"q1w2e3".to_vec())];
+    assert!(streaming_session_verified_cover(f.nzb_id, &f.dir, &obfuscated).is_err());
+}
+
+/// A file that changed after the cover was first taken (another inode, length or time) ends
+/// the trust: the par-check runs.
+#[cfg(unix)]
+#[test]
+fn verified_cover_ends_when_a_file_changes() {
+    let f = fixture(0x7a75_0021, 6, 2, 2);
+    feed_all(&f);
+    assert!(cover(&f).is_ok());
+    let path = f.dir.join("part01.rar");
+    let replacement = f.dir.join("part01.rar.new");
+    std::fs::write(&replacement, &f.data).unwrap();
+    std::fs::rename(&replacement, &path).unwrap();
+    let changed = cover(&f).unwrap_err();
+    assert!(changed.contains("changed after"), "{changed}");
+
+    let g = fixture(0x7a75_0022, 6, 2, 2);
+    feed_all(&g);
+    std::fs::write(g.dir.join("part01.rar"), &g.data[..g.data.len() - 1]).unwrap();
+    let short = cover(&g).unwrap_err();
+    assert!(short.contains("changed length"), "{short}");
+}
+
+/// A write live PAR could not vouch for (trust revoked) or a stopped session: no cover.
+#[cfg(unix)]
+#[test]
+fn verified_cover_needs_trusted_slices_and_a_current_session() {
+    let f = fixture(0x7a75_0023, 6, 2, 2);
+    feed_all(&f);
+    streaming_session_distrust(f.nzb_id, "test");
+    assert!(cover(&f).unwrap_err().contains("not vouched"));
+
+    let g = fixture(0x7a75_0024, 6, 2, 2);
+    feed_all(&g);
+    streaming_session_cancel(g.nzb_id);
+    assert!(cover(&g).is_err());
+}
+
+/// The file under the par2 name must be the queue file whose bytes live PAR verified for it:
+/// one bound to another par2 file, or an unbound one while another queue file holds the
+/// binding (an obfuscated copy), is not covered.
+#[cfg(unix)]
+#[test]
+fn verified_cover_needs_the_file_live_par_verified() {
+    let f = fixture(0x7a75_0025, 6, 2, 2);
+    feed_all(&f);
+    let entry = active_streaming_session(f.nzb_id).unwrap();
+    let id = file_id(f.nzb_id);
+    entry.queue_bindings.lock().unwrap().insert(40, FileId([9; 16]));
+    assert!(cover(&f).unwrap_err().contains("is not the file"));
+    {
+        let mut bindings = entry.queue_bindings.lock().unwrap();
+        bindings.clear();
+        bindings.insert(41, id);
+    }
+    assert!(cover(&f).unwrap_err().contains("is not the file"));
+    let owner = [(41, b"part01.rar".to_vec())];
+    let covered = streaming_session_verified_cover(f.nzb_id, &f.dir, &owner).unwrap();
+    assert_eq!(covered.queue_ids, vec![41]);
 }

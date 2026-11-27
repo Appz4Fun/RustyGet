@@ -68,5 +68,10 @@ codegen-units = 1
 panic = "abort"
 debug = 1
 
+# Debug and test builds (the test profile inherits this) keep file:line in panics,
+# backtraces and gdb/lldb `bt`, but no variable debug info: 4-9 s less per
+# `cargo build --tests` on the build farm (benchmark LB-1). For a debugger session
+# with variables, build with CARGO_PROFILE_DEV_DEBUG=true.
 [profile.dev]
 panic = "abort"
+debug = "line-tables-only"

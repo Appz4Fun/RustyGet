@@ -14,6 +14,7 @@ lede = "RustyGet runs on Linux and macOS, and builds from source with Just and R
 |---|---|---|
 | `just` | any current | Command runner used for building, testing, and packaging (`justfile`). |
 | C compiler and linker | any current GCC or Clang | Rust links with it, and the `zstd` crate builds the C zstd library with it. No C++ is compiled. |
+| `mold` | any current (Linux only) | The linker for Linux builds, set in `.cargo/config.toml`. A Linux build without `mold` stops with an install hint. macOS uses Apple's linker. |
 | Rust | 1.99.0 | Pinned in `rust/rust-toolchain.toml`. With rustup, the right toolchain installs itself on the first build. |
 | OpenSSL | any current | For encrypted news-server and HTTPS connections |
 
@@ -24,7 +25,7 @@ RustyGet needs no `par2`, `unrar`, or `7z` program: par2 repair and archive extr
 Debian 13 and Ubuntu 24.04:
 
 ```bash
-sudo apt install just build-essential pkg-config libssl-dev
+sudo apt install just build-essential pkg-config libssl-dev mold
 ```
 
 macOS with Homebrew:

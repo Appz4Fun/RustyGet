@@ -1,0 +1,10 @@
+# Linux builds link with mold through scripts/link-mold.sh, which stops the build with an
+# install hint when mold is missing. The wrapper is set as the linker rather than through
+# `rustflags`, because an environment RUSTFLAGS (`-D warnings`, the `-C target-cpu` tiers
+# set by `just build`) replaces config rustflags and would silently drop the linker choice.
+# Cargo resolves this relative path against the repository root. macOS keeps Apple's linker.
+[target.x86_64-unknown-linux-gnu]
+linker = "scripts/link-mold.sh"
+
+[target.aarch64-unknown-linux-gnu]
+linker = "scripts/link-mold.sh"

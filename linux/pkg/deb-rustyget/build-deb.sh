@@ -1,6 +1,6 @@
 #!/bin/sh
 # Build the side-by-side `rustyget` .deb on a Debian/Ubuntu host of the target arch.
-# Needs: build-essential pkg-config libssl-dev python3 just dpkg-dev, rustup.
+# Needs: build-essential pkg-config libssl-dev mold python3 just dpkg-dev, rustup.
 # Usage: linux/pkg/deb-rustyget/build-deb.sh [jobs]   -> build/deb/rustyget_<ver>_<arch>.deb
 set -eu
 

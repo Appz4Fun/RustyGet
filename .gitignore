@@ -43,6 +43,7 @@ docker/config
 !/.gitignore
 !/.gitattributes
 !/.vale.ini
+!/.cargo/
 !.github/
 !.github/**
 

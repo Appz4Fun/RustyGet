@@ -839,6 +839,9 @@ pub(crate) fn backup_may_lend_while_extracting(
     )
 }
 
+/// Articles the coordinator starts at most in one hold of the queue lock.
+const MAX_STARTS_PER_PASS: usize = 64;
+
 /// Test hook: `RUSTYGET_TEST_COORD_PASS_DELAY_MS` sleeps that long after each pass of
 /// the coordinator loop (outside the queue lock), as a pass slowed by a long queue and
 /// lock waits is (6790). The queuebatchstart scenario sets it; unset, it costs one load.
@@ -2425,57 +2428,70 @@ impl NzbgetRsQueueCoordinator {
             let mut downloads_checked = false;
             let mut download_started = false;
 
+            // Start articles while one is assignable, a connection is free and the limit
+            // allows, up to MAX_STARTS_PER_PASS in one hold of the queue lock: one start per
+            // pass (each pass taking the lock, scanning the queue and running the live
+            // drains) capped the start rate, and so the articles in flight (6790: 117 of
+            // 345 connections busy on one item while 148 waited).
             host.with_locked_queue(|dq_ptr| {
                 let opts = host.opts();
-                let next_pair = self.get_next_article(host, &opts, dq_ptr);
-                // The download next in line waits while its dead-pick probe waits for a
-                // connection (see `dupeprobe::probe_waiting_for_connection`): the connection it
-                // would take goes to the probe. Nothing of lower priority takes it meanwhile
-                // (a fleet's primary stays first), and the queue stays busy (`PROBE_HELD`).
-                let held = next_pair.as_ref().is_some_and(|(file, _)| {
-                    crate::dupeprobe::probe_waiting_for_connection(
-                        host.nzb_snap(file.nzb_ptr, false).id,
-                    )
-                });
-                PROBE_HELD.store(held, std::sync::atomic::Ordering::Relaxed);
-                let next_pair = if held { None } else { next_pair };
-                let has_more_articles = next_pair.is_some() || held;
-                let active_len = host.active_downloads_len();
-                article_downloads_running = active_len > 0;
-                host.self_set_has_more_jobs(has_more_articles || article_downloads_running);
+                for _ in 0..MAX_STARTS_PER_PASS {
+                    let next_pair = self.get_next_article(host, &opts, dq_ptr);
+                    // The download next in line waits while its dead-pick probe waits for a
+                    // connection (see `dupeprobe::probe_waiting_for_connection`): the connection it
+                    // would take goes to the probe. Nothing of lower priority takes it meanwhile
+                    // (a fleet's primary stays first), and the queue stays busy (`PROBE_HELD`).
+                    let held = next_pair.as_ref().is_some_and(|(file, _)| {
+                        crate::dupeprobe::probe_waiting_for_connection(
+                            host.nzb_snap(file.nzb_ptr, false).id,
+                        )
+                    });
+                    PROBE_HELD.store(held, std::sync::atomic::Ordering::Relaxed);
+                    let next_pair = if held { None } else { next_pair };
+                    let has_more_articles = next_pair.is_some() || held;
+                    let active_len = host.active_downloads_len();
+                    article_downloads_running = active_len > 0;
+                    host.self_set_has_more_jobs(has_more_articles || article_downloads_running);
 
-                let dl_limit = self
-                    .downloads_limit
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                let effective_limit = host.effective_downloads_limit(dl_limit);
-                let can_proceed = !host.self_is_stopped() && (active_len as i32) < effective_limit;
+                    let dl_limit = self
+                        .downloads_limit
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let effective_limit = host.effective_downloads_limit(dl_limit);
+                    let can_proceed =
+                        !host.self_is_stopped() && (active_len as i32) < effective_limit;
 
-                if let Some((file, art)) = next_pair {
-                    if can_proceed && (!opts.download_held || file.extra_priority) {
-                        let nzb = host.nzb_snap(file.nzb_ptr, false);
-                        let conn_ptr = host.server_pool_get_connection(
-                            nzb.has_desired_server,
-                            nzb.desired_server_id,
-                        );
-                        if conn_ptr != 0 {
-                            downloads_checked = true;
-                            article_downloads_running = true;
-                            download_started = true;
-                            self.start_dead_pick_probe(host, &opts, dq_ptr, &nzb);
-                            self.start_article_download(host, &opts, &nzb, &file, &art, conn_ptr);
-                        } else if nzb.has_desired_server {
-                            let mut dbg = b"Could not start download for ".to_vec();
-                            dbg.extend_from_slice(&nzb.name);
-                            dbg.extend_from_slice(
-                                format!(
-                                    ": desired server {} has no available connections",
-                                    nzb.desired_server_id
-                                )
-                                .as_bytes(),
-                            );
-                            host.log(crate::queuesubsys_host::MK_DEBUG, &dbg);
-                        }
+                    let Some((file, art)) = next_pair else {
+                        break;
+                    };
+                    if !(can_proceed && (!opts.download_held || file.extra_priority)) {
+                        break;
                     }
+                    let nzb = host.nzb_snap(file.nzb_ptr, false);
+                    let conn_ptr = host.server_pool_get_connection(
+                        nzb.has_desired_server,
+                        nzb.desired_server_id,
+                    );
+                    if conn_ptr != 0 {
+                        downloads_checked = true;
+                        article_downloads_running = true;
+                        download_started = true;
+                        self.start_dead_pick_probe(host, &opts, dq_ptr, &nzb);
+                        self.start_article_download(host, &opts, &nzb, &file, &art, conn_ptr);
+                        continue;
+                    } else if nzb.has_desired_server {
+                        let mut dbg = b"Could not start download for ".to_vec();
+                        dbg.extend_from_slice(&nzb.name);
+                        dbg.extend_from_slice(
+                            format!(
+                                ": desired server {} has no available connections",
+                                nzb.desired_server_id
+                            )
+                            .as_bytes(),
+                        );
+                        host.log(crate::queuesubsys_host::MK_DEBUG, &dbg);
+                    }
+                    // No connection free: the rest waits for the next pass.
+                    break;
                 }
             });
             test_coord_pass_delay();

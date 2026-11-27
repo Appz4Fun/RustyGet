@@ -37,6 +37,10 @@ openssl = "0.10"
 openssl-sys = "0.9"
 yaml-rust2 = { version = "0.10", default-features = false }
 
+[features]
+# Re-exports pub(crate) parsers for the cargo-fuzz targets in fuzz/. Off in every shipped build.
+fuzzing = []
+
 [dev-dependencies]
 # Kernel diagnostics only; complete C++/Rust caller measurements remain the gate.
 criterion = { version = "=0.8.2", default-features = false, features = ["cargo_bench_support"] }

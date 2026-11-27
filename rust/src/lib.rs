@@ -73,6 +73,8 @@ pub(crate) mod prepost;
 pub(crate) mod progressive_unpack;
 pub(crate) mod livefeed;
 pub(crate) mod liveorder;
+#[cfg(feature = "fuzzing")]
+pub mod fuzz_entry;
 pub(crate) mod livewrite;
 #[cfg(unix)]
 pub(crate) mod procrun;

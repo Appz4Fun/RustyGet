@@ -45,6 +45,13 @@ pub(super) struct LiveMetricCounters {
     /// `take_rebuilt_slices`), and those re-verified once their file completed.
     pub rebuilt_ahead_slices: AtomicU64,
     pub rebuilt_rechecked: AtomicU64,
+    /// Holds of new downloads while hashing caught up, their total length, and the holds
+    /// that timed out (`streaming_session_holds_downloads`).
+    pub held_downloads: AtomicU64,
+    /// Slices the completion replay read back from their file (`reconcile_live_file`).
+    pub replayed_slices: AtomicU64,
+    pub held_ns: AtomicU64,
+    pub hold_timeouts: AtomicU64,
     pub writer_wait_ns: AtomicU64,
     pub operation_wait_ns: AtomicU64,
     report_sequence: AtomicU64,
@@ -148,7 +155,7 @@ impl ActiveStreamingSession {
         let replay = self.catchup_source_bytes.load(Ordering::Relaxed);
         let mb = |bytes: u64| format!("{:.1}", bytes as f64 / (1024.0 * 1024.0));
         format!(
-            "Live PAR (job {nzb_id}) I/O: source_bytes_read {} MB (par-rs {} MB, RustyGet replay {} MB), backfill_bytes_read {} MB, recovery_bytes_read {} MB, target_verification_bytes_read {} MB, ram_bytes_verified {} MB, ram_backfilled_slices {}, recovery volumes from RAM {} ({} MB), trusted slice checks {}; {} cache miss(es), {} article(s) read from their file by par-rs, {} waited for the cache flush, {} still waiting, {} handed over with the bytes written, {} taken from bytes kept at write, {} file(s) matched by their first article, {} not kept at write (no room), {} taken from bytes kept before the session, {} slice(s) rebuilt ahead ({} re-verified at completion), {} copied from the cache during a flush (all jobs), {} repeated capture(s) skipped (queued from RAM already)",
+            "Live PAR (job {nzb_id}) I/O: source_bytes_read {} MB (par-rs {} MB, RustyGet replay {} MB), backfill_bytes_read {} MB, recovery_bytes_read {} MB, target_verification_bytes_read {} MB, ram_bytes_verified {} MB, ram_backfilled_slices {}, recovery volumes from RAM {} ({} MB), trusted slice checks {}; {} cache miss(es), {} article(s) read from their file by par-rs, {} waited for the cache flush, {} still waiting, {} handed over with the bytes written, {} taken from bytes kept at write, {} file(s) matched by their first article, {} not kept at write (no room), {} taken from bytes kept before the session, {} slice(s) rebuilt ahead ({} re-verified at completion), {} copied from the cache during a flush (all jobs), {} repeated capture(s) skipped (queued from RAM already); new downloads held {:.1} s for hashing ({} hold(s), {} timed out); {} slice(s) replayed at completion",
             mb(io.source_bytes_read.saturating_add(replay)),
             mb(io.source_bytes_read),
             mb(replay),
@@ -175,6 +182,10 @@ impl ActiveStreamingSession {
                 .load(Ordering::Relaxed)
                 .saturating_sub(self.metrics.flush_snapshots_base.load(Ordering::Relaxed)),
             self.metrics.repeated_captures.load(Ordering::Relaxed),
+            self.metrics.held_ns.load(Ordering::Relaxed) as f64 / 1e9,
+            self.metrics.held_downloads.load(Ordering::Relaxed),
+            self.metrics.hold_timeouts.load(Ordering::Relaxed),
+            self.metrics.replayed_slices.load(Ordering::Relaxed),
         )
     }
 }

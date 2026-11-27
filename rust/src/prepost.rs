@@ -1966,6 +1966,45 @@ impl NzbgetRsPrePostProcessor {
         }
     }
 
+    /// A job whose download ended while direct unpack ran is marked as working for direct
+    /// unpack (`nzb_downloaded`) until the extraction ends, or until it waits for the repair
+    /// of volumes it holds, which `postproc` reports at the end of the download by clearing
+    /// the mark. Damage the extraction finds of its own after that (a part failing its own
+    /// check, `postproc::direct_unpack_declare_damaged`) holds a volume too, but nothing
+    /// cleared the mark: neither the post stages (the job stayed working) nor a live repair
+    /// (`live_repair_may_start`) could repair it, and the extraction waited for ever (the
+    /// liveparrartrust/liveparrarobfuscated hang). The job is handed back here as at the end of
+    /// the download: the mark is cleared, so a live repair may start (kicked at once, as
+    /// the live status that says "repair possible now" may have come already) and otherwise
+    /// the post stages repair the download and resume direct unpack. Called under the queue
+    /// lock.
+    fn hand_back_late_declared_damage(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
+        use crate::queuesubsys_host::{MK_INFO, POST_INT_WORKING};
+        let jobs = self.active_jobs.lock().unwrap().clone();
+        for job_ptr in jobs {
+            let nzb = host.nzb_snap(job_ptr, false);
+            if nzb.post_info_ptr.is_none()
+                || !nzb.has_unpack_thread
+                || nzb.has_live_repair_thread
+                || !nzb.is_download_completed
+                || !crate::postproc::direct_unpack_late_damage_unclaimed(nzb.id)
+            {
+                continue;
+            }
+            let ps = host.post_snap(nzb.post_info_ptr);
+            if !ps.working || ps.has_post_thread || ps.stage != PostStage::Queued {
+                continue;
+            }
+            let mut msg = b"Direct unpack for ".to_vec();
+            msg.extend_from_slice(&nzb.name);
+            msg.extend_from_slice(b" found damage after the download ended; it waits for the repair of its damaged volumes");
+            host.nzb_print_message(job_ptr, MK_INFO, &msg);
+            host.post_set_int(nzb.post_info_ptr, POST_INT_WORKING, 0);
+            #[cfg(unix)]
+            crate::postproc::direct_unpack_try_live_par_repair(host, &host.nzb_snap(job_ptr, false));
+        }
+    }
+
     fn active_job_stages(&self, host: &crate::queuesubsys_host::QueueSubsysHost) -> Vec<PostStage> {
         let jobs = self.active_jobs.lock().unwrap().clone();
         let mut stages = Vec::with_capacity(jobs.len());
@@ -2110,6 +2149,7 @@ impl NzbgetRsPrePostProcessor {
         host.with_locked_queue(|dq_ptr| {
             let count_before = self.active_jobs.lock().unwrap().len();
             self.check_request_par(host, dq_ptr);
+            self.hand_back_late_declared_damage(host);
             self.cleanup_jobs(host, dq_ptr);
             let mut changed = self.active_jobs.lock().unwrap().len() != count_before;
 

@@ -4405,6 +4405,24 @@ pub(crate) fn direct_unpack_awaiting_repair(nzb_id: i32) -> bool {
         .is_some_and(|st| st.awaiting_repair && !st.live_repair_running)
 }
 
+/// True when direct unpack of `nzb_id` found damage of its own after the download ended
+/// (`direct_unpack_declare_damaged` with the download finished): it waits for a repair of
+/// volumes it holds, no live repair of them runs, and post-processing has not resumed it
+/// after its repair stages yet. Post-processing must take the job back then (see
+/// `prepost::hand_back_late_declared_damage`): the download-end hand-off
+/// (`nzb_downloaded`) found nothing held and left the job marked as working for direct
+/// unpack, which blocks both the post stages and a live repair.
+pub(crate) fn direct_unpack_late_damage_unclaimed(nzb_id: i32) -> bool {
+    direct_unpack_holds().get(&nzb_id).is_some_and(|st| {
+        st.awaiting_repair
+            && st.download_finished
+            && !st.held.is_empty()
+            && !st.live_repair_running
+            && !st.abandoned
+            && !st.resumed_after_repair
+    })
+}
+
 fn direct_unpack_set_awaiting_repair(nzb_id: i32) -> bool {
     let mut map = direct_unpack_holds();
     match map.get_mut(&nzb_id) {

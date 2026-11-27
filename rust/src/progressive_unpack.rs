@@ -533,6 +533,11 @@ pub struct Request<'a> {
     /// Told `true` while extraction waits for a volume (to download or be repaired) and
     /// `false` when it continues.
     pub on_wait: Option<&'a dyn Fn(bool)>,
+    /// Called at each safe point between pieces of work (after a volume was opened or a member
+    /// finished, before the session is asked for more): nothing is being written then, as
+    /// while it waits for a volume. A direct unpack gives its unpack slot up there for a
+    /// download that goes first (`unpackslots::should_yield`).
+    pub on_boundary: Option<&'a dyn Fn()>,
 }
 
 /// Extracts the RAR set starting at `req.first_volume` into `req.dest`.
@@ -814,8 +819,16 @@ where
     // replace the output of a later member with the same name.
     let mut placed: std::collections::HashMap<Vec<u8>, u64> = Default::default();
     let mut first_failure: Option<Failure> = None;
+    // Set once a volume was opened or a member finished: the next turn of the loop, after that
+    // event was handled and before the session works again, is a safe point (`on_boundary`).
+    let mut at_boundary = false;
 
     loop {
+        if std::mem::take(&mut at_boundary) {
+            if let Some(cb) = req.on_boundary {
+                cb();
+            }
+        }
         let event = match drive.next_event(is_cancelled) {
             Ok(Some(ev)) => ev,
             Ok(None) => break,
@@ -837,6 +850,10 @@ where
                 return Err(failure.into());
             }
         };
+        at_boundary = matches!(
+            event,
+            ProgressiveEvent::VolumeOpened { .. } | ProgressiveEvent::MemberFinished { .. }
+        );
         match event {
             ProgressiveEvent::VolumeOpened { index, .. } => {
                 current_volume = volume_path(req.first_volume, index);
@@ -1536,6 +1553,7 @@ fn patch_by_reextracting(
             // Every occurrence of a name gets its own file; where each went is recorded.
             overwrite: Overwrite::Rename,
             on_wait: None,
+            on_boundary: None,
         };
         let mut outputs: Outputs = Vec::new();
         match extract_recording(

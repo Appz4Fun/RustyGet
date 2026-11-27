@@ -197,6 +197,7 @@ fn run_with(
         password: "",
         overwrite,
         on_wait: None,
+        on_boundary: None,
     };
     let r = extract(
         &req,
@@ -634,6 +635,7 @@ fn run_pw(
         password,
         overwrite: Overwrite::Always,
         on_wait: None,
+        on_boundary: None,
     };
     let r = extract(
         &req,
@@ -1183,6 +1185,7 @@ fn rename_mode_keeps_duplicate_members_and_existing_files() {
         password: "",
         overwrite: Overwrite::Rename,
         on_wait: None,
+        on_boundary: None,
     };
     let r = extract(
         &req,
@@ -1333,6 +1336,7 @@ fn duplicate_names_keep_their_own_metadata() {
         password: "",
         overwrite: Overwrite::Rename,
         on_wait: None,
+        on_boundary: None,
     };
     let r = extract(&req, Box::new(Growing), &mut |_, _| {}, &mut || false);
     expect_ok(r, &[]);
@@ -1373,6 +1377,7 @@ fn skip_mode_keeps_the_first_of_duplicate_names() {
         password: "",
         overwrite: Overwrite::Skip,
         on_wait: None,
+        on_boundary: None,
     };
     let r = extract(&req, Box::new(Growing), &mut |_, _| {}, &mut || false);
     expect_ok(r, &[]);
@@ -1431,6 +1436,7 @@ fn repairing_a_duplicate_name_uses_its_own_bytes() {
         password: "",
         overwrite: Overwrite::Rename,
         on_wait: None,
+        on_boundary: None,
     };
     let mut log = Vec::new();
     let r = extract(
@@ -1510,6 +1516,7 @@ fn repair_reads_the_right_copy_when_a_member_is_named_like_a_renamed_one() {
         password: "",
         overwrite: Overwrite::Rename,
         on_wait: None,
+        on_boundary: None,
     };
     let mut log = Vec::new();
     let r = extract(
@@ -1560,6 +1567,7 @@ fn waiting_for_a_volume_is_reported() {
         password: "",
         overwrite: Overwrite::Always,
         on_wait: Some(&on_wait),
+        on_boundary: None,
     };
     let r = extract(&req, Box::new(feed), &mut |_, _| {}, &mut || false);
     releaser.join().unwrap();
@@ -1612,6 +1620,7 @@ fn rename_mode_out_of_slots_behind_damage_reports_damage() {
         password: "",
         overwrite: Overwrite::Rename,
         on_wait: None,
+        on_boundary: None,
     };
     let r = extract(&req, Box::new(feed), &mut |_, _| {}, &mut || false);
     match r {
@@ -1656,6 +1665,7 @@ fn rename_mode_names_follow_archive_order() {
         password: "",
         overwrite: Overwrite::Rename,
         on_wait: None,
+        on_boundary: None,
     };
     let r = extract(&req, Box::new(Growing), &mut |_, _| {}, &mut || false);
     expect_ok(r, &[]);
@@ -2209,6 +2219,7 @@ fn patch_timing() {
         password: "",
         overwrite: Overwrite::Always,
         on_wait: None,
+        on_boundary: None,
     };
     let r = extract(
         &req,
@@ -2322,6 +2333,7 @@ fn repaired_output_with_many_damaged_volumes_is_moved_not_copied() {
         password: "",
         overwrite: Overwrite::Always,
         on_wait: None,
+        on_boundary: None,
     };
     let mut log = Vec::new();
     let mut copied: Outputs = Vec::new();
@@ -2379,6 +2391,7 @@ fn run_late(
         password: "",
         overwrite,
         on_wait: None,
+        on_boundary: None,
     };
     let mut log = Vec::new();
     let mut copied: Outputs = Vec::new();
@@ -2567,6 +2580,7 @@ fn repaired_output_of_a_final_set_is_moved_not_copied() {
         password: "",
         overwrite: Overwrite::Always,
         on_wait: None,
+        on_boundary: None,
     };
     let mut log = Vec::new();
     let mut copied: Outputs = Vec::new();
@@ -2684,6 +2698,7 @@ fn big_final_set_unpacks() {
         password: "",
         overwrite: Overwrite::Always,
         on_wait: None,
+        on_boundary: None,
     };
     let mut log = Vec::new();
     let mut copied: Outputs = Vec::new();
@@ -2906,6 +2921,7 @@ fn run_downloading(
         password: "",
         overwrite: Overwrite::Always,
         on_wait: None,
+        on_boundary: None,
     };
     let r = extract(
         &req,
@@ -3065,6 +3081,7 @@ fn holes_are_patched_inline_as_soon_as_their_volume_is_repaired() {
         password: "",
         overwrite: Overwrite::Always,
         on_wait: None,
+        on_boundary: None,
     };
     let r = extract(
         &req,
@@ -3366,6 +3383,7 @@ fn big_member_timing() {
             password: "",
             overwrite,
             on_wait: None,
+            on_boundary: None,
         };
         let mut log = Vec::new();
         let started = std::time::Instant::now();
@@ -3512,6 +3530,7 @@ fn a_cancel_right_after_a_member_starts_places_nothing() {
         password: "",
         overwrite: Overwrite::Always,
         on_wait: None,
+        on_boundary: None,
     };
     let r = extract(
         &req,
@@ -3670,6 +3689,7 @@ fn stale_persistent_state_is_removed_when_the_path_is_not_taken() {
         password: "",
         overwrite: Overwrite::Always,
         on_wait: None,
+        on_boundary: None,
     };
     // A crashed run's state for this set, then a post-download (final) unpack.
     persistent::plant_state_for_test(&req);
@@ -4737,6 +4757,7 @@ fn a_directory_entry_extracts_from_an_undeclared_complete_set() {
         password: "",
         overwrite: Overwrite::Skip,
         on_wait: None,
+        on_boundary: None,
     };
     let mut log = Vec::new();
     let r = extract(
@@ -4777,6 +4798,7 @@ fn a_windows_directory_entry_lands_where_its_files_are_copied() {
         password: "",
         overwrite: Overwrite::Skip,
         on_wait: None,
+        on_boundary: None,
     };
     let mut log = Vec::new();
     let r = extract(
@@ -4858,6 +4880,7 @@ fn a_restart_resumes_the_persistent_extraction_from_its_saved_state() {
         password: "",
         overwrite: Overwrite::Always,
         on_wait: None,
+        on_boundary: None,
     };
     let feed = Downloading {
         damaged: Damaged {
@@ -4921,6 +4944,7 @@ fn a_resumed_member_refills_holes_the_earlier_run_reported() {
         password: "",
         overwrite: Overwrite::Always,
         on_wait: None,
+        on_boundary: None,
     };
     let feed = Downloading {
         damaged: Damaged {
@@ -4990,6 +5014,7 @@ fn a_resumed_member_with_old_and_new_holes_refills_both() {
         password: "",
         overwrite: Overwrite::Always,
         on_wait: None,
+        on_boundary: None,
     };
     let feed = Downloading {
         damaged: Damaged {
@@ -5095,6 +5120,7 @@ fn a_restart_waits_for_the_repair_of_a_volume_the_earlier_run_saw_damaged() {
         password: "",
         overwrite: Overwrite::Always,
         on_wait: None,
+        on_boundary: None,
     };
     let feed = Downloading {
         damaged: Damaged {
@@ -5224,6 +5250,7 @@ fn a_damaged_volume_released_before_a_restart_is_not_saved_for_it() {
             password: "",
             overwrite: Overwrite::Always,
             on_wait: None,
+            on_boundary: None,
         };
         let inner = Downloading {
             damaged: Damaged {
@@ -5307,6 +5334,7 @@ fn a_release_seen_while_the_next_volume_is_not_there_is_saved() {
         password: "",
         overwrite: Overwrite::Always,
         on_wait: None,
+        on_boundary: None,
     };
     let feed = ReleasedThenNotYet {
         inner: Downloading {
@@ -5506,6 +5534,7 @@ fn the_copy_path_reads_borrowed_volumes_after_the_download_ends() {
             password: "",
             overwrite: Overwrite::Always,
             on_wait: None,
+            on_boundary: None,
         };
         let mut log = Vec::new();
         let mut declared = false;
@@ -5751,6 +5780,7 @@ fn a_half_borrowed_dead_volume_is_extracted_past_and_patched_inline() {
         password: "",
         overwrite: Overwrite::Always,
         on_wait: None,
+        on_boundary: None,
     };
     let r = extract(
         &req,
@@ -5790,6 +5820,7 @@ fn a_dead_volume_handed_over_before_any_byte_is_borrowed_is_extracted_past() {
         password: "",
         overwrite: Overwrite::Always,
         on_wait: None,
+        on_boundary: None,
     };
     let r = extract(
         &req,
@@ -5832,6 +5863,7 @@ fn a_half_borrowed_rar4_dead_volume_is_extracted_past_and_patched_inline() {
         password: "",
         overwrite: Overwrite::Always,
         on_wait: None,
+        on_boundary: None,
     };
     let r = extract(
         &req,
@@ -6329,6 +6361,7 @@ fn a_crash_before_a_grouped_hole_commits_reports_the_hole_again() {
         password: "",
         overwrite: Overwrite::Always,
         on_wait: None,
+        on_boundary: None,
     };
     let mut log1 = Vec::new();
     let flag = taken.clone();
@@ -6473,6 +6506,7 @@ fn a_crash_before_a_grouped_refill_commits_refills_the_hole_again() {
         password: "",
         overwrite: Overwrite::Always,
         on_wait: None,
+        on_boundary: None,
     };
     let mut log1 = Vec::new();
     let flag = taken.clone();
@@ -6687,6 +6721,7 @@ fn volumes_being_written_are_read_article_by_article_on_the_copy_path() {
         password: "",
         overwrite: Overwrite::Always,
         on_wait: None,
+        on_boundary: None,
     };
     let r = extract_recording(
         &req,
@@ -7059,6 +7094,7 @@ fn corrupt_part_run(tag: &str, holdable: bool, late: bool) -> CorruptRun {
         password: "",
         overwrite: Overwrite::Always,
         on_wait: None,
+        on_boundary: None,
     };
     let r = extract(
         &req,

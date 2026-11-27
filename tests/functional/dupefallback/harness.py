@@ -4912,6 +4912,98 @@ def scenario_dupausedlive(daemon, t):
         status, unpack, du_b, du_b_ok, used, rel_a, stopped_a, files))
 
 
+def _slot_rar_members(t, tag, name, volumes, seed):
+    """A store-mode rar set of ``volumes`` 120 kB volumes (real CRCs) of movie.mkv, served
+    as ``<tag>/v00`` .. (the news server may hold the last one back by that path)."""
+    movie = _payload(120_000 * volumes - 1000, seed)
+    vols = generators.rar3_store_volumes_valid('movie.mkv', movie, 120_000)
+    members = []
+    for i, data in enumerate(vols):
+        rel = '%s/v%02d' % (tag, i)
+        t.write_file(os.path.join('data', rel), data)
+        members.append((rel, '%s.part%02d.rar' % (name, i + 1), len(data), 60_000, set()))
+    return members
+
+
+def scenario_slotpreemptpaused(daemon, t):
+    """One unpack slot (the default): an active download's live extraction goes before a
+    paused download's extraction that holds the slot. RelA, an 8-volume rar set whose last
+    volume the news server holds back, starts its direct unpack and is paused; every safe
+    point of an extraction takes 3 s (RUSTYGET_TEST_EXTRACT_BOUNDARY_DELAY_MS, a slow disk),
+    so RelA extracts its 7 volumes on the slot for about 20 s. RelB, added after, downloads:
+    RelA gives the slot up at its next volume ("Giving the unpack slot of RelA"), RelB's
+    direct unpack extracts and RelB goes to history as SUCCESS. RelA stays paused in the
+    queue with its direct unpack not stopped. Before, RelA kept the slot until it ran out of
+    volumes."""
+    api = daemon.wait_ready()
+    members_a = _slot_rar_members(t, 'sppA', 'RelA', 8, 7501)
+    blocked = _paused_blocker(daemon, t, api, 'RelA', 'sppA', members_a)
+    if blocked is not True:
+        return ('slotpreemptpaused', False, 'RelA: %s' % blocked)
+    members_b = _rarrenamer_members(t, 'sppB', ['testfile5'])
+    daemon.append(api, 'RelB', build_multi_nzb([m[:5] for m in members_b]), False, 'spp-b', 100)
+    try:
+        h = daemon.wait_history(api, 'RelB', timeout=90)
+        status, unpack = h['Status'], h['UnpackStatus']
+    except RuntimeError:
+        g = next((g for g in api.listgroups() if g['NZBName'] == 'RelB'), {})
+        status, unpack = 'still queued: %s' % g.get('Status'), '-'
+    rel_a = _paused_state(api, 'RelA')
+    gave = _grep_log(t, 'Giving the unpack slot of RelA')
+    gave_b = _grep_log(t, 'Giving the unpack slot of RelB')
+    du_b_ok = _grep_log(t, 'Direct unpack for RelB successful')
+    stopped_a = _grep_log(t, 'Stopping the direct unpack of RelA') + _grep_log(t, 'Cancelling direct unpack for RelA')
+    files = _main_basenames(t)
+    ok = (gave >= 1 and gave_b == 0 and du_b_ok == 1 and status.startswith('SUCCESS') and unpack == 'SUCCESS'
+          and 'testfile5.dat' in files and rel_a.startswith('paused') and stopped_a == 0)
+    return ('slotpreemptpaused', ok, 'relB=%s unpack=%s gave_a=%d gave_b=%d du_b_ok=%d relA=%s stopped_a=%d files=%s' % (
+        status, unpack, gave, gave_b, du_b_ok, rel_a, stopped_a, files))
+
+
+def scenario_slotfinishedlive(daemon, t):
+    """One unpack slot (the default): a finished download's unpack is not held back for the
+    whole download by an active download's live extraction that keeps the slot. RelA, a
+    30-volume rar set whose last volume the news server holds back, extracts while it
+    downloads; every safe point of an extraction takes 4 s
+    (RUSTYGET_TEST_EXTRACT_BOUNDARY_DELAY_MS, a slow disk), so RelA keeps the slot for about
+    two minutes. RelB, a single .7z (no direct unpack: post-processing unpacks it), finishes
+    downloading meanwhile: its unpack waits in line for the slot instead of being skipped,
+    and once it waited a minute RelA gives the slot up at its next volume ("Giving the unpack
+    slot of RelA"); RelB goes to history as SUCCESS with its file, while RelA is still in the
+    queue with its direct unpack not stopped. Before, a finished job was not even started
+    while any extraction held the slot, so RelB sat in PP_QUEUED until RelA ran out of
+    volumes."""
+    api = daemon.wait_ready()
+    members_a = _slot_rar_members(t, 'sflA', 'RelA', 30, 7502)
+    daemon.append(api, 'RelA', build_multi_nzb(members_a), False, 'sfl-a', 100)
+    deadline = time.time() + 60
+    while time.time() < deadline and _grep_log(t, 'Directly unpacking RelA') == 0:
+        time.sleep(0.2)
+    if _grep_log(t, 'Directly unpacking RelA') == 0:
+        return ('slotfinishedlive', False, 'RelA: its direct unpack did not start')
+    data = _payload(1_500_000, 7503)
+    archive = generators.seven_zip_copy([('clip.mkv', data)])
+    t.write_file(os.path.join('data', 'sflB/rel.7z'), archive)
+    daemon.append(api, 'RelB', build_multi_nzb([('sflB/rel.7z', 'RelB.7z', len(archive), 300_000, set())]),
+                  False, 'sfl-b', 100)
+    started = time.time()
+    try:
+        h = daemon.wait_history(api, 'RelB', timeout=150)
+        status, unpack = h['Status'], h['UnpackStatus']
+    except RuntimeError:
+        g = next((g for g in api.listgroups() if g['NZBName'] == 'RelB'), {})
+        status, unpack = 'still queued: %s' % g.get('Status'), '-'
+    took = time.time() - started
+    rel_a = next((g['Status'] for g in api.listgroups() if g['NZBName'] == 'RelA'), 'gone')
+    gave = _grep_log(t, 'Giving the unpack slot of RelA')
+    stopped_a = _grep_log(t, 'Stopping the direct unpack of RelA') + _grep_log(t, 'Cancelling direct unpack for RelA')
+    files = _main_basenames(t)
+    ok = (gave >= 1 and status.startswith('SUCCESS') and unpack == 'SUCCESS' and 'clip.mkv' in files
+          and rel_a != 'gone' and stopped_a == 0)
+    return ('slotfinishedlive', ok, 'relB=%s unpack=%s after %.0fs gave_a=%d relA=%s stopped_a=%d files=%s' % (
+        status, unpack, took, gave, rel_a, stopped_a, files))
+
+
 def scenario_failcont_alt25(daemon, t):
     return _failcont(daemon, t, 'failcont_alt25', 'alt', 0.25)
 
@@ -16198,6 +16290,8 @@ SCENARIOS = {
     'failcont_aescontainer': scenario_failcont_aescontainer,
     'failcont_alt25busy': scenario_failcont_alt25busy,
     'dupausedlive': scenario_dupausedlive,
+    'slotpreemptpaused': scenario_slotpreemptpaused,
+    'slotfinishedlive': scenario_slotfinishedlive,
     'failcont_twinlabel': scenario_failcont_twinlabel,
     'failcont_fleettwin': scenario_failcont_fleettwin,
     'failcont_fleetalt': scenario_failcont_fleetalt,
@@ -16287,6 +16381,10 @@ SCENARIO_ENV = {
     # Each cache flush holds its file's flush lock 150 ms before writing (articledl.rs
     # `flush_test_hold`): captures land while their file is flushed.
     'liveparflushrace': {'RUSTYGET_TEST_FLUSH_HOLD_MS': '150'},
+    # Each safe point of a direct unpack takes that long, holding its unpack slot
+    # (postproc.rs `test_boundary_delay`): an extraction onto a slow disk.
+    'slotpreemptpaused': {'RUSTYGET_TEST_EXTRACT_BOUNDARY_DELAY_MS': '3000'},
+    'slotfinishedlive': {'RUSTYGET_TEST_EXTRACT_BOUNDARY_DELAY_MS': '4000'},
 }
 SCENARIO_ENV_KEYS = sorted({k for env in SCENARIO_ENV.values() for k in env})
 
@@ -16704,6 +16802,11 @@ SCENARIO_OPTIONS = {
     'failcont_alt25busy': PROD_OPTIONS + ['DownloadRate=4000', 'UnpackSlots=1', 'ArticleTimeout=1200'],
     'dupausedlive': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1',
                      'ArticleTimeout=1200', 'UnpackSlots=1'],
+    # the default UnpackSlots (one slot)
+    'slotpreemptpaused': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no',
+                          'KeepHistory=1', 'ArticleTimeout=1200'],
+    'slotfinishedlive': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no',
+                         'KeepHistory=1', 'ArticleTimeout=1200'],
     'failcont_twinlabel': PROD_OPTIONS + ['DownloadRate=4000'],
     'failcont_fleettwin': PROD_OPTIONS + ['DownloadRate=4000'],
     'failcont_fleetalt': PROD_OPTIONS + ['DownloadRate=4000'],
@@ -16804,7 +16907,7 @@ SCENARIO_REWRITE_PROXY = {'notfound451': (b'430 ', b'451 '),
                           'pathtraversalarticle': (b'name=aaaaaaaa.bin', b'name=../../ab.bin'), 'rejectnextserver': (b'=ypart begin=', b'=ypart begxn=')}
 
 # scenarios with a DelayingNntpProxy in front of Server1: [(message-id marker, delay in s)]
-SCENARIO_DELAY_PROXY = {'fleetbigqueue': [(b'-0-', 600.0)], 'dupausedunpack': [(b'dpuA/testfile3.part03', 200.0)], 'dupausedlive': [(b'dplA/testfile3.part03', 900.0)], 'failcont_alt25busy': [(b'fcBlk/Blk.part03.rar?2=', 900.0)], 'livestraggler': LIVE_STRAGGLERS, 'lightburst': [(b'lbLoad', 0.25)], 'clientthreads': [(b'ctA/', 3.0)], 'xdecomp_slow': [(b'xdzB/', 0.7)], 'damagedfilestate': [(b'?6=500000:', 20.0, True)], 'articledecoyparrestart': [(b'?9=4000000:', 15.0, True), (b'?10=4500000:', 15.0, True)], 'directrenamesubdir': [(b'drA/obf', 0.4)], 'directrenamesubdirjoin': [(b'drA/obf', 0.4)], 'slowprobe': [(b'STAT ', 5.0), (b'spA/', 0.2)],
+SCENARIO_DELAY_PROXY = {'fleetbigqueue': [(b'-0-', 600.0)], 'dupausedunpack': [(b'dpuA/testfile3.part03', 200.0)], 'dupausedlive': [(b'dplA/testfile3.part03', 900.0)], 'slotpreemptpaused': [(b'sppA/v07', 900.0)], 'slotfinishedlive': [(b'sflA/v29', 900.0)], 'failcont_alt25busy': [(b'fcBlk/Blk.part03.rar?2=', 900.0)], 'livestraggler': LIVE_STRAGGLERS, 'lightburst': [(b'lbLoad', 0.25)], 'clientthreads': [(b'ctA/', 3.0)], 'xdecomp_slow': [(b'xdzB/', 0.7)], 'damagedfilestate': [(b'?6=500000:', 20.0, True)], 'articledecoyparrestart': [(b'?9=4000000:', 15.0, True), (b'?10=4500000:', 15.0, True)], 'directrenamesubdir': [(b'drA/obf', 0.4)], 'directrenamesubdirjoin': [(b'drA/obf', 0.4)], 'slowprobe': [(b'STAT ', 5.0), (b'spA/', 0.2)],
                         'directunpackkeep': [(b'rel.part03', 2.0)],
                         'directunpackkeepnointer': [(b'rel.part03', 2.0)],
                         'truncatedstate': [(b'tsA/', 0.5)],

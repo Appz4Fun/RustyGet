@@ -198,6 +198,7 @@ fn run(dir: &Path, set: &LiveSet, feed: &mut DiskFeed) -> (Outcome, Vec<String>)
         &mut |_, m| lines.push(m.to_string()),
         &mut || false,
         &|_| {},
+        &|| {},
     );
     (outcome, lines)
 }
@@ -399,6 +400,7 @@ fn a_hole_in_a_stored_member_is_read_past_and_filled_after_its_repair() {
         &mut |_, _| {},
         &mut || false,
         &|_| {},
+        &|| {},
     );
     assert!(
         matches!(outcome, Outcome::Done { files: 1, .. }),
@@ -618,6 +620,7 @@ fn volumes_being_written_are_fed_article_by_article() {
         &mut |_, m| lines.push(m.to_string()),
         &mut || false,
         &|_| {},
+        &|| {},
     );
     writer.join().unwrap();
     assert_eq!(
@@ -787,6 +790,7 @@ fn a_set_is_mapped_from_its_first_and_last_volume_while_they_are_written() {
             },
             &mut || false,
             &|_| {},
+            &|| {},
         );
         let (mapped_early, served_last) = handle.join().unwrap();
         assert_eq!(

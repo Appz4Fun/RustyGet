@@ -20503,6 +20503,7 @@ mod dead_volume_fill_tests {
             password: "",
             overwrite: crate::progressive_unpack::Overwrite::Always,
             on_wait: None,
+            on_boundary: None,
         };
         let mut log = Vec::new();
         let r = crate::progressive_unpack::extract(
@@ -20696,6 +20697,7 @@ mod dead_volume_fill_tests {
             password: "",
             overwrite: crate::progressive_unpack::Overwrite::Always,
             on_wait: None,
+            on_boundary: None,
         };
         let mut log = Vec::new();
         let r = crate::progressive_unpack::extract(
@@ -20818,6 +20820,7 @@ mod dead_volume_fill_tests {
             password: "",
             overwrite: crate::progressive_unpack::Overwrite::Always,
             on_wait: None,
+            on_boundary: None,
         };
         let mut log = Vec::new();
         let r = crate::progressive_unpack::extract(
@@ -20920,6 +20923,7 @@ mod dead_volume_fill_tests {
             password: "",
             overwrite: crate::progressive_unpack::Overwrite::Always,
             on_wait: None,
+            on_boundary: None,
         };
         let mut log = Vec::new();
         let r = crate::progressive_unpack::extract(

@@ -5778,8 +5778,11 @@ unsafe fn save_single_file_or_state(
     };
     // Always written to `<file>.new` and renamed: a partial state (`<id>s`) written in
     // place was cut short when the queue disk filled (6790), and the load then threw away
-    // every article it recorded (57 GB downloaded again). A first save of a file (`replace`)
-    // is not synced, as before; a later one is when FlushQueue is set.
+    // every article it recorded (57 GB downloaded again). A write error now keeps the
+    // last good file. Not synced, as before: the partial states of every downloading
+    // file are saved each second, and a sync each (with the directory's) queued the
+    // saves behind one another (queuesyncslow: a thread waiting for its save waited
+    // seconds); rename over an existing file is ordered after its data on ext4.
     let mut sf = RsStateFile::new(
         qdir,
         sep,
@@ -5788,7 +5791,7 @@ unsafe fn save_single_file_or_state(
         true,
         DISKSTATE_FILE_VERSION,
     );
-    sf.flush = !replace;
+    sf.flush = false;
     let Some(mut w) = (unsafe { sf.begin_write(env) }) else {
         return false;
     };

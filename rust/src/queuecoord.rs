@@ -1892,17 +1892,29 @@ pub fn format_par_damage_summary(
 }
 
 /// Evaluates `(discard_par_probe_article, discard_article_infos)` in `QueueCoordinator::DiscardDirectRename`.
+///
+/// Only a par2 file's first-article probe is discarded, never a whole par2 file: when the
+/// file has a single article that probe is the complete file. The download can complete
+/// on that very file (its completion runs the discard before the file leaves the queue,
+/// and under load a one-article par2 index is often the last file written); discarding it
+/// then deleted the set's only par2 index, so par-rename, par-check and recreation of a
+/// dead volume had nothing to work from and unpack failed on the unrenamed volumes.
 #[inline]
+#[allow(clippy::too_many_arguments)]
 pub fn eval_discard_direct_rename_file(
     is_par_file: bool,
     completed_articles: i32,
+    total_articles: i32,
     active_downloads: i32,
     server_mode: bool,
     has_articles: bool,
     continue_partial: bool,
     cached_articles: i32,
 ) -> (bool, bool) {
-    let discard_par = is_par_file && completed_articles == 1 && active_downloads == 0;
+    let discard_par = is_par_file
+        && completed_articles == 1
+        && completed_articles < total_articles
+        && active_downloads == 0;
     let discard_infos = server_mode
         && has_articles
         && continue_partial
@@ -7883,6 +7895,7 @@ fn discard_direct_rename_host(
         let (discard_par, discard_infos) = eval_discard_direct_rename_file(
             f.par_file,
             f.completed_articles,
+            f.total_articles,
             f.active_downloads,
             opts.server_mode,
             f.articles_len > 0,
@@ -8478,6 +8491,17 @@ mod tests {
         // already under the current InterDir, or a final folder
         assert!(!f(NK_NZB, false, false, b"/hdd/inter/Movie.#42", new, 42, || false));
         assert!(!f(NK_NZB, false, false, b"/dst/Movies/Movie", new, 42, || false));
+    }
+
+    #[test]
+    fn discard_direct_rename_keeps_a_whole_one_article_par2_file() {
+        // the probe of a longer par2 file is discarded
+        assert!(eval_discard_direct_rename_file(true, 1, 5, 0, false, true, true, 0).0);
+        // a one-article par2 file is complete: its probe is the file itself
+        assert!(!eval_discard_direct_rename_file(true, 1, 1, 0, false, true, true, 0).0);
+        // still downloading, or not a par2 file: kept
+        assert!(!eval_discard_direct_rename_file(true, 1, 5, 1, false, true, true, 0).0);
+        assert!(!eval_discard_direct_rename_file(false, 1, 5, 0, false, true, true, 0).0);
     }
 
     #[test]

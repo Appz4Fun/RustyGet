@@ -12938,8 +12938,7 @@ def scenario_livepardecodeahead(daemon, t):
     return ('livepardecodeahead', ok, 'status=%s intact=%s rebuilt_ahead=%s end_repaired=%s '
             'before_end=%s before_last_data=%s batch_repairs=%d io=%s'
             % (h['Status'], intact, rebuilt, ended, before_end, before_last, batch, io))
-def _livepar_rar_run(daemon, t, tag, seed, missing, corrupt=None, recovery=24, obfuscate=False,
-                     par2_last=False):
+def _livepar_rar_run(daemon, t, tag, seed, missing, corrupt=None, recovery=24, obfuscate=False):
     """A RAR set under the production options with live PAR: 8 store-mode volumes of
     movie.mkv (real CRCs, so direct unpack extracts it while it downloads) and a par2 set of
     64 KiB blocks with <recovery> recovery blocks in two volumes. <missing> maps a volume
@@ -12949,7 +12948,7 @@ def _livepar_rar_run(daemon, t, tag, seed, missing, corrupt=None, recovery=24, o
     post-processing par-check lines, par-rename missing lines, post-processing loads of the
     par2 index, seconds from the end of the download to the history entry). With
     <obfuscate> the volumes are posted under random names without an extension (the par2
-    files keep theirs); with <par2_last> the par2 files come last in the NZB."""
+    files keep theirs)."""
     import subprocess as _sp
     import zlib
     seg = 100_000
@@ -12970,7 +12969,7 @@ def _livepar_rar_run(daemon, t, tag, seed, missing, corrupt=None, recovery=24, o
         else (lambda n: n)
     data_members = [('%s/%s' % (tag, n), posted(n), len(vols[i]), seg, set(missing.get(i, ())))
                     for i, n in enumerate(names)]
-    members = data_members + members if par2_last else members + data_members
+    members += data_members
     nzb = build_multi_nzb(members)
     if corrupt:
         vol, part = corrupt
@@ -13053,16 +13052,17 @@ def scenario_liveparrartrust(daemon, t):
                loads, end_s))
 
 
-def _livepar_rar_obfuscated(daemon, t, tag, par2_last, damaged=True):
-    """liveparrartrust with the volumes posted under random names (DirectRename=yes: the
-    queue stores each file's first-16-KiB MD5 printed nzbget-style, bytes last to first).
-    Live PAR matches the volumes to their par2 entries by that hash. Before, it read the
-    queue's text in digest order: no hash ever matched, a volume bound by its first article
-    stopped the session on its next write ("bound source hash identity changed"), and
-    post-processing ran a full par-check."""
+def _livepar_rar_obfuscated(daemon, t, tag):
+    """liveparrartrust with the volumes posted under random names, no extension
+    (DirectRename=yes: the queue stores each volume's first-16-KiB MD5 printed nzbget-style,
+    bytes last to first, and live PAR gets that text with every write). Live PAR binds the
+    volumes, repairs the damage as the download ends, never stops on a source identity
+    (only the end-of-job cancel), and post-processing trusts it: no par-check, par-rename
+    finds no volume missing. (The direct rename gives the volumes their par2 names by the
+    same hashes, so this passes on main too; the byte-order fix itself is proved by the
+    parchecker live_lifecycle_tests, which fail on main.)"""
     h, intact, verify, missing, loads, end_s = _livepar_rar_run(
-        daemon, t, tag, 13740, {1: {3}, 4: {2, 6}} if damaged else {},
-        corrupt=(6, 4) if damaged else None, obfuscate=True, par2_last=par2_last)
+        daemon, t, tag, 13740, {1: {3}, 4: {2, 6}}, corrupt=(6, 4), obfuscate=True)
     live = _grep_log(t, 'Live par-repair for Rel%s' % tag)
     trusted = _grep_log(t, 'live PAR verified every file')
     # A stop other than the end of the job (its history entry cancels the session).
@@ -13078,24 +13078,15 @@ def _livepar_rar_obfuscated(daemon, t, tag, par2_last, damaged=True):
 
 
 def scenario_liveparrarobfuscated(daemon, t):
-    """_livepar_rar_obfuscated with the par2 files first in the NZB."""
-    ok, detail = _livepar_rar_obfuscated(daemon, t, 'lrb', par2_last=False)
+    """_livepar_rar_obfuscated."""
+    ok, detail = _livepar_rar_obfuscated(daemon, t, 'lrb')
     return ('liveparrarobfuscated', ok, detail)
 
 
-def scenario_liveparrarobfuscatedlate(daemon, t):
-    """_livepar_rar_obfuscated with the par2 files last in the NZB (ReorderFiles=no): every
-    volume's 16k hash is in the queue before the par2 index arrives, so live PAR captures
-    the volumes under their obfuscated names and binds them by that hash."""
-    ok, detail = _livepar_rar_obfuscated(daemon, t, 'lrl', par2_last=True, damaged=False)
-    return ('liveparrarobfuscatedlate', ok, detail)
-
-
 def scenario_liveparrarobfuscatedslow(daemon, t):
-    """liveparrarobfuscated on a slow line (DownloadRate=1000): the volumes' later articles
-    are written under their obfuscated names, with the queue's 16k hash, before the direct
-    rename gives them their par2 names."""
-    ok, detail = _livepar_rar_obfuscated(daemon, t, 'lrs', par2_last=False)
+    """liveparrarobfuscated on a slow line (DownloadRate=1000), so the direct rename, live
+    PAR's capture and the volumes' writes interleave differently."""
+    ok, detail = _livepar_rar_obfuscated(daemon, t, 'lrs')
     return ('liveparrarobfuscatedslow', ok, detail)
 
 
@@ -15791,7 +15782,6 @@ SCENARIOS = {
     'liveparrarclean': scenario_liveparrarclean,
     'liveparrartrust': scenario_liveparrartrust,
     'liveparrarobfuscated': scenario_liveparrarobfuscated,
-    'liveparrarobfuscatedlate': scenario_liveparrarobfuscatedlate,
     'liveparrarobfuscatedslow': scenario_liveparrarobfuscatedslow,
     'liveparraroff': scenario_liveparraroff,
     'livepartrusted': scenario_livepartrusted,
@@ -16274,8 +16264,6 @@ SCENARIO_OPTIONS = {
     'liveparrarobfuscated': PROD_OPTIONS + ['LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes', 'UnpackCleanupDisk=no'],
     'liveparrarobfuscatedslow': PROD_OPTIONS + ['LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes', 'UnpackCleanupDisk=no',
                                  'DownloadRate=1000'],
-    'liveparrarobfuscatedlate': [o for o in PROD_OPTIONS if o != 'ReorderFiles=yes'] + [
-        'ReorderFiles=no', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes', 'UnpackCleanupDisk=no'],
     'liveparraroff': PROD_OPTIONS + ['LiveParRepair=no', 'ArticleCache=256', 'DirectWrite=yes', 'UnpackCleanupDisk=no'],
     'parinplace': ['ParCheck=auto', 'LiveParRepair=no'],
     'parlesscritical': ['HealthCheck=dupe', 'DupeArticleFallback=no'],

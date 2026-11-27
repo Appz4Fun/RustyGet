@@ -15697,39 +15697,44 @@ def scenario_fleetholdrename(daemon, t):
     copies downloaded with nothing paused (DupeHeld=yes, PausedSizeMB 0).
     RUSTYGET_TEST_DIRECT_RENAME_DELAY_MS lets the hold land between the rename's
     par2 read and its completion."""
-    data = _payload(3_000_000, 16531)
+    data = _payload(1_200_000, 16531)
     rel = 'Hold.Movie.2024.1080p.WEB-DL.x264-GRP'
     key = 'dupes:hold.movie.2024.1080p.web.dl.x264.grp'
     api = daemon.wait_ready()
-    b_name = rel + '_1'
-    _ds_append(api, b_name, _par_copy(t, 'hrB', data, vol_articles=4, obfuscate=True), key, 100, paused=False)
-    b = _wait_free(api, b_name)
-    deadline = time.time() + 30
-    while time.time() < deadline and not _grep_log(t, 'Directly checking renamed files for ' + b_name):
+    t_name = rel + '_1'
+    _ds_append(api, rel + '_2', _par_copy(t, 'hrX', data, files=6, obfuscate=True), key, 100, paused=False)
+    _wait_free(api, rel + '_2')
+    # t, a better copy, downloads (the first copy is held) and starts its direct rename
+    _ds_append(api, t_name, _par_copy(t, 'hrT', data, files=6, obfuscate=True), key, 200, paused=False)
+    tq = _wait_free(api, t_name)
+    deadline = time.time() + 60
+    while time.time() < deadline and not _grep_log(t, 'Directly checking renamed files for ' + t_name):
         time.sleep(0.1)
-    started = _grep_log(t, 'Directly checking renamed files for ' + b_name) > 0
-    # a better copy arrives while b's direct rename runs
-    _ds_append(api, rel, _par_copy(t, 'hrA', data, vol_articles=4, obfuscate=True), key, 200, paused=False)
-    b_held = _wait_held(api, b_name)
-    done = 'renamed files found for %s' % b_name, 'file(s) for %s' % b_name
+    started = _grep_log(t, 'Directly checking renamed files for ' + t_name) > 0
+    # a still better copy arrives while t's direct rename runs: t is held
+    _ds_append(api, rel, _par_copy(t, 'hrC', data, files=6, obfuscate=True), key, 300, paused=False)
+    t_held = _wait_held(api, t_name)
+    done = 'renamed files found for %s' % t_name, 'file(s) for %s' % t_name
     deadline = time.time() + 30
     while time.time() < deadline and not any(_grep_log(t, d) for d in done):
         time.sleep(0.2)
     completed = any(_grep_log(t, d) for d in done)
     time.sleep(1)
-    held_files = _files_of(api, b['NZBID'])
-    a = _group_named(api, rel)
-    api.editqueue('GroupDelete', 0, '', [a['NZBID']]) if a else None
-    b2 = _wait_free(api, b_name)
+    held_files = _files_of(api, tq['NZBID']) if tq else {}
+    c = _group_named(api, rel)
+    api.editqueue('GroupDelete', 0, '', [c['NZBID']]) if c else None
+    t2 = _wait_free(api, t_name)
     time.sleep(1)
-    after = _files_of(api, b['NZBID'])
+    after = _files_of(api, tq['NZBID']) if tq else {}
     pars = [k for k in after if k.endswith('.par2')]
     held_ok = bool(held_files) and all(held_files.values())
-    ok = (started and completed and _params(b_held).get('DupeHeld') == 'yes' and held_ok and bool(b2)
+    ok = (started and completed and _params(t_held).get('DupeHeld') == 'yes' and held_ok and bool(t2)
           and all(after[k] for k in pars) and not all(after.values()))
-    return ('fleetholdrename', ok, 'started=%s completed=%s unpaused_held=%s unpaused_after=%s' % (
+    events = [ln[11:19] + ' ' + ln.split('\t')[-1].replace(rel, 'R')[:36] for ln in _log_text(t).splitlines()
+              if 'GRP_1' in ln and re.search(r'Holding|Releasing|renamed|Directly', ln)]
+    return ('fleetholdrename', ok, 'started=%s completed=%s held=%s after=%s ev=%s' % (
         started, completed, sorted(k for k, v in held_files.items() if not v),
-        sorted(k for k, v in after.items() if not v)))
+        sorted(k for k, v in after.items() if not v), events[:10]))
 
 
 def scenario_fleetendnolive(daemon, t):

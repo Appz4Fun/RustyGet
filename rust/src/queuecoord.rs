@@ -3186,7 +3186,7 @@ impl NzbgetRsQueueCoordinator {
         // their priority and paused file count. Choosing an article changes nothing read here;
         // the chosen collection is read afresh before it is used.
         let queue: Vec<PickEntry> = (0..host.queue_len(dq_ptr))
-            .map(|i| PickEntry::read(host, host.queue_at(dq_ptr, i)))
+            .map(|i| PickEntry::read(host, host.queue_at(dq_ptr, i), i))
             .collect();
         // The queue's copies by duplicate key, indexed once per call when first needed (see
         // `has_active_dupe`).
@@ -7806,15 +7806,18 @@ fn interdir_budget_skips(
     let Some((id, _, _, success, failed, active)) = host.nzb_budget_fields(entry.ptr) else {
         return false;
     };
+    // FORCE starts regardless: never skipped for a held download ranked above it.
     !crate::interbudget::started(success, failed, active)
-        && crate::interbudget::held_now(now, id, (entry.has_extra_priority, entry.priority))
+        && !entry.snap(host).force_priority
+        && crate::interbudget::held_now(now, id, (entry.has_extra_priority, entry.priority, std::cmp::Reverse(entry.index)))
 }
 
 /// The InterDir budget (see `interbudget`) for a queue item the pick would take: a download
 /// that has started always may go on; one that has not starts only when the disk has room
 /// for it after what the started ones will still write (a copy `dupe_held` keeps from
-/// downloading counts nothing). FORCE starts regardless but reserves its room. Held, it says
-/// why once.
+/// downloading counts nothing: should a failover let it go on later, it goes on unchecked,
+/// as any started download, and `DiskSpace` still pauses at the line). FORCE starts
+/// regardless but reserves its room. Held, it says why once.
 #[cfg(unix)]
 fn interdir_budget_admits(
     host: &crate::queuesubsys_host::QueueSubsysHost,
@@ -7838,7 +7841,7 @@ fn interdir_budget_admits(
         // it downloads (a download larger than half the disk would never start). From its
         // start it reserves the unpack too, until the unpack has run.
         need: crate::interbudget::need_bytes(remaining, paused, 0),
-        rank: (entry.has_extra_priority, entry.priority),
+        rank: (entry.has_extra_priority, entry.priority, std::cmp::Reverse(entry.index)),
         force: nzb.force_priority,
     };
     let mut items = || {
@@ -7904,11 +7907,13 @@ struct PickEntry {
     has_extra_priority: bool,
     paused_file_count: i32,
     file_len: usize,
+    /// Its position in the queue (the pick's order among equal priorities).
+    index: usize,
     snap: std::cell::OnceCell<crate::queuesubsys_host::NzbSnap>,
 }
 
 impl PickEntry {
-    fn read(host: &crate::queuesubsys_host::QueueSubsysHost, ptr: NzbRef) -> Self {
+    fn read(host: &crate::queuesubsys_host::QueueSubsysHost, ptr: NzbRef, index: usize) -> Self {
         let (priority, has_extra_priority, paused_file_count) = host.nzb_pick_fields(ptr);
         PickEntry {
             ptr,
@@ -7916,6 +7921,7 @@ impl PickEntry {
             has_extra_priority,
             paused_file_count,
             file_len: host.nzb_file_len(ptr),
+            index,
             snap: std::cell::OnceCell::new(),
         }
     }

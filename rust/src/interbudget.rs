@@ -52,8 +52,9 @@ pub(crate) fn fits(avail: i64, reserved: i64, need: i64, keep_mb: i64) -> bool {
     avail.saturating_sub(reserved).saturating_sub(need) >= keep
 }
 
-/// A download's priority as the pick orders it: extra priority first, then priority.
-pub(crate) type Rank = (bool, i32);
+/// A download's place as the pick orders it: extra priority first, then priority, then
+/// queue position (earlier ranks higher).
+pub(crate) type Rank = (bool, i32, std::cmp::Reverse<usize>);
 
 /// The budget as it stood at the last check, recomputed at most once per second.
 #[derive(Default)]
@@ -72,9 +73,10 @@ struct Budget {
     /// Downloads held since `sec`: free space and reservations cannot improve within the
     /// second, so the pick skips them without asking again.
     held: std::collections::HashSet<i32>,
-    /// The highest rank held since `sec` (of a download that fits the file system at all):
-    /// unstarted downloads ranked below it wait too, so smaller lower-priority ones never
-    /// take its room.
+    /// The highest rank held since `sec` of a download that fits the free space as it is
+    /// and only waits for the started downloads' room: unstarted downloads ranked below it
+    /// (lower priority, or the same priority later in the queue) wait too, so smaller ones
+    /// never take its room. One that does not fit even the free space holds nobody.
     hold_below: Option<Rank>,
     /// Downloads whose hold has been logged (once each, until admitted).
     logged: std::collections::HashSet<i32>,
@@ -134,6 +136,7 @@ fn probe() -> Option<(i64, i64, i64)> {
         std::sync::atomic::AtomicBool::new(false);
     let (dir, disk_space) = inputs()?;
     let Some((avail, total)) = crate::fsops::get_disk_state(&dir) else {
+        // Logged once per failure spell: cleared again when the directory reads.
         if !UNMEASURED_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
             let mut msg = b"InterDir disk budget off: cannot read the free space of ".to_vec();
             msg.extend_from_slice(dir.as_bytes());
@@ -141,6 +144,7 @@ fn probe() -> Option<(i64, i64, i64)> {
         }
         return None;
     };
+    UNMEASURED_LOGGED.store(false, std::sync::atomic::Ordering::Relaxed);
     Some((avail, total, disk_space.saturating_add(state_reserve_mb())))
 }
 
@@ -242,7 +246,11 @@ fn check_with(
         .need
         .saturating_add(b.keep_mb.saturating_mul(1024 * 1024))
         > b.total;
-    if !never_fits && b.hold_below.is_none_or(|r| pick.rank > r) {
+    // Waiting for the started downloads' room only (it fits the free space as it is): the
+    // ones ranked below it wait as well. Otherwise it may never fit (the disk is taken by
+    // data that stays) and must not hold the queue.
+    let waits_for_room = fits(b.avail, 0, pick.need, b.keep_mb);
+    if waits_for_room && b.hold_below.is_none_or(|r| pick.rank > r) {
         b.hold_below = Some(pick.rank);
     }
     if b.logged.insert(pick.id) {
@@ -307,11 +315,15 @@ mod tests {
         }
     }
 
+    fn r(extra: bool, priority: i32, position: usize) -> Rank {
+        (extra, priority, std::cmp::Reverse(position))
+    }
+
     fn pick(id: i32, need: i64) -> Pick {
         Pick {
             id,
             need,
-            rank: (false, 0),
+            rank: r(false, 0, 0),
             force: false,
         }
     }
@@ -347,9 +359,9 @@ mod tests {
                 never_fits: false
             }))
         );
-        assert!(held_with(&b, 1, 2, (false, 0)));
+        assert!(held_with(&b, 1, 2, r(false, 0, 0)));
         assert!(
-            !held_with(&b, 2, 2, (false, 0)),
+            !held_with(&b, 2, 2, r(false, 0, 0)),
             "a new second judges again"
         );
         // logged once
@@ -402,12 +414,19 @@ mod tests {
     #[test]
     fn a_held_download_holds_lower_ranked_ones_but_not_higher_or_started() {
         let mut b = Budget::default();
-        let mut probe = || Some((40 * MB, 100 * MB, 0));
-        let mut q = || Vec::new();
+        // 50 MB of the 100 MB free are reserved by a started download
+        let mut probe = || Some((100 * MB, 200 * MB, 0));
+        let mut q = || {
+            vec![Item {
+                id: 9,
+                started: true,
+                reserve: 50 * MB,
+            }]
+        };
         let big = Pick {
             id: 1,
             need: 60 * MB,
-            rank: (false, 50),
+            rank: r(false, 50, 0),
             force: false,
         };
         assert!(hold_log(&check_with(&mut b, 1, &big, &mut probe, &mut q)).is_some());
@@ -415,7 +434,7 @@ mod tests {
         let small_low = Pick {
             id: 2,
             need: MB,
-            rank: (false, 0),
+            rank: r(false, 0, 0),
             force: false,
         };
         assert!(held_with(&b, 1, 2, small_low.rank));
@@ -423,11 +442,11 @@ mod tests {
             check_with(&mut b, 1, &small_low, &mut probe, &mut q),
             Verdict::Hold(_)
         ));
-        // the same priority or higher still may
+        // a higher priority still may
         let small_same = Pick {
             id: 3,
             need: MB,
-            rank: (false, 50),
+            rank: r(false, 60, 3),
             force: false,
         };
         assert_eq!(
@@ -437,7 +456,7 @@ mod tests {
         let small_extra = Pick {
             id: 4,
             need: MB,
-            rank: (true, -100),
+            rank: r(true, -100, 0),
             force: false,
         };
         assert_eq!(
@@ -454,7 +473,7 @@ mod tests {
         let huge = Pick {
             id: 1,
             need: 200 * MB,
-            rank: (false, 50),
+            rank: r(false, 50, 0),
             force: false,
         };
         let log = check_with(&mut b, 1, &huge, &mut probe, &mut q);
@@ -462,7 +481,7 @@ mod tests {
         let small_low = Pick {
             id: 2,
             need: MB,
-            rank: (false, 0),
+            rank: r(false, 0, 0),
             force: false,
         };
         assert_eq!(
@@ -479,7 +498,7 @@ mod tests {
         let forced = Pick {
             id: 1,
             need: 60 * MB,
-            rank: (false, 900),
+            rank: r(false, 900, 0),
             force: true,
         };
         assert_eq!(
@@ -505,7 +524,7 @@ mod tests {
             check_with(&mut b, 9, &pick(1, i64::MAX), &mut probe, &mut q),
             Verdict::Start
         );
-        assert!(!held_with(&b, 9, 1, (false, 0)));
+        assert!(!held_with(&b, 9, 1, r(false, 0, 0)));
         assert_eq!(calls, 0);
         let mut probe = || Some((MB, 100 * MB, 0));
         let mut q = || {
@@ -538,5 +557,68 @@ mod tests {
         ))
         .is_some());
         assert!(!b.logged.contains(&5));
+    }
+
+    #[test]
+    fn the_same_priority_later_in_the_queue_waits_behind_a_held_download() {
+        let mut b = Budget::default();
+        let mut probe = || Some((70 * MB, 100 * MB, 0));
+        let mut q = || vec![item(9, 30, true)];
+        // 33 MB reserved by a started one: the first in the queue (60 MB) waits for its room
+        let first = Pick {
+            id: 1,
+            need: 60 * MB,
+            rank: r(false, 0, 0),
+            force: false,
+        };
+        assert!(hold_log(&check_with(&mut b, 1, &first, &mut probe, &mut q)).is_some());
+        let later = Pick {
+            id: 2,
+            need: MB,
+            rank: r(false, 0, 5),
+            force: false,
+        };
+        assert!(held_with(&b, 1, 2, later.rank));
+        assert!(matches!(
+            check_with(&mut b, 1, &later, &mut probe, &mut q),
+            Verdict::Hold(_)
+        ));
+        let earlier_higher = Pick {
+            id: 3,
+            need: MB,
+            rank: r(false, 10, 7),
+            force: false,
+        };
+        assert_eq!(
+            check_with(&mut b, 1, &earlier_higher, &mut probe, &mut q),
+            Verdict::Start
+        );
+    }
+
+    #[test]
+    fn one_that_does_not_fit_the_free_space_holds_nobody() {
+        // a large disk mostly taken by data that stays: total says it fits, free space never
+        let mut b = Budget::default();
+        let mut probe = || Some((10 * MB, 1000 * MB, 0));
+        let mut q = || Vec::new();
+        let big = Pick {
+            id: 1,
+            need: 50 * MB,
+            rank: r(false, 50, 0),
+            force: false,
+        };
+        let log = check_with(&mut b, 1, &big, &mut probe, &mut q);
+        assert!(hold_log(&log).is_some_and(|l| !l.never_fits));
+        let small = Pick {
+            id: 2,
+            need: MB,
+            rank: r(false, 0, 1),
+            force: false,
+        };
+        assert!(!held_with(&b, 1, 2, small.rank));
+        assert_eq!(
+            check_with(&mut b, 1, &small, &mut probe, &mut q),
+            Verdict::Start
+        );
     }
 }

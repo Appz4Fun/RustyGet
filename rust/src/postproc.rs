@@ -2881,12 +2881,19 @@ fn path_bytes(path: &std::path::Path) -> Vec<u8> {
 /// `VolumeFeed::declare_damaged`): holds it with `holes` added to its known lost ranges, also
 /// after the download ended (post-processing then repairs the download first and releases
 /// it, see `prepost`), and marks the job's damage as found by the extraction. False when the
-/// holds were given up: nothing repairs the volume any more.
+/// holds were given up: nothing repairs the volume any more. True without a hold once
+/// post-processing resumed direct unpack after its repair stages: the volume is repaired.
 pub(crate) fn direct_unpack_declare_damaged(nzb_id: i32, full_path: &[u8], holes: Vec<(u64, u64)>) -> bool {
     let mut map = direct_unpack_holds();
     let st = map.entry(nzb_id).or_default();
-    if st.abandoned || st.resumed_after_repair {
+    if st.abandoned {
         return false;
+    }
+    if st.resumed_after_repair {
+        // Post-processing ran its repair stages before it resumed direct unpack: the volume on
+        // disk is as repaired as it gets, so it is read back now (holding it would wait for a
+        // repair that never comes). A member still bad after that fails.
+        return true;
     }
     if !st.held.iter().any(|p| p == full_path) {
         st.held.push(full_path.to_vec());
@@ -6854,9 +6861,13 @@ mod live_hold_tests {
         assert!(direct_unpack_declared_damage(id));
         direct_unpack_release_all(id);
         assert!(!direct_unpack_declared_damage(id));
-        // Its repair stages are over: nothing would release a new hold.
-        assert!(!direct_unpack_declare_damaged(id, b, Vec::new()));
+        // Its repair stages are over: nothing would release a new hold, and the volume is
+        // repaired already. Read back at once, not held.
+        assert!(direct_unpack_declare_damaged(id, b, vec![(0, 10)]));
         assert!(!direct_unpack_has_holds(id));
+        assert!(!direct_unpack_declared_damage(id));
+        direct_unpack_abandon(id);
+        assert!(!direct_unpack_declare_damaged(id, b, vec![(0, 10)]));
         direct_unpack_forget_holds(id);
     }
 

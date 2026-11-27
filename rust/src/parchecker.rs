@@ -240,6 +240,9 @@ struct ActiveStreamingSession {
     /// and declares them holes, so the extraction never reads them and the refill after the
     /// repair reads only these slices. Bounded by `LIVE_STASH_LIMIT`.
     bad_slices: Mutex<Vec<(FileId, usize, std::time::Instant)>>,
+    /// Files whose rebuilt slices `recheck_rebuilt` is reading again right now: their slice
+    /// states are not final until it ends (see `streaming_session_ranges_good`).
+    rechecking: Mutex<HashSet<FileId>>,
     // Drop last, after the session, queue and all owned metadata. Grows with
     // the syndrome slots as damage appears (see `grow_for_damage`).
     budget: Mutex<SessionBudgetLease>,
@@ -773,6 +776,7 @@ fn build_streaming_session_with(
         rebuilt_recheck: Mutex::new(Vec::new()),
         rebuilt_files: Mutex::new(HashSet::new()),
         bad_slices: Mutex::new(Vec::new()),
+        rechecking: Mutex::new(HashSet::new()),
     }))
 }
 
@@ -2348,17 +2352,32 @@ pub(crate) fn streaming_session_ranges_good(nzb_id: i32, name: &[u8], ranges: &[
             .unwrap_or_else(|e| e.into_inner())
             .iter()
             .any(|(f, _, _)| *f == id)
+        || entry
+            .rechecking
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&id)
     {
         return false;
     }
     let Ok(states) = entry.session.slice_states(&id) else {
         return false;
     };
+    // A slice verified and then changed on disk stays VerifiedGood in par-rs: diverged.
+    let diverged: Vec<usize> = entry
+        .session
+        .diverged_slices()
+        .into_iter()
+        .filter(|(f, _)| *f == id)
+        .map(|(_, s)| s)
+        .collect();
     let size = entry.session.slice_size().max(1);
     ranges.iter().all(|&(off, len)| {
         let first = (off / size) as usize;
         let last = (off.saturating_add(len.max(1)) - 1) / size;
-        (first..=last as usize).all(|s| states.get(s) == Some(&SliceState::VerifiedGood))
+        (first..=last as usize).all(|s| {
+            states.get(s) == Some(&SliceState::VerifiedGood) && !diverged.contains(&s)
+        })
     })
 }
 
@@ -2848,6 +2867,19 @@ impl ActiveStreamingSession {
     /// since is diverged, so the trusted check at repair end fails it and the set is
     /// repaired from disk instead. Callers hold the operation lock.
     fn recheck_rebuilt(&self, nzb_id: i32, id: FileId) -> Result<(), RepairError> {
+        self.rechecking
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id);
+        let result = self.recheck_rebuilt_inner(nzb_id, id);
+        self.rechecking
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
+        result
+    }
+
+    fn recheck_rebuilt_inner(&self, nzb_id: i32, id: FileId) -> Result<(), RepairError> {
         self.completed_sources
             .lock()
             .unwrap_or_else(|e| e.into_inner())

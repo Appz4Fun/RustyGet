@@ -2115,7 +2115,7 @@ fn queue_file_path(qdir: &[u8], sep: u8, name: &[u8]) -> Vec<u8> {
 fn remove_queue_file(qdir: &[u8], sep: u8, name: &[u8]) {
     let p = queue_file_path(qdir, sep, name);
     let job = crate::statesaver::Job {
-            seq: 0,
+        seq: 0,
         temp: p.clone(),
         path: p,
         sep,

@@ -164,6 +164,8 @@ impl Saver {
             }
             true
         } else {
+            // Taken off the queue and marked running in one hold (see `idle`).
+            st = self.idle(st, &job.path);
             st.next_seq += 1;
             job.seq = st.next_seq;
             // This newer content (or delete) replaces a queued one, and whoever waits
@@ -239,6 +241,16 @@ impl Saver {
         }
     }
 
+    /// Waits until no job runs for `path`. A caller that takes a job of `path` off the
+    /// queue does so after this, in the same hold as `mark`, so the job is never out of
+    /// both the queue and the running list (where `wait_for` could miss it).
+    fn idle<'a>(&self, mut st: MutexGuard<'a, State>, path: &[u8]) -> MutexGuard<'a, State> {
+        while st.in_flight.iter().any(|(p, _)| p == path) {
+            st = self.wait(st);
+        }
+        st
+    }
+
     /// Waits for a job running for the same file, then runs `job` in this thread.
     fn run_marked(&self, st: MutexGuard<'_, State>, job: Job, log: Log<'_>) -> bool {
         let _mark = self.mark(st, &job.path, job.seq);
@@ -305,7 +317,7 @@ impl Saver {
     /// [`Saver::settle`], then runs `f` while no job can touch `path`: a reader that
     /// checks the file and its `.new` never sees the moment of a rename.
     pub(crate) fn settled<R>(&self, path: &[u8], f: impl FnOnce() -> R) -> R {
-        let mut st = self.lock();
+        let mut st = self.idle(self.lock(), path);
         let pending = st
             .queue
             .iter()
@@ -323,6 +335,11 @@ impl Saver {
     /// A queued delete runs now (no sync), so the reader finds the file gone.
     pub(crate) fn pending_content(&self, path: &[u8]) -> Option<Vec<u8>> {
         let mut st = self.lock();
+        let i = st.queue.iter().position(|j| j.path == path)?;
+        if let JobKind::Write { bytes, .. } = &st.queue[i].kind {
+            return Some(bytes.clone());
+        }
+        st = self.idle(st, path);
         let i = st.queue.iter().position(|j| j.path == path)?;
         if let JobKind::Write { bytes, .. } = &st.queue[i].kind {
             return Some(bytes.clone());

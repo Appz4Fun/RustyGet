@@ -2583,6 +2583,14 @@ struct DirectUnpackHoldState {
     /// `virtuals`, with the bytes not borrowed yet as holes. They stay held until the borrow
     /// completes and `direct_unpack_set_virtual` replaces them.
     offered: std::collections::HashMap<Vec<u8>, crate::deadvolume::VirtualVolume>,
+    /// Direct unpack found damage the download did not report (a stored part that failed its
+    /// own check on an article whose transport check passed): the volumes it declared, see
+    /// `direct_unpack_declare_damaged`.
+    declared: Vec<Vec<u8>>,
+    /// Post-processing ran its repair stages and resumed direct unpack: nothing repairs a
+    /// volume held after this (the job is not picked for post-processing again until direct
+    /// unpack ends).
+    resumed_after_repair: bool,
 }
 
 /// The names of a RAR set's volumes in order, from its first volume `first` (`count` of them at
@@ -2674,6 +2682,20 @@ impl crate::progressive_unpack::VolumeFeed for DirectUnpackFeed {
         direct_unpack_rehold(self.nzb_id, &full, holes);
     }
 
+    fn declare_damaged(&mut self, path: &std::path::Path, holes: Vec<(u64, u64)>) -> bool {
+        direct_unpack_declare_damaged(self.nzb_id, &path_bytes(path), holes)
+    }
+
+    fn late_damage(&mut self, path: &std::path::Path) -> Vec<(u64, u64)> {
+        match path.file_name() {
+            Some(name) => crate::parchecker::streaming_session_take_bad_slices(
+                self.nzb_id,
+                name.as_encoded_bytes(),
+            ),
+            None => Vec::new(),
+        }
+    }
+
     fn still_held(&self, path: &std::path::Path) -> bool {
         #[cfg(unix)]
         let full = {
@@ -2698,6 +2720,7 @@ impl crate::progressive_unpack::VolumeFeed for DirectUnpackFeed {
         // Asked only of volumes handed out with holes, which were held then. Released by its
         // repair: no longer held, and the holds were not given up (an abandon clears every
         // hold without repairing anything).
+        release_declared_verified(self.nzb_id);
         direct_unpack_holds()
             .get(&self.nzb_id)
             .is_some_and(|st| !st.abandoned && !st.held.iter().any(|p| p == &full))
@@ -2750,6 +2773,7 @@ impl crate::progressive_unpack::VolumeFeed for DirectUnpackFeed {
             if direct_unpack_abandoned(self.nzb_id) || is_cancelled() {
                 return false;
             }
+            release_declared_verified(self.nzb_id);
             if !direct_unpack_has_holds(self.nzb_id) {
                 return true;
             }
@@ -2839,6 +2863,94 @@ fn direct_unpack_rehold(nzb_id: i32, full_path: &[u8], holes: Vec<(u64, u64)>) -
     }
     st.holes.insert(full_path.to_vec(), holes);
     true
+}
+
+fn path_bytes(path: &std::path::Path) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        path.as_os_str().as_bytes().to_vec()
+    }
+    #[cfg(not(unix))]
+    {
+        path.to_string_lossy().as_bytes().to_vec()
+    }
+}
+
+/// Direct unpack found bytes of volume `full_path` wrong on its own (see
+/// `VolumeFeed::declare_damaged`): holds it with `holes` added to its known lost ranges, also
+/// after the download ended (post-processing then repairs the download first and releases
+/// it, see `prepost`), and marks the job's damage as found by the extraction. False when the
+/// holds were given up: nothing repairs the volume any more. True without a hold once
+/// post-processing resumed direct unpack after its repair stages: the volume is repaired.
+pub(crate) fn direct_unpack_declare_damaged(nzb_id: i32, full_path: &[u8], holes: Vec<(u64, u64)>) -> bool {
+    let mut map = direct_unpack_holds();
+    let st = map.entry(nzb_id).or_default();
+    if st.abandoned {
+        return false;
+    }
+    if st.resumed_after_repair {
+        // Post-processing ran its repair stages before it resumed direct unpack: the volume on
+        // disk is as repaired as it gets, so it is read back now (holding it would wait for a
+        // repair that never comes). A member still bad after that fails.
+        return true;
+    }
+    if !st.held.iter().any(|p| p == full_path) {
+        st.held.push(full_path.to_vec());
+    }
+    if !st.declared.iter().any(|p| p == full_path) {
+        st.declared.push(full_path.to_vec());
+    }
+    if !holes.is_empty() {
+        let known = st.holes.entry(full_path.to_vec()).or_default();
+        known.extend(holes);
+        known.sort_unstable();
+        let mut merged: Vec<(u64, u64)> = Vec::with_capacity(known.len());
+        for &(off, len) in known.iter() {
+            match merged.last_mut() {
+                Some((o, l)) if off <= *o + *l => *l = (*l).max(off + len - *o),
+                _ => merged.push((off, len)),
+            }
+        }
+        *known = merged;
+    }
+    if st.download_finished {
+        st.awaiting_repair = true;
+    }
+    true
+}
+
+/// Releases the volumes direct unpack of `nzb_id` declared damaged whose declared ranges
+/// live PAR has verified good on disk since (it repaired them while downloading, decode-ahead
+/// rebuilt them, or the damage was not real): nothing else would release them before the
+/// post-processing repair, and a hold nothing releases stops the job.
+fn release_declared_verified(nzb_id: i32) {
+    let candidates: Vec<(Vec<u8>, Vec<(u64, u64)>)> = {
+        let map = direct_unpack_holds();
+        let Some(st) = map.get(&nzb_id) else {
+            return;
+        };
+        st.declared
+            .iter()
+            .filter(|p| st.held.contains(p))
+            .filter_map(|p| st.holes.get(p).map(|h| (p.clone(), h.clone())))
+            .collect()
+    };
+    for (path, holes) in candidates {
+        let name = hold_path_filename(&path);
+        if crate::parchecker::streaming_session_ranges_good(nzb_id, name, &holes) {
+            direct_unpack_release_path(&path);
+        }
+    }
+}
+
+/// True while a volume direct unpack of `nzb_id` found damaged on its own
+/// (`direct_unpack_declare_damaged`) is still held: the download's health does not show that
+/// damage, so only a par-check (or a twin) can repair it.
+pub(crate) fn direct_unpack_declared_damage(nzb_id: i32) -> bool {
+    direct_unpack_holds()
+        .get(&nzb_id)
+        .is_some_and(|st| st.declared.iter().any(|p| st.held.contains(p)))
 }
 
 /// `None` when `full_path` is not on hold; otherwise its recorded lost ranges (empty when they
@@ -3465,6 +3577,7 @@ pub(crate) fn direct_unpack_release_all(nzb_id: i32) {
             st.released.push(hold_path_filename(&path).to_vec());
         }
         st.awaiting_repair = false;
+        st.resumed_after_repair = true;
     }
 }
 
@@ -6751,6 +6864,28 @@ mod live_hold_tests {
         direct_unpack_holds().remove(&id);
         assert!(!direct_unpack_widen_hold(id, path, vec![(70_000, 10)]));
         assert_eq!(direct_unpack_hole_view(path), None);
+    }
+
+    #[test]
+    fn damage_direct_unpack_declares_is_held_until_the_repair_resumes_it_and_not_after() {
+        let id = -1900251;
+        let (a, b) = (b"/dl/x.part01.rar".as_slice(), b"/dl/x.part02.rar".as_slice());
+        direct_unpack_mark_downloaded(id);
+        assert!(direct_unpack_declare_damaged(id, a, vec![(100, 50), (120, 80)]));
+        assert_eq!(direct_unpack_hole_view(a), Some(vec![(100, 100)]));
+        // After the download: post-processing repairs it first.
+        assert!(direct_unpack_awaiting_repair(id));
+        assert!(direct_unpack_declared_damage(id));
+        direct_unpack_release_all(id);
+        assert!(!direct_unpack_declared_damage(id));
+        // Its repair stages are over: nothing would release a new hold, and the volume is
+        // repaired already. Read back at once, not held.
+        assert!(direct_unpack_declare_damaged(id, b, vec![(0, 10)]));
+        assert!(!direct_unpack_has_holds(id));
+        assert!(!direct_unpack_declared_damage(id));
+        direct_unpack_abandon(id);
+        assert!(!direct_unpack_declare_damaged(id, b, vec![(0, 10)]));
+        direct_unpack_forget_holds(id);
     }
 
     #[test]

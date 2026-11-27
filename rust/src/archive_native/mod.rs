@@ -750,6 +750,13 @@ where
         replace_placed_links: false,
         keep_broken: false,
         attempt_continued_members: false,
+        salvage_truncated_zip: false,
+        unix_modes: Default::default(),
+        backslashes: Default::default(),
+        unsupported_filters: Default::default(),
+        // Progressive and persistent sessions refuse a damaged header whatever this says
+        // (zipfast #310), and 7z ignores it: RustyGet runs no RarSession, where Salvage applies.
+        damaged_input: Default::default(),
     };
     let limits = sz_limits();
 

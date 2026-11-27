@@ -539,6 +539,12 @@ impl VolumeFeed for RememberedHoles {
     fn remember_damaged(&mut self, path: &Path, holes: Vec<(u64, u64)>) {
         self.inner.remember_damaged(path, holes)
     }
+    fn declare_damaged(&mut self, path: &Path, holes: Vec<(u64, u64)>) -> bool {
+        self.inner.declare_damaged(path, holes)
+    }
+    fn late_damage(&mut self, path: &Path) -> Vec<(u64, u64)> {
+        self.inner.late_damage(path)
+    }
     fn still_held(&self, path: &Path) -> bool {
         self.inner.still_held(path)
     }
@@ -717,6 +723,13 @@ struct Run<'a> {
     dirs: Vec<Member>,
     /// Output bytes the session wrote (the extraction itself, not refills).
     written: u64,
+    /// When live PAR's bad slices were last asked for (see `declare_late_damage`).
+    late: Option<std::time::Instant>,
+    /// The damaged volumes saved for a restart (shared with the session's provider).
+    saved: SavedRepairs,
+    /// Members whose archive check failed once and were refilled from their repaired volumes:
+    /// a second failure fails the job instead of waiting again.
+    reverified: bool,
 }
 
 /// The holes of a running session whose volumes have not been repaired yet. Each one is read
@@ -951,6 +964,188 @@ fn refill_released<F>(
     }
 }
 
+/// Adds `add` to the lost ranges recorded for damaged volume `path` and saves the volumes
+/// still waiting for their repair, so a restart holds this one again too.
+fn note_damaged(
+    damaged: &HandedHoles,
+    saved: &SavedRepairs,
+    plan: &Plan,
+    path: &Path,
+    add: &[(u64, u64)],
+) {
+    let mut merged = damaged
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(path)
+        .cloned()
+        .unwrap_or_default();
+    merged.extend_from_slice(add);
+    merged.sort_unstable();
+    merged.dedup();
+    record_damaged(damaged, saved, &plan.root.join(PENDING_REPAIR), path, &merged, true);
+}
+
+/// A `DeclaredBad` hole (a stored part that failed its own check): holds each of its volumes,
+/// so the hole is refilled only after the volume is repaired, never from the damaged file.
+fn hold_declared<F>(
+    report: &HoleReport,
+    damaged: &HandedHoles,
+    saved: &SavedRepairs,
+    plan: &Plan,
+    feed: &Mutex<Box<dyn VolumeFeed>>,
+    log_cb: &mut F,
+) where
+    F: FnMut(i32, &str),
+{
+    let mut volumes: Vec<u32> = report.packed.iter().map(|s| s.volume).collect();
+    volumes.sort_unstable();
+    volumes.dedup();
+    for v in volumes {
+        let Some(name) = plan.names.get(v as usize) else {
+            continue;
+        };
+        let path = plan.dir.join(name);
+        let spans: Vec<(u64, u64)> = report
+            .packed
+            .iter()
+            .filter(|s| s.volume == v)
+            .map(|s| (s.range.start, s.range.end - s.range.start))
+            .collect();
+        // Declared already (a slice live PAR found bad, reached now): held since.
+        let known = damaged
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&path)
+            .is_some_and(|k| {
+                spans
+                    .iter()
+                    .all(|&(o, l)| k.iter().any(|&(ko, kl)| ko <= o && o + l <= ko + kl))
+            });
+        if known || spans.is_empty() {
+            continue;
+        }
+        let held = feed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .declare_damaged(&path, spans.clone());
+        note_damaged(damaged, saved, plan, &path, &spans);
+        log_cb(
+            2,
+            &format!(
+                "Unrar: {} failed its own check in {}; {}",
+                String::from_utf8_lossy(&report.name),
+                name.to_string_lossy(),
+                if held {
+                    "patched once the volume is repaired"
+                } else {
+                    "nothing here repairs the volume"
+                }
+            ),
+        );
+    }
+}
+
+/// Asks the feed (at most every `INLINE_CHECK`) for slices live PAR found bad in volumes that
+/// are complete on disk, and declares each one that lies in member data a hole of the session
+/// (`ProgressiveSession::declare_hole`): bytes not read yet are never read, output already
+/// written from them becomes a hole again. The volume is held until repaired, and the refill
+/// reads only these slices. A bad slice touching a header is left to the part's own check.
+#[allow(clippy::too_many_arguments)]
+fn declare_late_damage<F>(
+    session: &mut ProgressiveSession,
+    checked: &mut Option<std::time::Instant>,
+    inline: &mut InlineRefill,
+    holes: &mut Vec<HoleReport>,
+    damaged: &HandedHoles,
+    saved: &SavedRepairs,
+    plan: &Plan,
+    feed: &Mutex<Box<dyn VolumeFeed>>,
+    log_cb: &mut F,
+) where
+    F: FnMut(i32, &str),
+{
+    let now = std::time::Instant::now();
+    if checked.is_some_and(|t| now.duration_since(t) < INLINE_CHECK) {
+        return;
+    }
+    *checked = Some(now);
+    for (v, name) in plan.names.iter().enumerate() {
+        let path = plan.dir.join(name);
+        let Ok(len) = std::fs::metadata(&path).map(|m| m.len()) else {
+            continue;
+        };
+        let bad = feed.lock().unwrap_or_else(|e| e.into_inner()).late_damage(&path);
+        let bad: Vec<(u64, u64)> = bad
+            .into_iter()
+            .filter(|&(off, _)| off < len)
+            .map(|(off, l)| (off, l.min(len - off)))
+            .collect();
+        if bad.is_empty() {
+            continue;
+        }
+        let spans = match super::place_holes(&path, &bad) {
+            HolePlacement::Data(spans) => spans,
+            _ => {
+                log_cb(
+                    3,
+                    &format!(
+                        "Unrar: live PAR found {} bad slice(s) in {} touching its headers; left to the archive checks",
+                        bad.len(),
+                        name.to_string_lossy()
+                    ),
+                );
+                continue;
+            }
+        };
+        let mut declared = Vec::new();
+        for &(off, l) in &spans {
+            match session.declare_hole(v as u32, off..off + l) {
+                Ok(receipt) => {
+                    for report in receipt.holes {
+                        inline.pending.extend(
+                            report
+                                .packed
+                                .iter()
+                                .map(|s| (report.member.clone(), s.volume, s.range.clone())),
+                        );
+                        holes.push(report);
+                    }
+                    declared.push((off, l));
+                }
+                Err(e) => log_cb(
+                    3,
+                    &format!(
+                        "Unrar: declaring a bad slice of {} a hole failed ({:?}); left to the archive checks",
+                        name.to_string_lossy(),
+                        e.kind
+                    ),
+                ),
+            }
+        }
+        if declared.is_empty() {
+            continue;
+        }
+        let held = feed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .declare_damaged(&path, declared.clone());
+        note_damaged(damaged, saved, plan, &path, &declared);
+        let bytes: u64 = declared.iter().map(|(_, l)| l).sum();
+        log_cb(
+            0,
+            &format!(
+                "Unrar: live PAR found {bytes} bytes of {} bad; not read, {}",
+                name.to_string_lossy(),
+                if held {
+                    "patched once repaired"
+                } else {
+                    "nothing here repairs them"
+                }
+            ),
+        );
+    }
+}
+
 impl<'a> Run<'a> {
     fn new(req: &'a Request<'a>, plan: &'a Plan, feed: Arc<Mutex<Box<dyn VolumeFeed>>>) -> Self {
         Self {
@@ -966,6 +1161,9 @@ impl<'a> Run<'a> {
             inline: InlineRefill::default(),
             dirs: Vec::new(),
             written: 0,
+            late: None,
+            saved: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            reverified: false,
         }
     }
 
@@ -993,6 +1191,13 @@ impl<'a> Run<'a> {
         self.remember_pending_repair(log_cb);
         let volumes = self.plan.names.len() as u64;
         let pending: PendingWait = Arc::new(Mutex::new(None));
+        *self.saved.lock().unwrap_or_else(|e| e.into_inner()) = self
+            .damaged
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect();
         let provider = Provider {
             dir: self.plan.dir.clone(),
             feed: self.feed.clone(),
@@ -1000,14 +1205,7 @@ impl<'a> Run<'a> {
             declaration: self.plan.inventory(),
             damaged: self.damaged.clone(),
             pending_repair: self.plan.root.join(PENDING_REPAIR),
-            saved: Arc::new(Mutex::new(
-                self.damaged
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .keys()
-                    .cloned()
-                    .collect(),
-            )),
+            saved: self.saved.clone(),
         };
         let first_name = self.plan.names[0].clone();
         let mut opts = ProgressiveOptions::new(
@@ -1031,6 +1229,13 @@ impl<'a> Run<'a> {
                 replace_placed_links: false,
                 keep_broken: false,
                 attempt_continued_members: false,
+                salvage_truncated_zip: false,
+                unix_modes: Default::default(),
+                backslashes: Default::default(),
+                unsupported_filters: Default::default(),
+                // Progressive and persistent sessions refuse a damaged header whatever this says
+                // (zipfast #310), and 7z ignores it: RustyGet runs no RarSession, where Salvage applies.
+                damaged_input: Default::default(),
             },
             first_name,
         );
@@ -1104,6 +1309,19 @@ impl<'a> Run<'a> {
                     log_cb,
                     false,
                 );
+                // Slices live PAR found bad in volumes already complete: holes now, so the
+                // extraction does not read them and the refill reads only them.
+                declare_late_damage(
+                    drive.session,
+                    &mut self.late,
+                    &mut self.inline,
+                    &mut self.holes,
+                    &self.damaged,
+                    &self.saved,
+                    self.plan,
+                    &self.feed,
+                    log_cb,
+                );
                 match event {
                     Ok(None) => break,
                     Ok(Some(ProgressiveEvent::VolumeOpened { index, .. })) => {
@@ -1175,6 +1393,19 @@ impl<'a> Run<'a> {
                                 report.cause
                             ),
                         );
+                        if report.cause == zipfast::partial::HoleCause::DeclaredBad {
+                            // A stored part that failed its own check: its volume was handed
+                            // out whole, so nothing repairs it unless it is held now. Refilling
+                            // from the file as it is would write the same wrong bytes back.
+                            hold_declared(
+                                &report,
+                                &self.damaged,
+                                &self.saved,
+                                self.plan,
+                                &self.feed,
+                                log_cb,
+                            );
+                        }
                         self.inline.pending.extend(
                             report
                                 .packed
@@ -1260,7 +1491,7 @@ impl<'a> Run<'a> {
                 other => other?,
             }
         }
-        self.verify(is_cancelled)?;
+        self.verify(log_cb, is_cancelled)?;
         Ok(summary)
     }
 
@@ -1414,6 +1645,7 @@ impl<'a> Run<'a> {
             } else {
                 continue;
             };
+            let mut refilled = 0u64;
             for &v in &volumes {
                 let Some(name) = self.plan.names.get(v as usize) else {
                     continue;
@@ -1439,25 +1671,38 @@ impl<'a> Run<'a> {
                     .map_err(|e| Step::Fallback(format!("repaired volume {}: {e}", path.display())))?;
                 // A limit or any other refusal here is zipfast's, not damage: the progressive
                 // path extracts the repaired set again.
-                file.refill_from_packed(v, 0..len, &mut f).map_err(|e| {
+                let r = file.refill_from_packed(v, 0..len, &mut f).map_err(|e| {
                     Step::Fallback(format!("refilling from {}: {:?}", path.display(), e.kind))
                 })?;
+                refilled += r.applied.iter().map(|a| a.end - a.start).sum::<u64>();
             }
             log_cb(
                 0,
-                &format!("Unrar: repaired {name} from the repaired volumes (holes refilled)"),
+                &format!("Unrar: repaired {name} from the repaired volumes (holes refilled, {refilled} bytes read back)"),
             );
         }
         Ok(())
     }
 
-    /// Every member must verify Ok against its archive checksums.
-    fn verify(&mut self, is_cancelled: &mut dyn FnMut() -> bool) -> Result<(), Step> {
+    /// Every member must verify Ok against its archive checksums. A member whose bytes fail
+    /// its check (a part, or the whole member) keeps its output: the volumes concerned become
+    /// holes of it (`PartialFile::declare_hole`) and are held until repaired, then only those
+    /// holes are read back and the member is verified again. Nothing is extracted twice.
+    fn verify<F>(
+        &mut self,
+        log_cb: &mut F,
+        is_cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<(), Step>
+    where
+        F: FnMut(i32, &str),
+    {
+        let mut bad: Vec<(usize, Option<u32>)> = Vec::new();
         for i in 0..self.handles.len() {
             match self.verify_one(i, is_cancelled)? {
                 Ok(Verdict::Ok { .. }) => {}
-                // A failed check (bad bytes, or a wrong password on an encrypted member),
-                // holes left, or no stored checksum: the progressive path decides and reports
+                Ok(Verdict::PartBad { volume, .. }) => bad.push((i, Some(volume))),
+                Ok(Verdict::Bad { .. }) => bad.push((i, None)),
+                // Holes left or no stored checksum: the progressive path decides and reports
                 // exactly as before.
                 Ok(other) => {
                     return Err(Step::Fallback(format!("verification: {other:?}")));
@@ -1467,7 +1712,164 @@ impl<'a> Run<'a> {
                 }
             }
         }
-        Ok(())
+        if bad.is_empty() {
+            return Ok(());
+        }
+        if !self.req.password.is_empty() {
+            // A keyed check that fails may be a wrong password: the progressive path tells
+            // the two apart and reports them as before.
+            return Err(Step::Fallback("verification: an encrypted member failed its check".into()));
+        }
+        let names: Vec<String> = bad
+            .iter()
+            .map(|(i, _)| String::from_utf8_lossy(&self.handles[*i].2.name).into_owned())
+            .collect();
+        if self.reverified {
+            return Err(Step::Fail(Failure::Damaged(format!(
+                "{} failed its checksum again after the repair",
+                names.join(", ")
+            ))));
+        }
+        self.reverified = true;
+        // The volumes each bad member's output came from (the one of the failing part when it
+        // is known), declared holes of that member: (handle, volume, packed spans). Without
+        // the part (`Bad`) every volume is declared: the wait covers each volume the member
+        // spans and the refill reads the member back whole, the cost of not knowing where.
+        let mut declared: Vec<(usize, u32, Vec<(u64, u64)>)> = Vec::new();
+        for (i, volume) in &bad {
+            let volumes: Vec<u32> = match volume {
+                Some(v) => vec![*v],
+                None => (0..self.plan.names.len() as u32).collect(),
+            };
+            for v in volumes {
+                let Some(name) = self.plan.names.get(v as usize) else {
+                    continue;
+                };
+                let path = self.plan.dir.join(name);
+                let len = match open_repaired(&self.feed, &path) {
+                    Some(Ok(mut f)) => f.seek(std::io::SeekFrom::End(0)).unwrap_or(0),
+                    _ => 0,
+                };
+                if len == 0 {
+                    continue;
+                }
+                let file = &mut self.handles[*i].1;
+                let reports = file.declare_hole(v, 0..len).map_err(|e| {
+                    Step::Fallback(format!("declaring {} damaged: {:?}", path.display(), e.kind))
+                })?;
+                if reports.is_empty() {
+                    continue;
+                }
+                let spans: Vec<(u64, u64)> = reports
+                    .iter()
+                    .flat_map(|r| r.packed.iter())
+                    .filter(|s| s.volume == v)
+                    .map(|s| (s.range.start, s.range.end - s.range.start))
+                    .collect();
+                declared.push((*i, v, spans));
+            }
+        }
+        let mut volumes: Vec<u32> = declared.iter().map(|(_, v, _)| *v).collect();
+        volumes.sort_unstable();
+        volumes.dedup();
+        let mut held = !volumes.is_empty();
+        for &v in &volumes {
+            let path = self.plan.dir.join(&self.plan.names[v as usize]);
+            let spans: Vec<(u64, u64)> = declared
+                .iter()
+                .filter(|(_, dv, _)| *dv == v)
+                .flat_map(|(_, _, s)| s.iter().copied())
+                .collect();
+            held &= self
+                .feed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .declare_damaged(&path, spans.clone());
+            note_damaged(&self.damaged, &self.saved, self.plan, &path, &spans);
+        }
+        let volume_names: Vec<String> = volumes
+            .iter()
+            .map(|&v| self.plan.names[v as usize].to_string_lossy().into_owned())
+            .collect();
+        log_cb(
+            2,
+            &format!(
+                "Unrar: {} failed its checksum (bad bytes in {}); kept as extracted, waiting for the repair to read back only those bytes",
+                names.join(", "),
+                volume_names.join(", ")
+            ),
+        );
+        if !held {
+            // Nothing here repairs the volumes: the intact members are placed and the damage
+            // reported, as when a repair is given up.
+            self.publish_intact(is_cancelled).map_err(Step::Fallback)?;
+            return Err(Step::Fail(Failure::Damaged(format!(
+                "{} failed its checksum",
+                names.join(", ")
+            ))));
+        }
+        if let Some(cb) = self.req.on_wait {
+            cb(true);
+        }
+        let repaired = self
+            .feed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .wait_repaired(is_cancelled);
+        if let Some(cb) = self.req.on_wait {
+            cb(false);
+        }
+        if !repaired {
+            if is_cancelled() {
+                return Err(Step::Fail(Failure::Canceled));
+            }
+            self.publish_intact(is_cancelled).map_err(Step::Fallback)?;
+            return Err(Step::Fail(Failure::Damaged(
+                "the damaged volumes were not repaired".into(),
+            )));
+        }
+        {
+            let mut damaged = self.damaged.lock().unwrap_or_else(|e| e.into_inner());
+            damaged.clear();
+            save_pending_repair(&self.plan.root.join(PENDING_REPAIR), &damaged);
+        }
+        for (i, v, _) in &declared {
+            let path = self.plan.dir.join(&self.plan.names[*v as usize]);
+            let mut f = match open_repaired(&self.feed, &path) {
+                Some(Ok(f)) => f,
+                // As in `refill`: a refusal here is not damage; the progressive path extracts
+                // the repaired set.
+                Some(Err(e)) => {
+                    return Err(Step::Fallback(format!(
+                        "repaired volume {}: {e}",
+                        path.display()
+                    )))
+                }
+                None => {
+                    return Err(Step::Fallback(format!(
+                        "repaired volume {}: not on disk",
+                        path.display()
+                    )))
+                }
+            };
+            let len = f.seek(std::io::SeekFrom::End(0)).map_err(|e| {
+                Step::Fallback(format!("repaired volume {}: {e}", path.display()))
+            })?;
+            let (_, file, member) = &mut self.handles[*i];
+            let filled = file.refill_from_packed(*v, 0..len, &mut f).map_err(|e| {
+                Step::Fallback(format!("refilling from {}: {:?}", path.display(), e.kind))
+            })?;
+            let bytes: u64 = filled.applied.iter().map(|a| a.end - a.start).sum();
+            log_cb(
+                0,
+                &format!(
+                    "Unrar: repaired {} from repaired {} ({bytes} bytes read back)",
+                    String::from_utf8_lossy(&member.name),
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                ),
+            );
+        }
+        self.verify(log_cb, is_cancelled)
     }
 
     /// Polls member `i`'s verification to its verdict.

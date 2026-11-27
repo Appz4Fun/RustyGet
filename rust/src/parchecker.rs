@@ -240,6 +240,14 @@ struct ActiveStreamingSession {
     /// Every file of the set as post-processing first found it fully verified (see
     /// [`streaming_session_verified_cover`]): a later change to one ends the trust.
     cover_seal: Mutex<Option<Vec<(FileId, crate::parlive::FileStamp)>>>,
+    /// Slices whose own check failed on an article that arrived whole (a transport check that
+    /// passed on wrong bytes): direct unpack takes them (`streaming_session_take_bad_slices`)
+    /// and declares them holes, so the extraction never reads them and the refill after the
+    /// repair reads only these slices. Bounded by `LIVE_STASH_LIMIT`.
+    bad_slices: Mutex<Vec<(FileId, usize, std::time::Instant)>>,
+    /// Files whose rebuilt slices `recheck_rebuilt` is reading again right now: their slice
+    /// states are not final until it ends (see `streaming_session_ranges_good`).
+    rechecking: Mutex<HashSet<FileId>>,
     // Drop last, after the session, queue and all owned metadata. Grows with
     // the syndrome slots as damage appears (see `grow_for_damage`).
     budget: Mutex<SessionBudgetLease>,
@@ -774,6 +782,8 @@ fn build_streaming_session_with(
         rebuilt_files: Mutex::new(HashSet::new()),
         non_recoverable: !main.non_recoverable_file_ids.is_empty(),
         cover_seal: Mutex::new(None),
+        bad_slices: Mutex::new(Vec::new()),
+        rechecking: Mutex::new(HashSet::new()),
     }))
 }
 
@@ -2272,12 +2282,21 @@ fn drain_live_articles_locked(
                 .as_ref()
                 .is_some_and(|a| renamed_away(&result, a.committed));
             let parked = parked || renamed;
+            // An article that arrived (bytes, or in its file), not one that failed for good:
+            // a slice it turns Damaged failed its own check.
+            let arrived = article
+                .article
+                .as_ref()
+                .is_some_and(|a| a.bytes.is_some() || a.committed);
             drop(article);
             if parked {
                 count += 1;
                 continue;
             }
             let outcome = result?;
+            if arrived {
+                entry.note_bad_slices(&outcome.events);
+            }
             ensure_current_generation(nzb_id, entry)?;
             entry.unpause(outcome.unpause.as_ref());
             entry.note_admission_progress();
@@ -2299,6 +2318,128 @@ fn renamed_away<T>(result: &Result<T, RepairError>, committed: bool) -> bool {
         }
         _ => false,
     }
+}
+
+impl ActiveStreamingSession {
+    /// Keeps the slices `events` turned Damaged (see `bad_slices`).
+    fn note_bad_slices(&self, events: &[SliceEvent]) {
+        let mut bad = self.bad_slices.lock().unwrap_or_else(|e| e.into_inner());
+        let now = std::time::Instant::now();
+        for event in events.iter().filter(|e| e.state == SliceState::Damaged) {
+            let known = bad
+                .iter()
+                .any(|(f, s, _)| *f == event.file_id && *s == event.slice_idx);
+            if bad.len() < LIVE_STASH_LIMIT && !known {
+                bad.push((event.file_id, event.slice_idx, now));
+            }
+        }
+    }
+}
+
+/// True when live PAR of job `nzb_id` has verified every slice of file `name` that `ranges`
+/// (offset, length) touch, with the file complete and no rebuilt slice of it waiting for its
+/// second look: bytes direct unpack declared damaged there are good on disk now (repaired by
+/// live PAR, or found good after all). False when unknown (no session, no ranges).
+pub(crate) fn streaming_session_ranges_good(nzb_id: i32, name: &[u8], ranges: &[(u64, u64)]) -> bool {
+    let Some(entry) = active_streaming_session(nzb_id) else {
+        return false;
+    };
+    let Some(id) = entry.session.file_id_by_name(name) else {
+        return false;
+    };
+    if ranges.is_empty()
+        || !entry
+            .completed_sources
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&id)
+        || entry
+            .rebuilt_recheck
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|(f, _, _)| *f == id)
+        || entry
+            .rechecking
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&id)
+    {
+        return false;
+    }
+    let Ok(states) = entry.session.slice_states(&id) else {
+        return false;
+    };
+    // A slice verified and then changed on disk stays VerifiedGood in par-rs: diverged.
+    let diverged: Vec<usize> = entry
+        .session
+        .diverged_slices()
+        .into_iter()
+        .filter(|(f, _)| *f == id)
+        .map(|(_, s)| s)
+        .collect();
+    let size = entry.session.slice_size().max(1);
+    ranges.iter().all(|&(off, len)| {
+        let first = (off / size) as usize;
+        let last = (off.saturating_add(len.max(1)) - 1) / size;
+        (first..=last as usize).all(|s| {
+            states.get(s) == Some(&SliceState::VerifiedGood) && !diverged.contains(&s)
+        })
+    })
+}
+
+/// How long a slice live PAR found damaged stays so before direct unpack takes it as bad.
+const BAD_SLICE_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Byte ranges (offset, length) of file `name` of job `nzb_id` whose slice failed its own
+/// check on an article that arrived whole and is still damaged now: taken, each once. Direct
+/// unpack declares them holes (see `progressive_unpack::persistent`). Empty without a live
+/// session or such a slice; cheap then (one lock, no name lookup).
+pub(crate) fn streaming_session_take_bad_slices(nzb_id: i32, name: &[u8]) -> Vec<(u64, u64)> {
+    let Some(entry) = active_streaming_session(nzb_id) else {
+        return Vec::new();
+    };
+    if entry.bad_slices.lock().unwrap_or_else(|e| e.into_inner()).is_empty() {
+        return Vec::new();
+    }
+    let Some(id) = entry.session.file_id_by_name(name) else {
+        return Vec::new();
+    };
+    // Only once its file is complete (every byte on disk) and the damage has lasted past the
+    // grace in which par-rs checks a slice again that it counted damaged while bytes it read
+    // from the file were not final yet (seen re-verified within 4-8 s).
+    if !entry
+        .completed_sources
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&id)
+    {
+        return Vec::new();
+    }
+    let now = std::time::Instant::now();
+    let taken: Vec<usize> = {
+        let mut bad = entry.bad_slices.lock().unwrap_or_else(|e| e.into_inner());
+        let mut taken = Vec::new();
+        bad.retain(|(file, slice, at)| {
+            if *file == id && now.duration_since(*at) >= BAD_SLICE_GRACE {
+                taken.push(*slice);
+                false
+            } else {
+                true
+            }
+        });
+        taken
+    };
+    let size = entry.session.slice_size();
+    let mut ranges: Vec<(u64, u64)> = taken
+        .into_iter()
+        .filter(|&slice| {
+            matches!(entry.session.slice_state(&id, slice), Ok(SliceState::Damaged))
+        })
+        .map(|slice| (slice as u64 * size, size))
+        .collect();
+    ranges.sort_unstable();
+    ranges
 }
 
 /// Queue file `identity` of job `nzb_id` is at `path` now (completed, possibly renamed since):
@@ -2733,6 +2874,19 @@ impl ActiveStreamingSession {
     /// since is diverged, so the trusted check at repair end fails it and the set is
     /// repaired from disk instead. Callers hold the operation lock.
     fn recheck_rebuilt(&self, nzb_id: i32, id: FileId) -> Result<(), RepairError> {
+        self.rechecking
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id);
+        let result = self.recheck_rebuilt_inner(nzb_id, id);
+        self.rechecking
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
+        result
+    }
+
+    fn recheck_rebuilt_inner(&self, nzb_id: i32, id: FileId) -> Result<(), RepairError> {
         self.completed_sources
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -6126,6 +6280,13 @@ fn collect_extra_files_rec(
 ) {
     let sep = crate::paths::PATH_SEPARATOR;
     for filename in crate::fsops::list_dir_entries(directory) {
+        // Direct unpack's partial outputs and state (extracted bytes, never par2 data): a
+        // scan for misnamed volumes would read every extracted byte once more.
+        if !external_dir
+            && filename == crate::progressive_unpack::PERSISTENT_STATE_DIR.as_bytes()
+        {
+            continue;
+        }
         let full = [directory, &[sep], &filename].concat();
         if crate::fsops::directory_exists(&full, &crate::fsops::posix_stat) {
             collect_extra_files_rec(&full, external_dir, processed_files, is_parred_cb, out);

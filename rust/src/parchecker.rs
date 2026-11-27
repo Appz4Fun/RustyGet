@@ -4502,6 +4502,8 @@ pub(crate) struct LiveCover {
     pub par_name: Vec<u8>,
     /// Files of the set (every one of them verified).
     pub files: usize,
+    /// The queue ids of those files.
+    pub queue_ids: Vec<i32>,
 }
 
 /// Whether live PAR of job `nzb_id` has a complete verified state of its par2 set, so a
@@ -4515,8 +4517,9 @@ pub(crate) struct LiveCover {
 ///   none diverged after a patch, and no fold is pending;
 /// - the set has no file outside its recovery set (live PAR never checks those);
 /// - each file of the set is one of `files` (the download's completed queue files as
-///   `(queue id, name in dest_dir)`), under its par2 name, not bound to another par2 file,
-///   and on disk at its par2 length;
+///   `(queue id, name in dest_dir)`), under its par2 name, the queue file whose bytes live
+///   PAR verified for it (its binding, or no other queue file bound to it), and on disk at
+///   its par2 length;
 /// - and no file changed since the first call that found all this: that call records each
 ///   file's inode, length and modification time, later ones compare.
 ///
@@ -4563,6 +4566,7 @@ pub(crate) fn streaming_session_verified_cover(
         .clone();
     let mut stamps: Vec<(FileId, crate::parlive::FileStamp)> =
         Vec::with_capacity(entry.target_names.len());
+    let mut queue_ids = Vec::with_capacity(entry.target_names.len());
     for (queue_id, name) in files {
         let Some(id) = entry.session.file_id_by_name(name) else {
             continue; // not a file of this set, or not under its par2 name
@@ -4574,9 +4578,13 @@ pub(crate) fn streaming_session_verified_cover(
         if par_name.as_deref() != Some(name.as_slice()) {
             continue;
         }
-        if bindings.get(queue_id).is_some_and(|bound| *bound != id) {
+        let owned = match bindings.get(queue_id) {
+            Some(bound) => *bound == id,
+            None => !bindings.values().any(|bound| *bound == id),
+        };
+        if !owned {
             return Err(format!(
-                "{} holds another par2 file's bytes",
+                "{} is not the file live PAR verified under that name",
                 String::from_utf8_lossy(name)
             ));
         }
@@ -4589,6 +4597,7 @@ pub(crate) fn streaming_session_verified_cover(
             return Err(format!("{} changed length", String::from_utf8_lossy(name)));
         }
         stamps.push((id, stamp));
+        queue_ids.push(*queue_id);
     }
     if stamps.len() != entry.target_names.len() {
         return Err(format!(
@@ -4611,6 +4620,14 @@ pub(crate) fn streaming_session_verified_cover(
     Ok(LiveCover {
         par_name,
         files: entry.target_names.len(),
+        queue_ids,
+    })
+}
+
+/// Whether [`streaming_session_verified_cover`] already recorded job `nzb_id`'s files.
+pub(crate) fn streaming_session_cover_sealed(nzb_id: i32) -> bool {
+    active_streaming_session(nzb_id).is_some_and(|entry| {
+        entry.cover_seal.lock().unwrap_or_else(|e| e.into_inner()).is_some()
     })
 }
 

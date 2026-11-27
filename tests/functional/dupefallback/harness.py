@@ -12816,8 +12816,8 @@ def _livepar_rar_run(daemon, t, tag, seed, missing, corrupt=None, recovery=24):
     done = time.time()
     intact = _verify_output(t, movie, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
     log = t.read_file('nzbget.log').decode(errors='replace')
-    # The par-check's own lines: "Verifying <nzb>/<par2 set>", one per verified file
-    # ("Verifying file"/quick checks are progress, not log lines), "Repair not needed".
+    # The par-check's own lines: "Verifying <nzb>/<par2 set>" when it starts, "Repair not
+    # needed for <nzb>/<par2 set>" when it found nothing to repair.
     verify = log.count('Verifying %s/' % name) + log.count('Repair not needed for %s/' % name)
     missing_lines = len(re.findall(r'File Rel\.part\d+\.rar is missing', log))
     # Post-processing loads of the par2 index: par-rename's ("Loaded par2-file") and the
@@ -12835,8 +12835,10 @@ def scenario_liveparrarclean(daemon, t):
     par2 index once, and the statuses are nzbget's for a clean download with ParCheck=auto:
     SUCCESS, ParStatus NONE (par-check not needed), UnpackStatus SUCCESS."""
     h, intact, verify, missing, loads, end_s = _livepar_rar_run(daemon, t, 'lrc', 13710, {})
+    trusted = _grep_log(t, 'live PAR verified every file')
     ok = (h['Status'].startswith('SUCCESS') and intact and verify == 0 and missing == 0
-          and loads == 1 and h['ParStatus'] == 'NONE' and h['UnpackStatus'] == 'SUCCESS')
+          and loads == 1 and trusted == 0 and h['ParStatus'] == 'NONE'
+          and h['UnpackStatus'] == 'SUCCESS')
     return ('liveparrarclean', ok, 'status=%s par=%s unpack=%s intact=%s par_check_lines=%d '
             'missing_lines=%d par2_loads=%d end_to_history_s=%s'
             % (h['Status'], h['ParStatus'], h['UnpackStatus'], intact, verify, missing, loads, end_s))
@@ -12864,6 +12866,24 @@ def scenario_liveparrartrust(daemon, t):
             'par_check_lines=%d missing_lines=%d par2_loads=%d end_to_history_s=%s'
             % (h['Status'], h['ParStatus'], h['UnpackStatus'], intact, live, trusted, verify, missing,
                loads, end_s))
+
+
+def scenario_liveparraroff(daemon, t):
+    """The control for liveparrartrust: the same damaged RAR set with live PAR off. The
+    par-check runs and the counters see it (its "Verifying"/"Repair..." lines, the par2 index
+    and recovery volumes loaded by it besides par-rename), it repairs the set, and the
+    statuses are the same: SUCCESS, ParStatus SUCCESS, UnpackStatus SUCCESS, byte-exact."""
+    h, intact, verify, missing, loads, end_s = _livepar_rar_run(daemon, t, 'lro', 13720,
+                                                         {1: {3}, 4: {2, 6}}, corrupt=(6, 4))
+    trusted = _grep_log(t, 'live PAR verified every file')
+    repaired = _grep_log(t, 'Successfully repaired Rellro/')
+    ok = (h['Status'].startswith('SUCCESS') and intact and verify >= 1 and loads >= 2
+          and trusted == 0 and repaired >= 1 and missing == 0
+          and h['ParStatus'] == 'SUCCESS' and h['UnpackStatus'] == 'SUCCESS')
+    return ('liveparraroff', ok, 'status=%s par=%s unpack=%s intact=%s repaired=%d trusted=%d '
+            'par_check_lines=%d missing_lines=%d par2_loads=%d end_to_history_s=%s'
+            % (h['Status'], h['ParStatus'], h['UnpackStatus'], intact, repaired, trusted, verify,
+               missing, loads, end_s))
 
 
 def scenario_parinplace(daemon, t):
@@ -15534,6 +15554,7 @@ SCENARIOS = {
     'liveparheldvolume': scenario_liveparheldvolume,
     'liveparrarclean': scenario_liveparrarclean,
     'liveparrartrust': scenario_liveparrartrust,
+    'liveparraroff': scenario_liveparraroff,
     'livepartrusted': scenario_livepartrusted,
     'livepartrustedtemp': scenario_livepartrustedtemp,
     'parinplace': scenario_parinplace,
@@ -16002,6 +16023,7 @@ SCENARIO_OPTIONS = {
     'livepartrustedtemp': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=0', 'DirectWrite=no'],
     'liveparrarclean': PROD_OPTIONS + ['LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes', 'UnpackCleanupDisk=no'],
     'liveparrartrust': PROD_OPTIONS + ['LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes', 'UnpackCleanupDisk=no'],
+    'liveparraroff': PROD_OPTIONS + ['LiveParRepair=no', 'ArticleCache=256', 'DirectWrite=yes', 'UnpackCleanupDisk=no'],
     'parinplace': ['ParCheck=auto', 'LiveParRepair=no'],
     'parlesscritical': ['HealthCheck=dupe', 'DupeArticleFallback=no'],
     'parlesstwin': ['HealthCheck=dupe', 'DupeArticleFallback=no'],

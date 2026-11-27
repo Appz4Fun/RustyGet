@@ -603,3 +603,26 @@ fn verified_cover_needs_trusted_slices_and_a_current_session() {
     streaming_session_cancel(g.nzb_id);
     assert!(cover(&g).is_err());
 }
+
+/// The file under the par2 name must be the queue file whose bytes live PAR verified for it:
+/// one bound to another par2 file, or an unbound one while another queue file holds the
+/// binding (an obfuscated copy), is not covered.
+#[cfg(unix)]
+#[test]
+fn verified_cover_needs_the_file_live_par_verified() {
+    let f = fixture(0x7a75_0025, 6, 2, 2);
+    feed_all(&f);
+    let entry = active_streaming_session(f.nzb_id).unwrap();
+    let id = file_id(f.nzb_id);
+    entry.queue_bindings.lock().unwrap().insert(40, FileId([9; 16]));
+    assert!(cover(&f).unwrap_err().contains("is not the file"));
+    {
+        let mut bindings = entry.queue_bindings.lock().unwrap();
+        bindings.clear();
+        bindings.insert(41, id);
+    }
+    assert!(cover(&f).unwrap_err().contains("is not the file"));
+    let owner = [(41, b"part01.rar".to_vec())];
+    let covered = streaming_session_verified_cover(f.nzb_id, &f.dir, &owner).unwrap();
+    assert_eq!(covered.queue_ids, vec![41]);
+}

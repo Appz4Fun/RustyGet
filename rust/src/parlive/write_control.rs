@@ -60,7 +60,8 @@ impl FileStamp {
     #[cfg(not(unix))]
     pub(crate) fn of(_path: &std::path::Path) -> Option<Self> {
         None
-    }    /// The file's length in bytes.
+    }
+    /// The file's length in bytes.
     pub(crate) fn len(&self) -> u64 {
         self.len
     }

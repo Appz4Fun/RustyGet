@@ -728,6 +728,37 @@ mod host {
         host.nzb_print_message(q.ptr, crate::queuesubsys_host::MK_INFO, &crate::releasename::log_name(&msg));
     }
 
+    /// A held copy finished its direct rename. Unheld, the copy would now be
+    /// resumed and all its par2 files paused (GroupResume, GroupPauseAllPars);
+    /// held, it stays paused and its release gets that outcome instead: the
+    /// files to resume become every file but the par2 files.
+    /// Returns false when the copy is not held.
+    pub(crate) fn direct_rename_done_held_host(host: &QueueSubsysHost, ptr: NzbRef) -> bool {
+        if !is_held(host, ptr) {
+            return false;
+        }
+        // held as it was added: its release resumes it as a fresh copy
+        if host.nzb_get_param(ptr, HELD_FILES_PARAM).is_none() {
+            return true;
+        }
+        let mut resume = Vec::new();
+        for i in 0..host.nzb_file_len(ptr) {
+            let f = host.file_snap(host.nzb_file_at(ptr, i));
+            if f.deleted {
+                continue;
+            }
+            if !f.paused {
+                host.file_set_int(f.ptr, crate::queuesubsys_host::FILE_INT_PAUSED, 1);
+            }
+            if !f.par_file {
+                resume.push(f.id);
+            }
+        }
+        host.nzb_set_param(ptr, HELD_FILES_PARAM, Some(held_files_param(&resume).as_bytes()));
+        host.nzb_set_int(ptr, crate::queuesubsys_host::NZB_INT_CHANGED, 1);
+        true
+    }
+
     /// The share of a copy's tried articles that arrived, as kept on a parked donor.
     fn parked_alive_text(host: &QueueSubsysHost, nzb: &NzbSnap) -> String {
         let alive = host

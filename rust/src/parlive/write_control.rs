@@ -61,6 +61,10 @@ impl FileStamp {
     pub(crate) fn of(_path: &std::path::Path) -> Option<Self> {
         None
     }
+    /// The file's length in bytes.
+    pub(crate) fn len(&self) -> u64 {
+        self.len
+    }
 }
 /// A leaf name whose identity a case-insensitive comparison proves on every supported file
 /// system: printable ASCII without separators or reserved characters, no trailing dot or

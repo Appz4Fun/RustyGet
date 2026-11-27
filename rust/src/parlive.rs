@@ -336,7 +336,7 @@ fn reserve_control_inner(
 
 mod write_control;
 pub(crate) use write_control::{
-    RepairWriteLease, WriteBlocked, WriteCoordinator, WriterIdentity, WriterTarget,
+    FileStamp, RepairWriteLease, WriteBlocked, WriteCoordinator, WriterIdentity, WriterTarget,
 };
 
 #[cfg(all(test, unix))]

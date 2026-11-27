@@ -225,8 +225,19 @@ pub fn execute_all(
     )
 }
 
-/// The MD5 of a file's first 16 KiB from the queue's `hash16k` (32 hex digits, as the
-/// article analyzer stores it). None for anything else.
+/// A queue file's 16k hash as the download stores it (`FileStr::Hash16k`, the article
+/// analyzer's output): printed the way nzbget prints an MD5, its bytes last to first in
+/// upper-case hex (`renameanalyzer::print`). Returns the digest in its own byte order, the
+/// order par2 file descriptions and `par_rs` use. Before, the printed text was read as if it
+/// were in digest order, so every known hash was reversed: par-rename reported every file
+/// it had been told about as missing and asked for a par-check (6790 audit, finding 3).
+pub fn parse_printed_hash16k(printed: &[u8]) -> Option<[u8; 16]> {
+    let mut hash = parse_hash16k(printed)?;
+    hash.reverse();
+    Some(hash)
+}
+
+/// 32 hex digits read as a 16-byte digest in the order written. None for anything else.
 pub fn parse_hash16k(hex: &[u8]) -> Option<[u8; 16]> {
     if hex.len() != 32 {
         return None;
@@ -316,6 +327,21 @@ pub fn execute_all_known(
 mod tests {
     use super::*;
     use md5::{Digest, Md5};
+
+    /// The analyzer prints a digest backwards; read back, it is the digest a par2 file
+    /// description holds.
+    #[test]
+    fn printed_hash16k_reads_back_in_digest_order() {
+        let bytes: Vec<u8> = (0..20_000u32).map(|i| (i * 7 + 3) as u8).collect();
+        let digest: [u8; 16] = Md5::digest(&bytes[..16384]).into();
+        let mut analyzer = crate::renameanalyzer::Analyzer::default();
+        analyzer.append(&bytes[..9000]);
+        analyzer.append(&bytes[9000..]);
+        let printed = analyzer.finish();
+        assert_eq!(parse_printed_hash16k(&printed[..32]), Some(digest));
+        assert_ne!(parse_hash16k(&printed[..32]), Some(digest));
+        assert_eq!(parse_printed_hash16k(b"not a hash"), None);
+    }
 
     #[test]
     fn splitted_fragments() {

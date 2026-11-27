@@ -11667,7 +11667,9 @@ impl CrossPackRepairSession {
     ///
     /// Direct unpack goes on reading the stand-in (its scratch file stays until direct unpack
     /// forgets its holds): its headers may be laid out otherwise. Written under a temporary
-    /// name and renamed into place, so the volume is either absent or whole. `Ok(true)` when
+    /// name and linked into place, so the volume is either absent or whole, and never over a
+    /// file that reached the disk meanwhile (a live repair, say). Refused for a sibling whose
+    /// tail holds more than the quick-open copy (a recovery record). `Ok(true)` when
     /// live PAR took it in, `Ok(false)` when it could not (the par-check verifies it then).
     fn write_live_volume(&self, d: &DeadFill) -> Result<bool, String> {
         use std::io::{Read, Write};
@@ -11680,7 +11682,7 @@ impl CrossPackRepairSession {
             return Err("its part is not the size of the sibling's".into());
         }
         let target = crate::fsops::path(&d.volume_path).to_path_buf();
-        if std::fs::symlink_metadata(&target).is_ok_and(|m| !m.is_file() || m.len() > 0) {
+        if std::fs::symlink_metadata(&target).is_ok() {
             return Err("something of it is on disk already".into());
         }
         let dir = target.parent().ok_or("the volume has no folder")?;
@@ -11714,12 +11716,35 @@ impl CrossPackRepairSession {
             hasher.update(&buf[..n]);
         }
         let (head, tail) = self.faithful_volume_frame(d, hasher.finalize())?;
-        // The same barrier as every donor write, held through the rename and live PAR's
+        // Nothing arrived of the volume to check the rebuilt frame against: only a tail that
+        // holds nothing but the quick-open copy (resealed for this part) is rebuilt exactly.
+        // A recovery record there belongs to the sibling.
+        if !crate::deadvolume::rar5_tail_is_rebuilt(&tail) {
+            return Err("the sibling's tail holds records that cannot be rebuilt".into());
+        }
+        // The same barrier as every donor write, held through the link and live PAR's
         // reading: no write to a file live PAR has sealed, none during a live repair (one
         // running is waited for: this is the one chance to hand the volume to live PAR).
         let _permit = context
             .permit()
             .map_err(|blocked| format!("the volume is not writable now ({blocked:?})"))?;
+        // A live repair waited for may have rebuilt the volume meanwhile: it stays.
+        if std::fs::symlink_metadata(&target).is_ok() {
+            return Err("the volume reached the disk meanwhile".into());
+        }
+        // Leftovers of an earlier write of this volume (a crash) go first.
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            let mut suffix = std::ffi::OsString::from("-");
+            suffix.push(leaf);
+            suffix.push(".tmp");
+            let suffix = suffix.to_string_lossy().into_owned();
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with(".rustyget-dead-") && name.ends_with(&suffix) {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
         let mut temp_name = std::ffi::OsString::from(format!(
             ".rustyget-dead-{}-{}-",
             std::process::id(),
@@ -11752,15 +11777,16 @@ impl CrossPackRepairSession {
             return Err(e.to_string());
         }
         // Nothing of the volume ever reached the disk, so live PAR knew nothing of it: the
-        // new file is new data to it, not a changed source.
-        if let Err(e) = std::fs::rename(&temp, &target) {
-            let _ = std::fs::remove_file(&temp);
-            return Err(e.to_string());
-        }
+        // new file is new data to it, not a changed source. Linked into place, never over a
+        // file that appeared after all.
+        let linked = std::fs::hard_link(&temp, &target);
+        let _ = std::fs::remove_file(&temp);
+        linked.map_err(|e| e.to_string())?;
         if let Ok(folder) = std::fs::File::open(dir) {
             let _ = folder.sync_all();
         }
-        Ok(context.range_replaced(0, total))
+        // `range_replaced` also says yes when no session is left to ask.
+        Ok(context.range_replaced(0, total) && context.watched_by_live_par())
     }
 
     /// The scratch file a dead volume's borrowed bytes are written to.

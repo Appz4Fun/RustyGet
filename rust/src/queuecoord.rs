@@ -2203,9 +2203,9 @@ fn backup_still_unclassified(
 /// backup not classified yet (the `lending_possible` argument of [`backup_still_unclassified`]
 /// on the dead path): live borrowing is on (see [`live_borrowing`]), direct unpack of the
 /// download runs (`extracting`), the download itself can be borrowed into, and TwinCheck is
-/// checking the pair right now (`labelling`), so a label may follow. Without a running
-/// extraction a dead download has nothing to keep, and without a check under way no label
-/// comes: it fails over at once.
+/// reading the backup or the download, or just stored its read (`labelling`), so a label
+/// may follow. Without a running extraction a dead download has nothing to keep, and without
+/// a check under way no label comes: it fails over at once.
 #[cfg(unix)]
 fn dead_run_may_be_borrowed(
     live_borrowing: bool,
@@ -6812,12 +6812,15 @@ impl NzbgetRsQueueCoordinator {
                 .map_or(0, |d| d.as_secs() as i64);
             //
             // While direct unpack runs and live borrowing could keep it, an unlabelled backup
-            // TwinCheck is checking right now waits for its label as well (within the classify
+            // whose TwinCheck label is under way (a job for it or the download runs, or stored
+            // its read a few seconds ago) waits for that label as well (within the classify
             // grace): a dead volume fails its first 40 articles in a row within a second at line
-            // speed, while TwinCheck still reads (`container` a second later, which lends), and
-            // failing over then threw the extraction and every downloaded article away to fetch
-            // the same video again from the backup (prybar 4 GiB alt, 6 of 12 runs: 1.1 GB
-            // downloaded twice). A backup no check will label fails over at once as before.
+            // speed, while TwinCheck still reads. Its `container` label (the video inside not
+            // verified yet) a second later lets the live borrow start, which checks the video
+            // and keeps the download (`alt_covers_lost_articles`). Failing over first threw the
+            // extraction and every downloaded article away to fetch the same video again from
+            // the backup (prybar 4 GiB alt, 6 of 12 runs: 1.1 GB downloaded twice). A backup no
+            // check will label fails over at once as before.
             if !hopeless
                 && backup_still_unclassified(
                     backup_kind,
@@ -6829,8 +6832,8 @@ impl NzbgetRsQueueCoordinator {
                         live_borrowing(opts),
                         nzb.direct_unpack_status == DirectUnpackStatus::Running,
                         own_kind,
-                        crate::twin::twin_check_running(backup_nzb.id)
-                            || crate::twin::twin_check_running(nzb.id),
+                        crate::twin::twin_label_pending(backup_nzb.id)
+                            || crate::twin::twin_label_pending(nzb.id),
                     ),
                 )
             {

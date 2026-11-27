@@ -1054,16 +1054,25 @@ struct TwinCoordState {
     /// Sampling attempts that read too little, by `(copy, primary)`: kept
     /// apart from the par2 index attempts so neither uses up the other.
     sample_attempts: std::collections::BTreeMap<(i32, i32), i32>,
+    /// When a job that stored what it read ended, by copy: the label it lets the next
+    /// service pass set follows within a second or so (see [`twin_label_pending`]).
+    stored_at: std::collections::BTreeMap<i32, std::time::Instant>,
 }
 
-/// True while a TwinCheck job runs for copy `nzb_id`: its label (`twin`, `alt`,
-/// `container`, ...) may follow within seconds.
-pub(crate) fn twin_check_running(nzb_id: i32) -> bool {
-    twin_coord()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .checking
-        .contains(&nzb_id)
+/// How long after a TwinCheck job stored what it read a label it allows is still expected:
+/// the job wakes the service, whose next pass (nudged: every second) sets it.
+const LABEL_FOLLOWS: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// True while a TwinCheck job runs for copy `nzb_id`, or for a few seconds after one stored
+/// what it read ([`LABEL_FOLLOWS`]): a label (`twin`, `alt`, `container`, ...) for it or its
+/// copies may follow within seconds.
+pub(crate) fn twin_label_pending(nzb_id: i32) -> bool {
+    let guard = twin_coord().lock().unwrap_or_else(|e| e.into_inner());
+    guard.checking.contains(&nzb_id)
+        || guard
+            .stored_at
+            .get(&nzb_id)
+            .is_some_and(|at| at.elapsed() < LABEL_FOLLOWS)
 }
 
 /// Counts one sampling attempt of copy `nzb_id` against `primary_id` that
@@ -1849,6 +1858,11 @@ fn run_twin_job(token: usize, qdir: &[u8]) {
                 let mut guard = twin_coord().lock().unwrap_or_else(|e| e.into_inner());
                 guard.jobs.remove(&self.token);
                 guard.checking.remove(&self.nzb_id);
+                if self.stored {
+                    let now = std::time::Instant::now();
+                    guard.stored_at.retain(|_, at| now.duration_since(*at) < LABEL_FOLLOWS);
+                    guard.stored_at.insert(self.nzb_id, now);
+                }
                 TWIN_JOB_COUNT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                 if !guard.stopping && self.stored && guard.attached {
                     TWIN_NUDGED.store(true, std::sync::atomic::Ordering::SeqCst);

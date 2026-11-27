@@ -193,6 +193,15 @@ impl Drop for ActiveStreamingSession {
         // gate. Only installed/reported cohorts produce a disposal footer.
         if self.metrics.report_sequence.load(Ordering::Acquire) != 0 {
             let nzb_id = self.metrics.report_nzb_id.load(Ordering::Relaxed);
+            // bytes read back from disk (par-rs reads, RustyGet replays, back-fill) go
+            // into the job's repair record
+            let io = self.session.io_stats();
+            crate::repairsummary::note_read_back(
+                nzb_id,
+                io.source_bytes_read
+                    .saturating_add(self.catchup_source_bytes.load(Ordering::Relaxed))
+                    .saturating_add(io.backfill_bytes_read),
+            );
             self.emit_live_metrics(nzb_id, "disposed");
             if let Some(summary) = self.refusal_summary() {
                 let message = format!("Live PAR (job {nzb_id}) refusals: {summary}");

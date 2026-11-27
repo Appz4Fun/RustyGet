@@ -2960,6 +2960,7 @@ impl ActiveStreamingSession {
         self.metrics
             .rebuilt_ahead_slices
             .fetch_add(rebuilt.len() as u64, Ordering::Relaxed);
+        crate::repairsummary::note_live(nzb_id, rebuilt.len(), 0, 0);
         let message = format!(
             "Live PAR (job {nzb_id}): rebuilt {} damaged slice(s) ({:.1} MB) ahead while downloading",
             rebuilt.len(),

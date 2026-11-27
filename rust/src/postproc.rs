@@ -140,6 +140,8 @@ pub trait ParCheckerHooks {
         Vec::new()
     }
     fn stat_dupe_sources(&self, _sources: &[ParDupeSource]) {}
+    /// Par-repair rebuilt `repaired` slices with `available` recovery blocks at hand.
+    fn note_repaired(&self, _repaired: u64, _available: u64) {}
     fn request_twin_index(&self) -> Vec<u8> {
         Vec::new()
     }
@@ -638,6 +640,10 @@ impl NzbgetRsParChecker {
                 }
                 self.stage.store(PAR_STAGE_REPAIRING, Ordering::Release);
                 hooks.update_progress();
+                let (to_repair, available) = {
+                    let r = repairer.as_ref().expect("repairer initialized");
+                    (r.missing_block_count() as u64, r.recovery_block_count() as u64)
+                };
 
                 res = self.process_repairer(
                     repairer.as_mut().expect("repairer initialized"),
@@ -653,6 +659,7 @@ impl NzbgetRsParChecker {
                     );
                     status = ParCheckerStatus::Repaired;
                     hooks.stat_dupe_sources(&dupe_sources);
+                    hooks.note_repaired(to_repair, available);
                     repairer
                         .as_ref()
                         .expect("repairer initialized")
@@ -3879,6 +3886,8 @@ pub(crate) fn direct_unpack_try_live_par_repair(
         message.extend_from_slice(&nzb_name);
         let kind = match outcome {
             Ok((report, released)) => {
+                let available = crate::parchecker::streaming_session_status(nzb_id).map_or(0, |s| s.ready_recovery);
+                crate::repairsummary::note_live(nzb_id, report.repaired_slices.len(), report.recovery_used, available.max(report.recovery_used));
                 message.extend_from_slice(format!(": repaired {} block(s) with {} recovery block(s) in {:.1} s while downloading, {} paused volume(s) released", report.repaired_slices.len(), report.recovery_used, started.elapsed().as_secs_f64(), released).as_bytes());
                 MK_INFO
             }
@@ -4198,6 +4207,8 @@ fn live_par_repair_at_download_end(
             let kind = match outcome {
                 Ok((report, files)) => {
                     running.ok = true;
+                    let available = crate::parchecker::streaming_session_status(nzb_id).map_or(0, |s| s.ready_recovery);
+                    crate::repairsummary::note_live(nzb_id, report.repaired_slices.len(), report.recovery_used, available.max(report.recovery_used));
                     message.extend_from_slice(format!(": repaired {} block(s) with {} recovery block(s) in {:.1} s as the download ended, {} file(s) verified; no batch repair needed", report.repaired_slices.len(), report.recovery_used, started.elapsed().as_secs_f64(), files).as_bytes());
                     MK_INFO
                 }
@@ -4440,6 +4451,8 @@ pub(crate) fn live_par_time_settle(
         host.nzb_set_int(nzb_ptr, NZB_INT_LIVE_PAR_SEC, live);
         host.nzb_set_int(nzb_ptr, NZB_INT_REPAIR_SEC, repair);
     }
+    // after the times: the repair record carries the settled repair time
+    crate::repairsummary::settle(host, nzb_ptr, keep);
 }
 
 /// Queue checkpoint: moves the whole seconds of a queued job's live PAR time into its
@@ -4461,12 +4474,14 @@ pub(crate) fn live_par_time_checkpoint(
         host.nzb_set_int(nzb_ptr, NZB_INT_LIVE_PAR_SEC, live);
         host.nzb_set_int(nzb_ptr, NZB_INT_REPAIR_SEC, repair);
     }
+    crate::repairsummary::checkpoint(host, nzb_ptr);
 }
 
 /// Drops job `nzb_id`'s unsettled live PAR time: live work that ended after the job
 /// reached history, or a job that merge/split removed, belongs to no job's times.
 pub(crate) fn live_par_time_discard(nzb_id: i32) {
     let _ = crate::parchecker::streaming_session_take_par_secs(nzb_id);
+    crate::repairsummary::discard(nzb_id);
 }
 
 /// Borrowed dead volumes of downloads whose direct unpack ended without success, by full

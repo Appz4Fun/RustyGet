@@ -192,7 +192,7 @@ var History = (new function($)
 		Util.show($HistoryTabBadgeEmpty, history.length === 0 && UISettings.miniTheme);
 	}
 
-	var SEARCH_FIELDS = ['name', 'status', 'priority', 'category', 'age', 'size', 'time'];
+	var SEARCH_FIELDS = ['name', 'status', 'priority', 'category', 'age', 'size', 'time', 'repair'];
 
 	function redraw_table()
 	{
@@ -211,6 +211,10 @@ var History = (new function($)
 			hist.time = Util.formatDateTime(hist.HistoryTime + UISettings.timeZoneCorrection*60*60);
 			hist.category = kind !== 'DUP' ? hist.Category : '';
 			hist.dupe = DownloadsUI.buildDupeText(hist.DupeKey, hist.DupeScore, hist.DupeMode);
+			// search "repair:live", "repair:twin" or "repaired>0" (slices plus borrowed articles)
+			var repairRecord = HistoryUI.repairRecord(hist);
+			hist.repair = repairRecord ? repairRecord.method.replace(/\+/g, ' ') + ' ' + HistoryUI.repairText(repairRecord) : '';
+			hist.repaired = repairRecord ? repairRecord.slices + repairRecord.borrowed : 0;
 			var age_sec = hist.MinPostTime > 0 ? new Date().getTime() / 1000 - (hist.MinPostTime + UISettings.timeZoneCorrection*60*60) : 0;
 			hist.age = hist.MinPostTime > 0 ? Util.formatAge(hist.MinPostTime + UISettings.timeZoneCorrection*60*60) : '';
 			hist.agem = Util.round0(age_sec / 60);
@@ -236,6 +240,7 @@ var History = (new function($)
 		var hist = item.data;
 
 		var status = HistoryUI.buildStatus(hist);
+		var repair = hist.Kind === 'NZB' ? HistoryUI.buildRepairBadge(hist) : '';
 
 		var name = '<a href="#" data-nzbid="' + hist.ID + '">' + Util.textToHtml(Util.formatNZBName(hist.Name)) + '</a>';
 		name += DownloadsUI.buildEncryptedLabel(hist.Kind === 'NZB' ? hist.Parameters : []);
@@ -262,12 +267,12 @@ var History = (new function($)
 		{
 			status = '<div data-nzbid="' + hist.NZBID + '">' + status + '</div>';
 			category = '<div data-nzbid="' + hist.NZBID + '"' +  (hist.Kind === 'DUP' ? ' class="dropdown-disabled"' : '') + '>' + category + '</div>';
-			item.fields = ['<div class="check img-check"></div>', status, item.data.time, name + dupe + dupeScore + backup, category, item.data.age, item.data.size];
+			item.fields = ['<div class="check img-check"></div>', status, item.data.time, name + dupe + dupeScore + repair + backup, category, item.data.age, item.data.size];
 		}
 		else
 		{
 			var info = '<div class="check img-check"></div><span class="row-title">' + name + '</span>' + dupe + dupeScore +
-				' ' + status + backup + ' <span class="label">' + item.data.time + '</span>';
+				' ' + status + repair + backup + ' <span class="label">' + item.data.time + '</span>';
 			if (category)
 			{
 				info += ' <span class="label label-status text-uppercase">' + category + '</span>';
@@ -779,6 +784,158 @@ var HistoryUI = (new function($)
 			$('#ConfirmDialog_Text').html(html);
 		}
 	}
+
+	// The repair record the daemon keeps in the RepairStats parameter (see
+	// rust/src/repairsummary.rs): how much was repaired, and how. Null for
+	// entries that finished before it existed, or that never reached history.
+	this.repairRecord = function(hist)
+	{
+		var value = hist.Kind === 'NZB' ? DownloadsUI.parameterValue(hist.Parameters, 'RepairStats') : null;
+		if (!value)
+		{
+			return null;
+		}
+		var r = { live: [0, 0, 0], par: [0, 0, 0], readback: 0, twin: 0, alt: 0, unlabelled: 0, payload: 0,
+			faildata: 0, failpar: 0, sec: 0, method: '' };
+		String(value).split(';').forEach(function(pair)
+		{
+			var eq = pair.indexOf('=');
+			if (eq < 0) return;
+			var key = pair.substring(0, eq).trim(), val = pair.substring(eq + 1).trim();
+			var num = function(v) { var n = parseInt(v, 10); return isFinite(n) ? n : 0; };
+			if (key === 'live' || key === 'par') r[key] = val.split('/').concat([0, 0, 0]).slice(0, 3).map(num);
+			else if (key === 'method') r.method = val;
+			else if (r.hasOwnProperty(key) && key !== 'live' && key !== 'par') r[key] = num(val);
+		});
+		if (!r.method)
+		{
+			return null; // still queued: not settled yet
+		}
+		// only the names the daemon writes; anything else is dropped
+		var known = ['live', 'par', 'twin', 'alt', 'payload', 'unlabelled'];
+		if (/^(clean|par2only|unrepaired)$/.test(r.method))
+		{
+			r.methods = [];
+		}
+		else
+		{
+			r.methods = r.method.split('+').map(function(m) { return m.trim(); }).filter(function(m, i, all) {
+				return known.indexOf(m) > -1 && all.indexOf(m) === i;
+			});
+			if (!r.methods.length) return null;
+			r.method = r.methods.join('+');
+		}
+		r.slices = r.live[0] + r.par[0];
+		r.borrowed = Math.max(0, r.twin) + Math.max(0, r.alt) + Math.max(0, r.unlabelled) + Math.max(0, r.payload);
+		return r;
+	};
+
+	function repairKind(r)
+	{
+		if (r.method === 'clean' || r.method === 'par2only') return 'none';
+		if (r.method === 'unrepaired') return 'failed';
+		if (r.methods.length > 1) return 'mixed';
+		return r.methods[0] === 'live' ? 'live' : r.methods[0] === 'par' ? 'par' : 'borrow';
+	}
+
+	function borrowSource(m)
+	{
+		return I18n.translate(m === 'twin' ? 'repair_from_twin' : m === 'alt' ? 'repair_from_alt' :
+			m === 'payload' ? 'repair_from_payload' : 'repair_from_unlabelled');
+	}
+
+	// One line for the overview: what happened and how much.
+	this.repairText = function(r)
+	{
+		switch (r.method)
+		{
+			case 'clean': return I18n.translate('repair_not_needed');
+			case 'par2only': return I18n.translate('repair_nothing');
+			case 'unrepaired': return I18n.translate('repair_not_repaired');
+		}
+		if (r.methods.length > 1)
+		{
+			var names = r.methods.map(function(m) { return I18n.translate('repair_short_' + m); }).join(' + ');
+			var amounts = [];
+			if (r.slices > 0) amounts.push(I18n.translate('repair_slices', String(r.slices)));
+			if (r.borrowed > 0) amounts.push(I18n.translate('repair_articles', String(r.borrowed)));
+			return I18n.translate('repair_mixed', names) + ' · ' + amounts.join(', ');
+		}
+		var m = r.methods[0];
+		if (m === 'live') return I18n.translate('repair_live', String(r.live[0]));
+		if (m === 'par') return I18n.translate('repair_par', String(r.par[0]));
+		var count = m === 'twin' ? r.twin : m === 'alt' ? r.alt : m === 'payload' ? r.payload : r.unlabelled;
+		return I18n.translate('repair_borrowed', String(count), borrowSource(m));
+	};
+
+	// The overview badge; empty for entries without a repair record.
+	this.buildRepairBadge = function(hist)
+	{
+		var r = HistoryUI.repairRecord(hist);
+		if (!r)
+		{
+			return '';
+		}
+		var kind = repairKind(r);
+		var title = r.method === 'par2only' ? I18n.translate('repair_nothing_title') : HistoryUI.repairText(r);
+		return ' <span class="label repair-badge repair-badge--' + kind + '" title="' + Util.textToAttr(title) + '">' +
+			Util.textToHtml(HistoryUI.repairText(r)) + '</span>';
+	};
+
+	function bar(used, available)
+	{
+		if (!(available > 0))
+		{
+			return '';
+		}
+		var pct = Math.max(0, Math.min(100, Math.round(used * 100 / available)));
+		return '<div class="repair-bar" role="img" aria-label="' + Util.textToAttr(I18n.translate('repair_blocks', String(used), String(available))) +
+			'"><div class="repair-bar__fill" style="width:' + pct + '%"></div></div>';
+	}
+
+	function mb(bytes)
+	{
+		return Util.formatSizeMB(Math.floor(bytes / 1048576), bytes % 4294967296);
+	}
+
+	// The Repair section of the details panel.
+	this.buildRepairSection = function(hist)
+	{
+		var r = HistoryUI.repairRecord(hist);
+		if (!r)
+		{
+			return '';
+		}
+		var rows = [];
+		var row = function(label, value, extra)
+		{
+			rows.push('<div class="repair-row"><span class="repair-row__label">' + Util.textToHtml(label) + '</span>' +
+				'<span class="repair-row__value">' + Util.textToHtml(value) + '</span>' + (extra || '') + '</div>');
+		};
+		row(I18n.translate('repair_damaged'), I18n.translate('repair_damaged_value', mb(r.faildata), mb(r.failpar)));
+		if (r.live[0] > 0)
+		{
+			row(I18n.translate('repair_how_live'), I18n.translate('repair_slices', String(r.live[0])) +
+				(r.live[2] > 0 ? ' · ' + I18n.translate('repair_blocks', String(r.live[1]), String(r.live[2])) : ''), bar(r.live[1], r.live[2]));
+		}
+		if (r.par[0] > 0)
+		{
+			row(I18n.translate('repair_how_par'), I18n.translate('repair_slices', String(r.par[0])) +
+				(r.par[2] > 0 ? ' · ' + I18n.translate('repair_blocks', String(r.par[0]), String(r.par[2])) : ''), bar(r.par[0], r.par[2]));
+		}
+		var donors = ['twin', 'alt', 'payload', 'unlabelled'].filter(function(m) { return r[m] > 0; });
+		if (donors.length)
+		{
+			row(I18n.translate('repair_borrowed_label'), donors.map(function(m) {
+				return I18n.translate('repair_articles', String(r[m])) + ' ' + borrowSource(m);
+			}).join(' · '));
+		}
+		row(I18n.translate('stat_repair_time'), Util.formatTimeHMS(r.sec));
+		row(I18n.translate('repair_readback'), mb(r.readback));
+		return '<div class="repair-head"><span class="repair-title">' + Util.textToHtml(I18n.translate('repair_title')) + '</span>' +
+			HistoryUI.buildRepairBadge(hist) + '</div>' + rows.join('');
+	};
+
 }(jQuery));
 
 /*** HISTORY ACTION MENU *************************************************************************/

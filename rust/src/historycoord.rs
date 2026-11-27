@@ -2133,6 +2133,7 @@ mod native {
             self.nzb_set_int(job, NZB_INT_DUPE_RECOVERED_HOLES, 0);
             self.nzb_set_param(job, crate::queuecoord::PAR_ARTICLES_PARAM, None);
             self.nzb_set_param(job, crate::queuecoord::PAR_FILES_PARAM, None);
+            self.nzb_set_param(job, crate::repairsummary::PARAM, None);
             self.nzb_set_int(job, NZB_INT_DUPE_PAR_DEFER_STATE, DP_NONE);
             self.nzb_set_int(job, NZB_INT_DUPE_NO_PAR_NOTED, 0);
             self.nzb_redownload_replace_files(job, src_nzb_ptr);

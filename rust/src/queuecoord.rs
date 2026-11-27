@@ -4426,6 +4426,12 @@ impl NzbgetRsQueueCoordinator {
                     if file.par_file {
                         note_dupe_par_article(host, nzb.ptr, file.id, true);
                     }
+                    let donor = crate::repairsummary::find_item(host, dq_ptr, donor_id);
+                    crate::repairsummary::note_borrow(
+                        nzb.id,
+                        donor_id,
+                        crate::repairsummary::donor_label(host, donor),
+                    );
                     file.dupe_recovered_articles = next_file_rec;
                     nzb.dupe_recovered_articles = next_nzb_rec;
                     host.file_set_int(
@@ -5311,6 +5317,9 @@ impl NzbgetRsQueueCoordinator {
         // a borrowed par2 article taken back: it no longer counts as borrowed
         if file.par_file && file.dupe_recovered_articles < par_recovered_before {
             note_dupe_par_article(host, nzb.ptr, file.id, false);
+        }
+        if file.dupe_recovered_articles < par_recovered_before {
+            crate::repairsummary::note_unborrow(nzb.id, art.dupe_donor_id);
         }
         host.file_set_int(
             file.ptr,

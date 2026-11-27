@@ -6041,5 +6041,101 @@
   "fleet_state_history_backup": {
     "message": "backup in history",
     "description": "A copy waiting in History as a backup (DELETED/DUPE): failover and donor search take it."
+  },
+  "repair_title": {
+    "message": "Repair"
+  },
+  "repair_not_needed": {
+    "message": "Not needed",
+    "description": "History repair badge: no article failed, so nothing needed repair."
+  },
+  "repair_nothing": {
+    "message": "Nothing to repair",
+    "description": "History repair badge: articles failed only in par2 recovery files; no data needed repair."
+  },
+  "repair_nothing_title": {
+    "message": "Articles failed only in par2 recovery files: the data files were complete."
+  },
+  "repair_not_repaired": {
+    "message": "Not repaired",
+    "description": "History repair badge: data files had failed articles and nothing repaired them."
+  },
+  "repair_live": {
+    "message": "Repaired live · $1 slices",
+    "description": "$1: par2 slices repaired by live PAR while downloading."
+  },
+  "repair_par": {
+    "message": "Repaired after download · $1 slices",
+    "description": "$1: par2 slices rebuilt by par-repair after the download."
+  },
+  "repair_borrowed": {
+    "message": "Borrowed $1 articles $2",
+    "description": "$1: articles borrowed from duplicates; $2: where from, e.g. (twin)."
+  },
+  "repair_mixed": {
+    "message": "Repaired: $1",
+    "description": "$1: the ways used, joined by +."
+  },
+  "repair_slices": {
+    "message": "$1 slices"
+  },
+  "repair_articles": {
+    "message": "$1 articles"
+  },
+  "repair_blocks": {
+    "message": "$1 of $2 recovery blocks used"
+  },
+  "repair_how_live": {
+    "message": "Live PAR while downloading"
+  },
+  "repair_how_par": {
+    "message": "Par-repair after download"
+  },
+  "repair_from_twin": {
+    "message": "(twin)",
+    "description": "A twin: the exact same post uploaded again."
+  },
+  "repair_from_alt": {
+    "message": "(alt)",
+    "description": "An alt: the same video in another container (re-RAR)."
+  },
+  "repair_from_payload": {
+    "message": "(video bytes from a twin or alt)",
+    "description": "Matched by the bytes of the video file itself."
+  },
+  "repair_from_unlabelled": {
+    "message": "(unlabelled copy)",
+    "description": "A duplicate that TwinCheck has not labelled twin or alt."
+  },
+  "repair_borrowed_label": {
+    "message": "Borrowed from duplicates"
+  },
+  "repair_damaged": {
+    "message": "Failed articles"
+  },
+  "repair_damaged_value": {
+    "message": "$1 in data files · $2 in par2 files"
+  },
+  "repair_readback": {
+    "message": "Read back from disk",
+    "description": "Bytes live PAR read back from disk instead of from memory."
+  },
+  "repair_short_live": {
+    "message": "live PAR"
+  },
+  "repair_short_par": {
+    "message": "par-repair"
+  },
+  "repair_short_twin": {
+    "message": "twin"
+  },
+  "repair_short_alt": {
+    "message": "alt"
+  },
+  "repair_short_payload": {
+    "message": "video bytes"
+  },
+  "repair_short_unlabelled": {
+    "message": "unlabelled copy"
   }
 }

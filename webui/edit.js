@@ -2216,6 +2216,7 @@ var HistoryEditDialog = (new function($)
 		Util.show($('#HistoryEdit_DupeBackup').closest('.control-group'), hist.Kind === 'NZB');
 		$('#HistoryEdit_DupeMode').closest('.control-group').toggleClass('last-group', hist.Kind !== 'NZB');
 
+		$('#HistoryEdit_Repair').html(hist.Kind === 'NZB' ? HistoryUI.buildRepairSection(hist) : '');
 		$('#HistoryEdit_Fleet').html(hist.Kind === 'NZB' ? DetailsPanel.fleet(hist, 'history') : '');
 		Util.show('#HistoryEdit_PathGroup, #HistoryEdit_Summary, #HistoryEdit_Fleet', hist.Kind === 'NZB');
 		Util.show('#HistoryEdit_CategoryGroup', hist.Kind !== 'DUP');

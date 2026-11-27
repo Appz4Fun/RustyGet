@@ -492,9 +492,10 @@ pub(crate) fn move_file_no_overwrite_exdev(
 }
 
 /// Test hook: `RUSTYGET_TEST_MOVE_COPY_DELAY_MS` makes every cross-device copy of a
-/// moved file take that much longer, as a copy of gigabytes onto another disk does
+/// moved file take that much longer (after its first chunk, so a partial copy is on disk
+/// meanwhile), as a copy of gigabytes onto another disk does
 /// (6790: a bulk recategorize copied completed files for about 4 minutes). The
-/// recatmoveslow scenario sets it; unset, it costs one load.
+/// recatmoveslow and recatmovecrash scenarios set it; unset, it costs one load.
 pub(crate) fn test_move_copy_delay() {
     static DELAY_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     let ms = *DELAY_MS.get_or_init(|| {
@@ -513,7 +514,6 @@ pub(crate) fn test_move_copy_delay() {
 /// takes over the permissions. On failure the copy is removed; the source stays.
 pub(crate) fn copy_file_exclusive(src_filename: &CStr, dst_filename: &CStr) -> Result<(), i32> {
     use std::os::unix::fs::MetadataExt;
-    test_move_copy_delay();
     let src_meta = match std::fs::metadata(path(src_filename.to_bytes())) {
         Ok(m) => m,
         Err(e) => {
@@ -552,6 +552,7 @@ pub(crate) fn copy_file_exclusive(src_filename: &CStr, dst_filename: &CStr) -> R
     let mut buf = [0u8; 16 * 1024];
     let mut total_copied: i64 = 0;
     let mut copy_err: i32 = 0;
+    let mut delayed = false;
     loop {
         let r = unsafe { libc::read(in_fd, buf.as_mut_ptr().cast(), buf.len()) };
         if r < 0 {
@@ -586,6 +587,11 @@ pub(crate) fn copy_file_exclusive(src_filename: &CStr, dst_filename: &CStr) -> R
         }
         if copy_err != 0 {
             break;
+        }
+        if !delayed {
+            // (after the first chunk: the copy is there, partly written, meanwhile)
+            delayed = true;
+            test_move_copy_delay();
         }
     }
 

@@ -2048,6 +2048,139 @@ def scenario_recatmoveslow(daemon, t):
             shutil.rmtree(other, ignore_errors=True)
 
 
+_RGMOVE_COPY = re.compile(r'^\..+\.rgmove-[0-9]+-[0-9]+$')
+
+
+def _rgmove_copies(top):
+    """The partial copies (``.<file>.rgmove-<pid>-<seq>``) under ``top``."""
+    found = []
+    for root, _dirs, files in os.walk(top):
+        found += [os.path.join(root, f) for f in files if _RGMOVE_COPY.match(f)]
+    return sorted(found)
+
+
+def scenario_recatmovecrash(daemon, t):
+    """A recategorize copies a queued job's completed files onto another file system
+    (recatmove.rs) and RustyGet is killed in the middle of a copy: a partial copy
+    ``.<file>.rgmove-<pid>-<seq>`` is left in the new folder. After the restart that
+    copy is removed (and nothing else: two look-alike files stay), the completed files
+    are whole in the old folder, which the job still names, and the recategorize done
+    again moves them: the new folder holds the files and no copy, the old one is gone,
+    and the job downloads the rest there."""
+    api = daemon.wait_ready()
+    try:
+        api.shutdown()
+    except Exception:
+        pass
+    t.procs[-1].wait(timeout=60)
+    other, umount, why = _other_fs_dir(t, 'recatc')
+    if other is None:
+        return ('recatmovecrash', None, 'SKIP: no other file system: %s' % why)
+    try:
+        cat_a = t.path('main', 'catA')
+        cat_b = os.path.join(other, 'catB')
+        with open(t.path(daemon.conf_rel), 'ab') as f:
+            f.write(('InterDir=\nCategory1.Name=slowa\nCategory1.DestDir=%s\n'
+                     'Category2.Name=slowb\nCategory2.DestDir=%s\n' % (cat_a, cat_b)).encode())
+        daemon.start()
+        api = daemon.wait_ready()
+        datas = {}
+        members = []
+        for i in range(4):
+            datas['rc%d.bin' % i] = _payload(300_000, 7800 + i)
+            members.append((_place_copy(t, 'rcA', datas['rc%d.bin' % i], 'f%d.bin' % i),
+                            'rc%d.bin' % i, 300_000, 100_000, set()))
+        held = _payload(200_000, 7810)
+        members.append((_place_copy(t, 'rcA', held, 'held.bin'), 'rcheld.bin', 200_000, 100_000, set()))
+        content = base64.standard_b64encode(build_multi_nzb(members).encode()).decode()
+        api.append('RelRC', content, 'slowa', 0, False, True, 'rc-key', 100, 'score', [])
+        time.sleep(1)
+        gid = next(g['NZBID'] for g in api.listgroups() if g['NZBName'] == 'RelRC')
+        files = _rpc(daemon, 'listfiles', [0, 0, gid]).get('result', [])
+        resume = [f['ID'] for f in files if 'rcheld' not in f['Filename']]
+        held_id = next(f['ID'] for f in files if 'rcheld' in f['Filename'])
+        _rpc(daemon, 'editqueue', ['FileResume', '', resume])
+        deadline = time.time() + 60
+        while time.time() < deadline and len(_rpc(daemon, 'listfiles', [0, 0, gid]).get('result', [])) > 1:
+            time.sleep(0.3)
+        src = os.path.join(cat_a, 'RelRC')
+        dst = os.path.join(cat_b, 'RelRC')
+        if sorted(os.listdir(src) if os.path.isdir(src) else []) != sorted(datas):
+            return ('recatmovecrash', False, 'completed files in A before the move: %s' % os.listdir(src))
+
+        # the recategorize, killed while a copy is open
+        def edit():
+            try:
+                _rpc(daemon, 'editqueue', ['GroupApplyCategory', 'slowb', [gid]], timeout=120)
+            except Exception:
+                pass
+        threading.Thread(target=edit, daemon=True).start()
+        deadline = time.time() + 30
+        while time.time() < deadline and not _rgmove_copies(cat_b):
+            time.sleep(0.05)
+        partial = _rgmove_copies(cat_b)
+        t.procs[-1].kill()
+        t.procs[-1].wait(timeout=30)
+        if not partial:
+            return ('recatmovecrash', False, 'no partial copy appeared in B during the move')
+        # look-alikes that are not copies, which must stay
+        decoys = [os.path.join(dst, '.rc0.bin.rgmove-1-2.bak'), os.path.join(dst, 'rc0.bin.rgmove-1-2')]
+        for d in decoys:
+            with open(d, 'wb') as f:
+                f.write(b'decoy')
+
+        daemon.start()
+        api = daemon.wait_ready()
+        deadline = time.time() + 15
+        while time.time() < deadline and _rgmove_copies(cat_b):
+            time.sleep(0.2)
+        left = _rgmove_copies(cat_b)
+        decoys_kept = all(os.path.isfile(d) for d in decoys)
+        in_a = sorted(os.listdir(src)) if os.path.isdir(src) else []
+        a_intact = all(open(os.path.join(src, n), 'rb').read() == d for n, d in datas.items()
+                       if os.path.isfile(os.path.join(src, n))) and in_a == sorted(datas)
+        g = next((g for g in api.listgroups() if g['NZBID'] == gid), {})
+        dest_was_a = os.path.realpath(g.get('DestDir', '')) == os.path.realpath(src)
+
+        # done again, it moves them
+        retried = _rpc(daemon, 'editqueue', ['GroupApplyCategory', 'slowb', [gid]], timeout=300).get('result')
+        for d in decoys:
+            if os.path.exists(d):
+                os.remove(d)
+        moved = sorted(os.listdir(dst)) if os.path.isdir(dst) else []
+        b_intact = all(os.path.isfile(os.path.join(dst, n)) and
+                       open(os.path.join(dst, n), 'rb').read() == d for n, d in datas.items())
+        g = next((g for g in api.listgroups() if g['NZBID'] == gid), {})
+        dest_b = os.path.realpath(g.get('DestDir', '')) == os.path.realpath(dst)
+        a_gone = not os.path.exists(src)
+        _rpc(daemon, 'editqueue', ['FileResume', '', [held_id]])
+        _rpc(daemon, 'editqueue', ['GroupResume', '', [gid]])
+        h = daemon.wait_history(api, 'RelRC', timeout=90)
+        after = sorted(os.listdir(dst)) if os.path.isdir(dst) else []
+        ok = (not left and decoys_kept and a_intact and dest_was_a and retried is True
+              and moved == sorted(datas) and b_intact and dest_b and a_gone
+              and h['Status'].startswith('SUCCESS') and after == sorted(list(datas) + ['rcheld.bin']))
+        return ('recatmovecrash', ok,
+                'partial_at_kill=%s left_after_restart=%s decoys_kept=%s A_intact=%s DestDir_A=%s '
+                'retry=%s moved=%s B_intact=%s DestDir_B=%s A_gone=%s history=%s files_after=%s'
+                % ([os.path.basename(p) for p in partial], [os.path.basename(p) for p in left],
+                   decoys_kept, a_intact, dest_was_a, retried, moved, b_intact, dest_b, a_gone,
+                   h['Status'], after))
+    finally:
+        try:
+            daemon.api().shutdown()
+            t.procs[-1].wait(timeout=60)
+        except Exception:
+            pass
+        if t.procs[-1].poll() is None:
+            t.procs[-1].kill()
+            t.procs[-1].wait(timeout=30)
+        if umount:
+            subprocess.run(umount, capture_output=True)
+        else:
+            shutil.rmtree(other, ignore_errors=True)
+
+
 def _small_fs_mount(t, mnt, size_mb):
     """Mounts a small file system of its own at ``mnt`` (Linux: an ext4 image through
     sudo, which frees a truncated file's blocks only at the next journal commit, as the
@@ -16610,6 +16743,7 @@ SCENARIOS = {
     'truncatedstate': scenario_truncatedstate,
     'queuesyncslow': scenario_queuesyncslow,
     'recatmoveslow': scenario_recatmoveslow,
+    'recatmovecrash': scenario_recatmovecrash,
     'diskfullrestart': scenario_diskfullrestart,
     'cachecommitfull': scenario_cachecommitfull,
     'interdirbudget': scenario_interdirbudget,
@@ -17071,6 +17205,7 @@ SCENARIO_ENV = {
     'queuesyncslow': {'RUSTYGET_TEST_STATE_SYNC_DELAY_MS': '1000'},
     # each cross-device copy of a moved completed file takes 1.5 s longer (fsops::test_move_copy_delay)
     'recatmoveslow': {'RUSTYGET_TEST_MOVE_COPY_DELAY_MS': '1500'},
+    'recatmovecrash': {'RUSTYGET_TEST_MOVE_COPY_DELAY_MS': '1500'},
     # the InterDir budget (interbudget.rs) holds a download that needs 1 GB of state reserve on a 64 MB disk
     'cachecommitfull': {'RUSTYGET_TEST_STATE_RESERVE_MB': '1'},
     'interdirbudget': {'RUSTYGET_TEST_STATE_RESERVE_MB': '1'},

@@ -2687,6 +2687,9 @@ impl NzbgetRsQueueCoordinator {
             }
 
             if queue_loaded {
+                // partial copies a recategorize left when the daemon stopped
+                #[cfg(unix)]
+                crate::recatmove::clean_leftovers_at_start(host, dq_ptr);
                 let moved = relocate_unwritten_job_dirs(host, dq_ptr);
                 if moved > 0 {
                     host.log(

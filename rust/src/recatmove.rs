@@ -195,6 +195,8 @@ pub(crate) fn copy_files(
         if std::fs::create_dir_all(parent).is_err() {
             continue;
         }
+        // copies an earlier process left here (it stopped during this move) go first
+        remove_leftover_copies_of(parent, base.as_bytes());
         let seq = COPY_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut name = b".".to_vec();
         name.extend_from_slice(base.as_bytes());
@@ -266,6 +268,139 @@ fn commit(
     crate::articledl::move_completed_files_on_qh_precopied(host, nzb_ptr, &job.old_dir, copies);
     host.dq_save(dq_ptr);
     true
+}
+
+/// The process id in `name` when it is a copy's name, `.<file>.rgmove-<pid>-<seq>`
+/// (as [`copy_files`] makes them): anything else is None.
+pub(crate) fn copy_name_pid(name: &[u8]) -> Option<u32> {
+    const MARK: &[u8] = b".rgmove-";
+    let rest = name.strip_prefix(b".")?;
+    let at = rest.windows(MARK.len()).rposition(|w| w == MARK)?;
+    if at == 0 {
+        return None; // no file name
+    }
+    let tail = &rest[at + MARK.len()..];
+    let dash = tail.iter().position(|&c| c == b'-')?;
+    let (pid, seq) = (&tail[..dash], &tail[dash + 1..]);
+    let digits = |d: &[u8]| !d.is_empty() && d.len() <= 20 && d.iter().all(u8::is_ascii_digit);
+    if !digits(pid) || !digits(seq) {
+        return None;
+    }
+    std::str::from_utf8(pid).ok()?.parse().ok()
+}
+
+/// Whether `name` is a copy another process made (this one's are in use or removed by
+/// their own move).
+fn is_leftover_copy(name: &[u8]) -> bool {
+    copy_name_pid(name).is_some_and(|pid| pid != std::process::id())
+}
+
+/// Removes, in `dir`, the regular files named as a copy another process made; with
+/// `of`, only copies of that file. Returns how many.
+fn remove_leftovers_in(dir: &Path, of: Option<&[u8]>) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let name = name.as_bytes();
+        if !is_leftover_copy(name) {
+            continue;
+        }
+        if let Some(of) = of {
+            // `.<of>.rgmove-`
+            if name.get(1..1 + of.len()) != Some(of) || name.get(1 + of.len()) != Some(&b'.') {
+                continue;
+            }
+        }
+        // a regular file itself, never what a link points to
+        if e.file_type().is_ok_and(|t| t.is_file()) && std::fs::remove_file(e.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+fn remove_leftover_copies_of(dir: &Path, file: &[u8]) {
+    remove_leftovers_in(dir, Some(file));
+}
+
+/// Removes the copies a stopped process left in `dir` and in its subdirectories down
+/// to `depth` levels (completed files with a folder in their name). Symlinked
+/// directories are not followed. Returns how many.
+pub(crate) fn remove_leftovers_under(dir: &Path, depth: u32) -> usize {
+    let mut removed = remove_leftovers_in(dir, None);
+    if depth == 0 {
+        return removed;
+    }
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            if e.file_type().is_ok_and(|t| t.is_dir()) {
+                removed += remove_leftovers_under(&e.path(), depth - 1);
+            }
+        }
+    }
+    removed
+}
+
+/// At start, with the queue lock (queue and history loaded): the folders where a move
+/// that a stopped process did not end may have left copies: each queued or history
+/// download's directory and the one its category and name give it now (where such a
+/// move copied to). Then removes the copies there in a thread of its own, without the
+/// lock.
+pub(crate) fn clean_leftovers_at_start(host: &QueueSubsysHost, dq_ptr: usize) {
+    if !host.use_active {
+        return;
+    }
+    let mut nzbs: Vec<NzbRef> = (0..host.queue_len(dq_ptr))
+        .map(|i| host.queue_at(dq_ptr, i))
+        .collect();
+    nzbs.extend(
+        (0..host.history_len(dq_ptr))
+            .map(|i| host.history_at(dq_ptr, i).nzb())
+            .filter(|n| n.is_some()),
+    );
+    let mut dirs: Vec<Vec<u8>> = Vec::new();
+    for nzb_ptr in nzbs {
+        if nzb_ptr.is_none() {
+            continue;
+        }
+        let dest = host.nzb_snap(nzb_ptr, false).dest_dir;
+        host.nzb_action(nzb_ptr, crate::queuesubsys_host::NZB_ACT_BUILD_DEST_DIR);
+        let built = host.nzb_snap(nzb_ptr, false).dest_dir;
+        host.nzb_set_str(nzb_ptr, crate::queuesubsys_host::NZB_STR_DEST_DIR, &dest);
+        for d in [dest, built] {
+            let d = crate::cstr::until_nul(&d).to_vec();
+            if !d.is_empty() {
+                dirs.push(d);
+            }
+        }
+    }
+    dirs.sort();
+    dirs.dedup();
+    let spawned = std::thread::Builder::new()
+        .name("recat-clean".into())
+        .spawn(move || {
+            let removed: usize = dirs
+                .iter()
+                .map(|d| remove_leftovers_under(bytes_path(d), 2))
+                .sum();
+            if removed > 0 {
+                crate::log::log_active_bytes(
+                    crate::queuesubsys_host::MK_INFO,
+                    format!(
+                        "Removed {removed} partial cop{} of completed files that a recategorize \
+                         left when RustyGet stopped",
+                        if removed == 1 { "y" } else { "ies" }
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+    if spawned.is_err() {
+        // no thread: the files a later move of the same downloads copies replace them
+    }
 }
 
 /// Removes the directories a move that did not happen created under `target`, when
@@ -464,6 +599,78 @@ mod tests {
         assert!(!crosses_devices(&b(&old), &b(&new), &[b"a.bin".to_vec()]));
         let dev = std::fs::metadata(&root).unwrap().dev();
         assert!(copy_files(&job(&old, &new, &["a.bin"]), |m| m.dev() != dev).is_empty());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn only_the_exact_copy_names_are_recognized() {
+        assert_eq!(copy_name_pid(b".a.bin.rgmove-123-4"), Some(123));
+        assert_eq!(copy_name_pid(b".x.rgmove-1.rgmove-77-0"), Some(77));
+        for not in [
+            &b"a.bin.rgmove-1-2"[..], // no dot first
+            b".rgmove-1-2",           // no file name
+            b".a.rgmove-1-2.bak",
+            b".a.rgmove-1-",
+            b".a.rgmove--2",
+            b".a.rgmove-x-2",
+            b".a.rgmove-1-2-3",
+            b".a.rgmove_1-2",
+            b".a.bin",
+        ] {
+            assert_eq!(copy_name_pid(not), None, "{}", String::from_utf8_lossy(not));
+        }
+    }
+
+    #[test]
+    fn leftovers_of_other_processes_go_and_nothing_else() {
+        let root = tmp("leftover");
+        let sub = root.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let other = std::process::id().wrapping_add(1);
+        let mine = std::process::id();
+        let gone = [
+            root.join(format!(".a.bin.rgmove-{other}-0")),
+            sub.join(format!(".b.bin.rgmove-{other}-9")),
+        ];
+        let kept = [
+            root.join(format!(".a.bin.rgmove-{mine}-1")), // a move of this process
+            root.join("a.bin"),
+            root.join(".a.bin.rgmove-1-2.bak"),
+            root.join("a.bin.rgmove-1-2"),
+        ];
+        for p in gone.iter().chain(kept.iter()) {
+            std::fs::write(p, b"x").unwrap();
+        }
+        // a directory named as a copy, and a link to a file, stay too
+        let dir_named = root.join(format!(".d.rgmove-{other}-3"));
+        std::fs::create_dir_all(&dir_named).unwrap();
+        let link = root.join(format!(".l.rgmove-{other}-4"));
+        std::os::unix::fs::symlink(root.join("a.bin"), &link).unwrap();
+        assert_eq!(remove_leftovers_under(&root, 2), 2);
+        assert!(gone.iter().all(|p| !p.exists()));
+        assert!(kept.iter().all(|p| p.exists()));
+        assert!(dir_named.is_dir() && link.symlink_metadata().is_ok());
+        assert!(root.join("a.bin").exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_retried_move_removes_the_copy_a_stopped_process_left() {
+        let root = tmp("retry");
+        let old = root.join("old");
+        let new = root.join("new");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(old.join("a.bin"), b"alpha").unwrap();
+        let other = std::process::id().wrapping_add(1);
+        let stale = new.join(format!(".a.bin.rgmove-{other}-0"));
+        let unrelated = new.join(format!(".b.bin.rgmove-{other}-0"));
+        std::fs::write(&stale, b"al").unwrap();
+        std::fs::write(&unrelated, b"b").unwrap();
+        let copies = copy_files(&job(&old, &new, &["a.bin"]), |_| true);
+        assert_eq!(copies.len(), 1);
+        assert!(!stale.exists());
+        assert!(unrelated.exists(), "only copies of the moved files go here");
         std::fs::remove_dir_all(&root).unwrap();
     }
 

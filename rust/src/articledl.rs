@@ -7,7 +7,7 @@ use crate::options::OptStr;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::io::{Seek, SeekFrom, Write};
 use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 
 use crate::artwritercore::{
@@ -658,6 +658,33 @@ pub(crate) fn shutdown_daemon_article_cache() {
     DAEMON_CACHE_RUNNING.store(false, Ordering::SeqCst);
 }
 
+/// Test hook (functional harness only): `RUSTYGET_TEST_FLUSH_HOLD_MS` keeps each cache flush
+/// holding its file's flush lock that long before it writes, as a slow disk at line speed
+/// does, so articles of that file finish and are captured while it is flushed. Logged once
+/// when set; unset (production) it costs one load.
+fn flush_test_hold() {
+    static HOLD_MS: std::sync::LazyLock<u64> = std::sync::LazyLock::new(|| {
+        let ms = std::env::var("RUSTYGET_TEST_FLUSH_HOLD_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map_or(0, |ms| ms.min(1000));
+        if ms > 0 {
+            crate::log::log_active_bytes(
+                MK_WARNING,
+                format!("Test hook RUSTYGET_TEST_FLUSH_HOLD_MS: each cache flush waits {ms} ms").as_bytes(),
+            );
+        }
+        ms
+    });
+    if *HOLD_MS > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(*HOLD_MS));
+    }
+}
+
+/// Articles live PAR copied from the article cache while a flush of their file ran (all jobs;
+/// before, those were refused and read back from disk). For the live PAR I/O line.
+pub(crate) static SNAPSHOTS_DURING_FLUSH: AtomicU64 = AtomicU64::new(0);
+
 /// Whether a cache flush of a file hands its written bytes to live PAR: only while a session
 /// runs, and never for a par2 file. A par2 file is no source of the live set, and resolving
 /// it against the live namespace invalidates the namespace, which stops live PAR for the job
@@ -774,6 +801,7 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
         cache_unlock_flush();
         return true;
     };
+    flush_test_hold();
 
     let items: Vec<ArticleWriterFlushItem<'_>> = metas
         .iter()
@@ -2513,6 +2541,14 @@ impl RsArticleWriter {
             .clone()
             .filter(|_| !self.proc_raw_article && !self.proc_skip_disk_write)
             .filter(|live| crate::parchecker::streaming_session_wants_recovery_bytes(live.nzb_id));
+        // A data file's cached articles written here are their last time in RAM: live PAR
+        // keeps a copy for each one it has not captured yet (`articles_written`), so a
+        // capture that comes after this write never has par-rs read it back.
+        let live_source = self
+            .proc_live
+            .clone()
+            .filter(|live| !live.par_file && !self.proc_raw_article && !self.proc_skip_disk_write)
+            .filter(|live| crate::parchecker::streaming_session_has_session(live.nzb_id));
         let held = std::cell::RefCell::new(Vec::<(u64, Vec<u8>)>::new());
         let held_bytes = std::cell::Cell::new(0u64);
         let (crc, commit_err, failed_delta, short_copies) = article_writer_process_articles_counted(
@@ -2543,6 +2579,20 @@ impl RsArticleWriter {
                     .map_or(0, |f| f.write_bytes(buf))
             },
             |item_idx| {
+                if let (Some(live), Some(content)) =
+                    (live_source.as_ref(), items[item_idx].segment_content)
+                {
+                    if let Ok(offset) = u64::try_from(items[item_idx].segment_offset) {
+                        // Not "in the file" yet: the write may still sit in the output
+                        // buffer until the file closes, so nothing is handed over as readable.
+                        crate::parchecker::streaming_session_articles_completed(
+                            live.nzb_id,
+                            (Some(live.file_id), &live.filename, &live.hash16k),
+                            false,
+                            &[(offset, content)],
+                        );
+                    }
+                }
                 if let (Some(live), Some(content)) = (live.as_ref(), items[item_idx].segment_content) {
                     if let Ok(offset) = u64::try_from(items[item_idx].segment_offset) {
                         if live.par_file && live.decoded_size > 0 {

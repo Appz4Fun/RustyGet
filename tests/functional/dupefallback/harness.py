@@ -1859,6 +1859,155 @@ def scenario_queuesyncslow(daemon, t):
     return ('queuesyncslow', ok, 'status=%s elapsed=%.1fs bound=30s' % (h['Status'], elapsed))
 
 
+def _small_fs_mount(t, mnt, size_mb):
+    """Mounts a small file system of its own at ``mnt`` (Linux: an ext4 image through
+    sudo, which frees a truncated file's blocks only at the next journal commit, as the
+    NVMe on 6790 did; macOS: an HFS+ disk image). Returns the unmount command, or None
+    with the reason when this machine cannot."""
+    os.makedirs(mnt, exist_ok=True)
+    img = t.path('smallfs.img')
+    if sys.platform.startswith('linux'):
+        if shutil.which('mkfs.ext4') is None:
+            return None, 'mkfs.ext4 not installed'
+        if subprocess.run(['sudo', '-n', 'true'], capture_output=True).returncode != 0:
+            return None, 'no passwordless sudo to mount'
+        with open(img, 'wb') as f:
+            f.truncate(size_mb * 1024 * 1024)
+        if subprocess.run(['mkfs.ext4', '-q', '-F', '-m', '0', img], capture_output=True).returncode != 0:
+            return None, 'mkfs.ext4 failed'
+        if subprocess.run(['sudo', '-n', 'mount', '-o', 'loop', img, mnt], capture_output=True).returncode != 0:
+            return None, 'loop mount failed'
+        subprocess.run(['sudo', '-n', 'chown', '%d:%d' % (os.getuid(), os.getgid()), mnt], check=True)
+        return ['sudo', '-n', 'umount', mnt], None
+    if sys.platform == 'darwin':
+        dmg = img + '.dmg'
+        made = subprocess.run(['hdiutil', 'create', '-quiet', '-size', '%dm' % size_mb, '-fs', 'HFS+',
+                               '-volname', 'rgfull', dmg], capture_output=True)
+        if made.returncode != 0:
+            return None, 'hdiutil create failed'
+        if subprocess.run(['hdiutil', 'attach', '-quiet', '-nobrowse', '-mountpoint', mnt, dmg],
+                          capture_output=True).returncode != 0:
+            return None, 'hdiutil attach failed'
+        return ['hdiutil', 'detach', '-quiet', '-force', mnt], None
+    return None, 'no small file system on %s' % sys.platform
+
+
+class _DiskFiller:
+    """Fills the file system of ``path`` and keeps it full: a thread writes whatever
+    space comes free (a deleted temporary file, a journal commit) into the filler file
+    until ``release``."""
+
+    def __init__(self, path):
+        self.path = path
+        self.stop = threading.Event()
+        self.f = open(path, 'wb', buffering=0)
+        self._fill()
+        self.thread = threading.Thread(target=self._keep_full, daemon=True)
+        self.thread.start()
+
+    def _fill(self):
+        for chunk in (1 << 20, 1 << 16, 1 << 12, 512):
+            while True:
+                try:
+                    self.f.write(b'\0' * chunk)
+                except OSError:
+                    break
+
+    def _keep_full(self):
+        while not self.stop.wait(0.02):
+            self._fill()
+
+    def release(self):
+        self.stop.set()
+        self.thread.join(timeout=10)
+        try:
+            self.f.close()
+        except OSError:
+            pass
+        os.remove(self.path)
+
+
+def scenario_diskfullrestart(daemon, t):
+    """6790, 2026-11-27: the disk holding QueueDir and InterDir filled up during a
+    download. The partial state of the downloading file (``<id>s``, then written in
+    place) was cut short by the failed write, the deploy restart found it damaged and
+    threw away every article it recorded: 57 GB downloaded again. Here QueueDir and
+    InterDir sit on a small file system of their own; it is filled at 40 %, the daemon
+    is stopped (its last saves fail), space is freed and the daemon started again. No
+    article that came before the fill (less the last 2.5 s, which a save may not have
+    recorded yet) may be fetched again, the output must be byte-exact, and the stop
+    with failing saves must not exit 0 (not a clean stop)."""
+    seg, size = 100_000, 40_000_000
+    data = _payload(size, 6790)
+    pp = _place_copy(t, 'dfA', data, 'f.bin')
+    api = daemon.wait_ready()
+    try:
+        api.shutdown()
+    except Exception:
+        pass
+    t.procs[-1].wait(timeout=60)
+    mnt = t.path('main', 'small')
+    umount, why = _small_fs_mount(t, mnt, 64)
+    if umount is None:
+        return ('diskfullrestart', None, 'SKIP: %s' % why)
+    filler = None
+    try:
+        os.makedirs(os.path.join(mnt, 'queue'))
+        os.makedirs(os.path.join(mnt, 'inter'))
+        conf = t.path(daemon.conf_rel)
+        with open(conf, 'ab') as f:
+            f.write(('QueueDir=%s\nInterDir=%s\n' % (os.path.join(mnt, 'queue'),
+                                                     os.path.join(mnt, 'inter'))).encode())
+        daemon.start()
+        api = daemon.wait_ready()
+        daemon.append(api, 'RelDF', build_nzb(pp, 'df.bin', size, seg, set()), False, 'df-key', 100)
+        total = size // seg
+        history = []  # (time, requests so far)
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            history.append((time.time(), len(_failcont_requests(t))))
+            if history[-1][1] >= total * 4 // 10:
+                break
+            time.sleep(0.1)
+        filler = _DiskFiller(os.path.join(mnt, 'filler'))
+        fill_time = time.time()
+        recorded = max([n for when, n in history if when <= fill_time - 2.5] or [0])
+        before = _failcont_requests(t)[:recorded]
+        time.sleep(4)  # saves and article writes fail on the full disk
+        try:
+            api.shutdown()
+        except Exception:
+            pass
+        stop_rc = t.procs[-1].wait(timeout=120)
+        save_errors = _grep_log(t, 'Error saving diskstate')
+        unclean = _grep_log(t, 'Stopping is not clean')
+        filler.release()
+        filler = None
+        restart_at = len(_failcont_requests(t))
+        daemon.start()
+        api = daemon.wait_ready()
+        h = daemon.wait_history(api, 'RelDF', timeout=240)
+        after = _failcont_requests(t)[restart_at:]
+        again = sorted(set(before) & set(after))
+        integ = _verify_output(t, data)
+        discarded = _grep_log(t, 'Discarding damaged download state')
+        ok = (h['Status'].startswith('SUCCESS') and integ and recorded > 0 and not again
+              and save_errors > 0 and stop_rc != 0)
+        return ('diskfullrestart', ok,
+                'status=%s integrity=%s recorded_before_fill=%d fetched_again=%d of them '
+                'fetched_after_restart=%d save_errors=%d stop_rc=%s unclean_logs=%d discarded_states=%d'
+                % (h['Status'], integ, recorded, len(again), len(after), save_errors, stop_rc,
+                   unclean, discarded))
+    finally:
+        if filler:
+            filler.release()
+        for p in t.procs:
+            if p.poll() is None:
+                p.kill()
+                p.wait(timeout=30)
+        subprocess.run(umount, capture_output=True)
+
+
 def scenario_streamtimeout(daemon, t):
     """DupeStreamTimeout: the only duplicate is stalled (every request for its
     articles waits 8 s, longer than the timeout), so the repair of the
@@ -15518,6 +15667,7 @@ SCENARIOS = {
     'stream': scenario_stream,
     'truncatedstate': scenario_truncatedstate,
     'queuesyncslow': scenario_queuesyncslow,
+    'diskfullrestart': scenario_diskfullrestart,
     'queuebatchstart': scenario_queuebatchstart,
     'streamrestartcredit': scenario_streamrestartcredit,
     'streamtimeout': scenario_streamtimeout,
@@ -16016,6 +16166,7 @@ SCENARIO_OPTIONS = {
     'stream': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'truncatedstate': ['ContinuePartial=yes', 'FlushQueue=yes', 'Server1.Connections=1'],
     'queuesyncslow': ['ContinuePartial=yes', 'FlushQueue=yes', 'Server1.Connections=6'],
+    'diskfullrestart': ['ContinuePartial=yes', 'FlushQueue=yes', 'DiskSpace=0', 'Server1.Connections=4'],
     'queuebatchstart': ['Server1.Connections=30'],
     'streamrestartcredit': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'streamdeaddonor': ['DupeArticleFallback=stream', 'ParCheck=auto'],
@@ -16439,10 +16590,10 @@ def _promote_fallback(options, mode):
 # finished job is rightly not redone
 FALLBACK_MODE_BOUND = {'livegate', 'streamrestartcredit', 'wholefilerestart', 'wholefilestale'}
 # scenarios that read nserv's request log (nserv.log)
-CAPTURE_REQUESTS = {'repost', 'altfetchonce', 'wholefileproofcost', 'dropnzbdir', 'fleetstaysqueued', 'fleetprimaryfirst'} | {
+CAPTURE_REQUESTS = {'repost', 'diskfullrestart', 'altfetchonce', 'wholefileproofcost', 'dropnzbdir', 'fleetstaysqueued', 'fleetprimaryfirst'} | {
     'failcont_twin25', 'failcont_twin50', 'failcont_twin90', 'failcont_alt25', 'failcont_alt50', 'failcont_altlive', 'failcont_alt90', 'failcont_aes25', 'failcont_aes50', 'failcont_aes90', 'failcont_compressed', 'failcont_othervideo', 'failcont_twinlabel', 'failcont_fleettwin', 'failcont_fleetalt', 'failcont_fleetaes', 'failcont_aestwin', 'failcont_aesalt', 'failcont_rar5m3', 'failcont_rar5m3aes', 'failcont_rar5m3other', 'failcont_lzma2', 'failcont_norestart', 'weakswitchalt', 'weakswitchtwin', 'weakswitchaes', 'weakswitchm3', 'failcont_aescontainer', 'failcont_alt25busy'}
 # extra nserv arguments per scenario (-w: response latency in ms)
-SCENARIO_NSERV_ARGS = {'streamtimeoutwrites': ['-w', '800'], 'fleetslowprobe': ['-x', '2000'], 'fleetprobespeed': ['-w', '300'], 'fleetprobebusy': ['-w', '300'], 'fleetprobehealthfail': ['-w', '800'], 'finaldeletemidway': ['-w', '300'], 'finaldeleterestart': ['-w', '300'], 'restartmidway': ['-w', '300'], 'xpacklatency': ['-w', '1000'], 'deadpickprobe': ['-w', '500'], 'deadpickafterreload': ['-w', '500'],
+SCENARIO_NSERV_ARGS = {'diskfullrestart': ['-w', '300'], 'streamtimeoutwrites': ['-w', '800'], 'fleetslowprobe': ['-x', '2000'], 'fleetprobespeed': ['-w', '300'], 'fleetprobebusy': ['-w', '300'], 'fleetprobehealthfail': ['-w', '800'], 'finaldeletemidway': ['-w', '300'], 'finaldeleterestart': ['-w', '300'], 'restartmidway': ['-w', '300'], 'xpacklatency': ['-w', '1000'], 'deadpickprobe': ['-w', '500'], 'deadpickafterreload': ['-w', '500'],
                        'deadpickpartial': ['-w', '100'], 'deadpickstray': ['-w', '500'], 'forcefailover': ['-w', '500'], 'copybackup': ['-w', '500'], 'copyoffailed': ['-w', '500'], 'deaddownloadstray2': ['-w', '300'], 'deaddownloadrestart': ['-w', '300'], 'deadbackupsonly': ['-w', '500'], 'backuporder': ['-w', '500'], 'deaddownloadlate': ['-w', '300'], 'deadpickservers': ['-w', '200'],
                        'deadpickfewservers': ['-w', '200'],
                        # a missing article answers late, so the dead volumes fail one after another and later

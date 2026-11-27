@@ -21,14 +21,50 @@
 //! ([`settled`]), so it sees the latest content without waiting for a sync.
 //!
 //! Across files there is no crash-time ordering beyond that: after a crash the disk
-//! can hold a newer `progress` next to an older `queue`, and a queue save whose write
-//! fails on this thread has already queued the delete of `progress` behind it. The
-//! loader never relied on more (a partial state could already be newer than `queue`,
-//! `files` is checked against the queued file count, `ids` is a floor written inline).
+//! can hold a newer `progress` next to an older `queue`. The loader never relied on
+//! more (a partial state could already be newer than `queue`, `files` is checked
+//! against the queued file count, `ids` is a floor written inline). A delete that
+//! must follow a write of another file (`progress` after `queue`) waits for it
+//! ([`JobKind::Delete`] `after`) and is dropped if that write never succeeds.
+//!
+//! A failed save (6790: the queue disk full, ENOSPC) keeps the last good file (the
+//! writer never renames a write that failed) and is retried with backoff
+//! ([`Retry`]): it stays queued, a newer save of the file takes its place and its
+//! backoff, and nobody waits for it meanwhile (a full disk must not stall the API or
+//! the coordinator). At shutdown [`finish`] tries each failing save once more and
+//! names the ones that still fail: the stop is then not clean.
 
 use crate::diskstate_format::DiskLogLevel;
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
+use std::time::{Duration, Instant};
+
+/// The first retry of a failed save comes after this; each further one doubles it, up
+/// to [`RETRY_MAX`].
+const RETRY_BASE: Duration = Duration::from_secs(1);
+const RETRY_MAX: Duration = Duration::from_secs(30);
+
+/// How often a save of this file failed in a row, and when it is tried again.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Retry {
+    pub attempts: u32,
+    pub not_before: Option<Instant>,
+}
+
+impl Retry {
+    /// The state after one more failed attempt at `now`.
+    fn failed(&self, now: Instant) -> Self {
+        let attempts = self.attempts.saturating_add(1);
+        let shift = (attempts - 1).min(16);
+        let wait = RETRY_BASE
+            .checked_mul(1u32 << shift)
+            .map_or(RETRY_MAX, |d| d.min(RETRY_MAX));
+        Self {
+            attempts,
+            not_before: Some(now + wait),
+        }
+    }
+}
 
 /// What a job does to its file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,8 +76,13 @@ pub(crate) enum JobKind {
         transactional: bool,
         sync: bool,
     },
-    /// Delete the file, and `temp` too when `temp_too`.
-    Delete { temp_too: bool },
+    /// Delete the file, and `temp` too when `temp_too`. With `after`, only once no
+    /// job for that file is queued or running: `progress` is deleted after the `queue`
+    /// save that makes it obsolete has reached the disk, never while it fails.
+    Delete {
+        temp_too: bool,
+        after: Option<Vec<u8>>,
+    },
 }
 
 /// One state file to write or delete. `path` identifies it.
@@ -54,6 +95,8 @@ pub(crate) struct Job {
     pub temp: Vec<u8>,
     pub sep: u8,
     pub kind: JobKind,
+    /// Failed attempts so far; set by the saver.
+    pub retry: Retry,
 }
 
 pub(crate) type Log<'a> = &'a mut dyn FnMut(DiskLogLevel, &[u8]);
@@ -68,6 +111,30 @@ struct State {
     next_seq: u64,
     /// Saves are queued (the coordinator runs), else run inline.
     queue_saves: bool,
+    /// Files whose save was given up ([`Saver::drain`] after its last attempt failed).
+    unsaved: Vec<Vec<u8>>,
+}
+
+impl State {
+    /// A queued job nobody waits for: it failed before (it is retried later), or it
+    /// is a delete waiting for a write of another file.
+    fn deferred(&self, job: &Job) -> bool {
+        job.retry.attempts > 0 || self.blocked(job)
+    }
+
+    /// A delete whose `after` file still has a job queued or running.
+    fn blocked(&self, job: &Job) -> bool {
+        match &job.kind {
+            JobKind::Delete {
+                after: Some(after), ..
+            } => {
+                self.queue.iter().any(|j| j.path == *after)
+                    || self.in_flight.iter().any(|(p, _)| p == after)
+                    || self.unsaved.contains(after)
+            }
+            _ => false,
+        }
+    }
 }
 
 pub(crate) struct Saver {
@@ -88,11 +155,11 @@ thread_local! {
 
 /// While alive (the coordinator's loop), saves are queued for the saver thread; on drop,
 /// saves run inline again and the queued ones are drained.
-pub(crate) struct AsyncSaves(&'static Saver);
+pub(crate) struct AsyncSaves(&'static Arc<Saver>);
 
 impl AsyncSaves {
     pub(crate) fn enter() -> Self {
-        let saver: &'static Saver = global();
+        let saver: &'static Arc<Saver> = global();
         saver.lock().queue_saves = true;
         COORDINATOR.with(|c| c.set(true));
         Self(saver)
@@ -132,6 +199,15 @@ fn active_log(level: DiskLogLevel, msg: &[u8]) {
     crate::log::log_active_bytes(level.kind() as i32, msg);
 }
 
+fn saved_again_message(job: &Job) -> Vec<u8> {
+    [
+        &b"Saved diskstate file "[..],
+        &job.path,
+        format!(" after {} failed attempts", job.retry.attempts).as_bytes(),
+    ]
+    .concat()
+}
+
 impl Saver {
     pub(crate) fn new(exec: Box<Exec>) -> Arc<Self> {
         Arc::new(Self {
@@ -156,7 +232,8 @@ impl Saver {
         let mut st = self.lock();
         let coordinator = COORDINATOR.with(|c| c.get());
         let under_lock = QUEUE_LOCK_DEPTH.with(|d| d.get() > 0);
-        if st.queue_saves && (coordinator || under_lock) {
+        // A delete that waits for another file's write is queued behind it.
+        if (st.queue_saves && (coordinator || under_lock)) || st.blocked(&job) {
             let path = job.path.clone();
             let seq = self.enqueue_locked(st, job);
             if !coordinator {
@@ -169,9 +246,11 @@ impl Saver {
             st.next_seq += 1;
             job.seq = st.next_seq;
             // This newer content (or delete) replaces a queued one, and whoever waits
-            // for that one waits for this.
+            // for that one waits for this; a failing one's count goes on.
             if let Some(i) = st.queue.iter().position(|j| j.path == job.path) {
-                job.seq = st.queue.remove(i).expect("position is in range").seq;
+                let old = st.queue.remove(i).expect("position is in range");
+                job.seq = old.seq;
+                job.retry.attempts = old.retry.attempts;
             }
             self.run_marked(st, job, log)
         }
@@ -193,7 +272,9 @@ impl Saver {
                 if matches!(st.queue[i].kind, JobKind::Write { .. })
                     && matches!(job.kind, JobKind::Write { .. }) =>
             {
+                // Latest content, first position, and a failing save's backoff.
                 job.seq = st.queue[i].seq;
+                job.retry = st.queue[i].retry.clone();
                 st.queue[i] = job;
                 st.queue[i].seq
             }
@@ -207,6 +288,12 @@ impl Saver {
                 st.next_seq
             }
         };
+        self.start_worker(st);
+        seq
+    }
+
+    /// Starts the saver thread if it is not running yet, and wakes it.
+    fn start_worker(self: &Arc<Self>, mut st: MutexGuard<'_, State>) {
         if !st.thread_started {
             let me = Arc::clone(self);
             if std::thread::Builder::new()
@@ -219,19 +306,47 @@ impl Saver {
                 // No thread: run the queue here, as before.
                 drop(st);
                 self.run_queue_inline();
-                return seq;
+                return;
             }
         }
         self.cv.notify_all();
-        seq
     }
 
-    /// Waits until none of `tickets` (file, seq) is queued or running.
+    /// Runs `job`, marked running by the caller. A failed save is queued again for a
+    /// retry with backoff (the saver thread runs it), unless a newer save of the file
+    /// is queued already: that one takes over the backoff.
+    fn exec_job(self: &Arc<Self>, job: Job, log: Log<'_>) -> bool {
+        let ok = (self.exec)(&job, log);
+        if ok {
+            if job.retry.attempts > 0 {
+                log(DiskLogLevel::Info, &saved_again_message(&job));
+            }
+            let mut st = self.lock();
+            st.unsaved.retain(|p| *p != job.path);
+            return true;
+        }
+        let retry = job.retry.failed(Instant::now());
+        let mut st = self.lock();
+        if let Some(newer) = st.queue.iter_mut().find(|j| j.path == job.path) {
+            if newer.retry.attempts < retry.attempts {
+                newer.retry = retry;
+            }
+        } else {
+            st.queue.push_back(Job { retry, ..job });
+        }
+        self.start_worker(st);
+        false
+    }
+
+    /// Waits until none of `tickets` (file, seq) is queued or running, but for a save
+    /// that failed (retried later) or a delete waiting for another file's write.
     fn wait_for(&self, tickets: &[(Vec<u8>, u64)]) {
         let mut st = self.lock();
         loop {
             let busy = tickets.iter().any(|(p, s)| {
-                st.queue.iter().any(|j| j.path == *p && j.seq <= *s)
+                st.queue
+                    .iter()
+                    .any(|j| j.path == *p && j.seq <= *s && !st.deferred(j))
                     || st.in_flight.iter().any(|(fp, fs)| fp == p && fs <= s)
             });
             if !busy {
@@ -252,9 +367,10 @@ impl Saver {
     }
 
     /// Waits for a job running for the same file, then runs `job` in this thread.
-    fn run_marked(&self, st: MutexGuard<'_, State>, job: Job, log: Log<'_>) -> bool {
-        let _mark = self.mark(st, &job.path, job.seq);
-        (self.exec)(&job, log)
+    fn run_marked(self: &Arc<Self>, st: MutexGuard<'_, State>, job: Job, log: Log<'_>) -> bool {
+        let path = job.path.clone();
+        let _mark = self.mark(st, &path, job.seq);
+        self.exec_job(job, log)
     }
 
     /// Waits until no job runs for `path`, then marks it running (as save `seq`; a
@@ -267,22 +383,35 @@ impl Saver {
         Mark { saver: self, path }
     }
 
-    fn next_job(&self, st: &mut State) -> Option<Job> {
-        let i = st
-            .queue
-            .iter()
-            .position(|j| !st.in_flight.iter().any(|(p, _)| *p == j.path))?;
+    /// The first queued job that may run now: its file is not running, its retry is
+    /// due, and a delete's `after` write is done.
+    fn next_job(&self, st: &mut State, now: Instant) -> Option<Job> {
+        let i = st.queue.iter().position(|j| {
+            !st.in_flight.iter().any(|(p, _)| *p == j.path)
+                && j.retry.not_before.is_none_or(|t| t <= now)
+                && !st.blocked(j)
+        })?;
         st.queue.remove(i)
     }
 
-    fn worker(&self) {
+    fn worker(self: Arc<Self>) {
         loop {
             let mut st = self.lock();
             let job = loop {
-                if let Some(job) = self.next_job(&mut st) {
+                if let Some(job) = self.next_job(&mut st, Instant::now()) {
                     break job;
                 }
-                st = self.wait(st);
+                // Asleep until a job comes, or the next retry is due.
+                st = match st.queue.iter().filter_map(|j| j.retry.not_before).min() {
+                    Some(due) => {
+                        let wait = due.saturating_duration_since(Instant::now());
+                        self.cv
+                            .wait_timeout(st, wait.max(Duration::from_millis(1)))
+                            .unwrap_or_else(|e| e.into_inner())
+                            .0
+                    }
+                    None => self.wait(st),
+                };
             };
             // A panicking job must not kill the thread: later jobs and `drain` wait for it.
             let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -297,43 +426,53 @@ impl Saver {
         }
     }
 
-    fn run_queue_inline(&self) {
+    /// Runs the queued jobs due now in this thread (no saver thread could start). A
+    /// failed one stays queued for the next call.
+    fn run_queue_inline(self: &Arc<Self>) {
         loop {
             let mut st = self.lock();
-            let Some(job) = self.next_job(&mut st) else {
+            let Some(job) = self.next_job(&mut st, Instant::now()) else {
                 return;
             };
-            self.run_marked(st, job, &mut active_log);
+            let path = job.path.clone();
+            let _mark = self.mark(st, &path, job.seq);
+            if !(self.exec)(&job, &mut active_log) {
+                let retry = job.retry.failed(Instant::now());
+                self.lock().queue.push_back(Job { retry, ..job });
+                return;
+            }
         }
     }
 
     /// Makes the latest content of `path` reach the disk before a caller reads,
     /// stats or deletes it: runs its queued job now, in this thread, or waits for
     /// the one running.
-    pub(crate) fn settle(&self, path: &[u8]) {
+    pub(crate) fn settle(self: &Arc<Self>, path: &[u8]) {
         self.settled(path, || ());
     }
 
     /// [`Saver::settle`], then runs `f` while no job can touch `path`: a reader that
-    /// checks the file and its `.new` never sees the moment of a rename.
-    pub(crate) fn settled<R>(&self, path: &[u8], f: impl FnOnce() -> R) -> R {
+    /// checks the file and its `.new` never sees the moment of a rename. A delete that
+    /// still waits for another file's write stays queued (the file stays meanwhile).
+    pub(crate) fn settled<R>(self: &Arc<Self>, path: &[u8], f: impl FnOnce() -> R) -> R {
         let mut st = self.idle(self.lock(), path);
         let pending = st
             .queue
             .iter()
-            .position(|j| j.path == path)
+            .position(|j| j.path == path && !st.blocked(j))
             .and_then(|i| st.queue.remove(i));
         let seq = pending.as_ref().map_or(u64::MAX, |j| j.seq);
         let _mark = self.mark(st, path, seq);
         if let Some(job) = pending {
-            (self.exec)(&job, &mut active_log);
+            self.exec_job(job, &mut active_log);
         }
         f()
     }
 
     /// The content of a queued write of `path`, for a reader: the file on disk is older.
-    /// A queued delete runs now (no sync), so the reader finds the file gone.
-    pub(crate) fn pending_content(&self, path: &[u8]) -> Option<Vec<u8>> {
+    /// A queued delete runs now (no sync), so the reader finds the file gone, unless it
+    /// waits for another file's write.
+    pub(crate) fn pending_content(self: &Arc<Self>, path: &[u8]) -> Option<Vec<u8>> {
         let mut st = self.lock();
         let i = st.queue.iter().position(|j| j.path == path)?;
         if let JobKind::Write { bytes, .. } = &st.queue[i].kind {
@@ -344,17 +483,72 @@ impl Saver {
         if let JobKind::Write { bytes, .. } = &st.queue[i].kind {
             return Some(bytes.clone());
         }
+        if st.blocked(&st.queue[i]) {
+            return None;
+        }
         let job = st.queue.remove(i).expect("position is in range");
         self.run_marked(st, job, &mut active_log);
         None
     }
 
-    /// Waits until every queued job has run (the coordinator's exit).
-    pub(crate) fn drain(&self) {
+    /// Waits until every queued job has run (the coordinator's exit, the stop). A save
+    /// that failed and waits for its retry gets a last attempt now; one that fails
+    /// again is given up, the last good file staying ([`Saver::unsaved`] names it), and
+    /// a delete waiting for its write is dropped. Returns how many files are unsaved.
+    pub(crate) fn drain(self: &Arc<Self>) -> usize {
         let mut st = self.lock();
-        while !st.queue.is_empty() || !st.in_flight.is_empty() {
-            st = self.wait(st);
+        loop {
+            while !st.in_flight.is_empty()
+                || st
+                    .queue
+                    .iter()
+                    .any(|j| j.retry.attempts == 0 && !st.blocked(j))
+            {
+                st = self.wait(st);
+            }
+            let mut failed = Vec::new();
+            let mut i = 0;
+            while i < st.queue.len() {
+                if st.queue[i].retry.attempts > 0 {
+                    failed.extend(st.queue.remove(i));
+                } else {
+                    i += 1;
+                }
+            }
+            if failed.is_empty() {
+                // Left: deletes waiting for a write that was given up.
+                st.queue.clear();
+                self.cv.notify_all();
+                return st.unsaved.len();
+            }
+            for job in failed {
+                let ok = {
+                    let _mark = self.mark(st, &job.path, job.seq);
+                    (self.exec)(&job, &mut active_log)
+                };
+                st = self.lock();
+                if ok {
+                    active_log(DiskLogLevel::Info, &saved_again_message(&job));
+                    st.unsaved.retain(|p| *p != job.path);
+                } else if !st.unsaved.contains(&job.path) {
+                    active_log(
+                        DiskLogLevel::Error,
+                        &[
+                            &b"Error saving diskstate: giving up on "[..],
+                            &job.path,
+                            b"; the last good copy on disk is kept",
+                        ]
+                        .concat(),
+                    );
+                    st.unsaved.push(job.path);
+                }
+            }
         }
+    }
+
+    /// The files whose save [`Saver::drain`] gave up and no later save wrote.
+    pub(crate) fn unsaved(&self) -> Vec<Vec<u8>> {
+        self.lock().unsaved.clone()
     }
 
     #[cfg(test)]
@@ -406,8 +600,45 @@ pub(crate) fn pending_content(path: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// [`Saver::drain`] on the daemon's saver.
-pub(crate) fn drain() {
+pub(crate) fn drain() -> usize {
     global().drain()
+}
+
+/// The daemon stops: every queued save runs (a failing one gets its last attempt), and
+/// the files whose latest state could not be saved are returned. Not empty, the stop
+/// is not clean: their last good copies on disk are older than the queue in memory.
+pub(crate) fn finish() -> Vec<Vec<u8>> {
+    let saver = global();
+    saver.drain();
+    saver.unsaved()
+}
+
+/// Set once a stop (or reload) left state files unsaved; the process exit status says so.
+static STOPPED_UNCLEAN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// At the instance's teardown: [`finish`], and an error naming the unsaved files, if any.
+pub(crate) fn stop_report() {
+    let unsaved = finish();
+    if unsaved.is_empty() {
+        return;
+    }
+    STOPPED_UNCLEAN.store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut msg = format!(
+        "Stopping is not clean: {} state file(s) could not be saved, their last good copies \
+         are older than the queue in memory:",
+        unsaved.len()
+    )
+    .into_bytes();
+    for p in unsaved.iter().take(10) {
+        msg.push(b' ');
+        msg.extend_from_slice(crate::nserv::base_file_name(p));
+    }
+    active_log(DiskLogLevel::Error, &msg);
+}
+
+/// True once a teardown left state files unsaved ([`stop_report`]).
+pub(crate) fn stopped_unclean() -> bool {
+    STOPPED_UNCLEAN.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 #[cfg(test)]
@@ -442,12 +673,16 @@ mod tests {
                 transactional: true,
                 sync: true,
             },
+            retry: Retry::default(),
         }
     }
 
     fn delete(path: &str) -> Job {
         Job {
-            kind: JobKind::Delete { temp_too: true },
+            kind: JobKind::Delete {
+                temp_too: true,
+                after: None,
+            },
             ..write(path, "")
         }
     }
@@ -610,6 +845,192 @@ mod tests {
         releaser.join().unwrap();
     }
 
+    /// A saver whose writes fail while `full` is set (a full disk); it records the
+    /// jobs that succeeded and counts every attempt.
+    fn disk_full() -> (
+        Arc<Saver>,
+        Arc<Mutex<Vec<Job>>>,
+        Arc<AtomicBool>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let done = Arc::new(Mutex::new(Vec::new()));
+        let full = Arc::new(AtomicBool::new(true));
+        let tries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (d, f, n) = (Arc::clone(&done), Arc::clone(&full), Arc::clone(&tries));
+        let saver = Saver::new(Box::new(move |job: &Job, _log: Log<'_>| {
+            n.fetch_add(1, Ordering::SeqCst);
+            if matches!(job.kind, JobKind::Write { .. }) && f.load(Ordering::SeqCst) {
+                return false;
+            }
+            d.lock().unwrap().push(job.clone());
+            true
+        }));
+        (saver, done, full, tries)
+    }
+
+    fn wait_until(what: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !what() {
+            assert!(Instant::now() < deadline, "timed out");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn a_failed_save_is_kept_and_retried_with_backoff_until_it_succeeds() {
+        let (saver, done, full, tries) = disk_full();
+        assert!(!saver.submit(write("9s", "a"), &mut |_, _| {}));
+        // Kept, with its backoff; nobody waits for it.
+        let st = saver.lock();
+        assert_eq!(st.queue.len(), 1);
+        assert_eq!(st.queue[0].retry.attempts, 1);
+        assert!(st.queue[0].retry.not_before.is_some());
+        let seq = st.queue[0].seq;
+        drop(st);
+        saver.wait_for(&[(b"9s".to_vec(), seq)]);
+        // The first retry comes after about a second, not at once.
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(tries.load(Ordering::SeqCst), 1);
+        wait_until(|| tries.load(Ordering::SeqCst) >= 2);
+        assert_eq!(saver.lock().queue[0].retry.attempts, 2);
+        full.store(false, Ordering::SeqCst);
+        wait_until(|| !done.lock().unwrap().is_empty());
+        assert_eq!(summary(&done), ["9s=a"]);
+        assert_eq!(saver.drain(), 0);
+    }
+
+    #[test]
+    fn a_newer_save_of_a_failing_file_takes_its_place_and_backoff() {
+        let (saver, done, full, _tries) = disk_full();
+        assert!(!saver.submit(write("8s", "old"), &mut |_, _| {}));
+        saver.lock().queue_saves = true;
+        COORDINATOR.with(|c| c.set(true));
+        assert!(saver.submit(write("8s", "new"), &mut |_, _| {}));
+        COORDINATOR.with(|c| c.set(false));
+        {
+            let st = saver.lock();
+            assert_eq!(st.queue.len(), 1);
+            assert_eq!(st.queue[0].retry.attempts, 1, "the backoff goes on");
+        }
+        assert_eq!(saver.pending_content(b"8s"), Some(b"new".to_vec()));
+        full.store(false, Ordering::SeqCst);
+        wait_until(|| !done.lock().unwrap().is_empty());
+        assert_eq!(summary(&done), ["8s=new"]);
+        saver.lock().queue_saves = false;
+        saver.drain();
+    }
+
+    #[test]
+    fn a_delete_after_a_failing_write_waits_for_it_and_is_dropped_if_it_is_given_up() {
+        let (saver, done, full, _tries) = disk_full();
+        let after_queue = |path: &str| Job {
+            kind: JobKind::Delete {
+                temp_too: true,
+                after: Some(b"queue".to_vec()),
+            },
+            ..write(path, "")
+        };
+        // The queue save fails: progress stays.
+        assert!(!saver.submit(write("queue", "q1"), &mut |_, _| {}));
+        assert!(saver.submit(after_queue("progress"), &mut |_, _| {}));
+        assert_eq!(
+            saver.queued_paths(),
+            [b"queue".to_vec(), b"progress".to_vec()]
+        );
+        assert_eq!(
+            saver.pending_content(b"progress"),
+            None,
+            "a reader finds the file still there"
+        );
+        assert_eq!(saver.queued_paths().len(), 2);
+        // Given up at the stop: the delete is dropped, progress kept.
+        assert_eq!(saver.drain(), 1);
+        assert_eq!(saver.unsaved(), [b"queue".to_vec()]);
+        assert!(saver.queued_paths().is_empty());
+        assert!(summary(&done).is_empty());
+        // The next queue save succeeds: then progress goes, after it.
+        full.store(false, Ordering::SeqCst);
+        assert!(saver.submit(write("queue", "q2"), &mut |_, _| {}));
+        assert!(saver.unsaved().is_empty());
+        assert!(saver.submit(after_queue("progress"), &mut |_, _| {}));
+        assert_eq!(summary(&done), ["queue=q2", "-progress"]);
+    }
+
+    #[test]
+    fn drain_gives_a_failing_save_a_last_attempt_and_names_it_when_that_fails() {
+        let (saver, done, full, tries) = disk_full();
+        assert!(!saver.submit(write("5s", "x"), &mut |_, _| {}));
+        assert!(!saver.submit(write("6s", "y"), &mut |_, _| {}));
+        assert_eq!(saver.drain(), 2);
+        assert!(tries.load(Ordering::SeqCst) >= 4);
+        assert!(saver.queued_paths().is_empty());
+        let mut unsaved = saver.unsaved();
+        unsaved.sort();
+        assert_eq!(unsaved, [b"5s".to_vec(), b"6s".to_vec()]);
+        // Space again: the last attempt succeeds.
+        assert!(!saver.submit(write("7s", "z"), &mut |_, _| {}));
+        full.store(false, Ordering::SeqCst);
+        assert_eq!(saver.drain(), 2);
+        assert_eq!(summary(&done), ["7s=z"]);
+    }
+
+    /// The real writer on a full disk: the last good file stays whole, no `.new` is left.
+    #[test]
+    fn a_failed_write_never_replaces_the_last_good_file() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = std::env::temp_dir().join(format!(
+            "rg-statesaver-full-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("4242s");
+        let temp = dir.join("4242s.new");
+        std::fs::write(&path, b"last good").unwrap();
+        let job = Job {
+            seq: 0,
+            path: path.as_os_str().as_bytes().to_vec(),
+            temp: temp.as_os_str().as_bytes().to_vec(),
+            sep: b'/',
+            kind: JobKind::Write {
+                bytes: b"newer".to_vec(),
+                transactional: true,
+                sync: true,
+            },
+            retry: Retry::default(),
+        };
+        crate::diskstate_format::FAIL_WRITES
+            .lock()
+            .unwrap()
+            .push(b"/4242s".to_vec());
+        let mut errors = Vec::new();
+        let ok = crate::diskstate_format::run_state_job(&job, &mut |level, msg| {
+            if level == DiskLogLevel::Error {
+                errors.push(String::from_utf8_lossy(msg).into_owned());
+            }
+        });
+        crate::diskstate_format::FAIL_WRITES
+            .lock()
+            .unwrap()
+            .retain(|n| n != b"/4242s");
+        assert!(!ok);
+        assert_eq!(std::fs::read(&path).unwrap(), b"last good");
+        assert!(!temp.exists());
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("Could not write file") && e.contains("4242s.new")),
+            "{errors:?}"
+        );
+        // Space again: the save replaces it.
+        assert!(crate::diskstate_format::run_state_job(&job, &mut |_, _| {}));
+        assert_eq!(std::fs::read(&path).unwrap(), b"newer");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The real job writer: a queued save is on disk, readable, after `settle`,
     /// and its temporary file is gone.
     #[test]
@@ -636,6 +1057,7 @@ mod tests {
                 transactional: true,
                 sync: true,
             },
+            retry: Retry::default(),
         };
         saver.enqueue(job("first"));
         saver.enqueue(job("second"));

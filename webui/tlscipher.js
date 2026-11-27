@@ -195,6 +195,9 @@ var TlsCipherDialog = (new function($)
 		{
 			applyStep = 0;
 			info.text(text(key, fallback));
+			// a new test is possible again; an apply that was not seen to happen can be tried again
+			$('#TlsCipherAgain').toggle(!state || state.Available !== false);
+			$('#TlsCipherApply').text(text('apply', 'Apply now')).toggle(key !== 'applied' && unapplied);
 		};
 		// The daemon's instance number (setupstatus) tells a restarted daemon apart
 		// for sure; a smaller uptime (status) is the fallback, as in Config.reload.
@@ -212,7 +215,7 @@ var TlsCipherDialog = (new function($)
 					finish('apply_failed', 'RustyGet did not answer after the reload request. Check that it is running.');
 				else setTimeout(check, 1000);
 			};
-			RPC.call('setupstatus', [], function(setup) {
+			var withStatus = function(setup) {
 				RPC.call('status', [], function(status) {
 					lastAnswer = new Date().getTime();
 					if (reloaded(setup, status))
@@ -232,7 +235,9 @@ var TlsCipherDialog = (new function($)
 					}
 					setTimeout(check, 1000);
 				}, lost, { timeout: 5000 });
-			}, lost, { timeout: 5000 });
+			};
+			// a daemon that cannot answer setupstatus is still checked by its uptime
+			RPC.call('setupstatus', [], withStatus, function() { withStatus(null); }, { timeout: 5000 });
 		};
 		var request = function()
 		{
@@ -300,7 +305,8 @@ var TlsCipherDialog = (new function($)
 				render(result);
 				message(result.Message || text('unavailable', 'TLS cipher optimization requires a TLS-enabled Rust backend.'));
 			}
-			else if (applyStep === 2 || (applied && result.State === 'idle')) return; // keep the shown results
+			else if (applyStep === 2) return; // keep the shown results while the reload waits
+			else if (applied && result.State === 'idle') $('#TlsCipherAgain').show(); // keep the results, offer a new run
 			else if (result.State === 'idle' && !needsStatus) start();
 			else render(result);
 		});

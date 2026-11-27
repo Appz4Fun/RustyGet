@@ -200,6 +200,7 @@ const { fixtureURL } = require('./workspace-fixture');
       await page.waitForTimeout(100);
       assert.equal(await page.evaluate(() => cipherCalls.filter(x => x.method === 'tlscipherstart').length), 2, 'No automatic run after Apply');
       assert.equal(await page.locator('#TlsCipherServers tbody tr').count(), 3);
+      assert(await page.locator('#TlsCipherAgain').isVisible(), 'A new test can still be started after Apply');
       await page.evaluate(() => { cipherState = beforeIdle; });
       if (process.env.NZBGET_UI_CAPTURE_DIR && [1280, 390].includes(width)) {
         await page.screenshot({ path: path.join(process.env.NZBGET_UI_CAPTURE_DIR, `tls-cipher-applied-${theme}-${width}.jpg`), type: 'jpeg', quality: 90 });

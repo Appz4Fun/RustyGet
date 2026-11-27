@@ -191,6 +191,7 @@ fn run(dir: &Path, set: &LiveSet, feed: &mut DiskFeed) -> (Outcome, Vec<String>)
         set,
         password: "",
     };
+    let boundaries = std::cell::Cell::new(0u32);
     let outcome = extract(
         &req,
         feed,
@@ -198,7 +199,10 @@ fn run(dir: &Path, set: &LiveSet, feed: &mut DiskFeed) -> (Outcome, Vec<String>)
         &mut |_, m| lines.push(m.to_string()),
         &mut || false,
         &|_| {},
+        &|| boundaries.set(boundaries.get() + 1),
     );
+    // (the safe points a direct unpack may give its unpack slot up at)
+    lines.push(format!("safe points: {}", boundaries.get()));
     (outcome, lines)
 }
 
@@ -247,6 +251,11 @@ fn a_byte_split_zip_is_extracted_as_its_volumes_arrive() {
     assert!(lines
         .iter()
         .any(|l| l == "Unrar: Extracting from Movie.zip.001"));
+    // each pass that wrote something is a safe point (`on_boundary`)
+    assert!(
+        lines.iter().any(|l| l.starts_with("safe points: ") && l != "safe points: 0"),
+        "{lines:?}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -399,6 +408,7 @@ fn a_hole_in_a_stored_member_is_read_past_and_filled_after_its_repair() {
         &mut |_, _| {},
         &mut || false,
         &|_| {},
+        &|| {},
     );
     assert!(
         matches!(outcome, Outcome::Done { files: 1, .. }),
@@ -618,6 +628,7 @@ fn volumes_being_written_are_fed_article_by_article() {
         &mut |_, m| lines.push(m.to_string()),
         &mut || false,
         &|_| {},
+        &|| {},
     );
     writer.join().unwrap();
     assert_eq!(
@@ -787,6 +798,7 @@ fn a_set_is_mapped_from_its_first_and_last_volume_while_they_are_written() {
             },
             &mut || false,
             &|_| {},
+            &|| {},
         );
         let (mapped_early, served_last) = handle.join().unwrap();
         assert_eq!(

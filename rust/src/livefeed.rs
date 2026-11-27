@@ -142,6 +142,9 @@ fn basename(path: &[u8]) -> &[u8] {
 /// again.
 struct Waiting<'a> {
     on_wait: &'a dyn Fn(bool),
+    /// Called after a pass over the members (or pieces) that wrote something: a safe point,
+    /// nothing is being written (see `progressive_unpack::Request::on_boundary`).
+    on_boundary: &'a dyn Fn(),
     waiting: bool,
     /// Article writes reported when the extraction last looked (see `crate::livewrite`).
     writes: u64,
@@ -150,9 +153,10 @@ struct Waiting<'a> {
 }
 
 impl Waiting<'_> {
-    fn new(on_wait: &dyn Fn(bool)) -> Waiting<'_> {
+    fn new<'w>(on_wait: &'w dyn Fn(bool), on_boundary: &'w dyn Fn()) -> Waiting<'w> {
         Waiting {
             on_wait,
+            on_boundary,
             waiting: false,
             writes: crate::livewrite::write_count(),
             own: 0,
@@ -183,6 +187,11 @@ impl Waiting<'_> {
             self.waiting = false;
             (self.on_wait)(false);
         }
+    }
+    /// A pass wrote something: works again, then gives a direct unpack its safe point.
+    fn progressed(&mut self) {
+        self.busy();
+        (self.on_boundary)();
     }
 }
 
@@ -870,7 +879,8 @@ pub type Prepare<'a> =
 
 /// Extracts `req.set` while it downloads. `feed` says which volumes are on disk and which bytes
 /// in them are lost; `prepare` is called once, before the first output; `on_wait` is told
-/// `true` while the extraction waits for volumes and `false` when it works again.
+/// `true` while the extraction waits for volumes and `false` when it works again; `on_boundary`
+/// is called at each safe point (after a pass over the members that wrote something).
 pub fn extract(
     req: &Request<'_>,
     feed: &mut dyn VolumeFeed,
@@ -878,12 +888,13 @@ pub fn extract(
     log: &mut dyn FnMut(i32, &str),
     is_cancelled: &mut dyn FnMut() -> bool,
     on_wait: &dyn Fn(bool),
+    on_boundary: &dyn Fn(),
 ) -> Outcome {
     if req.set.kind == SetKind::Split {
-        return join_live(req, feed, prepare, log, is_cancelled, on_wait);
+        return join_live(req, feed, prepare, log, is_cancelled, on_wait, on_boundary);
     }
     let mut vols = Volumes::new(req.dir, req.set, feed);
-    let mut waiting = Waiting::new(on_wait);
+    let mut waiting = Waiting::new(on_wait, on_boundary);
     // Map the set as soon as its headers are on disk.
     let mut last_ready = usize::MAX;
     let mut last_try = Instant::now() - MAP_RETRY;
@@ -1165,7 +1176,7 @@ fn feed_members(
             break;
         }
         if progressed {
-            waiting.busy();
+            waiting.progressed();
         } else if vols.feed.set_became_final() {
             // Every volume is on disk and none will change: what is still lost stays lost.
             let names: Vec<&str> = members
@@ -1272,6 +1283,7 @@ fn join_live(
     log: &mut dyn FnMut(i32, &str),
     is_cancelled: &mut dyn FnMut() -> bool,
     on_wait: &dyn Fn(bool),
+    on_boundary: &dyn Fn(),
 ) -> Outcome {
     let first = &req.set.volumes[0];
     let joined = &first[..first.len().saturating_sub(4)];
@@ -1317,7 +1329,7 @@ fn join_live(
     );
     log(4, &format!("Unrar: Extracting  {name}"));
     let mut vols = Volumes::new(req.dir, req.set, feed);
-    let mut waiting = Waiting::new(on_wait);
+    let mut waiting = Waiting::new(on_wait, on_boundary);
     let n = req.set.volumes.len();
     let mut placed = vec![false; n];
     let mut piece_len: Option<u64> = None;
@@ -1384,7 +1396,7 @@ fn join_live(
             break;
         }
         if progressed {
-            waiting.busy();
+            waiting.progressed();
         } else if vols.feed.set_became_final() {
             let why = format!("Unrar: ERROR: {name} could not be joined from its pieces");
             log(1, &why);

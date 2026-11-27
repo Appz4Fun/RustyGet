@@ -68,6 +68,22 @@ fn slot_wait_message(in_use: usize, cap: usize) -> Vec<u8> {
     format!("Waiting for an unpack slot ({in_use} of {cap} in use, option UnpackSlots)").into_bytes()
 }
 
+/// Test hook: `RUSTYGET_TEST_EXTRACT_BOUNDARY_DELAY_MS` sleeps that long at each safe point of
+/// a direct unpack, holding its unpack slot, as an extraction onto a slow disk does. The
+/// slotpreemptpaused and slotfinishedlive scenarios set it; unset, it costs one load.
+fn test_boundary_delay() {
+    static DELAY_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let ms = *DELAY_MS.get_or_init(|| {
+        std::env::var("RUSTYGET_TEST_EXTRACT_BOUNDARY_DELAY_MS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0)
+    });
+    if ms > 0 {
+        std::thread::sleep(Duration::from_millis(ms));
+    }
+}
+
 #[inline]
 pub(crate) fn current_time_sec() -> i64 {
     // SAFETY: `libc::time(null)` is async-signal-safe and reads the wall clock.
@@ -4692,6 +4708,8 @@ pub struct NzbgetRsDirectUnpack {
     slot: Mutex<Option<crate::unpackslots::Slot>>,
     /// "Waiting for an unpack slot" was logged for this download.
     slot_wait_told: AtomicBool,
+    /// When `yield_if_wanted` last worked out this download's class.
+    yield_check: Mutex<Option<std::time::Instant>>,
 }
 
 /// Gives the direct unpack's slot back when the extraction step that took it ends, however it
@@ -4721,6 +4739,7 @@ impl NzbgetRsDirectUnpack {
             exec_thread_key: AtomicUsize::new(0),
             slot: Mutex::new(None),
             slot_wait_told: AtomicBool::new(false),
+            yield_check: Mutex::new(None),
         }
     }
 
@@ -4754,6 +4773,57 @@ impl NzbgetRsDirectUnpack {
                 true
             }
             None => false,
+        }
+    }
+
+    /// At a safe point of the extraction (a volume opened or a member finished, a pass of a
+    /// live set's members done: nothing is being written, the same state as when it stops to
+    /// wait for a volume), gives the slot up and asks again when a waiter goes before this
+    /// download now (`unpackslots::should_yield`): a paused or held download's extraction for
+    /// an active download or a finished job, any one for a finished job that waited
+    /// `unpackslots::OVERDUE`. Its class is worked out (under the queue lock) only when
+    /// someone waits, at most every quarter second. Called on the extraction's own thread only,
+    /// never with the queue locked.
+    fn yield_if_wanted(&self, host: &QueueSubsysHost) {
+        test_boundary_delay();
+        if !crate::unpackslots::anyone_waiting() {
+            return;
+        }
+        {
+            let mut last = self.yield_check.lock().unwrap_or_else(|e| e.into_inner());
+            if last.is_some_and(|t| t.elapsed() < Duration::from_millis(250)) {
+                return;
+            }
+            *last = Some(std::time::Instant::now());
+        }
+        let class = self.slot_class(host);
+        let why = self
+            .slot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(|slot| crate::unpackslots::should_yield(slot, class));
+        if let Some(why) = why {
+            self.yield_slot();
+            host.with_locked_queue(|dq_ptr| {
+                let n = host.queue_find_by_id(dq_ptr, self.nzb_id);
+                if n.is_some() {
+                    let name = host.nzb_snap(n, false).name;
+                    let mut msg = b"Giving the unpack slot of ".to_vec();
+                    msg.extend_from_slice(crate::cstr::until_nul(&name));
+                    msg.extend_from_slice(match why {
+                        crate::unpackslots::YieldFor::GoesFirst => {
+                            b" to a download that goes first (option UnpackSlots)".as_slice()
+                        }
+                        crate::unpackslots::YieldFor::Overdue => {
+                            b" to a finished download that waited a minute (option UnpackSlots)".as_slice()
+                        }
+                    });
+                    Self::nzb_message(host, n, MK_INFO, &cstr::nul_terminated(&msg));
+                }
+            });
+            // (stopped meanwhile: it goes on without one, and ends at its next look)
+            let _ = self.take_slot(host);
         }
     }
 
@@ -5493,6 +5563,7 @@ impl NzbgetRsDirectUnpack {
                 self.is_stopped_or_terminated(host)
             },
             &|waiting| self.session_wait(host, waiting),
+            &|| self.yield_if_wanted(host),
         );
         drop(cell);
         if let Some(summary) = crate::livewrite::read_summary(reads, crate::livewrite::read_counts()) {
@@ -5648,6 +5719,7 @@ impl NzbgetRsDirectUnpack {
                     session_parked.store(waiting, Ordering::Release);
                     self.session_wait(host, waiting);
                 }),
+                on_boundary: Some(&|| self.yield_if_wanted(host)),
                 guard: Some(&guard),
             },
         );

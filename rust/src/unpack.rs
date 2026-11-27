@@ -973,6 +973,7 @@ where
         feed,
         failure,
         on_wait,
+        on_boundary,
         ..
     } = rar;
     let feed = feed.unwrap_or_else(|| Box::new(pu::CompleteSet));
@@ -996,6 +997,7 @@ where
             _ => pu::Overwrite::Always,
         },
         on_wait,
+        on_boundary,
     };
     let result = pu::extract(&req, feed, &mut cb, is_cancelled);
     match result {
@@ -1505,6 +1507,9 @@ pub struct RarFeed<'a> {
     pub failure: Option<&'a mut Option<crate::progressive_unpack::Failure>>,
     /// Told `true` while the RAR extraction waits for a volume and `false` when it continues.
     pub on_wait: Option<&'a dyn Fn(bool)>,
+    /// Called at each safe point between volumes or members (see
+    /// `progressive_unpack::Request::on_boundary`).
+    pub on_boundary: Option<&'a dyn Fn()>,
     /// The job's unpack limits (`unpacklimits`), shared by all its archives and passes. The
     /// caller makes the names ASCII once the job's unpack is done
     /// (`unpacklimits::finish_names`). `None` (an archive that is not a job's download) limits

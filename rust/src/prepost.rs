@@ -2019,10 +2019,11 @@ impl NzbgetRsPrePostProcessor {
         true
     }
 
-    /// Whether a finished job's unpack would find no unpack slot now (`unpackslots`): slots
-    /// held, an active download's extraction waiting for one, and jobs already in their unpack
-    /// stage leave none. A direct unpack waiting for a volume (a paused download's, say) holds
-    /// none and keeps no job waiting.
+    /// Whether no more finished jobs may enter their unpack stage now
+    /// (`unpackslots::room_for_finished`): other finished jobs' unpacks holding or waiting for
+    /// a slot, and jobs already in their unpack stage, fill the slots. Direct unpacks holding
+    /// or waiting keep no job out: its unpack waits for a slot in line (and ages there), so a
+    /// live extraction that takes the slot again for each article cannot hold it back for ever.
     fn unpack_slot_lacking(&self, host: &crate::queuesubsys_host::QueueSubsysHost) -> bool {
         let unpacking = self
             .active_job_stages(host)

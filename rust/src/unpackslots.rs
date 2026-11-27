@@ -7,14 +7,22 @@
 //! could not be kept for its backup (the keep rule needs a running extraction) and finished
 //! jobs waited in PP_QUEUED. Now:
 //!
-//! - up to [`capacity`] extractions run at once (option `UnpackSlots`; 0 picks
-//!   `min(4, logical CPUs / 2)`, at least one);
+//! - up to [`capacity`] extractions run at once (option `UnpackSlots`; 0, the default, is
+//!   one: extractions share the destination disk, so one at a time finishes each release
+//!   sooner);
 //! - an extraction holds its slot only while it extracts: one waiting for a volume gives it
 //!   back (`yield` in the direct unpack's wait callbacks) and asks again when the volume is
 //!   there, so a paused download's extraction never keeps a slot from anyone;
 //! - a waiter for a slot is admitted in [`Class`] order (an active download first, then a
 //!   finished job's unpack, then a paused or held download), oldest first within a class.
-//!   The class is asked again while waiting, so a download resumed meanwhile moves up.
+//!   The class is asked again while waiting, so a download resumed meanwhile moves up;
+//! - a finished job's unpack always enters the waiting line (it is never just skipped while
+//!   slots are held, [`room_for_finished`] counts only other finished jobs' unpacks), so it
+//!   ages like any waiter and cannot be passed over for ever;
+//! - a direct unpack holding a slot gives it up at a safe point between volumes or members
+//!   ([`should_yield`]) when a waiter of a greater class wants it, or a finished job's unpack
+//!   waited [`OVERDUE`]. A finished job's unpack is never interrupted: it is the next release
+//!   to finish.
 
 use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::Duration;
@@ -45,6 +53,10 @@ struct Waiter {
     ticket: u64,
     class: Class,
     kind: Kind,
+    /// Its class as asked now, before aging ([`aged`]): only this one preempts a holder, so
+    /// paused downloads that waited do not take turns on the slot.
+    base: Class,
+    since: std::time::Instant,
 }
 
 struct Holder {
@@ -74,14 +86,15 @@ fn lock() -> MutexGuard<'static, State> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Slots for option `UnpackSlots` on a computer with `cores` logical CPUs: 0 (the default)
-/// picks half the CPUs, at least one and at most four (each extraction may use several
-/// threads of its own, see `FeedThreads`); n is n (at most 64).
-pub fn capacity_for(option: i32, cores: usize) -> usize {
+/// Slots for option `UnpackSlots`: 0 (the default) is one, n is n (at most 64). Extractions
+/// share one destination disk, so running several at once splits its bandwidth and every
+/// release finishes later; one at a time finishes each release sooner for the same total.
+/// One extraction still uses several threads of its own (see `FeedThreads`).
+pub fn capacity_for(option: i32) -> usize {
     if option > 0 {
         (option as usize).min(64)
     } else {
-        (cores / 2).clamp(1, 4)
+        1
     }
 }
 
@@ -100,8 +113,7 @@ pub fn session_limit() -> usize {
 /// Slots now, from the active options (read each time, so a reload applies).
 pub fn capacity() -> usize {
     let option = crate::options::active_options().map_or(0, |o| o.scalars().unpack_slots);
-    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
-    capacity_for(option, cores)
+    capacity_for(option)
 }
 
 /// The class of a download's direct unpack: [`Class::Paused`] when the files it still needs
@@ -134,20 +146,77 @@ pub fn admitted(free: usize, waiters: &[(Class, u64)], me: (Class, u64)) -> bool
     ahead < free
 }
 
-/// Whether a finished job's unpack (class [`Class::Finished`]) finds a slot now: slots held,
-/// waiters that go before it, and `starting` post jobs already in their unpack stage but not
-/// yet holding or waiting for a slot leave one free.
+/// Whether one more finished job may enter its unpack stage now: post jobs holding or
+/// waiting for a slot, and `starting` post jobs already in their unpack stage but not yet
+/// holding or waiting for one, are fewer than the slots. Direct unpacks holding or waiting
+/// are not counted: the job's unpack then waits for a slot in line ([`acquire`], class
+/// [`Class::Finished`], aging), instead of being skipped for as long as some extraction
+/// holds a slot (with one slot a live extraction takes it again for each article it
+/// decodes, so a skipped job could wait for the whole download).
 pub fn room_for_finished(starting: usize) -> bool {
     room_for_finished_in(capacity(), &lock(), starting)
 }
 
 fn room_for_finished_in(cap: usize, st: &State, starting: usize) -> bool {
-    let ahead = st
+    let posts = st.holders.iter().filter(|h| h.kind == Kind::Post).count()
+        + st.waiters.iter().filter(|w| w.kind == Kind::Post).count();
+    posts + starting < cap
+}
+
+/// How long a finished job's unpack waits before a direct unpack of any class gives its slot
+/// up for it at the next safe point (two aging steps: it reached [`Class::Active`] one step
+/// before and still found no slot).
+pub const OVERDUE: Duration = Duration::from_secs(2 * AGE_STEP.as_secs());
+
+/// Why a holder gives its slot up ([`yields_to`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum YieldFor {
+    /// A waiter of a greater class (not counting aging): an active download, or a finished
+    /// job, for a paused or held download's extraction.
+    GoesFirst,
+    /// A finished job's unpack that waited [`OVERDUE`].
+    Overdue,
+}
+
+/// Whether a direct unpack of class `own` holding a slot should give it up at a safe point
+/// for one of `waiters` (class before aging, kind, waited), and why: one of a greater class,
+/// or a finished job's unpack that waited [`OVERDUE`]. Aging decides who gets a free slot but
+/// preempts no one, so paused downloads do not take turns on the slot (each turn a seek on a
+/// disk).
+pub fn yields_to(own: Class, waiters: &[(Class, Kind, Duration)]) -> Option<YieldFor> {
+    if waiters.iter().any(|&(base, _, _)| base > own) {
+        Some(YieldFor::GoesFirst)
+    } else if waiters
+        .iter()
+        .any(|&(_, kind, waited)| kind == Kind::Post && waited >= OVERDUE)
+    {
+        Some(YieldFor::Overdue)
+    } else {
+        None
+    }
+}
+
+/// Whether someone waits for a slot (cheap; asked before the class of a holder is worked out).
+pub fn anyone_waiting() -> bool {
+    !lock().waiters.is_empty()
+}
+
+/// [`yields_to`] for the waiters now: whether the direct unpack holding `slot`, of class
+/// `own` now, should give it up at its next safe point (between volumes or members, where it
+/// would also stop to wait for a volume) and ask again ([`acquire`]), which puts it behind
+/// that waiter.
+pub fn should_yield(slot: &Slot, own: Class) -> Option<YieldFor> {
+    let st = lock();
+    if !st.holders.iter().any(|h| h.ticket == slot.ticket && h.kind == Kind::Direct) {
+        return None;
+    }
+    let waiters: Vec<(Class, Kind, Duration)> = st
         .waiters
         .iter()
-        .filter(|w| w.class >= Class::Finished)
-        .count();
-    st.holders.len() + ahead + starting < cap
+        .map(|w| (w.base, w.kind, w.since.elapsed()))
+        .collect();
+    drop(st);
+    yields_to(own, &waiters)
 }
 
 /// Number of post jobs holding or waiting for a slot (to tell which jobs in their unpack
@@ -236,12 +305,22 @@ pub fn acquire(
         if stopped() {
             return None;
         }
-        let my_class = aged(class(), since.elapsed());
+        let base = class();
+        let my_class = aged(base, since.elapsed());
         let cap = capacity();
         let mut st = lock();
         match st.waiters.iter_mut().find(|w| w.ticket == ticket) {
-            Some(w) => w.class = my_class,
-            None => st.waiters.push(Waiter { ticket, class: my_class, kind }),
+            Some(w) => {
+                w.class = my_class;
+                w.base = base;
+            }
+            None => st.waiters.push(Waiter {
+                ticket,
+                class: my_class,
+                kind,
+                base,
+                since,
+            }),
         }
         let free = cap.saturating_sub(st.holders.len());
         let order: Vec<(Class, u64)> = st.waiters.iter().map(|w| (w.class, w.ticket)).collect();
@@ -268,16 +347,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn capacity_is_half_the_cpus_between_one_and_four_unless_set() {
-        assert_eq!(capacity_for(0, 1), 1);
-        assert_eq!(capacity_for(0, 2), 1);
-        assert_eq!(capacity_for(0, 6), 3);
-        assert_eq!(capacity_for(0, 12), 4);
-        assert_eq!(capacity_for(0, 64), 4);
-        assert_eq!(capacity_for(-1, 12), 4);
-        assert_eq!(capacity_for(1, 12), 1);
-        assert_eq!(capacity_for(8, 2), 8);
-        assert_eq!(capacity_for(1000, 2), 64);
+    fn capacity_is_one_unless_set() {
+        assert_eq!(capacity_for(0), 1);
+        assert_eq!(capacity_for(-1), 1);
+        assert_eq!(capacity_for(1), 1);
+        assert_eq!(capacity_for(8), 8);
+        assert_eq!(capacity_for(1000), 64);
     }
 
     #[test]
@@ -358,38 +433,71 @@ mod tests {
         assert!(admitted(1, &[(aged(Finished, s(31)), 1), (Active, 9)], (Active, 1)));
     }
 
-    fn state(holders: usize, waiters: &[Class]) -> State {
+    fn state(holders: &[Kind], waiters: &[(Class, Kind)]) -> State {
         State {
             next_ticket: 100,
-            holders: (0..holders)
-                .map(|i| Holder {
+            holders: holders
+                .iter()
+                .enumerate()
+                .map(|(i, &kind)| Holder {
                     ticket: i as u64,
-                    kind: Kind::Direct,
+                    kind,
                 })
                 .collect(),
             waiters: waiters
                 .iter()
                 .enumerate()
-                .map(|(i, &class)| Waiter {
+                .map(|(i, &(class, kind))| Waiter {
                     ticket: 50 + i as u64,
                     class,
-                    kind: Kind::Direct,
+                    kind,
+                    base: class,
+                    since: std::time::Instant::now(),
                 })
                 .collect(),
         }
     }
 
     #[test]
-    fn a_finished_job_starts_unpacking_only_with_a_slot_left_for_it() {
+    fn a_finished_job_enters_its_unpack_unless_other_finished_unpacks_fill_the_slots() {
         use Class::*;
-        assert!(room_for_finished_in(2, &state(0, &[]), 0));
-        assert!(room_for_finished_in(2, &state(1, &[]), 0));
-        assert!(!room_for_finished_in(2, &state(2, &[]), 0));
-        // a paused download waiting for a slot holds no finished job back
-        assert!(room_for_finished_in(2, &state(1, &[Paused, Paused]), 0));
-        // an active download waiting goes first
-        assert!(!room_for_finished_in(2, &state(1, &[Active]), 0));
+        use Kind::*;
+        assert!(room_for_finished_in(1, &state(&[], &[]), 0));
+        // a direct unpack holding the one slot (a live extraction) does not keep it out:
+        // the job then waits for the slot in line, where it ages
+        assert!(room_for_finished_in(1, &state(&[Direct], &[]), 0));
+        assert!(room_for_finished_in(1, &state(&[Direct], &[(Active, Direct)]), 0));
+        assert!(room_for_finished_in(1, &state(&[Direct], &[(Paused, Direct)]), 0));
+        // another finished job's unpack holding or waiting does
+        assert!(!room_for_finished_in(1, &state(&[Post], &[]), 0));
+        assert!(!room_for_finished_in(1, &state(&[Direct], &[(Finished, Post)]), 0));
+        assert!(room_for_finished_in(2, &state(&[Post], &[]), 0));
         // a job already entering its unpack counts
-        assert!(!room_for_finished_in(2, &state(1, &[]), 1));
+        assert!(!room_for_finished_in(1, &state(&[], &[]), 1));
+        assert!(!room_for_finished_in(2, &state(&[Post], &[]), 1));
+    }
+
+    #[test]
+    fn a_holder_gives_way_to_a_greater_class_or_an_overdue_finished_unpack() {
+        use Class::*;
+        use Kind::*;
+        use YieldFor::*;
+        let s = Duration::from_secs;
+        // nobody waiting
+        assert_eq!(yields_to(Paused, &[]), None);
+        // a paused or held download's extraction gives way to an active download and to a
+        // finished job
+        assert_eq!(yields_to(Paused, &[(Active, Direct, s(0))]), Some(GoesFirst));
+        assert_eq!(yields_to(Paused, &[(Finished, Post, s(0))]), Some(GoesFirst));
+        assert_eq!(yields_to(Paused, &[(Paused, Direct, s(0))]), None);
+        // paused downloads do not take turns: one that waited (aged) preempts no one
+        assert_eq!(yields_to(Paused, &[(Paused, Direct, s(600))]), None);
+        // the active download's extraction goes first: a finished job waits until it idles
+        // (between articles) or is overdue
+        assert_eq!(yields_to(Active, &[(Finished, Post, s(0))]), None);
+        assert_eq!(yields_to(Active, &[(Finished, Post, s(59))]), None);
+        assert_eq!(yields_to(Active, &[(Finished, Post, OVERDUE)]), Some(Overdue));
+        // a paused download that waited long does not interrupt an active one
+        assert_eq!(yields_to(Active, &[(Paused, Direct, s(600))]), None);
     }
 }

@@ -363,10 +363,13 @@ fn exhausted_live_budget_does_not_bypass_a_foreign_certified_source() {
     let gate = f.seal(&path);
     let limit = crate::parchecker::effective_live_pool_bytes();
     assert!(limit > 0);
+    // Drain a pool of this test's own: holding all of the shared one starves parallel tests.
+    let pool = Arc::new(BudgetPool::with_size(limit));
+    crate::parchecker::TEST_BUDGET_POOL.with(|p| *p.borrow_mut() = Some(Arc::clone(&pool)));
     let mut held = Vec::new();
     let mut chunk = 1024 * 1024u64;
     while chunk != 0 {
-        while let Some(lease) = LIVE_BUDGET.acquire(chunk, limit) { held.push(lease); }
+        while let Some(lease) = pool.acquire(chunk, limit) { held.push(lease); }
         chunk /= 2;
     }
     let other_job = NEXT_JOB.fetch_sub(1, Ordering::Relaxed);
@@ -380,6 +383,7 @@ fn exhausted_live_budget_does_not_bypass_a_foreign_certified_source() {
     assert_eq!(std::fs::read(path).unwrap(), b"certified");
     assert!(gate.is_current_generation(SessionGeneration(1)));
     drop(held);
+    crate::parchecker::TEST_BUDGET_POOL.with(|p| *p.borrow_mut() = None);
     forget_download_writes(other_job);
     f.finish();
 }

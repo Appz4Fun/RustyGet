@@ -2939,6 +2939,56 @@ def scenario_xpack7z(daemon, t):
             % (h['Status'], c['recov'], c['repaired'], integ['movie.mkv']))
 
 
+def _xpack_many_volumes(daemon, t, tag, donor_volumes):
+    """Bare target (2 lost articles) repaired from a donor of many small volumes
+    (``donor_volumes``: [(name, bytes)]) against a slow server (SCENARIO_NSERV_ARGS):
+    returns (ok, detail) where ok needs the movie intact and the donor map's
+    per-volume articles (each volume's first, a RAR volume's last) fetched in
+    batches, not one by one. 6790 (NZBID 2966): an alt split into 207 7z volumes
+    cost 208 single fetches, 231 s one after another, for 22 articles of repair."""
+    size = 6_000_000
+    data = _payload(size, 6450)
+    pp = _place_copy(t, tag + 'A', data, 'movie.mkv')
+    members = [(pp, 'movie.mkv', size, 500_000, {5, 6})]
+    donor_members = []
+    for name, piece in donor_volumes(data):
+        rel = '%sB/%s' % (tag, name)
+        t.write_file(os.path.join('data', rel), piece)
+        donor_members.append((rel, name, len(piece), 60_000, set()))
+    h, integ, c = _xpack_run(daemon, t, tag, members, donor_members, {'movie.mkv': data})
+    costs = [(float(m.group(1)), int(m.group(2)), int(m.group(3))) for m in re.finditer(
+        r'Fetch cost of borrowing from Don%s: [\d.]+ MB in [\d.]+ s, waiting on the network ([\d.]+) s; '
+        r'(\d+) single.*?of (\d+) article' % re.escape(tag), _log_text(t))]
+    singles = sum(x[1] for x in costs)
+    vols = len(donor_members)
+    # The map asks for at least one article per volume; one by one that is >= vols singles.
+    ok = (integ['movie.mkv'] and c['recov'] >= 1 and 'SUCCESS' in h['Status'] and costs
+          and singles * 4 < vols)
+    return ok, ('status=%s recovered=%d integrity=%s donor_volumes=%d singles=%d costs(waited,singles,batched)=%s'
+                % (h['Status'], c['recov'], integ['movie.mkv'], vols, singles, costs))
+
+
+def scenario_xpack7zmanyvols(daemon, t):
+    """A split 7z donor of 40 volumes: its payload map learns every volume's size
+    from that volume's first article, fetched as one batch (see _xpack_many_volumes)."""
+    def volumes(data):
+        archive = generators.seven_zip_copy([('movie.mkv', data)])
+        pieces = generators.split_bytes(archive, [150_000] * (len(archive) // 150_000))
+        return [('Rel.7z.%03d' % i, p) for i, p in enumerate(pieces, 1)]
+    ok, detail = _xpack_many_volumes(daemon, t, 'X7m', volumes)
+    return ('xpack7zmanyvols', ok, detail)
+
+
+def scenario_xpackrarmanyvols(daemon, t):
+    """An alt in 40 stored RAR volumes: every volume's headers and end block,
+    which its payload map reads, come in one batch (see _xpack_many_volumes)."""
+    def volumes(data):
+        vols = generators.rar3_store_volumes('movie.mkv', data, 150_000)
+        return [('Rel.part%02d.rar' % i, v) for i, v in enumerate(vols, 1)]
+    ok, detail = _xpack_many_volumes(daemon, t, 'Xrm', volumes)
+    return ('xpackrarmanyvols', ok, detail)
+
+
 def scenario_xpack7zlzma2(daemon, t):
     """Bare target repaired from a real 7-Zip LZMA2 donor (.7z.001/.002) whose
     data did not compress: LZMA2 stored it as raw chunks, and only the articles
@@ -16397,6 +16447,8 @@ SCENARIOS = {
     'xpackzip': scenario_xpackzip,
     'xpack7z': scenario_xpack7z,
     'xpack7zlzma2': scenario_xpack7zlzma2,
+    'xpack7zmanyvols': scenario_xpack7zmanyvols,
+    'xpackrarmanyvols': scenario_xpackrarmanyvols,
     'xpacksplit': scenario_xpacksplit,
     'xpackcompressed': scenario_xpackcompressed,
     'xpackneg': scenario_xpackneg,
@@ -16783,6 +16835,7 @@ EXPECTED_HISTORY_STATUS = {
     'xpackrar': 'FAILURE/HEALTH', 'xpackrar2rar': 'SUCCESS/HEALTH',
     'xpack2sets': 'SUCCESS/HEALTH',
     'xpackzip': 'SUCCESS/HEALTH', 'xpack7z': 'SUCCESS/HEALTH', 'xpack7zlzma2': 'SUCCESS/HEALTH',
+    'xpack7zmanyvols': 'SUCCESS/HEALTH', 'xpackrarmanyvols': 'SUCCESS/HEALTH',
     'xpacksplit': 'SUCCESS/HEALTH', 'xpackcompressed': 'SUCCESS/HEALTH',
     'xpackneg': 'FAILURE/HEALTH', 'xcrypt_encplain': 'SUCCESS/HEALTH',
     'xcrypt_enc7ztarget': 'SUCCESS/HEALTH', 'xcrypt_enc7zdonor': 'SUCCESS/HEALTH',
@@ -16952,6 +17005,8 @@ SCENARIO_OPTIONS = {
     'xpack2sets': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'xpackzip': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'xpack7z': ['DupeArticleFallback=stream', 'ParCheck=auto'],
+    'xpack7zmanyvols': ['DupeArticleFallback=stream', 'ParCheck=auto'],
+    'xpackrarmanyvols': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'xpack7zlzma2': ['DupeArticleFallback=stream', 'ParCheck=auto', 'DupeStreamDecompress=no'],
     'xpacksplit': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'xpackcompressed': ['DupeArticleFallback=stream', 'ParCheck=auto'],
@@ -17338,7 +17393,7 @@ FALLBACK_MODE_BOUND = {'livegate', 'streamrestartcredit', 'wholefilerestart', 'w
 CAPTURE_REQUESTS = {'repost', 'diskfullrestart', 'cachecommitfull', 'interdirbudget', 'interdirbudgetprio', 'altfetchonce', 'wholefileproofcost', 'dropnzbdir', 'fleetstaysqueued', 'fleetprimaryfirst'} | {
     'failcont_twin25', 'failcont_twin50', 'failcont_twin90', 'failcont_alt25', 'failcont_alt50', 'failcont_altlive', 'failcont_alt90', 'failcont_aes25', 'failcont_aes50', 'failcont_aes90', 'failcont_compressed', 'failcont_othervideo', 'failcont_twinlabel', 'failcont_fleettwin', 'failcont_fleetalt', 'failcont_fleetaes', 'failcont_aestwin', 'failcont_aesalt', 'failcont_rar5m3', 'failcont_rar5m3aes', 'failcont_rar5m3other', 'failcont_lzma2', 'failcont_norestart', 'weakswitchalt', 'weakswitchtwin', 'weakswitchaes', 'weakswitchm3', 'failcont_aescontainer', 'failcont_alt25busy'}
 # extra nserv arguments per scenario (-w: response latency in ms)
-SCENARIO_NSERV_ARGS = {'diskfullrestart': ['-w', '300'], 'cachecommitfull': ['-w', '100'], 'interdirbudget': ['-w', '2000'], 'interdirbudgetprio': ['-w', '2000'], 'streamtimeoutwrites': ['-w', '800'], 'fleetslowprobe': ['-x', '2000'], 'fleetprobespeed': ['-w', '300'], 'fleetprobebusy': ['-w', '300'], 'fleetprobehealthfail': ['-w', '800'], 'finaldeletemidway': ['-w', '300'], 'finaldeleterestart': ['-w', '300'], 'restartmidway': ['-w', '300'], 'xpacklatency': ['-w', '1000'], 'deadpickprobe': ['-w', '500'], 'deadpickafterreload': ['-w', '500'],
+SCENARIO_NSERV_ARGS = {'diskfullrestart': ['-w', '300'], 'cachecommitfull': ['-w', '100'], 'interdirbudget': ['-w', '2000'], 'interdirbudgetprio': ['-w', '2000'], 'streamtimeoutwrites': ['-w', '800'], 'fleetslowprobe': ['-x', '2000'], 'fleetprobespeed': ['-w', '300'], 'fleetprobebusy': ['-w', '300'], 'fleetprobehealthfail': ['-w', '800'], 'finaldeletemidway': ['-w', '300'], 'finaldeleterestart': ['-w', '300'], 'restartmidway': ['-w', '300'], 'xpacklatency': ['-w', '1000'], 'xpack7zmanyvols': ['-w', '300'], 'xpackrarmanyvols': ['-w', '300'], 'deadpickprobe': ['-w', '500'], 'deadpickafterreload': ['-w', '500'],
                        'deadpickpartial': ['-w', '100'], 'deadpickstray': ['-w', '500'], 'forcefailover': ['-w', '500'], 'copybackup': ['-w', '500'], 'copyoffailed': ['-w', '500'], 'deaddownloadstray2': ['-w', '300'], 'deaddownloadrestart': ['-w', '300'], 'deadbackupsonly': ['-w', '500'], 'backuporder': ['-w', '500'], 'deaddownloadlate': ['-w', '300'], 'deadpickservers': ['-w', '200'],
                        'deadpickfewservers': ['-w', '200'],
                        # a missing article answers late, so the dead volumes fail one after another and later

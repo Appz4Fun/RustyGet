@@ -327,7 +327,8 @@ fn first_volume_qualifies(first: &Path, password: &str) -> Result<usize, String>
     // that are not there yet (members starting later are checked by zipfast when reached).
     let source = super::header_source(first);
     let live = source.as_path() != first;
-    let mut vol = Volume::open_with_password(&source, pw).map_err(|e| format!("headers: {e}"))?;
+    let mut vol = Volume::open_damaged(&source, pw, zipfast::extract::DamagedInput::Refuse)
+        .map_err(|e| format!("headers: {e}"))?;
     let mut members = 0;
     for _ in 0..100_000 {
         match vol.next_block() {

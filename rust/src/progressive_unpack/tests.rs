@@ -5941,6 +5941,12 @@ fn persistent_unpack_preserves_strict_handling_of_a_damaged_continuation_header(
     let (result, log) = run_downloading(&first, &t.out(), damaged, volumes.len() as u64);
     assert!(log.iter().any(|line| line.contains("persistent partial files")), "{log:?}");
     assert!(matches!(result, Err(Error::Failed(Failure::Checksum(_)))), "{log:?}");
+    assert!(
+        log.iter().any(|line| line.starts_with("Unrar: CRC error")
+            && line.contains("set.part02.rar")
+            && line.contains("damaged header")),
+        "{log:?}"
+    );
     assert!(!t.out().join("movie.mkv").exists());
     assert!(!persistent_state_left(&t.out()));
 }

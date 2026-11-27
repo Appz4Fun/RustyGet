@@ -419,6 +419,10 @@ impl Failure {
         match &e.kind {
             FailureKind::PasswordRequired => Failure::PasswordRequired,
             FailureKind::WrongPassword => Failure::WrongPassword,
+            FailureKind::ChecksumMismatch {
+                scope: zipfast::progressive::ChecksumScope::Header,
+                ..
+            } => Failure::Checksum(format!("{at} (damaged header)")),
             FailureKind::ChecksumMismatch { .. } => Failure::Checksum(at),
             FailureKind::MissingVolume => Failure::MissingVolume(at),
             FailureKind::HeaderHole | FailureKind::DataHole | FailureKind::Truncated => {

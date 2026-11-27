@@ -225,6 +225,16 @@ struct ActiveStreamingSession {
     /// Bytes held in RAM for recovery slots that wait for a back-fill (file, offset, run),
     /// and their total; see [`ActiveStreamingSession::backfill_held`].
     held_backfill: Mutex<(Vec<(FileId, u64, Vec<u8>)>, u64)>,
+    /// par2 files whose download completed: nothing writes into them any more. A slice
+    /// decode-ahead rebuilds in one of them needs no second look ([`Self::recheck_rebuilt`]).
+    completed_sources: Mutex<HashSet<FileId>>,
+    /// Slices decode-ahead rebuilt (file, offset, length) while their file was still being
+    /// written: re-verified once the file completes, see [`Self::hand_over_rebuilt`].
+    rebuilt_recheck: Mutex<Vec<(FileId, u64, u64)>>,
+    /// par2 files with a slice decode-ahead rebuilt: verified now, but the download counts
+    /// their lost articles, so the repair as the download ends still takes them and
+    /// certifies them (see [`streaming_session_download_end_targets`]).
+    rebuilt_files: Mutex<HashSet<FileId>>,
     // Drop last, after the session, queue and all owned metadata. Grows with
     // the syndrome slots as damage appears (see `grow_for_damage`).
     budget: Mutex<SessionBudgetLease>,
@@ -698,6 +708,17 @@ fn build_streaming_session_with(
     // every slice verified needs no whole-file read at repair end.
     let trust = live_trust_allowed();
     session.set_trust_verified_slices(trust);
+    // Decode-ahead (par-rs #126/#127): once slices are damaged for good and as many recovery
+    // slices are ready, every later fold goes straight into the solution, and the damaged
+    // slices are rebuilt, checked and written to their targets within the call that verifies
+    // the last other slice, not at the repair as the download ends. They are handed to live
+    // extraction at once (`hand_over_rebuilt`). Its scratch is transient: while it switches
+    // the slots to the solution and back, par-rs holds up to about two extra copies of the
+    // damaged slices' slots, and the rebuilt bytes until they are taken (each operation).
+    // That is the same order as the scratch of the repair it replaces, and bounded by the
+    // slot cap (the session reservation holds a second syndrome copy, `parlive::resources`). Only when the targets hold the
+    // bytes verified (as for trusted slices): with SkipWrite there is nothing to write into.
+    session.set_decode_ahead(trust);
     Ok(Arc::new(ActiveStreamingSession {
         session,
         generation: SessionGeneration(generation),
@@ -734,6 +755,9 @@ fn build_streaming_session_with(
         recovery_tees: Mutex::new(HashMap::new()),
         staged_due: AtomicBool::new(false),
         held_backfill: Mutex::new((Vec::new(), 0)),
+        completed_sources: Mutex::new(HashSet::new()),
+        rebuilt_recheck: Mutex::new(Vec::new()),
+        rebuilt_files: Mutex::new(HashSet::new()),
     }))
 }
 
@@ -1318,6 +1342,7 @@ impl ActiveStreamingSession {
             self.lend_memory(error);
         } else {
             self.observe_count_readiness();
+            self.hand_over_rebuilt();
         }
         result
     }
@@ -2240,6 +2265,9 @@ fn drain_live_articles_locked(
             ensure_current_generation(nzb_id, entry)?;
             entry.unpause(outcome.unpause.as_ref());
             entry.note_admission_progress();
+            // The fold that verifies the last other slice rebuilds the damaged ones: hand
+            // them on at once, not after the rest of the queue.
+            entry.hand_over_rebuilt();
             count += 1;
         }
     })())
@@ -2604,6 +2632,142 @@ impl ActiveStreamingSession {
             "Live PAR (job {nzb_id}): whole-file check kept at repair end: {reason}"
         );
         crate::log::log_active_bytes(crate::queuesubsys_host::MK_DETAIL, message.as_bytes());
+    }
+}
+
+impl ActiveStreamingSession {
+    /// Takes the slices decode-ahead rebuilt (`take_rebuilt_slices`) and hands them on. par-rs
+    /// checked each against its IFSC checksums and wrote it into its target before queueing
+    /// it, so a live extraction reading that file as it is written may read those bytes now
+    /// (`livewrite::rebuilt`), instead of waiting for the repair at download end.
+    ///
+    /// The write order (par-rs `set_decode_ahead`): a writer that still writes bytes of a
+    /// lost or corrupt article into a rebuilt slice afterwards undoes the rebuild. Nothing
+    /// writes a file once its download completed, so a slice rebuilt in a completed file is
+    /// final. One rebuilt while its file is still being written (a retry that wrote a
+    /// CRC-failed copy, a late cache flush) is re-verified from its target once the file
+    /// completes ([`Self::recheck_rebuilt`]).
+    fn hand_over_rebuilt(&self) {
+        let rebuilt = self.session.take_rebuilt_slices();
+        if rebuilt.is_empty() {
+            return;
+        }
+        let nzb_id = self.metrics.report_nzb_id();
+        let completed = self
+            .completed_sources
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let paths: HashMap<FileId, PathBuf> = self
+            .committed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .paths
+            .iter()
+            .filter(|(_, (_, applied))| *applied)
+            .map(|(id, (path, _))| (*id, path.clone()))
+            .collect();
+        let bindings: Vec<(i32, FileId)> = self
+            .queue_bindings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(queue_id, id)| (*queue_id, *id))
+            .collect();
+        let mut bytes = 0u64;
+        let mut recheck = Vec::new();
+        for slice in &rebuilt {
+            let len = slice.data.len() as u64;
+            bytes += len;
+            if !completed.contains(&slice.file_id) {
+                recheck.push((slice.file_id, slice.offset, len));
+            }
+            // par-rs wrote into the target path it was given; a growing volume is read from
+            // its direct-write output, so only that same file counts.
+            if let Some(path) = paths.get(&slice.file_id) {
+                for (queue_id, _) in bindings.iter().filter(|(_, id)| *id == slice.file_id) {
+                    crate::livewrite::rebuilt(nzb_id, *queue_id, path, slice.offset, len);
+                }
+            }
+        }
+        self.rebuilt_files
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(rebuilt.iter().map(|slice| slice.file_id));
+        if !recheck.is_empty() {
+            self.rebuilt_recheck
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(recheck);
+        }
+        self.metrics
+            .rebuilt_ahead_slices
+            .fetch_add(rebuilt.len() as u64, Ordering::Relaxed);
+        let message = format!(
+            "Live PAR (job {nzb_id}): rebuilt {} damaged slice(s) ({:.1} MB) ahead while downloading",
+            rebuilt.len(),
+            bytes as f64 / (1024.0 * 1024.0)
+        );
+        crate::log::log_active_bytes(crate::queuesubsys_host::MK_DETAIL, message.as_bytes());
+    }
+
+    /// File `id`'s download completed: nothing writes into it any more. Re-verifies the
+    /// slices decode-ahead rebuilt in it while it was still being written
+    /// (`on_range_replaced`, reading only those slices back): a slice something overwrote
+    /// since is diverged, so the trusted check at repair end fails it and the set is
+    /// repaired from disk instead. Callers hold the operation lock.
+    fn recheck_rebuilt(&self, nzb_id: i32, id: FileId) -> Result<(), RepairError> {
+        self.completed_sources
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id);
+        let ranges: Vec<(u64, u64)> = {
+            let mut pending = self.rebuilt_recheck.lock().unwrap_or_else(|e| e.into_inner());
+            let mut ranges = Vec::new();
+            pending.retain(|(file, offset, len)| {
+                if *file == id {
+                    ranges.push((*offset, *len));
+                    false
+                } else {
+                    true
+                }
+            });
+            ranges
+        };
+        if ranges.is_empty() {
+            return Ok(());
+        }
+        let mut diverged = 0usize;
+        let checked = self.apply_target_paths().and_then(|()| {
+            for (offset, len) in &ranges {
+                let outcome = self.session.on_range_replaced(&id, *offset, *len, None)?;
+                self.unpause(outcome.unpause.as_ref());
+                diverged += outcome.unreconcilable().count();
+            }
+            Ok(())
+        });
+        if let Err(error) = checked {
+            // Not re-verified (par-rs: fall back as for an unreconcilable slice): the
+            // whole-file check decides at repair end.
+            self.distrust(nzb_id, &format!("a slice rebuilt ahead could not be re-verified ({error})"));
+            return Err(error);
+        }
+        self.metrics
+            .rebuilt_rechecked
+            .fetch_add(ranges.len() as u64, Ordering::Relaxed);
+        if diverged > 0 {
+            let message = format!(
+                "Live PAR (job {nzb_id}): {diverged} slice(s) rebuilt ahead were overwritten before their file completed; the set is checked from disk at repair end"
+            );
+            crate::log::log_active_bytes(crate::queuesubsys_host::MK_WARNING, message.as_bytes());
+        }
+        Ok(())
+    }
+
+    /// Rebuilt slices waiting for their file to complete (tests).
+    #[cfg(test)]
+    fn rebuilt_pending(&self) -> usize {
+        self.rebuilt_recheck.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 }
 
@@ -3229,6 +3393,13 @@ pub(crate) fn streaming_session_process_completed_file_with_start(
         }
         let accepted = normalize_ranges(&accepted);
         with_live_entry(nzb_id, &entry, |entry| {
+            // Completed: a slice decode-ahead rebuilds from here on is final (the lost ranges
+            // reported below may finish it within this call).
+            entry
+                .completed_sources
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(id);
             let mut end = 0;
             for range in &accepted {
                 if range.offset > end {
@@ -3280,6 +3451,7 @@ pub(crate) fn streaming_session_process_completed_file_with_start(
                 offset = end;
             }
         }
+        with_live_entry(nzb_id, &entry, |entry| entry.recheck_rebuilt(nzb_id, id))?;
         Ok(false)
     })();
     if result
@@ -4370,10 +4542,19 @@ pub(crate) fn streaming_session_download_end_targets(nzb_id: i32) -> Option<Vec<
     if ensure_current_generation(nzb_id, &entry).is_err() {
         return None;
     }
+    // Slices decode-ahead rebuilt are taken before the status is read: their files are
+    // verified already, but they lost articles, so they are certified here (a repair with
+    // nothing left to rebuild) instead of by a batch par-check.
+    entry.hand_over_rebuilt();
+    let rebuilt = entry
+        .rebuilt_files
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     let status = entry.session.status();
     // Folds still queued do not matter: the repair applies them before its solve.
     if !status.early_cutover_possible
-        || status.damaged == 0
+        || (status.damaged == 0 && rebuilt.is_empty())
         || status.unarrived + status.partially_arrived > 0
     {
         return None;
@@ -4382,10 +4563,11 @@ pub(crate) fn streaming_session_download_end_targets(nzb_id: i32) -> Option<Vec<
         .target_names
         .iter()
         .filter(|(id, _)| {
-            !matches!(
-                entry.session.volume_status(id),
-                Ok(VolumeStatus::CompleteAndVerified)
-            )
+            rebuilt.contains(id)
+                || !matches!(
+                    entry.session.volume_status(id),
+                    Ok(VolumeStatus::CompleteAndVerified)
+                )
         })
         .map(|(_, name)| par_rs::filenames::os_str_bytes(name.as_os_str()).to_vec())
         .collect();
@@ -4967,6 +5149,16 @@ impl TargetWriteLease {
                 Ok(released)
             })
             .map_err(|_| RepairError::Cancelled)??;
+        // Certified now: a file with slices rebuilt ahead is no end-repair target any more
+        // (`streaming_session_download_end_targets`), or the end repair would run again.
+        {
+            let mut rebuilt = entry.rebuilt_files.lock().unwrap_or_else(|e| e.into_inner());
+            for (queue_id, par_id) in &ids {
+                if verified.contains(queue_id) {
+                    rebuilt.remove(par_id);
+                }
+            }
+        }
         entry.emit_live_metrics(nzb_id, "repair_complete");
         Ok((report, released))
     }
@@ -5972,6 +6164,13 @@ pub fn calc_stage_progress(
 mod tests {
     use super::*;
 
+    /// Slices decode-ahead rebuilt before the repair call (handed on first, as the next
+    /// operation would): a repair finds those verified already.
+    fn rebuilt_ahead(entry: &ActiveStreamingSession) -> usize {
+        entry.hand_over_rebuilt();
+        entry.metrics.rebuilt_ahead_slices.load(Ordering::Relaxed) as usize
+    }
+
     #[test]
     fn test_parse_ignore_ext_tokens_keeps_wildcard_masks() {
         // Tokens are nzbget's: split on `,` / `;`, trimmed, otherwise verbatim (a space inside a
@@ -6685,7 +6884,7 @@ mod tests {
         let report = streaming_session_repair_available_targets_now(nzb_id, &[id0])
             .unwrap()
             .unwrap();
-        assert_eq!(report.repaired_slices.len(), 3);
+        assert_eq!(report.repaired_slices.len() + rebuilt_ahead(&entry), 3);
         assert_eq!(std::fs::read(dir.join("part01.rar")).unwrap(), f0);
         // The repair is charged as repair time, the feeding as verification.
         let time = LIVE_PAR_TIME.lock().unwrap_or_else(|e| e.into_inner())[&nzb_id];
@@ -6799,7 +6998,7 @@ mod tests {
         let report = streaming_session_repair_available_targets_now(nzb_id, &[id0])
             .unwrap()
             .unwrap();
-        assert_eq!(report.repaired_slices.len(), damaged.len());
+        assert_eq!(report.repaired_slices.len() + rebuilt_ahead(&entry), damaged.len());
         assert_eq!(std::fs::read(dir.join("part01.rar")).unwrap(), f0);
         let backfill = entry.session.io_stats().backfill_bytes_read;
         streaming_session_cancel(nzb_id);
@@ -6980,7 +7179,7 @@ mod tests {
         let report = streaming_session_repair_available_targets_now(nzb_id, &[id0])
             .unwrap()
             .unwrap();
-        assert_eq!(report.repaired_slices.len(), 9);
+        assert_eq!(report.repaired_slices.len() + rebuilt_ahead(&entry), 9);
         assert_eq!(std::fs::read(dir.join("part01.rar")).unwrap(), f0);
         let backfill = entry.session.io_stats().backfill_bytes_read;
         streaming_session_cancel(nzb_id);
@@ -7337,7 +7536,7 @@ mod tests {
         let report = streaming_session_repair_available_targets_now(nzb_id, &[id0])
             .unwrap()
             .unwrap();
-        assert_eq!(report.repaired_slices.len(), 3);
+        assert_eq!(report.repaired_slices.len() + rebuilt_ahead(&entry), 3);
         assert_eq!(std::fs::read(dir.join("part01.rar")).unwrap(), f0);
         streaming_session_cancel(nzb_id);
         let _ = std::fs::remove_dir_all(&dir);

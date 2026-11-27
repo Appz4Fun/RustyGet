@@ -644,7 +644,7 @@ dependencies = [
 [[package]]
 name = "par-rs"
 version = "0.2.0"
-source = "git+https://github.com/Appz4Fun/par-rs?rev=6d0f005fffbd5d3e762706d56426cd40e586ce0f#6d0f005fffbd5d3e762706d56426cd40e586ce0f"
+source = "git+https://github.com/Appz4Fun/par-rs?rev=b60bfd151784903dbced37cff165006754f81fe9#b60bfd151784903dbced37cff165006754f81fe9"
 dependencies = [
  "crc32fast",
  "libc",

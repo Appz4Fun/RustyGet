@@ -1541,6 +1541,8 @@ pub(crate) fn quick_info_from_status(
 struct UnpackRunState {
     /// "Waiting for an unpack slot" was logged for this job.
     slot_wait_told: bool,
+    /// The download's id (a post job's own nzb id is 0).
+    nzb_id: i32,
     name: Vec<u8>,
     info_name: Vec<u8>,
     info_name_up: Vec<u8>,
@@ -1714,6 +1716,7 @@ impl JobQueue<'_> {
         };
         let sc = opts.as_ref().map(|o| o.scalars());
 
+        st.nzb_id = ns.id;
         st.dest_dir = ns.dest_dir;
         st.final_dir = ns.final_dir;
         st.name = ns.name;
@@ -2137,7 +2140,12 @@ impl NzbgetRsUnpackController {
         st: &mut UnpackRunState,
     ) {
         let sep = crate::paths::PATH_SEPARATOR;
-        st.inter_dir = crate::unpack::use_inter_dir(&st.dest_dir, &st.inter_dir_opt, sep);
+        st.inter_dir = crate::unpack::job_dir_is_intermediate(
+            &st.dest_dir,
+            &st.inter_dir_opt,
+            sep,
+            Some(st.nzb_id),
+        );
 
         if st.inter_dir && st.final_dir.is_empty() {
             st.final_dir = q.build_final_dir_name();
@@ -5414,8 +5422,12 @@ impl NzbgetRsDirectUnpack {
 
     fn create_unpack_dir(&self, host: &QueueSubsysHost, local: &mut DirectUnpackRunLocal) {
         let sep = crate::paths::PATH_SEPARATOR;
-        let use_inter_dir =
-            crate::unpack::use_inter_dir(&local.dest_dir, &local.inter_dir_opt, sep);
+        let use_inter_dir = crate::unpack::job_dir_is_intermediate(
+            &local.dest_dir,
+            &local.inter_dir_opt,
+            sep,
+            Some(self.nzb_id),
+        );
         local.final_dir_created = use_inter_dir
             && !crate::fsops::directory_exists(&local.final_dir, &crate::fsops::posix_stat);
 

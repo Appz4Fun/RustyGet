@@ -950,7 +950,20 @@ pub(crate) unsafe fn host_output_op(
     let or_empty = |s: *const c_char| if s.is_null() { c"".as_ptr() } else { s };
     let opts = crate::options::active_options();
     let direct_write = opts.as_ref().is_some_and(|o| o.scalars().direct_write != 0);
-    let inter_dir_empty = opts.as_ref().is_none_or(|o| o.str_bytes(OptStr::InterDir).is_empty());
+    // the download's folder is its final folder (no InterDir, now or when it was queued): only
+    // then does a hard-linked output's copy in it go (artwritercore); a folder an earlier
+    // InterDir named stays intermediate after InterDir was emptied (unpack::job_dir_is_intermediate)
+    let inter_dir_empty = || {
+        let inter = opts.as_ref().map_or(&[][..], |o| o.str_bytes(OptStr::InterDir));
+        let dest = nzb_text(3);
+        if nzb.is_null() || dest.is_null() {
+            inter.is_empty()
+        } else {
+            let dest = unsafe { std::ffi::CStr::from_ptr(dest) }.to_bytes();
+            let id = unsafe { (*nzb).id };
+            !crate::unpack::job_dir_is_intermediate(dest, inter, crate::paths::PATH_SEPARATOR, Some(id))
+        }
+    };
     let hard_linked = || file.lock().texts[text::HARD_LINK_PATH as usize].as_bytes() != b"";
     let flag = |b: bool| c_int::from(b);
     match a1 {
@@ -1108,7 +1121,7 @@ pub(crate) unsafe fn host_output_op(
                     *ints.add(6) = file.get(MISSED_ARTICLES) as c_int;
                     *ints.add(7) = file.get(TOTAL_ARTICLES) as c_int;
                     *ints.add(8) = flag(hard_linked());
-                    *ints.add(9) = flag(inter_dir_empty);
+                    *ints.add(9) = flag(inter_dir_empty());
                     *ints.add(10) =
                         flag(opts.as_ref().is_some_and(|o| o.scalars().raw_article != 0));
                     *ints.add(11) = flag(skip_write);
@@ -1199,7 +1212,7 @@ pub(crate) unsafe fn host_output_op(
                 set_text(text::OUTPUT_FILENAME, or_empty(s1));
                 unsafe {
                     *ints = flag(hard_linked());
-                    *ints.add(1) = flag(inter_dir_empty);
+                    *ints.add(1) = flag(inter_dir_empty());
                     *strs = text(text::FILENAME);
                     *strs.add(1) = text(text::OUTPUT_FILENAME);
                     *strs.add(2) = nzb_text(3);

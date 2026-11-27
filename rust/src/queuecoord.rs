@@ -2519,8 +2519,8 @@ impl NzbgetRsQueueCoordinator {
         self.save_all_partial_state(host);
         self.save_queue_if_changed(host);
         self.save_all_file_state(host);
+        // Saves run inline again; the queued ones reach the disk before the loop exits.
         drop(async_saves);
-        crate::statesaver::drain();
 
         host.log(
             crate::queuesubsys_host::MK_DEBUG,

@@ -6,12 +6,16 @@
 //!
 //! The content is still serialized by the caller, under the queue lock, so each file is
 //! a consistent snapshot; only the write, the sync, the rename and the directory sync
-//! move here. Only the thread inside an [`AsyncSaves`] scope (the coordinator) queues its
-//! saves; every other caller writes inline as before, after the jobs queued for the same
-//! file. Queued jobs run first in, first out; a newer write of a file still queued
+//! move here. While the coordinator runs (its [`AsyncSaves`] scope) every thread's saves
+//! are queued: a save made by another thread under the queue lock would otherwise keep
+//! the coordinator waiting for that lock. Before and after (startup, the final saves of
+//! a shutdown) saves run inline as before, after the jobs queued for the same file.
+//! Queued jobs run first in, first out; a newer write of a file still queued
 //! replaces its content in place (latest content, first position: partial states, then
 //! progress, then queue, as they were saved). A delete goes to the back, behind the
-//! writes it follows. Readers call [`settle`] first, so they see the latest content.
+//! writes it follows. A reader gets the content of a queued write from memory
+//! ([`Saver::pending_content`]) and otherwise reads the file once no job touches it
+//! ([`settled`]), so it sees the latest content without waiting for a sync.
 //!
 //! Across files there is no crash-time ordering beyond that: after a crash the disk
 //! can hold a newer `progress` next to an older `queue`, and a queue save whose write
@@ -55,6 +59,8 @@ struct State {
     /// Files whose job runs right now, on the saver thread or inline in a caller.
     in_flight: Vec<Vec<u8>>,
     thread_started: bool,
+    /// Saves are queued (the coordinator runs), else run inline.
+    queue_saves: bool,
 }
 
 pub(crate) struct Saver {
@@ -63,23 +69,22 @@ pub(crate) struct Saver {
     exec: Box<Exec>,
 }
 
-thread_local! {
-    static ASYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// While alive, this thread's state saves are queued for the saver thread.
-pub(crate) struct AsyncSaves(bool);
+/// While alive, every thread's state saves are queued for the saver thread; on drop,
+/// saves run inline again and the queued ones are drained.
+pub(crate) struct AsyncSaves(&'static Saver);
 
 impl AsyncSaves {
     pub(crate) fn enter() -> Self {
-        Self(ASYNC.with(|a| a.replace(true)))
+        let saver: &'static Saver = global();
+        saver.lock().queue_saves = true;
+        Self(saver)
     }
 }
 
 impl Drop for AsyncSaves {
     fn drop(&mut self) {
-        let prev = self.0;
-        ASYNC.with(|a| a.set(prev));
+        self.0.lock().queue_saves = false;
+        self.0.drain();
     }
 }
 
@@ -104,14 +109,14 @@ impl Saver {
         self.cv.wait(st).unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Queues `job` when this thread saves asynchronously (true), else runs it now
-    /// and returns its result.
+    /// Queues `job` while saves are queued (true), else runs it now and returns its
+    /// result.
     pub(crate) fn submit(self: &Arc<Self>, job: Job, log: Log<'_>) -> bool {
-        if ASYNC.with(|a| a.get()) {
-            self.enqueue(job);
+        let mut st = self.lock();
+        if st.queue_saves {
+            self.enqueue_locked(st, job);
             true
         } else {
-            let mut st = self.lock();
             // This newer content (or delete) replaces a queued one.
             st.queue.retain(|j| j.path != job.path);
             self.run_marked(st, job, log)
@@ -119,8 +124,13 @@ impl Saver {
     }
 
     /// Queues `job` for the saver thread, coalescing with a queued job for its file.
-    pub(crate) fn enqueue(self: &Arc<Self>, job: Job) {
-        let mut st = self.lock();
+    #[cfg(test)]
+    fn enqueue(self: &Arc<Self>, job: Job) {
+        let st = self.lock();
+        self.enqueue_locked(st, job);
+    }
+
+    fn enqueue_locked(self: &Arc<Self>, mut st: MutexGuard<'_, State>, job: Job) {
         match st.queue.iter().position(|j| j.path == job.path) {
             Some(i)
                 if matches!(st.queue[i].kind, JobKind::Write { .. })
@@ -230,6 +240,19 @@ impl Saver {
         f()
     }
 
+    /// The content of a queued write of `path`, for a reader: the file on disk is older.
+    /// A queued delete runs now (no sync), so the reader finds the file gone.
+    pub(crate) fn pending_content(&self, path: &[u8]) -> Option<Vec<u8>> {
+        let mut st = self.lock();
+        let i = st.queue.iter().position(|j| j.path == path)?;
+        if let JobKind::Write { bytes, .. } = &st.queue[i].kind {
+            return Some(bytes.clone());
+        }
+        let job = st.queue.remove(i).expect("position is in range");
+        self.run_marked(st, job, &mut active_log);
+        None
+    }
+
     /// Waits until every queued job has run (the coordinator's exit).
     pub(crate) fn drain(&self) {
         let mut st = self.lock();
@@ -279,6 +302,11 @@ pub(crate) fn settle(path: &[u8]) {
 /// [`Saver::settled`] on the daemon's saver.
 pub(crate) fn settled<R>(path: &[u8], f: impl FnOnce() -> R) -> R {
     global().settled(path, f)
+}
+
+/// [`Saver::pending_content`] on the daemon's saver.
+pub(crate) fn pending_content(path: &[u8]) -> Option<Vec<u8>> {
+    global().pending_content(path)
 }
 
 /// [`Saver::drain`] on the daemon's saver.
@@ -428,14 +456,14 @@ mod tests {
     }
 
     #[test]
-    fn only_an_async_scope_queues_and_an_inline_write_supersedes_a_queued_one() {
+    fn saves_queue_only_in_a_scope_and_an_inline_write_supersedes_a_queued_one() {
         let (saver, done, gate) = recording();
         hold(&saver, &gate);
-        {
-            let _scope = AsyncSaves::enter();
-            assert!(saver.submit(write("4s", "old"), &mut |_, _| {}));
-            assert_eq!(saver.queued_paths(), [b"4s".to_vec()]);
-        }
+        saver.lock().queue_saves = true;
+        assert!(saver.submit(write("4s", "old"), &mut |_, _| {}));
+        assert_eq!(saver.queued_paths(), [b"4s".to_vec()]);
+        assert_eq!(saver.pending_content(b"4s"), Some(b"old".to_vec()));
+        saver.lock().queue_saves = false;
         // Outside the scope: runs now, and the queued older content is dropped.
         assert!(saver.submit(write("4s", "new"), &mut |_, _| {}));
         assert!(saver.queued_paths().is_empty());
@@ -443,6 +471,18 @@ mod tests {
         gate.store(false, Ordering::SeqCst);
         saver.drain();
         assert_eq!(summary(&done), ["4s=new", "hold=0"]);
+    }
+
+    #[test]
+    fn a_reader_of_a_queued_delete_runs_it_now() {
+        let (saver, done, gate) = recording();
+        hold(&saver, &gate);
+        saver.enqueue(delete("6s"));
+        assert_eq!(saver.pending_content(b"6s"), None);
+        assert_eq!(summary(&done), ["-6s"]);
+        assert!(saver.queued_paths().is_empty());
+        gate.store(false, Ordering::SeqCst);
+        saver.drain();
     }
 
     /// The real job writer: a queued save is on disk, readable, after `settle`,
@@ -471,11 +511,8 @@ mod tests {
                 sync: true,
             },
         };
-        {
-            let _scope = AsyncSaves::enter();
-            saver.submit(job("first"), &mut |_, _| {});
-            saver.submit(job("second"), &mut |_, _| {});
-        }
+        saver.enqueue(job("first"));
+        saver.enqueue(job("second"));
         saver.settle(path.as_os_str().as_bytes());
         assert_eq!(std::fs::read(&path).unwrap(), b"second");
         assert!(!dir.join("5s.new").exists());

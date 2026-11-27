@@ -2125,7 +2125,8 @@ fn remove_queue_file(qdir: &[u8], sep: u8, name: &[u8]) {
 
 fn queue_file_exists(qdir: &[u8], sep: u8, name: &[u8]) -> bool {
     let p = queue_file_path(qdir, sep, name);
-    crate::statesaver::settled(&p, || crate::fsops::posix_stat(&p) == 1)
+    crate::statesaver::pending_content(&p).is_some()
+        || crate::statesaver::settled(&p, || crate::fsops::posix_stat(&p) == 1)
 }
 
 /// `DiscardDownloadQueue`: removes the queue and history files and every
@@ -4407,7 +4408,7 @@ fn call_ctrl(env: &NzbgetRsDiskStateEnv, cmd: DiskCtrl<'_>) -> i32 {
 }
 
 struct RsStateReader {
-    reader: std::io::BufReader<std::fs::File>,
+    reader: std::io::BufReader<Box<dyn std::io::Read>>,
     raw_buf: Vec<u8>,
     cstr_buf: Vec<u8>,
 }
@@ -4418,12 +4419,21 @@ impl RsStateReader {
         if fd == -1 {
             return Err(crate::fsops::last_errno());
         }
-        let file = unsafe { std::os::unix::io::FromRawFd::from_raw_fd(fd) };
-        Ok(Self {
-            reader: std::io::BufReader::new(file),
+        let file: std::fs::File = unsafe { std::os::unix::io::FromRawFd::from_raw_fd(fd) };
+        Ok(Self::from_reader(Box::new(file)))
+    }
+
+    /// The content of a save still queued (statesaver), read like the file.
+    fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self::from_reader(Box::new(std::io::Cursor::new(bytes)))
+    }
+
+    fn from_reader(reader: Box<dyn std::io::Read>) -> Self {
+        Self {
+            reader: std::io::BufReader::new(reader),
             raw_buf: Vec::with_capacity(1024),
             cstr_buf: Vec::with_capacity(1024),
-        })
+        }
     }
 
     fn read_line(&mut self, max_size: usize) -> Option<&[u8]> {
@@ -4715,6 +4725,9 @@ impl RsStateFile {
     }
 
     fn file_exists(&self) -> bool {
+        if crate::statesaver::pending_content(&self.dest).is_some() {
+            return true;
+        }
         crate::statesaver::settled(&self.dest, || {
             crate::fsops::posix_stat(&self.dest) == 1
                 || (self.transactional && crate::fsops::posix_stat(&self.temp) == 1)
@@ -4730,7 +4743,7 @@ impl RsStateFile {
     }
 
     /// Writes the serialized `w` to the file (`run_state_job`): inline, or on the
-    /// `queue-saver` thread when called by the queue coordinator (statesaver).
+    /// `queue-saver` thread while the queue coordinator runs (statesaver).
     unsafe fn finish_write(
         &self,
         env: &NzbgetRsDiskStateEnv,
@@ -4750,10 +4763,13 @@ impl RsStateFile {
         crate::statesaver::submit(job, &mut |level, msg| emit_log(env, level, msg))
     }
 
-    /// Opens the file for reading once the saves queued for it are on disk, with no
-    /// save touching it meanwhile (statesaver).
+    /// Reads the content of a save still queued for the file from memory, else opens
+    /// the file with no save touching it meanwhile (statesaver).
     unsafe fn begin_read(&mut self, env: &NzbgetRsDiskStateEnv) -> Option<RsStateReader> {
         let dest = self.dest.clone();
+        if let Some(bytes) = crate::statesaver::pending_content(&dest) {
+            return unsafe { self.read_signature(env, RsStateReader::from_bytes(bytes)) };
+        }
         crate::statesaver::settled(&dest, || unsafe { self.begin_read_settled(env) })
     }
 
@@ -4794,7 +4810,7 @@ impl RsStateFile {
             }
         }
 
-        let mut reader = match RsStateReader::open(&self.dest_c) {
+        let reader = match RsStateReader::open(&self.dest_c) {
             Ok(r) => r,
             Err(errno) => {
                 let err = crate::fsops::error_message(errno);
@@ -4811,7 +4827,15 @@ impl RsStateFile {
                 return None;
             }
         };
+        unsafe { self.read_signature(env, reader) }
+    }
 
+    /// Reads the version line; refuses a file newer than this build reads.
+    unsafe fn read_signature(
+        &mut self,
+        env: &NzbgetRsDiskStateEnv,
+        mut reader: RsStateReader,
+    ) -> Option<RsStateReader> {
         let sig = reader.read_line(128).unwrap_or(b"");
         self.file_version = parse_format_version(sig);
         if self.file_version > self.read_version {

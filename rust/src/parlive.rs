@@ -200,6 +200,17 @@ impl SessionBudgetLease {
 pub(crate) static LIVE_BUDGET: LazyLock<Arc<BudgetPool>> =
     LazyLock::new(|| Arc::new(BudgetPool::default()));
 
+/// The pool live reservations draw on: the daemon's shared one, or in a test the pool the
+/// test installed for its thread (`parchecker::TEST_BUDGET_POOL`), so tests that fill or
+/// share it cannot starve each other.
+pub(crate) fn live_pool() -> Arc<BudgetPool> {
+    #[cfg(test)]
+    if let Some(pool) = crate::parchecker::TEST_BUDGET_POOL.with(|p| p.borrow().clone()) {
+        return pool;
+    }
+    Arc::clone(&LIVE_BUDGET)
+}
+
 #[derive(Default)]
 struct ControlAccounting {
     bytes: u64,
@@ -294,7 +305,7 @@ fn reserve_control_inner(
     // Ordinary-write root control is accounted (so live reservations yield to
     // it) but never refused by the live caps.
     if pool_optional {
-        let budget = LIVE_BUDGET.acquire(bytes, pool_limit);
+        let budget = live_pool().acquire(bytes, pool_limit);
         used.bytes = used.bytes.saturating_add(bytes);
         *used.jobs.entry(nzb_id).or_insert(0) += bytes;
         return Ok(ControlLease {
@@ -319,7 +330,7 @@ fn reserve_control_inner(
             MIB,
         ));
     }
-    let budget = LIVE_BUDGET.acquire(bytes, pool_limit);
+    let budget = live_pool().acquire(bytes, pool_limit);
     if budget.is_none() {
         return Err(limit_error("shared live PAR reservation", bytes, pool_limit));
     }

@@ -5505,11 +5505,14 @@ mod tests {
         let context = crate::parlive::source_write_context(-1_961_502, 40, &dir, b"part40.rar").unwrap();
         let limit = crate::parchecker::effective_live_pool_bytes();
         assert!(limit > 0);
-        // The pool is process-global; hold whatever other tests left free.
+        // Fill a pool of this test's own (the shared one is process-global, and holding all of
+        // it starved every other live test running in parallel).
+        let pool = std::sync::Arc::new(crate::parlive::BudgetPool::with_size(limit));
+        crate::parchecker::TEST_BUDGET_POOL.with(|p| *p.borrow_mut() = Some(pool.clone()));
         let mut reservation = Vec::new();
         let mut chunk = limit;
         while chunk != 0 {
-            while let Some(lease) = crate::parlive::LIVE_BUDGET.acquire(chunk, limit) {
+            while let Some(lease) = pool.acquire(chunk, limit) {
                 reservation.push(lease);
             }
             chunk /= 2;
@@ -5519,6 +5522,7 @@ mod tests {
         assert!(file.flush_and_close());
         assert_eq!(std::fs::read(path).unwrap(), b"ordinary");
         drop(reservation);
+        crate::parchecker::TEST_BUDGET_POOL.with(|p| *p.borrow_mut() = None);
         crate::parlive::forget_download_writes(-1_961_502);
         std::fs::remove_dir_all(dir).unwrap();
     }

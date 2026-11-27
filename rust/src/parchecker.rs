@@ -12,7 +12,7 @@
 
 use crate::parlive::{
     download_writes, reserve_control, resources, ControlLease, SessionBudgetLease,
-    SessionGeneration, WriteCoordinator, LIVE_BUDGET,
+    SessionGeneration, WriteCoordinator,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Seek, SeekFrom};
@@ -401,8 +401,17 @@ fn lease_pool_bytes(lease: &SessionBudgetLease) -> u64 {
     lease.pool().size().unwrap_or_else(effective_live_pool_bytes)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// A test's own budget pool for sessions started on its thread (see `live_lifecycle_tests`):
+    /// the daemon's shared pool is one process-wide 500 MB that parallel tests would exhaust.
+    pub(crate) static TEST_BUDGET_POOL: std::cell::RefCell<Option<Arc<crate::parlive::BudgetPool>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 fn acquire_session_budget(bytes: u64, limit: u64) -> Result<SessionBudgetLease, RepairError> {
-    LIVE_BUDGET
+    let pool = crate::parlive::live_pool();
+    pool
         .acquire(bytes, limit)
         .ok_or(RepairError::StreamingMemoryLimit {
             context: "shared live PAR reservation",

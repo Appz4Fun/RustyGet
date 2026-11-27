@@ -15706,7 +15706,10 @@ def scenario_dropkeepdonor(daemon, t):
           float(parked) < 10 and params.get('DupeAlive') == parked and nzb_kept and
           _grep_log(t, 'Holding ' + rel + ' in its fleet') == 1 and
           _verify_output(t, data))
-    # downloaded again by hand: the earlier try's projection and donor mark go
+    # downloaded again by hand: the earlier try's projection and donor mark go.
+    # Downloads are paused first: the dead copy is parked and leaves the queue
+    # again within about a second, before a poll under load can see it
+    api.pausedownload()
     api.editqueue('HistoryRedownload', 0, '', [hp['NZBID']])
     deadline = time.time() + 30
     again = {}
@@ -15716,6 +15719,7 @@ def scenario_dropkeepdonor(daemon, t):
             break
         time.sleep(0.5)
     cleared = bool(again) and 'DupeParked' not in again and 'DupeProjected' not in again
+    api.resumedownload()
     ok = ok and cleared
     return ('dropkeepdonor', ok, 'backup_held=%s held_donor=%s done=%s primary=%s health=%d projected=%s parked=%s '
             'nzb_kept=%s cleared=%s' % (backup_held, held_donor, done and (done['NZBName'], done['Status']),

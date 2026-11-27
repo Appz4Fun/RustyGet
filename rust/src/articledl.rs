@@ -3270,9 +3270,23 @@ pub(crate) fn move_completed_files_on_qh_precopied(
 /// folder; an empty preallocated `.out.tmp` goes), one holding articles has
 /// its partial output moved into the new folder.
 fn release_unwritten_outputs(qh: &QueueSubsysHost, nzb_ptr: NzbRef, old_dest_dir: &[u8]) {
-    let new_dest_dir = qh.nzb_snap(nzb_ptr, false).dest_dir;
+    let nzb = qh.nzb_snap(nzb_ptr, false);
+    let new_dest_dir = nzb.dest_dir.clone();
+    // Load each file's articles the way the downloader does (with their saved
+    // states, as seen from the old folder) before deciding: after a restart they
+    // are not loaded yet, and a list loaded without its states would make the
+    // downloader fetch the written articles again while the file still counts
+    // them, so it completed with articles missing.
+    let opts = qh.opts();
+    let mut old_view = nzb;
+    old_view.dest_dir = old_dest_dir.to_vec();
     for i in 0..qh.nzb_file_len(nzb_ptr) {
-        let f = qh.file_snap(qh.nzb_file_at(nzb_ptr, i));
+        let f = crate::queuecoord::ensure_articles_loaded_host(
+            qh,
+            &opts,
+            &old_view,
+            qh.nzb_file_at(nzb_ptr, i),
+        );
         let Some(follow) = output_follow(&f.output_filename, old_dest_dir, &f) else {
             continue;
         };
@@ -3314,12 +3328,8 @@ fn release_unwritten_outputs(qh: &QueueSubsysHost, nzb_ptr: NzbRef, old_dest_dir
         if new_out.is_none() {
             qh.file_set_int(f.ptr, crate::queuesubsys_host::FILE_INT_OUTPUT_INITIALIZED, 0);
         }
-        // The saved record holds the articles too: one written while they are
-        // not loaded yet (after a restart) would hold none.
-        if f.articles_len == 0 {
-            qh.disk_load_articles(f.ptr);
-        }
-        if qh.file_snap(f.ptr).articles_len > 0 {
+        // The saved record holds the articles too (loaded above).
+        if f.articles_len > 0 {
             qh.disk_save_file(f.ptr);
         }
     }

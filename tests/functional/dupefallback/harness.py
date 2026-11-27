@@ -1470,10 +1470,20 @@ def _output_moved(daemon, t, label, seg, written):
     found = [f for f in t.find_files('main', 'dst') if f.endswith('om.bin')]
     final_ok = len(found) == 1 and t.read_file(found[0]) == data
     refused = _grep_log(t, 'ownership unavailable') + _grep_log(t, 'Operation canceled')
+    # Each article is fetched once: an article written before the restart and
+    # fetched again meant the file counted it twice and completed one short
+    # (its articles were loaded without their saved states).
+    try:
+        log = t.read_file('nzbget.log').decode(errors='replace')
+    except Exception:
+        log = ''
+    fetched = len(re.findall(r'Successfully downloaded OutMoved(?:Renamed)?/om\.bin \[\d+/', log))
+    articles = -(-size // seg)
     ok = (reached and bool(stored) and (success_before > 0) == written and new_dir != old_dir
-          and h['Status'].startswith('SUCCESS') and final_ok and refused == 0)
-    return (label, ok, 'reached=%s stored=%d success_before=%d dir_changed=%s status=%s final=%s refused=%d'
-            % (reached, len(stored), success_before, new_dir != old_dir, h['Status'], final_ok, refused))
+          and h['Status'].startswith('SUCCESS') and final_ok and refused == 0 and fetched == articles)
+    return (label, ok, 'reached=%s stored=%d success_before=%d dir_changed=%s status=%s final=%s refused=%d fetched=%d/%d'
+            % (reached, len(stored), success_before, new_dir != old_dir, h['Status'], final_ok, refused,
+               fetched, articles))
 
 
 def scenario_outputmoved(daemon, t):

@@ -5962,80 +5962,7 @@ impl NzbgetRsQueueCoordinator {
         nzb: &crate::queuesubsys_host::NzbSnap,
         file_ptr: FileRef,
     ) -> crate::queuesubsys_host::FileSnap {
-        let file = host.file_snap(file_ptr);
-        if file.articles_len > 0 || !opts.server_mode {
-            return file;
-        }
-        host.disk_load_articles(file_ptr);
-        self.load_partial_state(host, opts, nzb, file_ptr);
-        host.file_snap(file_ptr)
-    }
-
-    fn load_partial_state(
-        &self,
-        host: &crate::queuesubsys_host::QueueSubsysHost,
-        opts: &crate::queuesubsys_host::GlobalOptsSnap,
-        nzb: &crate::queuesubsys_host::NzbSnap,
-        file_ptr: FileRef,
-    ) {
-        let file = host.file_snap(file_ptr);
-        if file.partial_state == crate::queuesubsys_host::PARTIAL_PARTIAL {
-            host.disk_load_file_state(file.ptr, false);
-            let f2 = host.file_snap(file.ptr);
-            if (opts.direct_write || f2.force_direct_write) && !f2.output_initialized {
-                let out_tmp = join_path(&nzb.dest_dir, format!("{}.out.tmp", f2.id).as_bytes());
-                if crate::fsops::file_exists(&out_tmp, &crate::fsops::posix_stat) {
-                    host.file_set_str(
-                        file.ptr,
-                        crate::queuesubsys_host::FILE_STR_OUTPUT_FILENAME,
-                        Some(&out_tmp),
-                    );
-                    host.file_set_int(
-                        file.ptr,
-                        crate::queuesubsys_host::FILE_INT_OUTPUT_INITIALIZED,
-                        1,
-                    );
-                } else if f2.force_direct_write {
-                    let out_fn = join_path(&nzb.dest_dir, &f2.filename);
-                    if crate::fsops::file_exists(&out_fn, &crate::fsops::posix_stat) {
-                        host.file_set_str(
-                            file.ptr,
-                            crate::queuesubsys_host::FILE_STR_OUTPUT_FILENAME,
-                            Some(&out_fn),
-                        );
-                        host.file_set_int(
-                            file.ptr,
-                            crate::queuesubsys_host::FILE_INT_OUTPUT_INITIALIZED,
-                            1,
-                        );
-                    }
-                }
-            }
-        } else if file.partial_state == crate::queuesubsys_host::PARTIAL_COMPLETED {
-            host.disk_load_file_state(file.ptr, true);
-            let f2 = host.file_snap(file.ptr);
-            let out_fn = join_path(&nzb.dest_dir, &f2.filename);
-            host.file_set_str(
-                file.ptr,
-                crate::queuesubsys_host::FILE_STR_OUTPUT_FILENAME,
-                Some(&out_fn),
-            );
-            host.file_set_int(
-                file.ptr,
-                crate::queuesubsys_host::FILE_INT_OUTPUT_INITIALIZED,
-                1,
-            );
-            host.file_set_int(
-                file.ptr,
-                crate::queuesubsys_host::FILE_INT_FORCE_DIRECT_WRITE,
-                1,
-            );
-            host.file_set_int(
-                file.ptr,
-                crate::queuesubsys_host::FILE_INT_FILENAME_CONFIRMED,
-                1,
-            );
-        }
+        ensure_articles_loaded_host(host, opts, nzb, file_ptr)
     }
 
     fn save_all_file_state(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
@@ -8080,6 +8007,89 @@ fn discard_temp_files_host(
         if file.is_hard_linked && !file.hard_link_path.is_empty() {
             unlink_bytes(&file.hard_link_path);
         }
+    }
+}
+
+/// [`NzbgetRsQueueCoordinator::ensure_articles_loaded`] for callers outside the
+/// coordinator: the article list and its saved per-article state, loaded together.
+pub(crate) fn ensure_articles_loaded_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    opts: &crate::queuesubsys_host::GlobalOptsSnap,
+    nzb: &crate::queuesubsys_host::NzbSnap,
+    file_ptr: FileRef,
+) -> crate::queuesubsys_host::FileSnap {
+    let file = host.file_snap(file_ptr);
+    if file.articles_len > 0 || !opts.server_mode {
+        return file;
+    }
+    host.disk_load_articles(file_ptr);
+    load_partial_state_host(host, opts, nzb, file_ptr);
+    host.file_snap(file_ptr)
+}
+
+fn load_partial_state_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    opts: &crate::queuesubsys_host::GlobalOptsSnap,
+    nzb: &crate::queuesubsys_host::NzbSnap,
+    file_ptr: FileRef,
+) {
+    let file = host.file_snap(file_ptr);
+    if file.partial_state == crate::queuesubsys_host::PARTIAL_PARTIAL {
+        host.disk_load_file_state(file.ptr, false);
+        let f2 = host.file_snap(file.ptr);
+        if (opts.direct_write || f2.force_direct_write) && !f2.output_initialized {
+            let out_tmp = join_path(&nzb.dest_dir, format!("{}.out.tmp", f2.id).as_bytes());
+            if crate::fsops::file_exists(&out_tmp, &crate::fsops::posix_stat) {
+                host.file_set_str(
+                    file.ptr,
+                    crate::queuesubsys_host::FILE_STR_OUTPUT_FILENAME,
+                    Some(&out_tmp),
+                );
+                host.file_set_int(
+                    file.ptr,
+                    crate::queuesubsys_host::FILE_INT_OUTPUT_INITIALIZED,
+                    1,
+                );
+            } else if f2.force_direct_write {
+                let out_fn = join_path(&nzb.dest_dir, &f2.filename);
+                if crate::fsops::file_exists(&out_fn, &crate::fsops::posix_stat) {
+                    host.file_set_str(
+                        file.ptr,
+                        crate::queuesubsys_host::FILE_STR_OUTPUT_FILENAME,
+                        Some(&out_fn),
+                    );
+                    host.file_set_int(
+                        file.ptr,
+                        crate::queuesubsys_host::FILE_INT_OUTPUT_INITIALIZED,
+                        1,
+                    );
+                }
+            }
+        }
+    } else if file.partial_state == crate::queuesubsys_host::PARTIAL_COMPLETED {
+        host.disk_load_file_state(file.ptr, true);
+        let f2 = host.file_snap(file.ptr);
+        let out_fn = join_path(&nzb.dest_dir, &f2.filename);
+        host.file_set_str(
+            file.ptr,
+            crate::queuesubsys_host::FILE_STR_OUTPUT_FILENAME,
+            Some(&out_fn),
+        );
+        host.file_set_int(
+            file.ptr,
+            crate::queuesubsys_host::FILE_INT_OUTPUT_INITIALIZED,
+            1,
+        );
+        host.file_set_int(
+            file.ptr,
+            crate::queuesubsys_host::FILE_INT_FORCE_DIRECT_WRITE,
+            1,
+        );
+        host.file_set_int(
+            file.ptr,
+            crate::queuesubsys_host::FILE_INT_FILENAME_CONFIRMED,
+            1,
+        );
     }
 }
 

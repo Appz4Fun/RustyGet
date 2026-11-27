@@ -750,6 +750,56 @@ pub fn article_writer_move_completed_files(
     dest_dir: &[u8],
     old_dest_dir: &[u8],
     completed_filenames: &[&[u8]],
+    log_err_fn: impl FnMut(&[u8]),
+    has_pending_writes_fn: impl FnOnce() -> bool,
+) -> bool {
+    article_writer_move_completed_files_precopied(
+        dest_dir,
+        old_dest_dir,
+        completed_filenames,
+        &mut std::collections::HashMap::new(),
+        log_err_fn,
+        has_pending_writes_fn,
+    )
+}
+
+/// A completed file already copied to the new directory's file system, outside the
+/// queue lock (`recatmove`): `temp` is the copy, next to where the file goes; the rest
+/// identifies the source as it was copied, so a changed source is moved anew.
+#[derive(Debug, Clone)]
+pub struct PreCopied {
+    pub temp: std::path::PathBuf,
+    /// The copy failed with this `errno` (and `temp` was removed): an unchanged source
+    /// is not copied again, the move fails with it.
+    pub err: i32,
+    pub len: u64,
+    pub mtime: (i64, i64),
+    pub dev: u64,
+    pub ino: u64,
+}
+
+impl PreCopied {
+    /// Whether `meta` (the source now) is the file that was copied.
+    #[cfg(unix)]
+    pub fn same_source(&self, meta: &std::fs::Metadata) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        meta.len() == self.len
+            && (meta.mtime(), meta.mtime_nsec()) == self.mtime
+            && meta.dev() == self.dev
+            && meta.ino() == self.ino
+    }
+}
+
+/// [`article_writer_move_completed_files`], where a file found in `precopied` (by its
+/// completed-file name) whose source is unchanged is moved by renaming its copy into
+/// place and removing the source: a cross-device move whose copy was made before. The
+/// entries used are taken out of `precopied`; the caller removes the copies left.
+/// The paths, the unique names on collision, the messages and the result are the same.
+pub fn article_writer_move_completed_files_precopied(
+    dest_dir: &[u8],
+    old_dest_dir: &[u8],
+    completed_filenames: &[&[u8]],
+    precopied: &mut std::collections::HashMap<Vec<u8>, PreCopied>,
     mut log_err_fn: impl FnMut(&[u8]),
     has_pending_writes_fn: impl FnOnce() -> bool,
 ) -> bool {
@@ -796,11 +846,23 @@ pub fn article_writer_move_completed_files(
             let _ = std::fs::create_dir_all(parent);
         }
 
+        let pre = precopied.remove(file_name_bytes);
         let move_res = match (
             std::ffi::CString::new(crate::fsops::path_to_bytes(&old_path)),
             std::ffi::CString::new(crate::fsops::path_to_bytes(&new_path)),
         ) {
-            (Ok(c_src), Ok(c_dst)) => crate::fsops::move_file_no_overwrite(&c_src, &c_dst),
+            (Ok(c_src), Ok(c_dst)) => match pre {
+                Some(pre) if pre_copy_usable(&pre, &old_path) => {
+                    finish_precopied_move(&pre, &c_src, &c_dst)
+                }
+                Some(pre) => {
+                    if pre.err == 0 {
+                        let _ = std::fs::remove_file(&pre.temp);
+                    }
+                    crate::fsops::move_file_no_overwrite(&c_src, &c_dst)
+                }
+                None => crate::fsops::move_file_no_overwrite(&c_src, &c_dst),
+            },
             _ => Err(libc::EINVAL),
         };
 
@@ -841,6 +903,50 @@ pub fn article_writer_move_completed_files(
     }
 
     true
+}
+
+/// The copy `pre` may stand in for moving `old_path`: the source is the file copied.
+fn pre_copy_usable(pre: &PreCopied, old_path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        (pre.err != 0
+            || std::fs::symlink_metadata(&pre.temp)
+                .is_ok_and(|m| m.is_file() && m.len() == pre.len))
+            && std::fs::metadata(old_path).is_ok_and(|m| pre.same_source(&m))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (pre, old_path);
+        false
+    }
+}
+
+/// Ends a cross-device move whose copy is `pre.temp`: renames the copy to `dst`
+/// (without overwriting), then removes `src`; as `move_file_no_overwrite_exdev`, a
+/// source that cannot be removed takes the new file back out, and the error is the
+/// move's.
+fn finish_precopied_move(
+    pre: &PreCopied,
+    src: &std::ffi::CStr,
+    dst: &std::ffi::CStr,
+) -> Result<(), i32> {
+    if pre.err != 0 {
+        return Err(pre.err);
+    }
+    let Ok(c_temp) = std::ffi::CString::new(crate::fsops::path_to_bytes(&pre.temp)) else {
+        return crate::fsops::move_file_no_overwrite(src, dst);
+    };
+    if let Err(e) = crate::fsops::move_file_no_overwrite(&c_temp, dst) {
+        let _ = std::fs::remove_file(&pre.temp);
+        return Err(e);
+    }
+    if unsafe { libc::unlink(src.as_ptr()) } != 0 {
+        let e = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        let rm_err = if e == 0 { libc::EIO } else { e };
+        unsafe { libc::unlink(dst.as_ptr()) };
+        return Err(rm_err);
+    }
+    Ok(())
 }
 
 ///Finished article descriptor for `article_writer_process_articles`.

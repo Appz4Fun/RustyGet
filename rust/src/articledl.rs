@@ -17,7 +17,7 @@ use crate::artwritercore::{
     article_writer_execute_cleanup_old_data, article_writer_execute_setup_output_file,
     article_writer_finish_disk_ops, article_writer_flush_cache_guarded,
     article_writer_format_dest_file_path, article_writer_format_info_path,
-    article_writer_move_completed_files, article_writer_post_process_rename_and_hardlink,
+    article_writer_post_process_rename_and_hardlink,
     article_writer_process_articles_counted, article_writer_resolve_direct_write_ready,
     calc_write_buffer_size, join_c_slices, memory_monitor_step, ArticleWriterFlushItem,
     ArticleWriterProcessItem, PRESSURE_CONSTRAINED, PRESSURE_CRITICAL, PRESSURE_NORMAL,
@@ -3220,6 +3220,17 @@ pub(crate) fn move_completed_files_on_qh(
     nzb_ptr: NzbRef,
     old_dest_dir: &[u8],
 ) -> bool {
+    move_completed_files_on_qh_precopied(qh, nzb_ptr, old_dest_dir, &mut Default::default())
+}
+
+/// [`move_completed_files_on_qh`] with the cross-device copies `recatmove` made
+/// outside the queue lock (see `article_writer_move_completed_files_precopied`).
+pub(crate) fn move_completed_files_on_qh_precopied(
+    qh: &QueueSubsysHost,
+    nzb_ptr: NzbRef,
+    old_dest_dir: &[u8],
+    precopied: &mut std::collections::HashMap<Vec<u8>, crate::artwritercore::PreCopied>,
+) -> bool {
     if nzb_ptr.is_none() {
         return true;
     }
@@ -3238,10 +3249,11 @@ pub(crate) fn move_completed_files_on_qh(
         return true;
     }
     let refs: Vec<&[u8]> = cfs.iter().map(|c| c.filename.as_slice()).collect();
-    article_writer_move_completed_files(
+    crate::artwritercore::article_writer_move_completed_files_precopied(
         &nzb.dest_dir,
         cstr::until_nul(old_dest_dir),
         &refs,
+        precopied,
         |msg| qh.nzb_print_message(nzb_ptr, MK_ERROR, msg),
         || qh.nzb_has_busy_output_file(nzb_ptr),
     )

@@ -157,6 +157,12 @@ impl Drop for CurrentQueueLock {
         }
         // Saves queued under the lock reach the disk before this thread goes on.
         crate::statesaver::queue_lock_released();
+        // Completed files a recategorize moves onto another disk are copied now,
+        // without the lock (recatmove.rs).
+        #[cfg(unix)]
+        if crate::statesaver::queue_lock_depth() == 0 {
+            crate::recatmove::run_after_unlock();
+        }
     }
 }
 

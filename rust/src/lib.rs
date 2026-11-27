@@ -117,6 +117,8 @@ pub mod wildmask;
 pub mod artwritercore;
 pub mod diskstate_format;
 pub(crate) mod statesaver;
+#[cfg(unix)]
+pub(crate) mod recatmove;
 pub(crate) mod donorkind;
 pub(crate) mod repairsummary;
 pub mod dupefallback;

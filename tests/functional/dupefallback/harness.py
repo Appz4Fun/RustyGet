@@ -1916,6 +1916,138 @@ def scenario_queuesyncslow(daemon, t):
     return ('queuesyncslow', ok, 'status=%s elapsed=%.1fs bound=30s' % (h['Status'], elapsed))
 
 
+def _other_fs_dir(t, tag):
+    """A fresh directory on another file system than the test's: /dev/shm when it is
+    one, else a small file system of its own. Returns (dir, unmount command or None,
+    None), or (None, None, reason)."""
+    base = os.stat(t.path('main')).st_dev
+    shm = '/dev/shm'
+    if os.path.isdir(shm) and os.access(shm, os.W_OK) and os.stat(shm).st_dev != base:
+        d = tempfile.mkdtemp(prefix='rg-%s-' % tag, dir=shm)
+        return d, None, None
+    mnt = t.path('main', 'otherfs')
+    umount, why = _small_fs_mount(t, mnt, 64)
+    if umount is None:
+        return None, None, why
+    if os.stat(mnt).st_dev == base:
+        subprocess.run(umount, capture_output=True)
+        return None, None, 'the small file system is not another device'
+    return mnt, umount, None
+
+
+def scenario_recatmoveslow(daemon, t):
+    """6790, 2026-11-27: a bulk recategorize of queued jobs moved their completed files
+    onto another disk under the queue lock; every copy held it, and downloads and every
+    RPC stood still for about 4 minutes. A queued job (one file still paused) with four
+    completed files in category A's folder gets category B, whose folder is on another
+    file system; each cross-device copy takes 1.5 s longer (RUSTYGET_TEST_MOVE_COPY_DELAY_MS),
+    so the move takes 6 s or more. While it runs, listgroups must answer within 1 s (the
+    copies run without the queue lock); the editqueue call itself returns only after the
+    move, as nzbget's does. After it: the files are in B's folder with their bytes, A's
+    folder is gone, no copy is left over, DestDir and Category name B, and the rest of
+    the job downloads into B's folder."""
+    api = daemon.wait_ready()
+    try:
+        api.shutdown()
+    except Exception:
+        pass
+    t.procs[-1].wait(timeout=60)
+    other, umount, why = _other_fs_dir(t, 'recat')
+    if other is None:
+        return ('recatmoveslow', None, 'SKIP: no other file system: %s' % why)
+    try:
+        cat_a = t.path('main', 'catA')
+        cat_b = os.path.join(other, 'catB')
+        with open(t.path(daemon.conf_rel), 'ab') as f:
+            f.write(('InterDir=\nCategory1.Name=slowa\nCategory1.DestDir=%s\n'
+                     'Category2.Name=slowb\nCategory2.DestDir=%s\n' % (cat_a, cat_b)).encode())
+        daemon.start()
+        api = daemon.wait_ready()
+        datas = {}
+        members = []
+        for i in range(4):
+            datas['rm%d.bin' % i] = _payload(300_000, 7700 + i)
+            members.append((_place_copy(t, 'rmA', datas['rm%d.bin' % i], 'f%d.bin' % i),
+                            'rm%d.bin' % i, 300_000, 100_000, set()))
+        held = _payload(200_000, 7710)
+        members.append((_place_copy(t, 'rmA', held, 'held.bin'), 'rmheld.bin', 200_000, 100_000, set()))
+        content = base64.standard_b64encode(build_multi_nzb(members).encode()).decode()
+        api.append('RelRM', content, 'slowa', 0, False, True, 'rm-key', 100, 'score', [])
+        time.sleep(1)
+        gid = next(g['NZBID'] for g in api.listgroups() if g['NZBName'] == 'RelRM')
+        files = _rpc(daemon, 'listfiles', [0, 0, gid]).get('result', [])
+        resume = [f['ID'] for f in files if 'rmheld' not in f['Filename']]
+        held_id = next(f['ID'] for f in files if 'rmheld' in f['Filename'])
+        _rpc(daemon, 'editqueue', ['FileResume', '', resume])
+        deadline = time.time() + 60
+        while time.time() < deadline and len(_rpc(daemon, 'listfiles', [0, 0, gid]).get('result', [])) > 1:
+            time.sleep(0.3)
+        src = os.path.join(cat_a, 'RelRM')
+        before = sorted(os.listdir(src)) if os.path.isdir(src) else []
+        if before != sorted(datas):
+            return ('recatmoveslow', False, 'completed files in A before the move: %s' % before)
+
+        lat = []  # (start, seconds) of each listgroups during the edit
+        stop = threading.Event()
+
+        def watch():
+            proxy = daemon.api()
+            while not stop.is_set():
+                t0 = time.time()
+                try:
+                    proxy.listgroups()
+                except Exception:
+                    pass
+                lat.append((t0, time.time() - t0))
+                time.sleep(0.05)
+
+        watcher = threading.Thread(target=watch, daemon=True)
+        watcher.start()
+        time.sleep(0.3)
+        e0 = time.time()
+        edited = _rpc(daemon, 'editqueue', ['GroupApplyCategory', 'slowb', [gid]], timeout=300).get('result')
+        e1 = time.time()
+        time.sleep(0.3)
+        stop.set()
+        watcher.join(timeout=120)
+        during = [s for start, s in lat if start < e1 and start + s > e0]
+        worst = max(during) if during else 0.0
+
+        dst = os.path.join(cat_b, 'RelRM')
+        moved = sorted(os.listdir(dst)) if os.path.isdir(dst) else []
+        intact = all(os.path.isfile(os.path.join(dst, n)) and
+                     open(os.path.join(dst, n), 'rb').read() == data for n, data in datas.items())
+        g = next((g for g in api.listgroups() if g['NZBID'] == gid), {})
+        dest_ok = os.path.realpath(g.get('DestDir', '')) == os.path.realpath(dst)
+        cat_ok = g.get('Category') == 'slowb'
+        a_gone = not os.path.exists(src)
+        _rpc(daemon, 'editqueue', ['FileResume', '', [held_id]])
+        _rpc(daemon, 'editqueue', ['GroupResume', '', [gid]])
+        h = daemon.wait_history(api, 'RelRM', timeout=90)
+        after = sorted(os.listdir(dst)) if os.path.isdir(dst) else []
+        ok = (edited is True and e1 - e0 >= 5.4 and worst < 1.0 and moved == sorted(datas) and intact
+              and dest_ok and cat_ok and a_gone and h['Status'].startswith('SUCCESS')
+              and after == sorted(list(datas) + ['rmheld.bin']))
+        return ('recatmoveslow', ok,
+                'editqueue=%s took=%.1fs listgroups during the move: n=%d worst=%.2fs (bound 1.0) '
+                'moved=%s intact=%s DestDir=%s category=%s A_gone=%s history=%s files_after=%s'
+                % (edited, e1 - e0, len(during), worst, moved, intact, dest_ok, cat_ok, a_gone,
+                   h['Status'], after))
+    finally:
+        try:
+            daemon.api().shutdown()
+            t.procs[-1].wait(timeout=60)
+        except Exception:
+            pass
+        if t.procs[-1].poll() is None:
+            t.procs[-1].kill()
+            t.procs[-1].wait(timeout=30)
+        if umount:
+            subprocess.run(umount, capture_output=True)
+        else:
+            shutil.rmtree(other, ignore_errors=True)
+
+
 def _small_fs_mount(t, mnt, size_mb):
     """Mounts a small file system of its own at ``mnt`` (Linux: an ext4 image through
     sudo, which frees a truncated file's blocks only at the next journal commit, as the
@@ -16477,6 +16609,7 @@ SCENARIOS = {
     'stream': scenario_stream,
     'truncatedstate': scenario_truncatedstate,
     'queuesyncslow': scenario_queuesyncslow,
+    'recatmoveslow': scenario_recatmoveslow,
     'diskfullrestart': scenario_diskfullrestart,
     'cachecommitfull': scenario_cachecommitfull,
     'interdirbudget': scenario_interdirbudget,
@@ -16936,6 +17069,8 @@ SCENARIO_ENV = {
     'corruptpartdurar5': {'RUSTYGET_PERSISTENT_UNPACK': '1'},
     # each state-file sync takes 1 s (diskstate_format::test_state_sync_delay)
     'queuesyncslow': {'RUSTYGET_TEST_STATE_SYNC_DELAY_MS': '1000'},
+    # each cross-device copy of a moved completed file takes 1.5 s longer (fsops::test_move_copy_delay)
+    'recatmoveslow': {'RUSTYGET_TEST_MOVE_COPY_DELAY_MS': '1500'},
     # the InterDir budget (interbudget.rs) holds a download that needs 1 GB of state reserve on a 64 MB disk
     'cachecommitfull': {'RUSTYGET_TEST_STATE_RESERVE_MB': '1'},
     'interdirbudget': {'RUSTYGET_TEST_STATE_RESERVE_MB': '1'},

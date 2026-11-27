@@ -3154,7 +3154,28 @@ impl NzbgetRsQueueCoordinator {
         host.nzb_set_str(nzb_ptr, crate::queuesubsys_host::NZB_STR_CATEGORY, category);
         host.nzb_action(nzb_ptr, crate::queuesubsys_host::NZB_ACT_BUILD_DEST_DIR);
         let new_nzb = host.nzb_snap(nzb_ptr, false);
-        new_nzb.dest_dir == old_dest_dir || host.move_completed_files(nzb_ptr, &old_dest_dir)
+        new_nzb.dest_dir == old_dest_dir
+            || Self::defer_completed_move(host, nzb_ptr, &old_dest_dir, &new_nzb.dest_dir)
+            || host.move_completed_files(nzb_ptr, &old_dest_dir)
+    }
+
+    /// A move of completed files onto another disk runs after the queue lock is let go
+    /// (recatmove.rs); the job keeps its directory until then.
+    fn defer_completed_move(
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        nzb_ptr: NzbRef,
+        old_dest_dir: &[u8],
+        new_dest_dir: &[u8],
+    ) -> bool {
+        #[cfg(unix)]
+        {
+            crate::recatmove::defer(host, nzb_ptr, old_dest_dir, new_dest_dir)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (host, nzb_ptr, old_dest_dir, new_dest_dir);
+            false
+        }
     }
 
     pub(crate) fn set_queue_entry_name(
@@ -3191,7 +3212,9 @@ impl NzbgetRsQueueCoordinator {
         let old_dest_dir = nzb.dest_dir;
         host.nzb_action(nzb_ptr, crate::queuesubsys_host::NZB_ACT_BUILD_DEST_DIR);
         let new_nzb = host.nzb_snap(nzb_ptr, false);
-        new_nzb.dest_dir == old_dest_dir || host.move_completed_files(nzb_ptr, &old_dest_dir)
+        new_nzb.dest_dir == old_dest_dir
+            || Self::defer_completed_move(host, nzb_ptr, &old_dest_dir, &new_nzb.dest_dir)
+            || host.move_completed_files(nzb_ptr, &old_dest_dir)
     }
 
     pub(crate) fn merge_queue_entries(

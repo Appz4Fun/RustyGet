@@ -480,7 +480,40 @@ pub(crate) fn move_file_no_overwrite_exdev(
     src_filename: &CStr,
     dst_filename: &CStr,
 ) -> Result<(), i32> {
+    copy_file_exclusive(src_filename, dst_filename)?;
+    if unsafe { libc::unlink(src_filename.as_ptr()) } != 0 {
+        let e = last_errno();
+        let rm_err = if e == 0 { libc::EIO } else { e };
+        unsafe { libc::unlink(dst_filename.as_ptr()) };
+        set_last_errno(rm_err);
+        return Err(rm_err);
+    }
+    Ok(())
+}
+
+/// Test hook: `RUSTYGET_TEST_MOVE_COPY_DELAY_MS` makes every cross-device copy of a
+/// moved file take that much longer, as a copy of gigabytes onto another disk does
+/// (6790: a bulk recategorize copied completed files for about 4 minutes). The
+/// recatmoveslow scenario sets it; unset, it costs one load.
+pub(crate) fn test_move_copy_delay() {
+    static DELAY_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let ms = *DELAY_MS.get_or_init(|| {
+        std::env::var("RUSTYGET_TEST_MOVE_COPY_DELAY_MS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0)
+    });
+    if ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+}
+
+/// The copy half of [`move_file_no_overwrite_exdev`]: creates `dst_filename`
+/// exclusively, copies `src_filename` into it in 16 KiB chunks, verifies the size and
+/// takes over the permissions. On failure the copy is removed; the source stays.
+pub(crate) fn copy_file_exclusive(src_filename: &CStr, dst_filename: &CStr) -> Result<(), i32> {
     use std::os::unix::fs::MetadataExt;
+    test_move_copy_delay();
     let src_meta = match std::fs::metadata(path(src_filename.to_bytes())) {
         Ok(m) => m,
         Err(e) => {
@@ -572,13 +605,6 @@ pub(crate) fn move_file_no_overwrite_exdev(
         unsafe { libc::unlink(dst_filename.as_ptr()) };
         set_last_errno(copy_err);
         return Err(copy_err);
-    }
-    if unsafe { libc::unlink(src_filename.as_ptr()) } != 0 {
-        let e = last_errno();
-        let rm_err = if e == 0 { libc::EIO } else { e };
-        unsafe { libc::unlink(dst_filename.as_ptr()) };
-        set_last_errno(rm_err);
-        return Err(rm_err);
     }
     Ok(())
 }

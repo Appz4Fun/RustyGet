@@ -183,6 +183,11 @@ pub(crate) fn queue_lock_acquired() {
     QUEUE_LOCK_DEPTH.with(|d| d.set(d.get() + 1));
 }
 
+/// How deep this thread holds the queue lock now (0: not at all).
+pub(crate) fn queue_lock_depth() -> u32 {
+    QUEUE_LOCK_DEPTH.with(|d| d.get())
+}
+
 /// `qqueue::CurrentQueueLock` released the queue lock: once this thread holds it no more,
 /// it waits for the saves it queued meanwhile, so they are on disk when it goes on.
 pub(crate) fn queue_lock_released() {

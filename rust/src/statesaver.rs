@@ -6,10 +6,13 @@
 //!
 //! The content is still serialized by the caller, under the queue lock, so each file is
 //! a consistent snapshot; only the write, the sync, the rename and the directory sync
-//! move here. While the coordinator runs (its [`AsyncSaves`] scope) every thread's saves
-//! are queued: a save made by another thread under the queue lock would otherwise keep
-//! the coordinator waiting for that lock. Before and after (startup, the final saves of
-//! a shutdown) saves run inline as before, after the jobs queued for the same file.
+//! move here. While the coordinator runs (its [`AsyncSaves`] scope) the coordinator's
+//! saves are queued and it never waits for them. Another thread's save made under the
+//! queue lock is queued too, and that thread waits for it once it releases the lock
+//! (`queue_lock_released`): the coordinator never waits for that lock during a sync, and
+//! the save is still on disk when the thread's caller (an API edit, an added NZB) gets
+//! its answer. Other saves, and all saves before and after the coordinator runs, run
+//! inline as before, after the jobs queued for the same file.
 //! Queued jobs run first in, first out; a newer write of a file still queued
 //! replaces its content in place (latest content, first position: partial states, then
 //! progress, then queue, as they were saved). A delete goes to the back, behind the
@@ -44,6 +47,9 @@ pub(crate) enum JobKind {
 /// One state file to write or delete. `path` identifies it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Job {
+    /// Order of submission, set by the saver; a write coalesced into a queued one keeps
+    /// the older number, so a thread waiting for the older save waits for the newer.
+    pub seq: u64,
     pub path: Vec<u8>,
     pub temp: Vec<u8>,
     pub sep: u8,
@@ -57,8 +63,9 @@ type Exec = dyn Fn(&Job, Log<'_>) -> bool + Send + Sync;
 struct State {
     queue: VecDeque<Job>,
     /// Files whose job runs right now, on the saver thread or inline in a caller.
-    in_flight: Vec<Vec<u8>>,
+    in_flight: Vec<(Vec<u8>, u64)>,
     thread_started: bool,
+    next_seq: u64,
     /// Saves are queued (the coordinator runs), else run inline.
     queue_saves: bool,
 }
@@ -69,7 +76,17 @@ pub(crate) struct Saver {
     exec: Box<Exec>,
 }
 
-/// While alive, every thread's state saves are queued for the saver thread; on drop,
+thread_local! {
+    /// This thread is the coordinator: its saves are queued and never waited for.
+    static COORDINATOR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// How deep this thread holds the queue lock (`qqueue::CurrentQueueLock`).
+    static QUEUE_LOCK_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// Saves this thread queued under the queue lock: (file, seq), waited for on release.
+    static TICKETS: std::cell::RefCell<Vec<(Vec<u8>, u64)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// While alive (the coordinator's loop), saves are queued for the saver thread; on drop,
 /// saves run inline again and the queued ones are drained.
 pub(crate) struct AsyncSaves(&'static Saver);
 
@@ -77,14 +94,37 @@ impl AsyncSaves {
     pub(crate) fn enter() -> Self {
         let saver: &'static Saver = global();
         saver.lock().queue_saves = true;
+        COORDINATOR.with(|c| c.set(true));
         Self(saver)
     }
 }
 
 impl Drop for AsyncSaves {
     fn drop(&mut self) {
+        COORDINATOR.with(|c| c.set(false));
         self.0.lock().queue_saves = false;
         self.0.drain();
+    }
+}
+
+/// `qqueue::CurrentQueueLock` took the queue lock.
+pub(crate) fn queue_lock_acquired() {
+    QUEUE_LOCK_DEPTH.with(|d| d.set(d.get() + 1));
+}
+
+/// `qqueue::CurrentQueueLock` released the queue lock: once this thread holds it no more,
+/// it waits for the saves it queued meanwhile, so they are on disk when it goes on.
+pub(crate) fn queue_lock_released() {
+    let depth = QUEUE_LOCK_DEPTH.with(|d| {
+        let v = d.get().saturating_sub(1);
+        d.set(v);
+        v
+    });
+    if depth == 0 {
+        let tickets = TICKETS.with(|t| std::mem::take(&mut *t.borrow_mut()));
+        if !tickets.is_empty() {
+            global().wait_for(&tickets);
+        }
     }
 }
 
@@ -109,41 +149,62 @@ impl Saver {
         self.cv.wait(st).unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Queues `job` while saves are queued (true), else runs it now and returns its
-    /// result.
-    pub(crate) fn submit(self: &Arc<Self>, job: Job, log: Log<'_>) -> bool {
+    /// Queues `job` while saves are queued and this thread is the coordinator (true),
+    /// or holds the queue lock (true; waited for on release, `queue_lock_released`);
+    /// else runs it now and returns its result.
+    pub(crate) fn submit(self: &Arc<Self>, mut job: Job, log: Log<'_>) -> bool {
         let mut st = self.lock();
-        if st.queue_saves {
-            self.enqueue_locked(st, job);
+        let coordinator = COORDINATOR.with(|c| c.get());
+        let under_lock = QUEUE_LOCK_DEPTH.with(|d| d.get() > 0);
+        if st.queue_saves && (coordinator || under_lock) {
+            let path = job.path.clone();
+            let seq = self.enqueue_locked(st, job);
+            if !coordinator {
+                TICKETS.with(|t| t.borrow_mut().push((path, seq)));
+            }
             true
         } else {
-            // This newer content (or delete) replaces a queued one.
-            st.queue.retain(|j| j.path != job.path);
+            st.next_seq += 1;
+            job.seq = st.next_seq;
+            // This newer content (or delete) replaces a queued one, and whoever waits
+            // for that one waits for this.
+            if let Some(i) = st.queue.iter().position(|j| j.path == job.path) {
+                job.seq = st.queue.remove(i).expect("position is in range").seq;
+            }
             self.run_marked(st, job, log)
         }
     }
 
     /// Queues `job` for the saver thread, coalescing with a queued job for its file.
     #[cfg(test)]
-    fn enqueue(self: &Arc<Self>, job: Job) {
+    fn enqueue(self: &Arc<Self>, job: Job) -> u64 {
         let st = self.lock();
-        self.enqueue_locked(st, job);
+        self.enqueue_locked(st, job)
     }
 
-    fn enqueue_locked(self: &Arc<Self>, mut st: MutexGuard<'_, State>, job: Job) {
-        match st.queue.iter().position(|j| j.path == job.path) {
+    /// Queues `job`; returns the seq a waiter for it waits for.
+    fn enqueue_locked(self: &Arc<Self>, mut st: MutexGuard<'_, State>, mut job: Job) -> u64 {
+        st.next_seq += 1;
+        job.seq = st.next_seq;
+        let seq = match st.queue.iter().position(|j| j.path == job.path) {
             Some(i)
                 if matches!(st.queue[i].kind, JobKind::Write { .. })
                     && matches!(job.kind, JobKind::Write { .. }) =>
             {
+                job.seq = st.queue[i].seq;
                 st.queue[i] = job;
+                st.queue[i].seq
             }
             Some(i) => {
                 st.queue.remove(i);
                 st.queue.push_back(job);
+                st.next_seq
             }
-            None => st.queue.push_back(job),
-        }
+            None => {
+                st.queue.push_back(job);
+                st.next_seq
+            }
+        };
         if !st.thread_started {
             let me = Arc::clone(self);
             if std::thread::Builder::new()
@@ -156,24 +217,41 @@ impl Saver {
                 // No thread: run the queue here, as before.
                 drop(st);
                 self.run_queue_inline();
-                return;
+                return seq;
             }
         }
         self.cv.notify_all();
+        seq
+    }
+
+    /// Waits until none of `tickets` (file, seq) is queued or running.
+    fn wait_for(&self, tickets: &[(Vec<u8>, u64)]) {
+        let mut st = self.lock();
+        loop {
+            let busy = tickets.iter().any(|(p, s)| {
+                st.queue.iter().any(|j| j.path == *p && j.seq <= *s)
+                    || st.in_flight.iter().any(|(fp, fs)| fp == p && fs <= s)
+            });
+            if !busy {
+                return;
+            }
+            st = self.wait(st);
+        }
     }
 
     /// Waits for a job running for the same file, then runs `job` in this thread.
     fn run_marked(&self, st: MutexGuard<'_, State>, job: Job, log: Log<'_>) -> bool {
-        let _mark = self.mark(st, &job.path);
+        let _mark = self.mark(st, &job.path, job.seq);
         (self.exec)(&job, log)
     }
 
-    /// Waits until no job runs for `path`, then marks it running until the guard drops.
-    fn mark<'a>(&'a self, mut st: MutexGuard<'_, State>, path: &'a [u8]) -> Mark<'a> {
-        while st.in_flight.iter().any(|p| p == path) {
+    /// Waits until no job runs for `path`, then marks it running (as save `seq`; a
+    /// reader marks with `u64::MAX`, which no waiter waits for) until the guard drops.
+    fn mark<'a>(&'a self, mut st: MutexGuard<'_, State>, path: &'a [u8], seq: u64) -> Mark<'a> {
+        while st.in_flight.iter().any(|(p, _)| p == path) {
             st = self.wait(st);
         }
-        st.in_flight.push(path.to_vec());
+        st.in_flight.push((path.to_vec(), seq));
         Mark { saver: self, path }
     }
 
@@ -181,7 +259,7 @@ impl Saver {
         let i = st
             .queue
             .iter()
-            .position(|j| !st.in_flight.contains(&j.path))?;
+            .position(|j| !st.in_flight.iter().any(|(p, _)| *p == j.path))?;
         st.queue.remove(i)
     }
 
@@ -233,7 +311,8 @@ impl Saver {
             .iter()
             .position(|j| j.path == path)
             .and_then(|i| st.queue.remove(i));
-        let _mark = self.mark(st, path);
+        let seq = pending.as_ref().map_or(u64::MAX, |j| j.seq);
+        let _mark = self.mark(st, path, seq);
         if let Some(job) = pending {
             (self.exec)(&job, &mut active_log);
         }
@@ -276,7 +355,7 @@ struct Mark<'a> {
 impl Drop for Mark<'_> {
     fn drop(&mut self) {
         let mut st = self.saver.lock();
-        if let Some(i) = st.in_flight.iter().position(|p| p == self.path) {
+        if let Some(i) = st.in_flight.iter().position(|(p, _)| p == self.path) {
             st.in_flight.swap_remove(i);
         }
         self.saver.cv.notify_all();
@@ -337,6 +416,7 @@ mod tests {
 
     fn write(path: &str, content: &str) -> Job {
         Job {
+            seq: 0,
             path: path.as_bytes().to_vec(),
             temp: format!("{path}.new").into_bytes(),
             sep: b'/',
@@ -460,7 +540,13 @@ mod tests {
         let (saver, done, gate) = recording();
         hold(&saver, &gate);
         saver.lock().queue_saves = true;
+        // Neither the coordinator nor under the queue lock: inline.
+        assert!(saver.submit(write("7s", "inline"), &mut |_, _| {}));
+        assert_eq!(summary(&done), ["7s=inline"]);
+        done.lock().unwrap().clear();
+        COORDINATOR.with(|c| c.set(true));
         assert!(saver.submit(write("4s", "old"), &mut |_, _| {}));
+        COORDINATOR.with(|c| c.set(false));
         assert_eq!(saver.queued_paths(), [b"4s".to_vec()]);
         assert_eq!(saver.pending_content(b"4s"), Some(b"old".to_vec()));
         saver.lock().queue_saves = false;
@@ -485,6 +571,28 @@ mod tests {
         saver.drain();
     }
 
+    #[test]
+    fn a_save_queued_under_the_queue_lock_is_waited_for_after_the_lock() {
+        let (saver, done, gate) = recording();
+        hold(&saver, &gate);
+        let first = saver.enqueue(write("queue", "q1"));
+        let second = saver.enqueue(write("queue", "q2"));
+        assert_eq!(
+            first, second,
+            "a coalesced write keeps its place and number"
+        );
+        let releaser = {
+            let gate = Arc::clone(&gate);
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(30));
+                gate.store(false, Ordering::SeqCst);
+            })
+        };
+        saver.wait_for(&[(b"queue".to_vec(), first)]);
+        assert_eq!(summary(&done), ["hold=0", "queue=q2"]);
+        releaser.join().unwrap();
+    }
+
     /// The real job writer: a queued save is on disk, readable, after `settle`,
     /// and its temporary file is gone.
     #[test]
@@ -502,6 +610,7 @@ mod tests {
         let saver = Saver::new(Box::new(crate::diskstate_format::run_state_job));
         let path = dir.join("5s");
         let job = |content: &str| Job {
+            seq: 0,
             path: path.as_os_str().as_bytes().to_vec(),
             temp: dir.join("5s.new").as_os_str().as_bytes().to_vec(),
             sep: b'/',

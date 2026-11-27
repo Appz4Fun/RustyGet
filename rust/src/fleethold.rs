@@ -718,6 +718,14 @@ mod host {
                     && host.queue_find_by_id(dq_ptr, q.id).is_some()
                 {
                     host.dq_edit_entry(dq_ptr, q.id, crate::queuesubsys_host::EA_GROUP_PAUSE_EXTRA_PARS, None);
+                    // a par2 the direct rename raised while the copy was held
+                    // (resume_on_release_host) downloads now: its rename waits for it
+                    for i in 0..host.nzb_file_len(q.ptr) {
+                        let f = host.file_snap(host.nzb_file_at(q.ptr, i));
+                        if f.extra_priority && f.paused && !f.deleted {
+                            host.file_set_int(f.ptr, crate::queuesubsys_host::FILE_INT_PAUSED, 0);
+                        }
+                    }
                 }
             }
         }
@@ -726,6 +734,56 @@ mod host {
         msg.extend_from_slice(b" from its fleet: ");
         msg.extend_from_slice(why);
         host.nzb_print_message(q.ptr, crate::queuesubsys_host::MK_INFO, &crate::releasename::log_name(&msg));
+    }
+
+    /// A held copy finished its direct rename. Unheld, the copy would now be
+    /// resumed and all its par2 files paused (GroupResume, GroupPauseAllPars);
+    /// held, it stays paused and its release gets that outcome instead: the
+    /// files to resume become every file but the par2 files.
+    /// Returns false when the copy is not held.
+    pub(crate) fn direct_rename_done_held_host(host: &QueueSubsysHost, ptr: NzbRef) -> bool {
+        if !is_held(host, ptr) {
+            return false;
+        }
+        // held as it was added: its release resumes it as a fresh copy
+        if host.nzb_get_param(ptr, HELD_FILES_PARAM).is_none() {
+            return true;
+        }
+        let mut resume = Vec::new();
+        for i in 0..host.nzb_file_len(ptr) {
+            let f = host.file_snap(host.nzb_file_at(ptr, i));
+            if f.deleted {
+                continue;
+            }
+            if !f.paused {
+                host.file_set_int(f.ptr, crate::queuesubsys_host::FILE_INT_PAUSED, 1);
+            }
+            if !f.par_file {
+                resume.push(f.id);
+            }
+        }
+        host.nzb_set_param(ptr, HELD_FILES_PARAM, Some(held_files_param(&resume).as_bytes()));
+        host.nzb_set_int(ptr, crate::queuesubsys_host::NZB_INT_CHANGED, 1);
+        true
+    }
+
+    /// A held copy's file that would be resumed now (a direct rename raising its
+    /// smallest par2) stays paused: its release resumes it instead. Returns
+    /// false when the copy is not held. A copy held as it was added keeps no
+    /// file list; its release resumes it as a fresh copy, this file included.
+    pub(crate) fn resume_on_release_host(host: &QueueSubsysHost, ptr: NzbRef, file_id: i32) -> bool {
+        if !is_held(host, ptr) {
+            return false;
+        }
+        if let Some(v) = host.nzb_get_param(ptr, HELD_FILES_PARAM) {
+            let mut ids = parse_held_files(&v);
+            if !ids.contains(&file_id) {
+                ids.push(file_id);
+                host.nzb_set_param(ptr, HELD_FILES_PARAM, Some(held_files_param(&ids).as_bytes()));
+                host.nzb_set_int(ptr, crate::queuesubsys_host::NZB_INT_CHANGED, 1);
+            }
+        }
+        true
     }
 
     /// The share of a copy's tried articles that arrived, as kept on a parked donor.

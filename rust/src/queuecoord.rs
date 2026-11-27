@@ -7825,7 +7825,10 @@ pub(crate) fn direct_rename_completed_host(
     let nzb = host.nzb_snap(nzb_ptr, false);
     host.nzb_set_direct_rename_status(nzb_ptr, DirectRenameStatus::Success);
 
-    if opts.par_check != crate::queuesubsys_host::PC_FORCE {
+    // a held copy stays paused: its release resumes what this would have
+    if opts.par_check != crate::queuesubsys_host::PC_FORCE
+        && !crate::fleethold::direct_rename_done_held_host(host, nzb_ptr)
+    {
         host.dq_edit_entry(
             dq_ptr,
             nzb.id,

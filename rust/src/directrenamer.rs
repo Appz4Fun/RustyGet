@@ -482,8 +482,15 @@ fn unpause_pars_host(
                 let bf = &files[b];
                 let mut msg = b"Increasing priority for par2-file ".to_vec();
                 msg.extend_from_slice(&bf.filename);
+                // a held copy stays paused: its release resumes this file
+                let held = crate::fleethold::resume_on_release_host(host, nzb_ptr, bf.id);
+                if held {
+                    msg.extend_from_slice(b" (held: it downloads when its fleet releases the copy)");
+                }
                 host.nzb_print_message(nzb_ptr, MK_INFO, &msg);
-                host.file_set_int(bf.ptr, FILE_INT_PAUSED, 0);
+                if !held {
+                    host.file_set_int(bf.ptr, FILE_INT_PAUSED, 0);
+                }
                 host.file_set_int(bf.ptr, FILE_INT_EXTRA_PRIORITY, 1);
             }
         }
@@ -586,6 +593,7 @@ pub(crate) fn run_par_loader(
         }
     }
 
+    rename_test_wait_held(&host, stopped, nzb_id);
     host.with_locked_queue(|dq_ptr| {
         let opts = host.opts();
         let nzb_ptr = host.queue_find_by_id(dq_ptr, nzb_id);
@@ -594,6 +602,51 @@ pub(crate) fn run_par_loader(
             if !nzb.skip_disk_write && !opts.skip_write {
                 rename_files_host(&host, &opts, dq_ptr, nzb_ptr, &par_hashes);
             }
+        }
+    });
+}
+
+/// Test hook (functional harness only): with `RUSTYGET_TEST_DIRECT_RENAME_WAIT_HELD_MS`
+/// set, a direct rename that has read its par2 files waits (at most that long)
+/// until its fleet holds the copy, then completes. This forces the order
+/// "rename started, copy held, rename completes while held" that production
+/// hit by timing alone. Unset (production) it costs one load.
+#[cfg(unix)]
+fn rename_test_wait_held(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    stopped: &std::sync::atomic::AtomicBool,
+    nzb_id: i32,
+) {
+    static WAIT_MS: std::sync::LazyLock<u64> = std::sync::LazyLock::new(|| {
+        std::env::var("RUSTYGET_TEST_DIRECT_RENAME_WAIT_HELD_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map_or(0, |ms| ms.min(120_000))
+    });
+    if *WAIT_MS == 0 {
+        return;
+    }
+    let end = std::time::Instant::now() + std::time::Duration::from_millis(*WAIT_MS);
+    let held = |host: &crate::queuesubsys_host::QueueSubsysHost| {
+        host.with_locked_queue(|dq_ptr| {
+            let ptr = host.queue_find_by_id(dq_ptr, nzb_id);
+            ptr.is_some() && crate::fleethold::is_held(host, ptr)
+        })
+    };
+    while !held(host) && std::time::Instant::now() < end && !stopped.load(std::sync::atomic::Ordering::Acquire) {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    host.with_locked_queue(|dq_ptr| {
+        let ptr = host.queue_find_by_id(dq_ptr, nzb_id);
+        if ptr.is_some() {
+            let mut msg = b"Test hook RUSTYGET_TEST_DIRECT_RENAME_WAIT_HELD_MS: direct rename of ".to_vec();
+            msg.extend_from_slice(&host.nzb_snap(ptr, false).name);
+            msg.extend_from_slice(if crate::fleethold::is_held(host, ptr) {
+                b" completes now, held=yes"
+            } else {
+                b" completes now, held=no"
+            });
+            host.nzb_print_message(ptr, crate::queuesubsys_host::MK_WARNING, &msg);
         }
     });
 }

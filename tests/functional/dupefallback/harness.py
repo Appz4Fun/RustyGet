@@ -1431,6 +1431,73 @@ def scenario_interdirchange(daemon, t):
                {k: rel(v) for k, v in dirs.items()}))
 
 
+def _output_moved(daemon, t, label, seg, written):
+    """A download's folder changes (here a rename; on 6790 an InterDir
+    relocation by a category edit) while one of its files has its direct-write
+    output in the old folder and nothing downloading. ``written``: the file
+    already holds articles; otherwise it only started one (its output path is
+    stored, nothing in it). The write guard refused the old path, so every later
+    article of the file failed and the download ended FAILURE with health 0."""
+    size = 3_000_000
+    data = _payload(size, 6161)
+    p = _place_copy(t, 'om', data, 'om.bin')
+    api = daemon.wait_ready()
+    daemon.append(api, 'OutMoved', build_nzb(p, 'om.bin', size, seg, set()), False, '', 0)
+    gid = [g['NZBID'] for g in api.listgroups() if g['NZBName'] == 'OutMoved'][0]
+    deadline = time.time() + 60
+    reached = False
+    while time.time() < deadline and not reached:
+        fs = api.listfiles(0, 0, gid)
+        g = [x for x in api.listgroups() if x['NZBID'] == gid]
+        reached = (g and g[0]['SuccessArticles'] >= 1) if written else any(f['ActiveDownloads'] for f in fs)
+        time.sleep(0.05)
+    api.editqueue('GroupPause', 0, '', [gid])
+    try:
+        api.shutdown()
+    except Exception:
+        pass
+    t.procs[-1].wait(timeout=60)
+    stored = [f for f in t.find_files('main') if '/queue/' in f and t.read_file(f).find(b'.out.tmp') >= 0]
+    daemon.start()
+    api = daemon.wait_ready()
+    g = [x for x in api.listgroups() if x['NZBID'] == gid][0]
+    old_dir, success_before = g['DestDir'], g['SuccessArticles']
+    api.editqueue('GroupSetName', 0, 'OutMovedRenamed', [gid])
+    new_dir = [x['DestDir'] for x in api.listgroups() if x['NZBID'] == gid][0]
+    api.rate(0)
+    api.editqueue('GroupResume', 0, '', [gid])
+    h = daemon.wait_history(api, 'OutMovedRenamed', timeout=120)
+    found = [f for f in t.find_files('main', 'dst') if f.endswith('om.bin')]
+    final_ok = len(found) == 1 and t.read_file(found[0]) == data
+    refused = _grep_log(t, 'ownership unavailable') + _grep_log(t, 'Operation canceled')
+    # Each article is fetched once: an article written before the restart and
+    # fetched again meant the file counted it twice and completed one short
+    # (its articles were loaded without their saved states).
+    try:
+        log = t.read_file('nzbget.log').decode(errors='replace')
+    except Exception:
+        log = ''
+    fetched = len(re.findall(r'Successfully downloaded OutMoved(?:Renamed)?/om\.bin \[\d+/', log))
+    articles = -(-size // seg)
+    ok = (reached and bool(stored) and (success_before > 0) == written and new_dir != old_dir
+          and h['Status'].startswith('SUCCESS') and final_ok and refused == 0 and fetched == articles)
+    return (label, ok, 'reached=%s stored=%d success_before=%d dir_changed=%s status=%s final=%s refused=%d fetched=%d/%d'
+            % (reached, len(stored), success_before, new_dir != old_dir, h['Status'], final_ok, refused,
+               fetched, articles))
+
+
+def scenario_outputmoved(daemon, t):
+    """6790, 2026-11-27 (2880, 2887): a file that had only started an article
+    when its download's folder changed gets its output in the new folder."""
+    return _output_moved(daemon, t, 'outputmoved', 1_000_000, False)
+
+
+def scenario_outputmovedpartial(daemon, t):
+    """6790, 2026-11-27 (2877): a file already holding articles when its
+    download's folder changed has its partial output moved along and completes."""
+    return _output_moved(daemon, t, 'outputmovedpartial', 100_000, True)
+
+
 def scenario_finaldeleterestart(daemon, t):
     """B42: nzbget shuts down right after a half-done download was final-deleted,
     before the files still downloading let the delete finish. The download
@@ -16824,6 +16891,8 @@ SCENARIOS = {
     'sidefilenorepair': scenario_sidefilenorepair,
     'finaldeletemidway': scenario_finaldeletemidway,
     'interdirchange': scenario_interdirchange,
+    'outputmoved': scenario_outputmoved,
+    'outputmovedpartial': scenario_outputmovedpartial,
     'finaldeleterestart': scenario_finaldeleterestart,
     'restartmidway': scenario_restartmidway,
     'declaredcountnopair': scenario_declaredcountnopair,
@@ -17380,6 +17449,8 @@ SCENARIO_OPTIONS = {
     'truncatedstate': ['ContinuePartial=yes', 'FlushQueue=yes', 'Server1.Connections=1'],
     'queuesyncslow': ['ContinuePartial=yes', 'FlushQueue=yes', 'Server1.Connections=6'],
     'interdirchange': ['DownloadRate=200', 'Unpack=yes', 'DirectUnpack=yes'],
+    'outputmoved': ['DownloadRate=20'],
+    'outputmovedpartial': ['DownloadRate=20'],
     'diskfullrestart': ['ContinuePartial=yes', 'FlushQueue=yes', 'DiskSpace=0', 'Server1.Connections=4'],
     'cachecommitfull': ['ArticleCache=16', 'DirectWrite=yes', 'DiskSpace=1', 'Server1.Connections=4'],
     'interdirbudget': ['DiskSpace=4', 'Server1.Connections=8'],

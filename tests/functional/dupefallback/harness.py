@@ -2065,6 +2065,10 @@ def scenario_cachecommitfull(daemon, t):
         again_after = len(set(before) & set(ids[requests_before:]))
         integ = _verify_output(t, data)
         refetch_logs = _grep_log(t, 'could not be written and will be downloaded again')
+        log = t.read_file('nzbget.log').decode(errors='replace')
+        for line in log.splitlines():
+            if 'could not be written' in line or 'Could not commit' in line or 'Pausing download' in line:
+                print('       cachecommitfull: %s' % line[-220:])
         ok = (h['Status'].startswith('SUCCESS') and integ and lost_logs > 0 and paused > 0
               and refetch_logs > 0)
         return ('cachecommitfull', ok,

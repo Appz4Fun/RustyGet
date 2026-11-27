@@ -8,6 +8,10 @@ var TlsCipherDialog = (new function($)
 	// Apply now: 0 idle, 1 asking to confirm, 2 reloading. A retried server's job
 	// reports only that server, so its row is merged into the earlier results.
 	var applyStep = 0, retryJob = '', retryBase = null;
+	// unapplied: some job saved ciphers that no detected reload has put to use yet
+	// (a later retry that saves nothing must not hide them). applied: RustyGet
+	// reloaded, so its idle cipher state is not a reason to start a new run.
+	var unapplied = false, applied = false;
 	function text(key, fallback) { return I18n.defaultValue('tls_cipher_' + key, fallback); }
 	function active(result) { return ['measuring', 'probing', 'saving'].indexOf(result.State) !== -1; }
 	function stopTimer() { if (timer !== null) clearTimeout(timer); timer = null; }
@@ -64,8 +68,10 @@ var TlsCipherDialog = (new function($)
 		$('#TlsCipherExcluded').toggle((result.ExcludedSuites || []).length > 0)
 			.find('p').text((result.ExcludedSuites || []).join(', '));
 		$('#TlsCipherCancel').prop('disabled', !active(result));
-		$('#TlsCipherAgain').toggle(!active(result) && result.Available !== false && (result.State !== 'idle' || needsStatus));
-		var canApply = !active(result) && result.Saved === true && result.ReloadRequired === true;
+		$('#TlsCipherAgain').toggle(applyStep !== 2 && !active(result) && result.Available !== false && (result.State !== 'idle' || needsStatus));
+		if (result.Saved === true && result.ReloadRequired === true) unapplied = true;
+		if (result.State !== 'idle') applied = false;
+		var canApply = !active(result) && unapplied;
 		if (applyStep === 0 || !canApply)
 		{
 			if (applyStep !== 2) applyStep = 0;
@@ -136,7 +142,7 @@ var TlsCipherDialog = (new function($)
 	}
 	function start()
 	{
-		if (pending) return;
+		if (pending || applyStep === 2) return;
 		snapshot = Config.cipherSnapshot();
 		if (snapshot === null)
 		{
@@ -144,7 +150,7 @@ var TlsCipherDialog = (new function($)
 			$('#TlsCipherCancel').prop('disabled', true); return;
 		}
 		pending = true; appliedJob = ''; saveBlocked = true; needsStatus = false;
-		retryJob = ''; retryBase = null; applyStep = 0;
+		retryJob = ''; retryBase = null; applyStep = 0; applied = false;
 		$('#TlsCipherAgain').hide();
 		message(text('starting', 'Starting cipher tests…'));
 		call('tlscipherstart', [], function(result) { pending = false; render(result); });
@@ -159,7 +165,7 @@ var TlsCipherDialog = (new function($)
 			return;
 		}
 		var base = state ? mergedServers(state) : [];
-		pending = true; appliedJob = ''; saveBlocked = true; needsStatus = false; applyStep = 0;
+		pending = true; appliedJob = ''; saveBlocked = true; needsStatus = false; applyStep = 0; applied = false;
 		$('#TlsCipherServers .tls-cipher-retry').prop('disabled', true);
 		message(text('retrying', 'Retrying this server…'));
 		call('tlscipherstart', [String(server)], function(result) {
@@ -181,49 +187,65 @@ var TlsCipherDialog = (new function($)
 		}
 		if (applyStep !== 1 || pending) return;
 		applyStep = 2;
-		$('#TlsCipherApply').hide();
-		$('#TlsCipherAgain').hide();
+		$('#TlsCipherApply, #TlsCipherAgain').hide();
 		$('#TlsCipherServers .tls-cipher-retry').remove();
-		var status = typeof Status !== 'undefined' && Status.status ? Status.status : {};
-		var before = status.UpTimeSec, instance = status.Instance;
-		var started = new Date().getTime();
 		var info = $('#TlsCipherReload').text(text('applying', 'Reloading RustyGet to apply the saved ciphers…')).show();
-		if (typeof Refresher !== 'undefined') Refresher.pause();
+		var started, instance, uptime, lastAnswer;
 		var finish = function(key, fallback)
 		{
 			applyStep = 0;
 			info.text(text(key, fallback));
-			if (typeof Refresher !== 'undefined') Refresher.resume(true);
+		};
+		// The daemon's instance number (setupstatus) tells a restarted daemon apart
+		// for sure; a smaller uptime (status) is the fallback, as in Config.reload.
+		var reloaded = function(setup, status)
+		{
+			if (instance !== undefined && setup && setup.Instance !== undefined) return setup.Instance !== instance;
+			return uptime !== undefined && status && status.UpTimeSec !== undefined && status.UpTimeSec < uptime;
 		};
 		var check = function()
 		{
-			RPC.call('status', [], function(current) {
-				var reloaded = instance !== undefined && current.Instance !== undefined ? current.Instance !== instance :
-					before !== undefined && current.UpTimeSec < before;
-				var waited = new Date().getTime() - started;
-				if (reloaded)
-				{
-					if (typeof Status !== 'undefined') Status.status = current;
-					state.ReloadRequired = false;
-					$('#TlsCipherApply').hide();
-					finish('applied', 'Applied: RustyGet reloaded and new connections use the saved ciphers.');
-					return;
-				}
-				if (current.PostJobCount > 0 && waited < 6 * 3600 * 1000)
-					info.text(text('apply_unpack', 'Waiting for the current unpack to finish; the ciphers apply when RustyGet reloads after it.'));
-				else if (waited > 60000)
-				{
-					finish('apply_slow', 'RustyGet has not reloaded yet. It may still be finishing an unpack; check Messages or reopen this dialog later.');
-					return;
-				}
-				setTimeout(check, 1000);
-			}, function() {
-				if (new Date().getTime() - started > 60000)
+			var now = new Date().getTime();
+			var lost = function()
+			{
+				if (new Date().getTime() - lastAnswer > 60000)
 					finish('apply_failed', 'RustyGet did not answer after the reload request. Check that it is running.');
 				else setTimeout(check, 1000);
-			}, { timeout: 5000 });
+			};
+			RPC.call('setupstatus', [], function(setup) {
+				RPC.call('status', [], function(status) {
+					lastAnswer = new Date().getTime();
+					if (reloaded(setup, status))
+					{
+						unapplied = false; applied = true;
+						if (typeof Status !== 'undefined') Status.status = status;
+						finish('applied', 'Applied: RustyGet reloaded and new connections use the saved ciphers.');
+						return;
+					}
+					// a reload waits for a running unpack (post-processing) to finish
+					if (status.PostJobCount > 0 && now - started < 6 * 3600 * 1000)
+						info.text(text('apply_unpack', 'RustyGet is post-processing; the reload waits for a running unpack to finish, then the ciphers apply.'));
+					else if (now - started > 60000)
+					{
+						finish('apply_slow', 'RustyGet has not reloaded yet. It may still be finishing an unpack; check Messages or reopen this dialog later.');
+						return;
+					}
+					setTimeout(check, 1000);
+				}, lost, { timeout: 5000 });
+			}, lost, { timeout: 5000 });
 		};
-		RPC.call('reload', [], function() { setTimeout(check, 1000); }, function() { setTimeout(check, 1000); }, { timeout: 15000 });
+		var request = function()
+		{
+			started = lastAnswer = new Date().getTime();
+			RPC.call('reload', [], function() { setTimeout(check, 1000); }, function() { setTimeout(check, 1000); }, { timeout: 15000 });
+		};
+		// read the baselines first: the cached Status may not be filled yet
+		RPC.call('setupstatus', [], function(setup) {
+			instance = setup ? setup.Instance : undefined;
+			RPC.call('status', [], function(status) { uptime = status.UpTimeSec; request(); }, request, { timeout: 5000 });
+		}, function() {
+			RPC.call('status', [], function(status) { uptime = status.UpTimeSec; request(); }, request, { timeout: 5000 });
+		}, { timeout: 5000 });
 	}
 	this.init = function()
 	{
@@ -278,6 +300,7 @@ var TlsCipherDialog = (new function($)
 				render(result);
 				message(result.Message || text('unavailable', 'TLS cipher optimization requires a TLS-enabled Rust backend.'));
 			}
+			else if (applyStep === 2 || (applied && result.State === 'idle')) return; // keep the shown results
 			else if (result.State === 'idle' && !needsStatus) start();
 			else render(result);
 		});

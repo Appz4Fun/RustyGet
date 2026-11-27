@@ -4763,7 +4763,7 @@
     "message": "Reloading RustyGet to apply the saved ciphers…"
   },
   "tls_cipher_apply_unpack": {
-    "message": "Waiting for the current unpack to finish; the ciphers apply when RustyGet reloads after it."
+    "message": "RustyGet is post-processing; the reload waits for a running unpack to finish, then the ciphers apply."
   },
   "tls_cipher_applied": {
     "message": "Applied: RustyGet reloaded and new connections use the saved ciphers."

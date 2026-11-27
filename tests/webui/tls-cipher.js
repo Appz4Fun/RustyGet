@@ -53,11 +53,13 @@ const { fixtureURL } = require('./workspace-fixture');
         window.cipherState = { Available: true, JobID: '', State: 'idle', Algorithms: [], Servers: [], Saved: false, ReloadRequired: false };
         window.Status = { status: { Instance: 1, UpTimeSec: 100, PostJobCount: 0 } };
         window.statusReplies = [];
+        window.setupReplies = [{}];
         window.nextStart = null;
         RPC.call = (method, params, done, fail) => {
           window.cipherCalls.push({ method, params });
           if (method === 'reload') return done(true);
           if (method === 'status') return done(window.statusReplies.length > 1 ? window.statusReplies.shift() : window.statusReplies[0]);
+          if (method === 'setupstatus') return done(window.setupReplies.length > 1 ? window.setupReplies.shift() : window.setupReplies[0]);
           if (method === 'tlscipherstart' && window.nextStart) window.cipherState = window.nextStart(params);
           else if (method === 'tlscipherstart') window.cipherState = { Available: true, JobID: 'example-job', State: 'measuring',
             Message: '', Saved: false, ReloadRequired: false, Algorithms: [], Servers: [], CommonSupported: null,
@@ -171,16 +173,34 @@ const { fixtureURL } = require('./workspace-fixture');
       assert.match(await apply.textContent(), /Reload now/);
       assert.match(await page.locator('#TlsCipherReload').innerText(), /unpack is running, the reload waits/);
       assert.equal(await page.evaluate(() => cipherCalls.filter(x => x.method === 'reload').length), 0, 'Nothing reloads before confirming');
-      await page.evaluate(() => {
-        statusReplies = [{ Instance: 1, UpTimeSec: 101, PostJobCount: 1 }, { Instance: 1, UpTimeSec: 102, PostJobCount: 1 },
-          { Instance: 2, UpTimeSec: 1, PostJobCount: 0 }];
-      });
+      // status has no Instance; setupstatus does. The phone pass checks the
+      // uptime fallback of a daemon whose setupstatus has no Instance.
+      await page.evaluate(viaInstance => {
+        // baseline, then one reply per check
+        statusReplies = [{ UpTimeSec: 100, PostJobCount: 0 }, { UpTimeSec: 101, PostJobCount: 1 },
+          { UpTimeSec: 102, PostJobCount: 1 }, { UpTimeSec: viaInstance ? 103 : 1, PostJobCount: 0 }];
+        setupReplies = viaInstance ? [{ Instance: 7 }, { Instance: 7 }, { Instance: 7 }, { Instance: 8 }] : [{}];
+        Status.status = {};
+      }, width !== 390);
       await apply.click();
-      await page.waitForFunction(() => /current unpack to finish/.test(document.querySelector('#TlsCipherReload').textContent));
+      await page.waitForFunction(() => /running unpack to finish/.test(document.querySelector('#TlsCipherReload').textContent));
       assert(await apply.isHidden());
+      assert(await page.locator('#TlsCipherAgain').isHidden(), 'No new test while the reload waits');
+      await page.evaluate(() => TlsCipherDialog.showModal());
+      assert.equal(await page.evaluate(() => cipherCalls.filter(x => x.method === 'tlscipherstart').length), 2, 'Reopening while waiting starts nothing');
       await page.waitForFunction(() => /Applied/.test(document.querySelector('#TlsCipherReload').textContent), null, { timeout: 15000 });
       assert.equal(await page.evaluate(() => cipherCalls.filter(x => x.method === 'reload').length), 1);
       assert(await apply.isHidden(), 'Applied ciphers need no second reload');
+      // after the reload the daemon has no cipher job: reopening keeps the results instead of testing again
+      await page.evaluate(() => {
+        window.beforeIdle = cipherState;
+        cipherState = { Available: true, JobID: '', State: 'idle', Algorithms: [], Servers: [], Saved: false, ReloadRequired: false };
+        TlsCipherDialog.showModal();
+      });
+      await page.waitForTimeout(100);
+      assert.equal(await page.evaluate(() => cipherCalls.filter(x => x.method === 'tlscipherstart').length), 2, 'No automatic run after Apply');
+      assert.equal(await page.locator('#TlsCipherServers tbody tr').count(), 3);
+      await page.evaluate(() => { cipherState = beforeIdle; });
       if (process.env.NZBGET_UI_CAPTURE_DIR && [1280, 390].includes(width)) {
         await page.screenshot({ path: path.join(process.env.NZBGET_UI_CAPTURE_DIR, `tls-cipher-applied-${theme}-${width}.jpg`), type: 'jpeg', quality: 90 });
       }
@@ -206,7 +226,10 @@ const { fixtureURL } = require('./workspace-fixture');
       await lastRow.scrollIntoViewIfNeeded();
       assert(await lastRow.isVisible());
       if (process.env.NZBGET_UI_CAPTURE_DIR && [1280, 390].includes(width)) {
-        await page.evaluate(() => { document.querySelector('#TlsCipherDialog .modal-body').scrollTop = 0; });
+        await page.evaluate(() => {
+          document.querySelector('#TlsCipherDialog .modal-body').scrollTop = 0;
+          document.querySelector('#TlsCipherServers').scrollLeft = 0;
+        });
         await page.screenshot({ path: path.join(process.env.NZBGET_UI_CAPTURE_DIR, `tls-cipher-ten-servers-${theme}-${width}.jpg`), type: 'jpeg', quality: 90 });
       }
       await page.setViewportSize({ width, height: 900 });

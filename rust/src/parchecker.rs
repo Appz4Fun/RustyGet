@@ -6987,6 +6987,11 @@ mod tests {
             };
             entry.unpause(outcome.as_ref());
         }
+        // par-rs folds verified slices on its own threads. A fold still queued when the volume's
+        // slots appear lands in them directly, with no read: under load that left the control
+        // with nothing to back-fill. Drain the queue so every verified slice is folded before
+        // the slots are added (as in a download whose articles arrived well before the volume).
+        entry.session.flush();
         let path = dir.join(vname);
         std::fs::write(&path, vbytes).unwrap();
         streaming_session_on_recovery_volume_arrived(nzb_id, &path, Some(9))
@@ -7161,6 +7166,10 @@ mod tests {
         }
         // Nine damaged blocks at once: 15 planned blocks cover them.
         fail_slices(nzb_id, &entry, 48, 9);
+        // Folds queued on par-rs's threads land in slots added later without a read; drain
+        // them so the control's volume past the plan always needs a back-fill (see
+        // `single_volume_backfill_case`).
+        entry.session.flush();
         let mut fetched = streaming_session_take_unpause_ids(nzb_id);
         fetched.sort_unstable();
         for &id in &fetched {

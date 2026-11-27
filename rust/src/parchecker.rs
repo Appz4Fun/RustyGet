@@ -239,7 +239,7 @@ struct ActiveStreamingSession {
     /// passed on wrong bytes): direct unpack takes them (`streaming_session_take_bad_slices`)
     /// and declares them holes, so the extraction never reads them and the refill after the
     /// repair reads only these slices. Bounded by `LIVE_STASH_LIMIT`.
-    bad_slices: Mutex<Vec<(FileId, usize)>>,
+    bad_slices: Mutex<Vec<(FileId, usize, std::time::Instant)>>,
     // Drop last, after the session, queue and all owned metadata. Grows with
     // the syndrome slots as damage appears (see `grow_for_damage`).
     budget: Mutex<SessionBudgetLease>,
@@ -2313,14 +2313,57 @@ impl ActiveStreamingSession {
     /// Keeps the slices `events` turned Damaged (see `bad_slices`).
     fn note_bad_slices(&self, events: &[SliceEvent]) {
         let mut bad = self.bad_slices.lock().unwrap_or_else(|e| e.into_inner());
+        let now = std::time::Instant::now();
         for event in events.iter().filter(|e| e.state == SliceState::Damaged) {
-            let key = (event.file_id, event.slice_idx);
-            if bad.len() < LIVE_STASH_LIMIT && !bad.contains(&key) {
-                bad.push(key);
+            let known = bad
+                .iter()
+                .any(|(f, s, _)| *f == event.file_id && *s == event.slice_idx);
+            if bad.len() < LIVE_STASH_LIMIT && !known {
+                bad.push((event.file_id, event.slice_idx, now));
             }
         }
     }
 }
+
+/// True when live PAR of job `nzb_id` has verified every slice of file `name` that `ranges`
+/// (offset, length) touch, with the file complete and no rebuilt slice of it waiting for its
+/// second look: bytes direct unpack declared damaged there are good on disk now (repaired by
+/// live PAR, or found good after all). False when unknown (no session, no ranges).
+pub(crate) fn streaming_session_ranges_good(nzb_id: i32, name: &[u8], ranges: &[(u64, u64)]) -> bool {
+    let Some(entry) = active_streaming_session(nzb_id) else {
+        return false;
+    };
+    let Some(id) = entry.session.file_id_by_name(name) else {
+        return false;
+    };
+    if ranges.is_empty()
+        || !entry
+            .completed_sources
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&id)
+        || entry
+            .rebuilt_recheck
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|(f, _, _)| *f == id)
+    {
+        return false;
+    }
+    let Ok(states) = entry.session.slice_states(&id) else {
+        return false;
+    };
+    let size = entry.session.slice_size().max(1);
+    ranges.iter().all(|&(off, len)| {
+        let first = (off / size) as usize;
+        let last = (off.saturating_add(len.max(1)) - 1) / size;
+        (first..=last as usize).all(|s| states.get(s) == Some(&SliceState::VerifiedGood))
+    })
+}
+
+/// How long a slice live PAR found damaged stays so before direct unpack takes it as bad.
+const BAD_SLICE_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Byte ranges (offset, length) of file `name` of job `nzb_id` whose slice failed its own
 /// check on an article that arrived whole and is still damaged now: taken, each once. Direct
@@ -2336,11 +2379,23 @@ pub(crate) fn streaming_session_take_bad_slices(nzb_id: i32, name: &[u8]) -> Vec
     let Some(id) = entry.session.file_id_by_name(name) else {
         return Vec::new();
     };
+    // Only once its file is complete (every byte on disk) and the damage has lasted past the
+    // grace in which par-rs checks a slice again that it counted damaged while bytes it read
+    // from the file were not final yet (seen re-verified within 4-8 s).
+    if !entry
+        .completed_sources
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&id)
+    {
+        return Vec::new();
+    }
+    let now = std::time::Instant::now();
     let taken: Vec<usize> = {
         let mut bad = entry.bad_slices.lock().unwrap_or_else(|e| e.into_inner());
         let mut taken = Vec::new();
-        bad.retain(|(file, slice)| {
-            if *file == id {
+        bad.retain(|(file, slice, at)| {
+            if *file == id && now.duration_since(*at) >= BAD_SLICE_GRACE {
                 taken.push(*slice);
                 false
             } else {

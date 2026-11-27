@@ -15327,10 +15327,11 @@ def _corrupt_part_run(daemon, t, label, tag, rar5=False):
     written = sum(int(n) for n in re.findall(r'persistent partial files wrote (\d+) bytes', log))
     refilled = (sum(int(n) for n in re.findall(r'while extracting \((\d+) bytes\)', log)) +
                 sum(int(n) for n in re.findall(r'(\d+) bytes read back\)', log)))
-    # Each archive byte read once by the extraction, plus at most the repaired part.
+    # Each archive byte read once by the extraction, plus at most the repaired part (and a
+    # 64 KiB slice live PAR may count damaged for a moment and rebuild).
     ok = (h['Status'].startswith('SUCCESS') and intact and du_ok == 1 and declared + late >= 1 and
           first_reads == 1 and fallback == 0 and again == 0 and
-          0 < written <= len(movie) and 0 < refilled <= 1_000_000)
+          0 < written <= len(movie) and 0 < refilled <= 1_000_000 + 2 * 65536)
     return (label, ok, 'status=%s intact=%s du_ok=%d declared=%d late=%d first_reads=%d fallback=%d '
             'unpack_again=%d written=%d refilled=%d' % (h['Status'], intact, du_ok, declared, late, first_reads,
                                                        fallback, again, written, refilled))

@@ -5272,19 +5272,21 @@ def scenario_altfetchonce(daemon, t):
     """Audit finding 6 (2026-11-26): borrowing from an alt fetched each donor article from the
     network once. A stored rar set without par2 loses one volume whole and two articles of a
     later one: two holes, so two repair runs, each of which maps the alt again (the first and
-    last article of every one of its 100 volumes, more than the 64-article memo of recent
-    articles holds). The alt is the same movie in another stored rar (150 KB volumes, 25 KB
-    articles), in history, labelled an alt. Every donor article the maps, TwinCheck and the
+    last article of every one of its 90 volumes: 180 articles, more than the 64-article memo
+    of recent articles holds, and the 72 MB the download fetches between the two runs pushes
+    them out of nntp-rs's 64 MB body cache too). The alt is the same 90 MB movie in another
+    stored rar (1 MB volumes, 50 KB articles; the download's are 3 MB and 100 KB), in
+    history, labelled an alt. Every donor article the maps, TwinCheck and the
     borrows read must reach the network once (no message-id asked twice), and the donor bytes
     fetched stay within the borrowed range plus one first and last article per donor volume,
     plus the batch margin around each hole (DONOR_PATCH_MARGIN_PARTS articles each side, and
     the article each hole edge falls in)."""
     tag = 'afo'
-    seg = 20_000
-    donor_seg = 25_000
-    movie = _payload(15_000_000, 23090)
-    vols = generators.rar3_store_volumes_valid('movie.mkv', movie, 1_000_000)
-    dead_vol, holed_vol, holes = 6, 10, {5, 6}
+    seg = 100_000
+    donor_seg = 50_000
+    movie = _payload(90_000_000, 23090)
+    vols = generators.rar3_store_volumes_valid('movie.mkv', movie, 3_000_000)
+    dead_vol, holed_vol, holes = 3, 27, {10, 11}
     members = []
     lost = 0
     for i, data in enumerate(vols):
@@ -5295,7 +5297,7 @@ def scenario_altfetchonce(daemon, t):
         missing = set(range(1, parts + 1)) if i == dead_vol else (holes if i == holed_vol else set())
         lost += sum(min(seg, len(data) - (k - 1) * seg) for k in missing)
         members.append((rel, name, len(data), seg, missing))
-    alt = generators.rar3_store_volumes_valid('movie.mkv', movie, 150_000)
+    alt = generators.rar3_store_volumes_valid('movie.mkv', movie, 1_000_000)
     donor_members = []
     edges = 0
     for i, data in enumerate(alt):
@@ -5325,7 +5327,9 @@ def scenario_altfetchonce(daemon, t):
     runs = _grep_log(t, 'Fetch cost of borrowing from Backup')
     stored = len(re.findall(r'[1-9]\d* from the fetched-article store', _log_text(t)))
     ok = (integ and hp['Status'].startswith('SUCCESS') and again == 0 and not twice and served <= bound)
-    costs = re.findall(r'Fetch cost of borrowing from Backup: ([^\n]*)', _log_text(t))
+    costs = [m.group(1, 2, 3, 4, 5) for m in re.finditer(
+        r'Fetch cost of borrowing from Backup: ([\d.]+) MB.*?; (\d+) single.*?of (\d+) article.*?'
+        r'(\d+) taken from memory(?:, (\d+) from the fetched-article store)?', _log_text(t))]
     return ('altfetchonce', ok,
             'status=%s extracted_ok=%s donor_bytes=%d bound=%d (lost %d + edges %d + margin %d) '
             'donor_articles=%d asked_twice=%d %s cost_lines=%d store_served_lines=%d costs=%s'
@@ -16381,7 +16385,7 @@ SCENARIO_OPTIONS = {
     'headlostvolumepar': PROD_OPTIONS + ['DownloadRate=4000'],
     'deadvolumeunlabelled': PROD_OPTIONS + ['DownloadRate=4000'],
     'deadvolumetwincheck': PROD_OPTIONS + ['DownloadRate=1000'],
-    'altfetchonce': PROD_OPTIONS + ['DownloadRate=1000'],
+    'altfetchonce': PROD_OPTIONS + ['DownloadRate=8000'],
     'deadvolumeothervideo': PROD_OPTIONS + ['DownloadRate=1000'],
     'deadvolumeothersize': PROD_OPTIONS + ['DownloadRate=1000'],
     'deadvolumetwolenders': PROD_OPTIONS + ['DownloadRate=1000'],

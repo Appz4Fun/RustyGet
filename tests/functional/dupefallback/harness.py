@@ -1095,9 +1095,8 @@ def scenario_complementary(daemon, t):
 
 
 def scenario_historylog(daemon, t):
-    """A finished download keeps its messages: there are no per-download log
-    files any more, so the History Log tab (loadlog) shows the messages kept in
-    memory, and they must survive the move from the queue to history."""
+    """A finished download keeps its messages: the History Log tab (loadlog)
+    shows them, and they must survive the move from the queue to history."""
     size, seg = 1_000_000, 100_000
     data = _payload(size, 4242)
     pp = _place_copy(t, 'histlog', data)
@@ -1113,6 +1112,45 @@ def scenario_historylog(daemon, t):
     ok = ok and len(later) == 1 and later[0]['ID'] == msgs[-1]['ID']
     return ('historylog', ok, 'status=%s messages=%d MessageCount=%d from_last_id=%d'
             % (h['Status'], len(msgs), count, len(later)))
+
+
+def scenario_historylogrestart(daemon, t):
+    """Every download in History keeps its log across a restart: the messages
+    kept in memory are gone after one, so each message is also appended to the
+    download's log file (QueueDir/n<id>.log). A SUCCESS and a FAILURE download
+    (articles missing, no par2) both still show every message they had before
+    the restart (loadlog) and a MessageCount, and the failed one still says why."""
+    size, seg = 1_000_000, 100_000
+    good, bad = _payload(size, 5151), _payload(size, 5152)
+    gp = _place_copy(t, 'hlrgood', good)
+    bp = _place_copy(t, 'hlrbad', bad)
+    api = daemon.wait_ready()
+    daemon.append(api, 'LogGood', build_nzb(gp, 'LogGood.bin', size, seg, set()), False, '', 0)
+    daemon.append(api, 'LogBad', build_nzb(bp, 'LogBad.bin', size, seg, {3, 7}), False, '', 0)
+    hg = daemon.wait_history(api, 'LogGood')
+    hb = daemon.wait_history(api, 'LogBad')
+    ids = {'good': hg.get('NZBID'), 'bad': hb.get('NZBID')}
+    before = {k: [m['Text'] for m in api.loadlog(v, 0, 10000)] for k, v in ids.items()}
+    try:
+        api.shutdown()
+    except Exception:
+        pass
+    t.procs[-1].wait(timeout=60)
+    daemon.start()
+    api = daemon.wait_ready()
+    after_msgs = {k: api.loadlog(v, 0, 10000) for k, v in ids.items()}
+    after = {k: [m['Text'] for m in v] for k, v in after_msgs.items()}
+    hist = {x['NZBID']: x for x in api.history()}
+    counts = {k: int(hist.get(v, {}).get('MessageCount', 0)) for k, v in ids.items()}
+    kept = all(before[k] and after[k] == before[k] for k in ids)
+    ok = (hg['Status'].startswith('SUCCESS') and hb['Status'].startswith('FAILURE') and kept
+          # (MessageCount is saved with the queue: a message logged after the
+          # last save, as "not retrying" for the failed one, is in the file only)
+          and all(counts[k] > 0 for k in ids)
+          and any(m['Kind'] in ('WARNING', 'ERROR') for m in after_msgs['bad']))
+    return ('historylogrestart', ok, 'status=%s/%s before=%d/%d after=%d/%d MessageCount=%d/%d'
+            % (hg['Status'], hb['Status'], len(before['good']), len(before['bad']),
+               len(after['good']), len(after['bad']), counts['good'], counts['bad']))
 
 
 def scenario_urlhistorylog(daemon, t):
@@ -16719,6 +16757,7 @@ SCENARIOS = {
     'fleetendkeephistory0': scenario_fleetendkeephistory0,
     'complementary': scenario_complementary,
     'historylog': scenario_historylog,
+    'historylogrestart': scenario_historylogrestart,
     'urlhistorylog': scenario_urlhistorylog,
     'redownloadresetsrecovered': scenario_redownloadresetsrecovered,
     'recheckfailed': scenario_recheckfailed,

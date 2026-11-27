@@ -732,17 +732,19 @@ pub(crate) fn cached_messages(nzb: NzbRef, range: MessageRange) -> Vec<CachedMes
 }
 
 /// Appends `src`'s cached messages to `dest` with fresh ids and the current
-/// time, keeping at most the configured log buffer.
-pub(crate) fn copy_cached_messages(dest: NzbRef, src: NzbRef) {
+/// time, keeping at most the configured log buffer. Returns that time and
+/// the copied (kind, text) messages, for the caller to keep in `dest`'s
+/// log file.
+pub(crate) fn copy_cached_messages(dest: NzbRef, src: NzbRef) -> (i64, Vec<(i32, CString)>) {
     let (Some(_), Some(_)) = (nzb_data(dest), nzb_data(src)) else {
-        return;
+        return (0, Vec::new());
     };
     let log_buffer = crate::options::active_options().map_or(0, |o| o.scalars().log_buffer);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as c_int);
     if dest == src {
-        return;
+        return (0, Vec::new());
     }
     let copied: Vec<(i32, CString)> = {
         let o = data(scalars(src))
@@ -751,7 +753,18 @@ pub(crate) fn copy_cached_messages(dest: NzbRef, src: NzbRef) {
             .unwrap_or_else(|e| e.into_inner());
         o.iter().map(|m| (m.1, m.3.clone())).collect()
     };
-    log_messages(scalars(dest), i64::from(now), log_buffer, copied);
+    log_messages(scalars(dest), i64::from(now), log_buffer, copied.iter().cloned());
+    (i64::from(now), copied)
+}
+
+/// Counts one more message kept in the download's log file: its
+/// `MessageCount`, saved with the queue, so the count survives a restart
+/// that empties the in-memory cache.
+pub(crate) fn count_logged_message(nzb: NzbRef) {
+    if let Some(d) = nzb_data(nzb) {
+        d.slot(Slot::MessageCount)
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// An integer or flag field of a download (flags take 0 or 1).

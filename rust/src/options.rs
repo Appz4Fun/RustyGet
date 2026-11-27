@@ -2181,7 +2181,7 @@ pub struct NzbgetRsParsedOptions {
     /// Worker threads for a 7z LZMA2 member's independent blocks in live extraction
     /// (`livefeed::feed_threads`): 0 picks, 1 is none, more is that many (at most 64).
     pub feed_threads: i32,
-    /// Extractions that run at once (`unpackslots::capacity_for`): 0 picks, n is n (at most 64).
+    /// Extractions that run at once (`unpackslots::capacity_for`): 0 is one, n is n (at most 64).
     pub unpack_slots: i32,
 }
 

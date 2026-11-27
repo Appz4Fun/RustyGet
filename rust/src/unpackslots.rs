@@ -74,14 +74,15 @@ fn lock() -> MutexGuard<'static, State> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Slots for option `UnpackSlots` on a computer with `cores` logical CPUs: 0 (the default)
-/// picks half the CPUs, at least one and at most four (each extraction may use several
-/// threads of its own, see `FeedThreads`); n is n (at most 64).
-pub fn capacity_for(option: i32, cores: usize) -> usize {
+/// Slots for option `UnpackSlots`: 0 (the default) is one, n is n (at most 64). Extractions
+/// share one destination disk, so running several at once splits its bandwidth and every
+/// release finishes later; one at a time finishes each release sooner for the same total.
+/// One extraction still uses several threads of its own (see `FeedThreads`).
+pub fn capacity_for(option: i32) -> usize {
     if option > 0 {
         (option as usize).min(64)
     } else {
-        (cores / 2).clamp(1, 4)
+        1
     }
 }
 
@@ -100,8 +101,7 @@ pub fn session_limit() -> usize {
 /// Slots now, from the active options (read each time, so a reload applies).
 pub fn capacity() -> usize {
     let option = crate::options::active_options().map_or(0, |o| o.scalars().unpack_slots);
-    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
-    capacity_for(option, cores)
+    capacity_for(option)
 }
 
 /// The class of a download's direct unpack: [`Class::Paused`] when the files it still needs
@@ -268,16 +268,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn capacity_is_half_the_cpus_between_one_and_four_unless_set() {
-        assert_eq!(capacity_for(0, 1), 1);
-        assert_eq!(capacity_for(0, 2), 1);
-        assert_eq!(capacity_for(0, 6), 3);
-        assert_eq!(capacity_for(0, 12), 4);
-        assert_eq!(capacity_for(0, 64), 4);
-        assert_eq!(capacity_for(-1, 12), 4);
-        assert_eq!(capacity_for(1, 12), 1);
-        assert_eq!(capacity_for(8, 2), 8);
-        assert_eq!(capacity_for(1000, 2), 64);
+    fn capacity_is_one_unless_set() {
+        assert_eq!(capacity_for(0), 1);
+        assert_eq!(capacity_for(-1), 1);
+        assert_eq!(capacity_for(1), 1);
+        assert_eq!(capacity_for(8), 8);
+        assert_eq!(capacity_for(1000), 64);
     }
 
     #[test]

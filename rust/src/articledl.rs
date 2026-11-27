@@ -823,6 +823,8 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
     // Items counted without being written (live PAR certified their target): not reported to
     // live extraction as written; the finished file is read for them.
     let dropped = std::cell::RefCell::new(Vec::new());
+    // Items whose write failed: their bytes are gone, the articles are downloaded again.
+    let lost = std::cell::RefCell::new(Vec::new());
     let hand_off = (live.is_some() || recovery.is_some() || early.is_some()) && !skip_disk_write;
     let (flushed_articles, flushed_size) = flush_cache_then_hand_off(
         &items,
@@ -840,6 +842,7 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
                     dropped.borrow_mut().push(index);
                     not_written(index);
                 },
+                |index| lost.borrow_mut().push(index),
                 |msg| {
                     if nzb_ptr.is_some() {
                         qh.nzb_print_message(nzb_ptr, MK_ERROR, msg);
@@ -900,7 +903,14 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
     }
     let skip_after = qh.file_cache_flush_finish(file_ptr, flushed_articles)
         || crate::options::active_options().is_some_and(|o| o.scalars().skip_write != 0);
+    let lost: Vec<usize> = lost.borrow().iter().filter_map(|&i| metas.get(i).map(|m| m.0)).collect();
+    // The busy mark goes first: `delete_file_info` waits for it holding the queue lock,
+    // which handing the lost articles back takes.
+    drop(_busy_guard);
     cache_unlock_flush();
+    if !lost.is_empty() {
+        crate::queuecoord::articles_uncommitted(&qh, nzb_id, file_id, &lost);
+    }
     let flushed_mb = (flushed_size as f64) / 1024.0 / 1024.0;
     let prefix = if skip_after {
         format!(
@@ -925,15 +935,31 @@ fn flush_shapes(items: &[ArticleWriterFlushItem<'_>]) -> Vec<(i64, i32, bool)> {
         .collect()
 }
 
+/// How many of the counted flush items (their `sizes`) were written: the flush writes a prefix
+/// and counts the failed write and every item after it without their sizes
+/// (`article_writer_flush_cache_guarded`), so the prefix is the longest one whose sizes add up
+/// to `flushed_size`.
+fn written_prefix(sizes: impl Iterator<Item = i32>, flushed_size: i64) -> usize {
+    let mut sum = 0i64;
+    let mut good = 0;
+    for (index, size) in sizes.enumerate() {
+        sum += i64::from(size);
+        if sum > flushed_size {
+            break;
+        }
+        good = index + 1;
+    }
+    good
+}
+
 /// The (offset, length) of the flushed items (`shapes`, see `flush_shapes`) written whole, up
-/// to the first failed write.
+/// to the first failed write (see `written_prefix`).
 fn flushed_ranges(shapes: &[(i64, i32, bool)], flushed_articles: i32, flushed_size: i64) -> Vec<(u64, u64)> {
     let written = usize::try_from(flushed_articles).unwrap_or(0).min(shapes.len());
     if written == 0 {
         return Vec::new();
     }
-    let all: i64 = shapes[..written].iter().map(|s| i64::from(s.1)).sum();
-    let good = if all == flushed_size { written } else { written - 1 };
+    let good = written_prefix(shapes[..written].iter().map(|s| s.1), flushed_size);
     shapes[..good]
         .iter()
         .filter(|s| s.2)
@@ -956,11 +982,7 @@ fn live_written_items<'a>(
     if written == 0 {
         return Vec::new();
     }
-    let all: i64 = items[..written]
-        .iter()
-        .map(|item| i64::from(item.segment_size))
-        .sum();
-    let good = if all == flushed_size { written } else { written - 1 };
+    let good = written_prefix(items[..written].iter().map(|item| item.segment_size), flushed_size);
     items[..good]
         .iter()
         .enumerate()

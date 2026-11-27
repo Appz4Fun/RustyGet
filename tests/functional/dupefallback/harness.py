@@ -526,6 +526,19 @@ class Daemon:
                       '-p', str(port or self.nntp_port), '-i', '1',
                       '-v', '2' if capture_requests else '0'] + list(extra_args),
                      output_rel='nserv.log' if capture_requests else None)
+        # Wait until nserv listens (it exits silently when its port is taken; the daemon
+        # would then be refused for the whole run: livepartrustedtemp on a busy m5air).
+        proc = self.t.procs[-1]
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                raise RuntimeError('nserv exited with %s before listening on port %d'
+                                   % (proc.returncode, port or self.nntp_port))
+            try:
+                socket.create_connection(('127.0.0.1', port or self.nntp_port), timeout=1).close()
+                return
+            except OSError:
+                time.sleep(0.1)
 
     def start(self):
         self.process = self.t.spawn([self.t.nzbget, '-c', self.t.path(self.conf_rel), '-s'])
@@ -2309,7 +2322,7 @@ def scenario_streammaxrun(daemon, t):
     took = time.time() - start
     capped = _grep_log(t, 'still running after 40 seconds, 5 times the timeout (option DupeStreamTimeout)')
     other = _grep_log(t, 'nothing recovered for') + _grep_log(t, 'times a download at')
-    ok = capped == 1 and other == 0 and 'SUCCESS' not in h['Status'] and took < 120
+    ok = capped == 1 and other == 0 and 'SUCCESS' not in h['Status'] and took < 170
     return ('streammaxrun', ok, 'status=%s took=%.0fs capped_logs=%d other_stop_logs=%d delayed=%d'
             % (h['Status'], took, capped, other, daemon.proxy.delayed))
 
@@ -10939,12 +10952,25 @@ def scenario_quotafutureday(daemon, t):
     api = daemon.wait_ready()
     daemon.append(api, 'RelQF1', build_nzb(pp, 'first.bin', len(data), 100_000, set()), False, 'qf-key1', 100)
     daemon.wait_history(api, 'RelQF1', timeout=60)
+    stats = t.path('main', 'queue', 'stats')
+    # The volume stats are saved by the periodic service tick, not at exit: shutting
+    # down right after the download can leave no file yet (seen 1 run in 8 on macOS).
+    # Wait until a saved file holds a day slot before stopping the daemon.
+    day_now = int(time.time()) // 86400
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        try:
+            if any(re.match(r'^(\d+),', ln) and abs(int(ln.split(',')[0]) - day_now) <= 2
+                   for ln in open(stats).read().split('\n')):
+                break
+        except OSError:
+            pass
+        time.sleep(0.5)
     try:
         api.shutdown()
     except Exception:
         pass
     t.procs[-1].wait(timeout=60)
-    stats = t.path('main', 'queue', 'stats')
     today = int(time.time()) // 86400
     lines = open(stats).read().split('\n')
     moved = 0

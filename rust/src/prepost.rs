@@ -690,6 +690,7 @@ pub fn eval_post_stages(
     dest_dir: &[u8],
     inter_dir: &[u8],
     sep: u8,
+    nzb_id: i32,
     direct_unpack_status: DirectUnpackStatus,
     opt_post_download_rename: bool,
     post_download_renaming_status: i32,
@@ -698,10 +699,8 @@ pub fn eval_post_stages(
     opt_rename_after_unpack: bool,
     post_unpack_renaming_status: i32,
 ) -> RsPostStageDecision {
-    let in_inter_dir = !inter_dir.is_empty()
-        && dest_dir.len() > inter_dir.len()
-        && dest_dir.starts_with(inter_dir)
-        && dest_dir[inter_dir.len()] == sep;
+    // also a folder an earlier InterDir gave it, which then moves like any other
+    let in_inter_dir = crate::unpack::job_dir_is_intermediate(dest_dir, inter_dir, sep, Some(nzb_id));
     eval_post_stages_in_inter(
         want_unpack,
         unpack_status,
@@ -2572,6 +2571,7 @@ impl NzbgetRsPrePostProcessor {
             &nzb.dest_dir,
             &opts.inter_dir,
             crate::paths::PATH_SEPARATOR,
+            nzb.id,
             nzb.direct_unpack_status,
             opts.post_download_rename,
             nzb.post_download_renaming_status,
@@ -3093,6 +3093,7 @@ mod tests {
             b"/inter/job1",
             b"/inter",
             b'/',
+            1,
             DirectUnpackStatus::None,
             false,
             0,
@@ -3102,6 +3103,36 @@ mod tests {
             0,
         );
         assert_eq!(dec.move_inter, 1);
+    }
+
+    #[test]
+    fn a_download_from_an_earlier_inter_dir_still_moves() {
+        let eval = |dest: &[u8], id: i32| {
+            eval_post_stages(
+                false,
+                UnpackStatus::None,
+                DeleteStatus::None,
+                NzbParStatus::Success,
+                CleanupStatus::None,
+                false,
+                1000,
+                MoveStatus::None,
+                dest,
+                b"/hdd/inter",
+                b'/',
+                id,
+                DirectUnpackStatus::None,
+                false,
+                0,
+                true,
+                true,
+                false,
+                0,
+            )
+            .move_inter
+        };
+        assert_eq!(eval(b"/nvme/inter/Movie.#42", 42), 1);
+        assert_eq!(eval(b"/dst/Movies/Movie", 42), 0);
     }
 
     #[test]

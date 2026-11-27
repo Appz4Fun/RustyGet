@@ -1686,8 +1686,8 @@ pub fn is_queued_dupe_active(
 pub fn repair_lets_other_copies_download(
     has_post_info: bool,
     post_stage: PostStage,
-    repairing_dir: &[u8],
-    own_dir: &[u8],
+    (repairing_dir, repairing_id): (&[u8], i32),
+    (own_dir, own_id): (&[u8], i32),
     opts: impl FnOnce() -> (i32, Vec<u8>),
 ) -> bool {
     if !has_post_info || post_stage != PostStage::StreamRepairing {
@@ -1699,8 +1699,75 @@ pub fn repair_lets_other_copies_download(
         health_check,
         crate::queuesubsys_host::HC_DUPE | crate::queuesubsys_host::HC_PARK
     ) && repairing_dir != own_dir
-        && crate::unpack::use_inter_dir(repairing_dir, &inter_dir, sep)
-        && crate::unpack::use_inter_dir(own_dir, &inter_dir, sep)
+        && crate::unpack::job_dir_is_intermediate(repairing_dir, &inter_dir, sep, Some(repairing_id))
+        && crate::unpack::job_dir_is_intermediate(own_dir, &inter_dir, sep, Some(own_id))
+}
+
+/// Whether a queued download's folder should be named again after InterDir changed: it was
+/// named by an earlier InterDir (`<old InterDir>/<name>.#<id>`, see
+/// [`crate::unpack::job_dir_is_intermediate`]), not by the current one, it never started
+/// (`started`: no article came, failed or is in flight) and nothing of it is on disk
+/// (`dir_exists` false; a folder that is gone because its disk is not mounted does not make a
+/// started download unwritten). A download that wrote something keeps its folder; it is still
+/// unpacked and moved from there. With InterDir emptied nothing is renamed: the downloads queued
+/// before go through the old InterDir, which still counts as intermediate.
+pub fn should_rename_unwritten_job_dir(
+    kind: i32,
+    has_post_info: bool,
+    started: bool,
+    dest_dir: &[u8],
+    inter_dir: &[u8],
+    nzb_id: i32,
+    dir_exists: impl FnOnce() -> bool,
+) -> bool {
+    let sep = crate::paths::PATH_SEPARATOR;
+    kind == crate::queuesubsys_host::NK_NZB
+        && !has_post_info
+        && !started
+        && !inter_dir.is_empty()
+        && !crate::unpack::use_inter_dir(dest_dir, inter_dir, sep)
+        && crate::unpack::named_by_an_inter_dir(dest_dir, sep, Some(nzb_id))
+        && !dir_exists()
+}
+
+/// Names again, under the current InterDir, the folders of the queued downloads that an
+/// earlier InterDir named and that have nothing on disk yet
+/// ([`should_rename_unwritten_job_dir`]). Called with the queue loaded and locked. Returns
+/// how many were renamed.
+fn relocate_unwritten_job_dirs(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    dq_ptr: usize,
+) -> usize {
+    let inter_dir = host.opts().inter_dir;
+    if inter_dir.is_empty() {
+        return 0;
+    }
+    let mut moved = 0;
+    for i in 0..host.queue_len(dq_ptr) {
+        let nzb_ptr = host.queue_at(dq_ptr, i);
+        if nzb_ptr.is_none() {
+            continue;
+        }
+        let nzb = host.nzb_snap(nzb_ptr, false);
+        let started = crate::interbudget::started(
+            i64::from(nzb.success_articles),
+            i64::from(nzb.failed_articles),
+            nzb.active_downloads,
+        );
+        if should_rename_unwritten_job_dir(
+            nzb.kind,
+            nzb.has_post_info,
+            started,
+            &nzb.dest_dir,
+            &inter_dir,
+            nzb.id,
+            || crate::fsops::directory_exists(&nzb.dest_dir, &crate::fsops::posix_stat),
+        ) {
+            host.nzb_action(nzb_ptr, crate::queuesubsys_host::NZB_ACT_BUILD_DEST_DIR);
+            moved += 1;
+        }
+    }
+    moved
 }
 
 /// Determines whether `QueueCoordinator::CheckDupeFailover` should defer failover and whether `DupeFailoverChecked` should be updated.
@@ -2616,6 +2683,22 @@ impl NzbgetRsQueueCoordinator {
                             }
                         }
                     }
+                }
+            }
+
+            if queue_loaded {
+                let moved = relocate_unwritten_job_dirs(host, dq_ptr);
+                if moved > 0 {
+                    host.log(
+                        crate::queuesubsys_host::MK_INFO,
+                        format!(
+                            "InterDir changed: {moved} queued download(s) with nothing on disk \
+                             yet now download into {}",
+                            String::from_utf8_lossy(&host.opts().inter_dir)
+                        )
+                        .as_bytes(),
+                    );
+                    host.dq_save(dq_ptr);
                 }
             }
 
@@ -6160,8 +6243,8 @@ impl NzbgetRsQueueCoordinator {
                 if repair_lets_other_copies_download(
                     queued.has_post_info,
                     queued.post_stage,
-                    &queued.dest_dir,
-                    &nzb.dest_dir,
+                    (&queued.dest_dir, queued.id),
+                    (&nzb.dest_dir, nzb.id),
                     || {
                         let o = host.opts();
                         (o.health_check, o.inter_dir)
@@ -8162,6 +8245,18 @@ fn downloaded_ranges(
     merged
 }
 
+/// Whether a started download's articles still land on the disk the InterDir budget measures
+/// (the current InterDir, or DestDir without one): not when its folder was named by an earlier
+/// InterDir (`unpack::job_dir_is_intermediate`), which keeps it on that earlier disk.
+fn budget_counts_download_bytes(dest_dir: &[u8], inter_dir: &[u8], nzb_id: i32) -> bool {
+    let sep = crate::paths::PATH_SEPARATOR;
+    if inter_dir.is_empty() {
+        !crate::unpack::named_by_an_inter_dir(dest_dir, sep, Some(nzb_id))
+    } else {
+        crate::unpack::use_inter_dir(dest_dir, inter_dir, sep)
+    }
+}
+
 /// What a started queue item's unpack will still write next to its archives: its data size
 /// (par2 files are not extracted) until its unpack has run (or was skipped: no archives);
 /// 0 with unpacking off. A download without archives is overcounted while it downloads.
@@ -8221,6 +8316,7 @@ fn interdir_budget_admits(
         rank: (entry.has_extra_priority, entry.priority, std::cmp::Reverse(entry.index)),
         force: nzb.force_priority,
     };
+    let inter_now = host.opts().inter_dir;
     let mut items = || {
         queue
             .iter()
@@ -8229,8 +8325,16 @@ fn interdir_budget_admits(
                     host.nzb_budget_fields(e.ptr)?;
                 let started = crate::interbudget::started(success, failed, active);
                 let reserve = if started && (active > 0 || !dupe_held(e)) {
-                    let unpack = interdir_unpack_bytes(e.snap(host), unpack_on);
-                    crate::interbudget::need_bytes(remaining, paused, unpack)
+                    let snap = e.snap(host);
+                    let unpack = interdir_unpack_bytes(snap, unpack_on);
+                    // a download still in a folder an earlier InterDir named writes its
+                    // articles to that disk, not this one; only its unpack lands here
+                    let here = budget_counts_download_bytes(&snap.dest_dir, &inter_now, snap.id);
+                    crate::interbudget::need_bytes(
+                        if here { remaining } else { 0 },
+                        if here { paused } else { 0 },
+                        unpack,
+                    )
                 } else {
                     0
                 };
@@ -8317,6 +8421,35 @@ type CopiesByKey = std::collections::HashMap<Vec<u8>, Vec<usize>>;
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_budget_counts_download_bytes_only_on_the_measured_disk() {
+        use super::budget_counts_download_bytes as f;
+        assert!(f(b"/dst/Movies/Movie", b"", 42));
+        assert!(f(b"/hdd/inter/Movie.#42", b"/hdd/inter", 42));
+        assert!(!f(b"/nvme/inter/Movie.#42", b"/hdd/inter", 42));
+        assert!(!f(b"/nvme/inter/Movie.#42", b"", 42));
+    }
+
+    #[test]
+    fn only_unwritten_downloads_from_an_earlier_inter_dir_are_renamed() {
+        use super::should_rename_unwritten_job_dir as f;
+        use crate::queuesubsys_host::{NK_NZB, NK_URL};
+        let old = b"/nvme/inter/Movie.#42";
+        let new = b"/hdd/inter";
+        assert!(f(NK_NZB, false, false, old, new, 42, || false));
+        // started (its folder may be on a disk that is not mounted)
+        assert!(!f(NK_NZB, false, true, old, new, 42, || false));
+        // something on disk, in post-processing, a URL, another id, no InterDir
+        assert!(!f(NK_NZB, false, false, old, new, 42, || true));
+        assert!(!f(NK_NZB, true, false, old, new, 42, || false));
+        assert!(!f(NK_URL, false, false, old, new, 42, || false));
+        assert!(!f(NK_NZB, false, false, old, new, 43, || false));
+        assert!(!f(NK_NZB, false, false, old, b"", 42, || false));
+        // already under the current InterDir, or a final folder
+        assert!(!f(NK_NZB, false, false, b"/hdd/inter/Movie.#42", new, 42, || false));
+        assert!(!f(NK_NZB, false, false, b"/dst/Movies/Movie", new, 42, || false));
+    }
 
     #[test]
     fn a_lost_article_is_fetched_again_until_the_file_is_decided_closed_or_it_was_lost_too_often() {
@@ -8858,7 +8991,7 @@ mod tests {
     fn a_copy_in_stream_repair_lets_other_copies_download_with_dupe_health() {
         use crate::queuesubsys_host::{HC_DUPE, HC_PARK};
         let lets = |post, stage, a: &str, b: &str, inter: &str, hc: i32| {
-            repair_lets_other_copies_download(post, stage, a.as_bytes(), b.as_bytes(), || {
+            repair_lets_other_copies_download(post, stage, (a.as_bytes(), 1), (b.as_bytes(), 2), || {
                 (hc, inter.as_bytes().to_vec())
             })
         };

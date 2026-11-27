@@ -1335,6 +1335,63 @@ def scenario_finaldeletemidway(daemon, t):
     return _final_delete_midway(daemon, t, 'finaldeletemidway', False)
 
 
+def scenario_interdirchange(daemon, t):
+    """6790, 2026-11-27: InterDir moves to the destination's file system so the
+    final move is a rename, applied by a reload. A download's folder is named
+    once, when it is queued (<InterDir>/<name>.#<id>), so after the change the
+    queue still holds folders under the old InterDir. A queued download with
+    nothing on disk yet downloads into the new InterDir; one that already wrote
+    into the old InterDir (a RAR set, unpacked) keeps that folder and is still
+    unpacked into and moved to its final folder. On main both stayed in the
+    old InterDir as if it were their final folder."""
+    size, seg = 2_000_000, 50_000
+    du, dw = _payload(size, 5151), _payload(3 * size, 5252)
+    pu = _place_copy(t, 'idcu', du, 'idcu.bin')
+    members = []
+    for i, vol in enumerate(generators.rar3_store_volumes('idcw.mkv', dw, size), 1):
+        rel = 'idcw/idcw.part%02d.rar' % i
+        t.write_file(os.path.join('data', rel), vol)
+        members.append((rel, 'idcw.part%02d.rar' % i, len(vol), seg, set()))
+    old_inter = t.path('main', 'inter')
+    new_inter = t.makedirs('main', 'inter2')
+    api = daemon.wait_ready()
+    daemon.append(api, 'IdcUnwritten', build_nzb(pu, 'idcu.bin', size, seg, set()), True, '', 0)
+    daemon.append(api, 'IdcWritten', build_multi_nzb(members), False, '', 0)
+    deadline = time.time() + 60
+    written = False
+    while time.time() < deadline and not written:
+        written = any('/IdcWritten.#' in f for f in t.find_files('main', 'inter'))
+        time.sleep(0.1)
+    with open(t.path(daemon.conf_rel), 'ab') as f:
+        f.write(('InterDir=%s\n' % new_inter).encode())
+    api = daemon.reload(api)
+    api.rate(0)
+    dirs = {g['NZBName']: g['DestDir'] for g in api.listgroups()}
+    midway = 'IdcWritten' in dirs
+    gid = [g['NZBID'] for g in api.listgroups() if g['NZBName'] == 'IdcUnwritten']
+    api.editqueue('GroupResume', 0, '', gid)
+    hu = daemon.wait_history(api, 'IdcUnwritten', timeout=120)
+    hw = daemon.wait_history(api, 'IdcWritten', timeout=120)
+
+    def final(name, data):
+        found = [f for f in t.find_files('main', 'dst') if f.endswith(name)]
+        return len(found) == 1 and t.read_file(found[0]) == data
+    left = t.find_files('main', 'inter')
+    ok = (written and midway and dirs.get('IdcUnwritten', '').startswith(new_inter + os.sep)
+          and dirs.get('IdcWritten', '').startswith(old_inter + os.sep)
+          and hu['Status'].startswith('SUCCESS') and hw['Status'].startswith('SUCCESS')
+          and hw.get('UnpackStatus') == 'SUCCESS'
+          and hu.get('MoveStatus') == 'SUCCESS' and hw.get('MoveStatus') == 'SUCCESS'
+          and final('idcu.bin', du) and final('idcw.mkv', dw) and not left
+          and _grep_log(t, 'InterDir changed: 1 queued download') > 0)
+    rel = lambda p: os.path.relpath(p, t.path('main')) if p else p
+    return ('interdirchange', ok, 'final_u=%s final_w=%s left_in_old=%s dst=%s written=%s midway=%s status=%s/%s '
+            'unpack=%s move=%s/%s dirs_after_reload=%s'
+            % (final('idcu.bin', du), final('idcw.mkv', dw), left, t.find_files('main', 'dst'), written, midway,
+               hu['Status'], hw['Status'], hw.get('UnpackStatus'), hu.get('MoveStatus'), hw.get('MoveStatus'),
+               {k: rel(v) for k, v in dirs.items()}))
+
+
 def scenario_finaldeleterestart(daemon, t):
     """B42: nzbget shuts down right after a half-done download was final-deleted,
     before the files still downloading let the delete finish. The download
@@ -16403,6 +16460,7 @@ SCENARIOS = {
     'nzbgapborrow': scenario_nzbgapborrow,
     'sidefilenorepair': scenario_sidefilenorepair,
     'finaldeletemidway': scenario_finaldeletemidway,
+    'interdirchange': scenario_interdirchange,
     'finaldeleterestart': scenario_finaldeleterestart,
     'restartmidway': scenario_restartmidway,
     'declaredcountnopair': scenario_declaredcountnopair,
@@ -16949,6 +17007,7 @@ SCENARIO_OPTIONS = {
     'stream': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'truncatedstate': ['ContinuePartial=yes', 'FlushQueue=yes', 'Server1.Connections=1'],
     'queuesyncslow': ['ContinuePartial=yes', 'FlushQueue=yes', 'Server1.Connections=6'],
+    'interdirchange': ['DownloadRate=200', 'Unpack=yes', 'DirectUnpack=yes'],
     'diskfullrestart': ['ContinuePartial=yes', 'FlushQueue=yes', 'DiskSpace=0', 'Server1.Connections=4'],
     'cachecommitfull': ['ArticleCache=16', 'DirectWrite=yes', 'DiskSpace=1', 'Server1.Connections=4'],
     'interdirbudget': ['DiskSpace=4', 'Server1.Connections=8'],

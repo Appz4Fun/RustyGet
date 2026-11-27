@@ -150,6 +150,46 @@ pub fn use_inter_dir(dest_dir: &[u8], inter_dir: &[u8], sep: u8) -> bool {
     dest_dir.starts_with(inter_dir) && dest_dir[inter_dir.len()] == sep
 }
 
+/// Whether a download's folder is an intermediate one, which post-processing
+/// unpacks out of and moves to the final folder: a folder under the current
+/// InterDir ([`use_inter_dir`]), or one an earlier InterDir gave it. A
+/// download's folder is named once, when it is queued
+/// ([`crate::downloadinfo::build_dest_dir_name`]: `<InterDir>/<name>.#<id>`),
+/// so after InterDir changes the downloads queued before keep folders under
+/// the old one; matching only the current InterDir would leave them where
+/// they are, as if they had been downloaded into their final folder.
+///
+/// An earlier InterDir's folder is known by its name ending in `.#<id>`, the
+/// download's own id (`nzb_id`), or any id when the caller has none to give.
+pub fn job_dir_is_intermediate(
+    dest_dir: &[u8],
+    inter_dir: &[u8],
+    sep: u8,
+    nzb_id: Option<i32>,
+) -> bool {
+    use_inter_dir(dest_dir, inter_dir, sep) || named_by_an_inter_dir(dest_dir, sep, nzb_id)
+}
+
+/// The last component of `dest_dir` is `<name>.#<id>` (see
+/// [`job_dir_is_intermediate`]).
+pub fn named_by_an_inter_dir(dest_dir: &[u8], sep: u8, nzb_id: Option<i32>) -> bool {
+    let base = match dest_dir.iter().rposition(|&b| b == sep) {
+        Some(p) => &dest_dir[p + 1..],
+        None => return false,
+    };
+    let Some(hash) = base.windows(2).rposition(|w| w == b".#") else {
+        return false;
+    };
+    let digits = &base[hash + 2..];
+    if hash == 0 || digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return false;
+    }
+    match nzb_id {
+        Some(id) => digits == id.to_string().as_bytes(),
+        None => true,
+    }
+}
+
 /// `DirectUnpack::IsMainArchive`:
 /// Matches `RegEx regExRarPart(".*\\.part([0-9]+)\\.rar$"); return !regExRarPart.Match(filename) || atoi(...) == 1;`.
 pub fn is_main_archive(filename: &[u8]) -> bool {
@@ -2560,6 +2600,25 @@ pub fn eval_unpack_completed_failure(
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn a_folder_from_an_earlier_inter_dir_stays_intermediate() {
+        let old = b"/nvme/inter/Movie.2020.#2966";
+        // under the current InterDir, and under an earlier one (its own id)
+        assert!(job_dir_is_intermediate(b"/hdd/inter/Movie.#7", b"/hdd/inter", b'/', Some(7)));
+        assert!(!use_inter_dir(old, b"/hdd/inter", b'/'));
+        assert!(job_dir_is_intermediate(old, b"/hdd/inter", b'/', Some(2966)));
+        assert!(job_dir_is_intermediate(old, b"", b'/', Some(2966)));
+        assert!(job_dir_is_intermediate(old, b"/hdd/inter", b'/', None));
+        // another download's id, or a final folder, is not
+        assert!(!job_dir_is_intermediate(old, b"/hdd/inter", b'/', Some(296)));
+        assert!(!job_dir_is_intermediate(old, b"/hdd/inter", b'/', Some(29660)));
+        assert!(!job_dir_is_intermediate(b"/dst/Movies/Movie.2020", b"/hdd/inter", b'/', None));
+        assert!(!job_dir_is_intermediate(b"/dst/Movies/Movie.#", b"", b'/', None));
+        assert!(!job_dir_is_intermediate(b"/dst/Movies/.#12", b"", b'/', None));
+        assert!(!job_dir_is_intermediate(b"/dst/Movies/Movie.#12x", b"", b'/', None));
+        assert!(!job_dir_is_intermediate(b"Movie.#12", b"", b'/', None));
+    }
 
     /// A RAR volume that lost its first article (its headers) gives nothing: the unpack fails
     /// with the reason instead of reporting "All OK" over no files, which would have deleted

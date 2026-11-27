@@ -34,3 +34,7 @@ rustyget (unreleased)
     - Settings checks every value before saving, backs the file up
       (rustyget.conf.bak-<date>-<time>, the newest 10 and the first kept) and
       asks before removing lines that are not settings.
+    - InterDir can be changed with downloads queued: those with nothing on
+      disk yet download into the new InterDir, and those already started
+      finish in the old one and are still unpacked and moved to their final
+      folder (before, they stayed in the old InterDir as if finished there).

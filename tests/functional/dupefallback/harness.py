@@ -5461,7 +5461,11 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
     else:
         daemon.wait_history(api, 'Backup', timeout=60)
     started = time.time()
-    api.editqueue('GroupResume', 0, '', [g['NZBID'] for g in api.listgroups() if g['NZBName'] == 'Primary'])
+    primary_ids = [g['NZBID'] for g in api.listgroups() if g['NZBName'] == 'Primary']
+    api.editqueue('GroupResume', 0, '', primary_ids)
+    caught_up = None
+    if need_live:
+        caught_up = _failcont_catch_up(t, api, primary_ids, names)
     hp = daemon.wait_history(api, 'Primary', timeout=300)
     hb = daemon.wait_history(api, 'Backup', timeout=300)
     deadline = time.time() + 240
@@ -5564,10 +5568,46 @@ def _failcont(daemon, t, name, backup, die, fleet=False, twin_label='DupeCopyKin
             'winner=%s primary=%s backup=%s secs=%.1f primary_served=%d/%d B (%d articles, %d again, '
             'par2 %d again) backup_served=%d B of %d (budget %d, %d articles, %d again, par2 %d again) '
             'twin_before_frontier=%d failover_logs=%d du_cancelled=%d du_ok=%d used_direct=%d '
-            'backup_unpacks=%d extracted_ok=%s restarts=%d as_written_mb=%s continued=%d'
+            'backup_unpacks=%d extracted_ok=%s restarts=%d as_written_mb=%s continued=%d%s'
             % (winner, hp['Status'], hb['Status'], elapsed, a_bytes, total, a_count, a_again, a_par_again,
                b_bytes, donor_total, b_budget, b_count, b_again, b_par_again, b_before, failed_over, cancelled,
-               du_ok, used_direct, backup_unpacks, integ, restarts, as_written, continued))
+               du_ok, used_direct, backup_unpacks, integ, restarts, as_written, continued,
+               '' if caught_up is None else ' caught_up=%s' % caught_up))
+
+
+def _failcont_catch_up(t, api, primary_ids, names, bound=120):
+    """Holds the primary's download (GroupPause) from the moment its direct unpack starts
+    until the extraction has started its member and opened the last volume finished so far,
+    then resumes it: what is downloaded after that is read as it is written.
+
+    The extraction's start makes several durable syncs (anchors, partial create); under a
+    busy disk they take seconds each, while the download at DownloadRate=4000 finishes every
+    volume before the cut in a few seconds, so without the hold the extraction may only meet
+    finished volumes (as_written_mb=0) although it reads written volumes correctly. Returns
+    the volume the extraction had opened at the resume (or why the bound expired)."""
+    deadline = time.time() + bound
+    while time.time() < deadline and _grep_log(t, 'Directly unpacking Primary') == 0:
+        if not any(g['NZBName'] == 'Primary' for g in api.listgroups()):
+            return 'gone before direct unpack'
+        time.sleep(0.05)
+    if _grep_log(t, 'Directly unpacking Primary') == 0:
+        return 'no direct unpack in %d s' % bound
+    api.editqueue('GroupPause', 0, '', primary_ids)
+    try:
+        finished_re = re.compile(r'\tSuccessfully downloaded Primary/(Show\.part\d+\.rar)\n')
+        opened = None
+        while time.time() < deadline:
+            text = _log_text(t)
+            done = set(finished_re.findall(text))
+            last = max((i for i, n in enumerate(names) if n in done), default=-1)
+            opened = max((i for i, n in enumerate(names) if 'Unrar: Extracting from %s' % n in text),
+                         default=-1)
+            if 'Unrar: Extracting  movie.mkv' in text and opened >= last:
+                return names[opened] if opened >= 0 else 'none'
+            time.sleep(0.1)
+        return 'bound expired (opened %s)' % (names[opened] if opened is not None and opened >= 0 else 'none')
+    finally:
+        api.editqueue('GroupResume', 0, '', primary_ids)
 
 
 def scenario_failcont_twin25(daemon, t):

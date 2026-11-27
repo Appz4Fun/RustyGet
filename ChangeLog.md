@@ -38,3 +38,7 @@ rustyget (unreleased)
       disk yet download into the new InterDir, and those already started
       finish in the old one and are still unpacked and moved to their final
       folder (before, they stayed in the old InterDir as if finished there).
+    - Direct unpack of a compressed RAR set (-m1 to -m5) no longer gives up
+      at a lost article: it waits at that volume until live PAR repairs it,
+      then goes on from where it stopped. Before, it failed with "DataHole"
+      and post-processing extracted the whole set again after the download.

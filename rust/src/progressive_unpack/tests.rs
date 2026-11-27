@@ -7195,3 +7195,109 @@ fn a_slice_live_par_found_bad_is_never_read_and_only_it_is_refilled() {
     assert_eq!(declared.len(), 1, "{declared:?}");
     assert_eq!(declared[0].1, vec![(p3 + 32_768, 16_384)]);
 }
+
+/// The member data of RAR 5.0 volume `path`'s first file block: (offset, length).
+fn rar5_first_data(path: &Path) -> (u64, u64) {
+    first_member_data(path).expect("a file block")
+}
+
+#[test]
+fn compressed_hole_is_not_skippable_but_stored_hole_is() {
+    // prybar N1: a lost article inside compressed (-m3) data was placed as `Data`, handed to the
+    // session as a skippable hole, and the decoder failed with DataHole, cancelling direct unpack.
+    let t = TestDir::new("comphole");
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/testdata/rarrenamer");
+    let v2 = t.dl().join("testfile5.part02.rar");
+    std::fs::copy(src.join("testfile5.part02.rar"), &v2).unwrap();
+    let (at, len) = rar5_first_data(&v2);
+    assert!(len > 2000, "the part holds compressed data");
+    let hole = (at + len / 2, 500);
+    assert_eq!(place_holes(&v2, &[hole]), HolePlacement::Compressed);
+    assert!(skippable_placed(&HolePlacement::Compressed, &[], 10_000).is_empty());
+    // A header hole stays a header hole.
+    assert_eq!(place_holes(&v2, &[(at - 4, 8)]), HolePlacement::Header);
+    // Stored data is still read past.
+    let data = pattern(300_000);
+    let vols = rar5_volumes("stored.bin", &data, 100_000);
+    let first = write_set(&t.dl(), &vols);
+    let _ = first;
+    let s2 = t.dl().join(volume_name(1, vols.len()));
+    let p2 = payload_offset(&vols[1], 100_000) as u64;
+    let stored_hole = (p2 + 1000, 500);
+    assert_eq!(place_holes(&s2, &[stored_hole]), HolePlacement::Data(vec![stored_hole]));
+}
+
+#[test]
+fn compressed_member_waits_at_a_damaged_volume_and_resumes_after_repair() {
+    // prybar N1: the damaged volume of a compressed member split over three volumes is held (no
+    // skippable holes) until it is repaired in place; the session parks with its decoder state
+    // and finishes the member from the repaired bytes instead of failing.
+    let t = TestDir::new("compwait");
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/testdata/rarrenamer");
+    let names: Vec<PathBuf> = (1..=3)
+        .map(|i| t.dl().join(format!("testfile5.part0{i}.rar")))
+        .collect();
+    for n in &names {
+        std::fs::copy(src.join(n.file_name().unwrap()), n).unwrap();
+    }
+    let good = std::fs::read(&names[1]).unwrap();
+    let (at, len) = rar5_first_data(&names[1]);
+    let hole = (at + len / 2, 500);
+    let mut dmg = good.clone();
+    dmg[hole.0 as usize..(hole.0 + hole.1) as usize].fill(0);
+    std::fs::write(&names[1], &dmg).unwrap();
+    struct Held {
+        names: Vec<PathBuf>,
+        hole: (u64, u64),
+        repaired: Arc<AtomicBool>,
+        waited: Arc<AtomicUsize>,
+    }
+    impl VolumeFeed for Held {
+        fn volume(&mut self, path: &Path) -> VolumeView {
+            if path == self.names[1] && !self.repaired.load(Ordering::Acquire) {
+                // What `prepost` hands out for a damaged volume: its skippable holes, or a hold.
+                let placement = place_holes(path, &[self.hole]);
+                let skippable = skippable_placed(&placement, &[], 0);
+                if skippable.is_empty() {
+                    self.waited.fetch_add(1, Ordering::Relaxed);
+                    return VolumeView::NotYet;
+                }
+                return VolumeView::Ready { holes: skippable };
+            }
+            if self.names.iter().any(|n| n == path) {
+                VolumeView::Ready { holes: Vec::new() }
+            } else {
+                VolumeView::Missing
+            }
+        }
+    }
+    let repaired = Arc::new(AtomicBool::new(false));
+    let waited = Arc::new(AtomicUsize::new(0));
+    let feed = Held {
+        names: names.clone(),
+        hole,
+        repaired: repaired.clone(),
+        waited: waited.clone(),
+    };
+    let (path2, rep, w) = (names[1].clone(), repaired.clone(), waited.clone());
+    let repairer = std::thread::spawn(move || {
+        // Repair in place once the session is waiting on the volume.
+        for _ in 0..400 {
+            if w.load(Ordering::Relaxed) > 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::write(&path2, &good).unwrap();
+        rep.store(true, Ordering::Release);
+    });
+    let (r, log) = run(&names[0], &t.out(), Box::new(feed));
+    repairer.join().unwrap();
+    expect_ok(r, &log);
+    assert!(waited.load(Ordering::Relaxed) > 0, "the session waited for the repair: {log:#?}");
+    assert_eq!(
+        std::fs::metadata(t.out().join("testfile5.dat")).unwrap().len(),
+        68161
+    );
+    assert!(!log.iter().any(|l| l.contains("DataHole")), "{log:#?}");
+}

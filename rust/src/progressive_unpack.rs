@@ -214,6 +214,11 @@ pub enum HolePlacement {
     Tail { data_end: u64 },
     /// A hole covers a header in front of member data: extraction waits for the repair.
     Header,
+    /// A hole lies inside the data of a compressed member piece. The decoder cannot read past
+    /// lost compressed bytes (zipfast fails the member with `DataHole`), so extraction waits at
+    /// the hole for the repair instead: the session parks there with its decoder state and goes
+    /// on from the repaired bytes, rather than failing and leaving the whole set to post-job.
+    Compressed,
     /// The headers cannot be read (encrypted without a password, not a RAR volume, unreadable).
     Unknown,
 }
@@ -329,6 +334,16 @@ pub fn place_holes(path: &Path, holes: &[(u64, u64)]) -> HolePlacement {
         Some(Err(MapError::NotArchive)) => return HolePlacement::Unknown,
         Some(Err(_)) => return HolePlacement::Header,
     };
+    // Lost bytes of compressed data cannot be read past: such a volume waits for its repair.
+    let compressed = map.members.iter().any(|m| {
+        !matches!(m.method, zipfast::map::MapMethod::Stored)
+            && holes
+                .iter()
+                .any(|&(s, l)| s < m.packed.end.min(file_len) && m.packed.start < s + l)
+    });
+    if compressed {
+        return HolePlacement::Compressed;
+    }
     let spans = spans_of(&map);
     if cut.is_none() && holes.iter().all(|&h| inside(&spans, h)) {
         return HolePlacement::Data(holes);
@@ -363,7 +378,9 @@ pub fn skippable_placed(
     match placement {
         HolePlacement::Data(h) => h.clone(),
         HolePlacement::Unknown => skippable_holes(holes, file_size),
-        HolePlacement::Tail { .. } | HolePlacement::Header => Vec::new(),
+        HolePlacement::Tail { .. } | HolePlacement::Header | HolePlacement::Compressed => {
+            Vec::new()
+        }
     }
 }
 

@@ -4724,7 +4724,7 @@
     "message": "Testing algorithm"
   },
   "tls_cipher_explanation": {
-    "message": "Measure cipher speed on this RustyGet computer and test each encrypted news server. The fastest supported cipher is saved for each fully tested server. Tests briefly use CPU and server connections. A reload is required to activate saved settings."
+    "message": "Measure cipher speed on this RustyGet computer and test each encrypted news server. The fastest supported cipher is saved for each fully tested server. Tests briefly use CPU and server connections. Apply now reloads RustyGet so new connections use the saved ciphers."
   },
   "tls_cipher_algorithm": {
     "message": "Algorithm"
@@ -4750,6 +4750,36 @@
   "tls_cipher_again": {
     "message": "Run again"
   },
+  "tls_cipher_apply": {
+    "message": "Apply now"
+  },
+  "tls_cipher_apply_confirm": {
+    "message": "Reload now"
+  },
+  "tls_cipher_apply_warning": {
+    "message": "RustyGet reloads to use the saved ciphers: downloads pause for a few seconds. If an unpack is running, the reload waits until it finishes. Select Reload now to continue."
+  },
+  "tls_cipher_applying": {
+    "message": "Reloading RustyGet to apply the saved ciphers…"
+  },
+  "tls_cipher_apply_unpack": {
+    "message": "RustyGet is post-processing; the reload waits for a running unpack to finish, then the ciphers apply."
+  },
+  "tls_cipher_applied": {
+    "message": "Applied: RustyGet reloaded and new connections use the saved ciphers."
+  },
+  "tls_cipher_apply_slow": {
+    "message": "RustyGet has not reloaded yet. It may still be finishing an unpack; check Messages or reopen this dialog later."
+  },
+  "tls_cipher_apply_failed": {
+    "message": "RustyGet did not answer after the reload request. Check that it is running."
+  },
+  "tls_cipher_retry": {
+    "message": "Retry"
+  },
+  "tls_cipher_retrying": {
+    "message": "Retrying this server…"
+  },
   "tls_cipher_unmeasured": {
     "message": "Unmeasured"
   },
@@ -4766,7 +4796,7 @@
     "message": "None"
   },
   "tls_cipher_reload": {
-    "message": "Cipher settings are saved. Reload RustyGet to use them for new connections."
+    "message": "Cipher settings are saved. Apply now reloads RustyGet so new connections use them."
   },
   "tls_cipher_browser_conflict": {
     "message": "Settings were saved, but your server editor changed. Refresh Settings to see the saved ciphers; your edits have been retained."
@@ -5643,6 +5673,12 @@
   },
   "config_server_cipher_chosen": {
     "message": "Cipher"
+  },
+  "config_server_cipher_failed": {
+    "message": "Cipher test failed"
+  },
+  "config_server_cipher_default_kept": {
+    "message": "The system default cipher is used."
   },
   "config_server_cipher_unavailable": {
     "message": "Cipher testing is not available here."

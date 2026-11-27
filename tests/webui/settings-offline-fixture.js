@@ -24,6 +24,8 @@ async function installOfflineModel(page, base) {
         parpresetdetect: { Running: false, CPUs: 8, Presets: { large: { ParBuffer: 1024, ParThreads: 0, ParPauseQueue: false } } },
         // Settings checks folders as they are typed: every fixture folder is usable
         checkpath: { Path: String((rpc.params || [])[0] || ''), State: 'ok', Message: 'This folder exists and RustyGet can write to it.' },
+        // a saved example host is looked up when its server editor opens: no addresses offline
+        hostlookup: { Host: String((rpc.params || [])[0] || ''), Port: 563, Error: '', GeoIP: false, Addresses: [] },
         checkconfig: [] }[rpc.method];
       assert.notEqual(result, undefined, 'Offline fixture must account for every read RPC: ' + rpc.method);
       return route.fulfill({ contentType: 'application/json', json: { result, id: rpc.id } });

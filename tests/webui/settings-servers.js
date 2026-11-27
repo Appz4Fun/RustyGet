@@ -24,7 +24,7 @@ const { installDetailsFixture } = require('./details-fixture');
       await context.addInitScript(() => localStorage.setItem('SettingsMode', 'expert'));
       const page = await context.newPage();
       const errors = [], writes = [], calls = [], configReads = [];
-      let upTime = 86400, statusMisses = 0, hold = null, startBusy = 0;
+      let upTime = 86400, statusMisses = 0, hold = null, startBusy = 0, probeFails = false;
       page.on('pageerror', e => errors.push(e.message));
       await installDetailsFixture(page, base, writes, { patchReply: (method, result) => {
         if (method === 'config' || method === 'loadconfig') {
@@ -53,7 +53,10 @@ const { installDetailsFixture } = require('./details-fixture');
           statusMisses--;
           return route.fulfill({ status: 500, body: 'busy' });
         }
-        if (rpc.method === 'tlscipherstatus') {
+        if (rpc.method === 'tlscipherstatus' && probeFails) {
+          result = { JobID: 'job1', State: 'completed', Saved: false, Message: 'Tests completed; no cipher settings were changed.',
+            Servers: [{ ID: 1, Outcome: 'unchanged', SelectedCipher: '', OldCipher: '', Message: 'DNS resolution failed.' }] };
+        } else if (rpc.method === 'tlscipherstatus') {
           result = rpc.params && rpc.params[0] === 'job1' ? { JobID: 'job1', State: 'completed', Saved: true, Servers: [{
             ID: 1, Outcome: 'saved', SelectedCipher: 'TLS_AES_128_GCM_SHA256', OldCipher: '',
             SavedHost: await page.evaluate(() => $('#S_Server1_Host').val()), SavedPort: '563' }] } : {};
@@ -159,6 +162,50 @@ const { installDetailsFixture } = require('./details-fixture');
         assert.equal(await page.evaluate(() => Config.config().values.find(v => v.Name === 'Server1.Connections').Value), '11');
         await page.locator('#S_Server1_Connections').fill('11');
         await page.locator('#S_Server1_Connections').dispatchEvent('change');
+      });
+
+      // A cipher found for one host says nothing about another: a changed host
+      // clears it, tests again and applies; a failed test is shown and keeps the default.
+      const saveHost = async host => {
+        upTime = 86400;
+        await page.evaluate(() => { Status.status.UpTimeSec = 86400; });
+        await page.locator('#S_Server1_Host').fill(host);
+        await page.locator('#S_Server1_Host').dispatchEvent('change');
+        const starts = calls.filter(c => c.method === 'tlscipherstart').length;
+        await page.locator('.config-server-save:visible').click();
+        await page.waitForFunction(() => /in use|reload/i.test($('.config-server-status:visible').text()) &&
+          !/Putting it to use/.test($('.config-server-status:visible').text()), null, { timeout: 8000 });
+        const save = writes.filter(w => w.method === 'saveconfig').pop();
+        return { values: Object.fromEntries(save.params[0].map(o => [o.Name, o.Value])),
+          started: calls.filter(c => c.method === 'tlscipherstart').length - starts };
+      };
+      await check('a changed host tests the cipher again and applies it', async () => {
+        assert.equal(await page.locator('#S_Server1_Cipher').inputValue(), 'TLS_AES_128_GCM_SHA256');
+        const reloads = calls.filter(c => c.method === 'reload').length;
+        const { values, started } = await saveHost('news3.example.invalid');
+        assert.equal(values['Server1.Cipher'], '', 'the old host\'s cipher is not carried over');
+        assert.equal(started, 1, 'the optimizer runs again for the moved server');
+        assert.equal(calls.filter(c => c.method === 'reload').length, reloads + 1, 'and the result is put to use');
+        assert.equal(await page.locator('#S_Server1_Cipher').inputValue(), 'TLS_AES_128_GCM_SHA256');
+      });
+      await check('a failed automatic test is shown and keeps the system default', async () => {
+        probeFails = true;
+        try {
+          const { values, started } = await saveHost('news4.example.invalid');
+          assert.equal(started, 1);
+          assert.equal(values['Server1.Cipher'], '');
+          assert.match(await page.locator('.config-server-status:visible').textContent(),
+            /Cipher test failed: DNS resolution failed\. The system default cipher is used\./);
+          assert.equal(await page.locator('#S_Server1_Cipher').inputValue(), '');
+        } finally { probeFails = false; }
+      });
+      await check('a cipher chosen with the new host is kept as chosen', async () => {
+        await page.evaluate(() => $('#S_Server1_Cipher').siblings('select').val('TLS_AES_256_GCM_SHA384').trigger('change'));
+        await page.locator('#S_Server1_Host').fill('news5.example.invalid');
+        await page.locator('#S_Server1_Host').dispatchEvent('change');
+        const { values, started } = await saveHost('news5.example.invalid');
+        assert.equal(values['Server1.Cipher'], 'TLS_AES_256_GCM_SHA384');
+        assert.equal(started, 0, 'a cipher picked by hand is not tested over');
       });
 
       await check('Save and reload waits while a server is being saved', async () => {

@@ -4872,6 +4872,7 @@ var Config = (new function($)
 		$('.config-server-save, .config-cipher__optimize', $ConfigData).prop('disabled', true);
 		setServerStatus(serverText('saving', 'Saving…'), 'busy');
 		var request = serverOnlySaveRequest();
+		var moved = forgetMovedCiphers(request);
 		var structure = serverStructure();
 		var editor = config;
 		RPC.call('saveconfig', [Config.withCipherBaseline(request)], function(ok)
@@ -4895,6 +4896,16 @@ var Config = (new function($)
 				serverSaveFailed(serverText('save_failed', 'Could not write the configuration file.'));
 				return;
 			}
+			// the written cipher was cleared: show that in the editor too, unless it was edited while saving
+			moved.forEach(function(item)
+			{
+				var cipher = findOptionByName('Server' + item.id + '.Cipher');
+				if (cipher && String(getOptionValue(cipher)) === item.old)
+				{
+					setOptionValue(cipher, '');
+					syncCipher($('#' + cipher.formId).siblings('select.config-cipher__menu'));
+				}
+			});
 			markServersSaved(request, structure);
 			var encryption = findOptionByName('Server' + multiid + '.Encryption');
 			var cipher = findOptionByName('Server' + multiid + '.Cipher');
@@ -4913,6 +4924,48 @@ var Config = (new function($)
 			serverSaveFailed(result && result.error ? result.error.message : String(value));
 		});
 	};
+
+	// A cipher chosen for another host, port or encryption setting says nothing
+	// about this one. For every encrypted server in the save request whose
+	// endpoint changed while its cipher was left as saved, the written cipher is
+	// cleared: the saved server is tested again, and a failed test leaves the
+	// system default instead of the old endpoint's cipher. Only the request is
+	// changed here; the editor follows once the save succeeded.
+	function forgetMovedCiphers(request)
+	{
+		var saved = {}, sent = {};
+		(config.values || []).forEach(function(item) { saved[item.Name.toLowerCase()] = String(item.Value); });
+		request.forEach(function(item) { sent[item.Name.toLowerCase()] = item; });
+		var savedValue = function(name)
+		{
+			if (saved.hasOwnProperty(name.toLowerCase())) return saved[name.toLowerCase()];
+			// a line missing from the file means the option's default
+			var option = findOptionByName(name);
+			return option && option.defvalue != null ? String(option.defvalue) : '';
+		};
+		var moved = [];
+		request.forEach(function(item)
+		{
+			var match = /^Server(\d+)\.Cipher$/i.exec(item.Name);
+			if (!match || !item.Value) return;
+			var prefix = 'Server' + match[1] + '.';
+			var now = function(name) { var value = sent[(prefix + name).toLowerCase()]; return value ? String(value.Value) : savedValue(prefix + name); };
+			if (now('Encryption').toLowerCase() !== 'yes' || !saved.hasOwnProperty((prefix + 'host').toLowerCase()) ||
+				String(item.Value) !== savedValue(prefix + 'Cipher'))
+			{
+				return;
+			}
+			var changed = now('Host').toLowerCase() !== savedValue(prefix + 'Host').toLowerCase() ||
+				now('Port') !== savedValue(prefix + 'Port') ||
+				now('Encryption').toLowerCase() !== savedValue(prefix + 'Encryption').toLowerCase();
+			if (changed)
+			{
+				moved.push({ id: parseInt(match[1], 10), old: String(item.Value) });
+				item.Value = '';
+			}
+		});
+		return moved;
+	}
 
 	function serverSaveFailed(message)
 	{
@@ -4958,9 +5011,16 @@ var Config = (new function($)
 				{
 					finish(serverText('cipher_chosen', 'Cipher') + ': ' + server.SelectedCipher);
 				}
+				else if (forced)
+				{
+					finish(server.Message || result.Message || '');
+				}
 				else
 				{
-					finish(forced ? (server.Message || result.Message || '') : '');
+					// an automatic test that failed (DNS, deadline, login) keeps the system default
+					var why = server.Message || result.Message || '';
+					finish(serverText('cipher_failed', 'Cipher test failed') + (why ? ': ' + why : '') + ' ' +
+						serverText('cipher_default_kept', 'The system default cipher is used.'));
 				}
 			}, function()
 			{

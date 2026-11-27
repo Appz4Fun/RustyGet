@@ -3294,7 +3294,7 @@
 <div class="modal modal-padded hide" id="TlsCipherDialog" role="dialog" aria-modal="true" aria-labelledby="TlsCipherTitle">
   <div class="modal-header"><h3 id="TlsCipherTitle" data-i18n="tls_cipher_title">Optimize TLS ciphers</h3></div>
   <div class="modal-body">
-    <p data-i18n="tls_cipher_explanation">Measure cipher speed on this RustyGet computer and test each encrypted news server. The fastest supported cipher is saved for each fully tested server. Tests briefly use CPU and server connections. A reload is required to activate saved settings.</p>
+    <p data-i18n="tls_cipher_explanation">Measure cipher speed on this RustyGet computer and test each encrypted news server. The fastest supported cipher is saved for each fully tested server. Tests briefly use CPU and server connections. Apply now reloads RustyGet so new connections use the saved ciphers.</p>
     <p id="TlsCipherState" role="status" aria-live="polite"></p>
     <p id="TlsCipherProgress"></p>
     <div id="TlsCipherAlgorithms" class="tls-cipher-table" tabindex="0" role="region" aria-label="Cipher measurements">
@@ -3308,6 +3308,7 @@
     <p id="TlsCipherReload" class="alert alert-info hide"></p>
   </div>
   <div class="modal-footer">
+    <button type="button" class="btn btn-success hide" id="TlsCipherApply" data-i18n="tls_cipher_apply">Apply now</button>
     <button type="button" class="btn hide" id="TlsCipherAgain" data-i18n="tls_cipher_again">Run again</button>
     <button type="button" class="btn" id="TlsCipherCancel" data-i18n="btn_cancel" disabled>Cancel</button>
     <button type="button" class="btn btn-primary" id="TlsCipherClose" data-dismiss="modal" data-i18n="btn_close">Close</button>

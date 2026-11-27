@@ -586,7 +586,7 @@ fn resolve(
         if address.port() != port
             || family == 4 && !address.is_ipv4()
             || family == 6 && !address.is_ipv6()
-            || addresses.len() >= 16
+            || addresses.len() >= MAX_PROBE_ADDRESSES
         {
             return Err(Error("Invalid DNS resolver address set."));
         }
@@ -604,6 +604,8 @@ fn resolve(
     Ok(addresses)
 }
 
+const MAX_PROBE_ADDRESSES: usize = 16;
+
 fn ordered_addresses(
     found: impl IntoIterator<Item = SocketAddr>,
     family: u8,
@@ -616,8 +618,11 @@ fn ordered_addresses(
         if !addresses.contains(&address) {
             addresses.push(address);
         }
-        if addresses.len() > 16 {
-            return Err(Error("Too many DNS resolver addresses."));
+        // Large provider pools publish 20+ addresses (news.frugalusenet.com
+        // has 20): probe through the first 16 in resolver order instead of
+        // calling the whole name unresolvable.
+        if addresses.len() == MAX_PROBE_ADDRESSES {
+            break;
         }
     }
     Ok(addresses)
@@ -699,8 +704,13 @@ mod tests {
             ordered_addresses([preferred, second], 6).unwrap(),
             [preferred]
         );
-        let many = (1..=17).map(|i| SocketAddr::from(([127, 0, 0, i], 563)));
-        assert!(ordered_addresses(many, 0).is_err());
+        // a 20-address pool keeps its first 16 instead of failing as a DNS error
+        let many: Vec<_> = (1..=20)
+            .map(|i| SocketAddr::from(([127, 0, 0, i], 563)))
+            .collect();
+        assert_eq!(ordered_addresses(many.clone(), 0).unwrap(), many[..16]);
+        let v4 = many.iter().copied().chain([preferred]);
+        assert_eq!(ordered_addresses(v4, 6).unwrap(), [preferred]);
     }
     #[test]
     fn incomplete_login_pairs_reject_before_probing() {

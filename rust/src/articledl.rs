@@ -922,7 +922,10 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
             "Discarded {flushed_articles} articles ({flushed_mb:.2} MB) from cache (SkipWrite) for "
         )
     } else {
-        format!("Saved {flushed_articles} articles ({flushed_mb:.2} MB) from cache into disk for ")
+        format!(
+            "Saved {} articles ({flushed_mb:.2} MB) from cache into disk for ",
+            flushed_articles.saturating_sub(lost_n)
+        )
     };
     crate::log::log_active_bytes(MK_DETAIL, &join_c_slices(&[prefix.as_bytes(), &info_name]));
     true

@@ -1207,13 +1207,6 @@ pub(crate) fn articles_uncommitted(
         else {
             return (0, 0);
         };
-        let cached = host.file_snap(file_ptr).cached_articles;
-        let lost_count = i32::try_from(article_ptrs.len()).unwrap_or(i32::MAX);
-        host.file_set_int(
-            file_ptr,
-            h::FILE_INT_CACHED_ARTICLES,
-            cached.saturating_sub(lost_count).max(0),
-        );
         let mut refetched = 0u32;
         let mut failed = 0u32;
         for &art_ptr in article_ptrs {
@@ -1309,6 +1302,15 @@ pub(crate) fn articles_uncommitted(
             host.nzb_set_i64(nzb.ptr, h::NZB_I64_REMAINING_SIZE, c.nzb_remaining_size);
             host.nzb_set_i64(nzb.ptr, h::NZB_I64_PAUSED_SIZE, c.nzb_paused_size);
         }
+        // Only now, every lost article reset or failed: a completion that reads the cached
+        // count without the queue lock must not see it drop while one is still finished.
+        let cached = host.file_snap(file_ptr).cached_articles;
+        let lost_count = i32::try_from(article_ptrs.len()).unwrap_or(i32::MAX);
+        host.file_set_int(
+            file_ptr,
+            h::FILE_INT_CACHED_ARTICLES,
+            cached.saturating_sub(lost_count).max(0),
+        );
         if refetched + failed > 0 {
             let file = host.file_snap(file_ptr);
             let mut msg = file.filename.clone();

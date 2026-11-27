@@ -2076,7 +2076,8 @@ def _cache_commit_full(daemon, t, name):
         downloaded_mb = h.get('DownloadedSizeMB', 0)
         # The handed-back articles came again: the daemon downloaded more articles than the
         # file has (nserv may log none of them: a fetched-again body can come from the
-        # client's shared body cache, so the daemon's own log counts).
+        # client's shared body cache, so the daemon's own log counts). A lower bound only:
+        # the byte-exact output (no par2 here) is what proves no hole was left.
         fetched = len(re.findall(r'Successfully downloaded RelCC/cc\.bin \[', log))
         fetched_again = fetched - total
         ok = (h['Status'].startswith('SUCCESS') and integ and lost_logs > 0 and paused > 0

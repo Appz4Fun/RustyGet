@@ -4489,7 +4489,11 @@ pub(crate) fn streaming_session_kick_backfill(nzb_id: i32) {
             // Bytes a flush or a completion held in RAM go first: never read back.
             worker.apply_held_backfill();
             let reread = worker.session.io_stats().backfill_bytes_read;
-            let backfilled = worker.session.backfill_pending().is_ok();
+            // Since par-rs 985b373 (#147) a slice not on disk yet leaves the back-fill
+            // pending and returns Ok: only an empty queue counts as done, so the retry
+            // delay stays in force while it waits for the cache to write those slices.
+            let backfilled =
+                worker.session.backfill_pending().is_ok() && !worker.session.needs_backfill();
             let reread = worker.session.io_stats().backfill_bytes_read.saturating_sub(reread);
             if reread > 0 {
                 let message = format!(

@@ -35,6 +35,20 @@ impl Drop for Fixture {
 /// A one-file set (`part01.rar`, `slices` slices plus a short last one), its file on disk,
 /// and a started live session sized for `slots` recovery slots.
 fn fixture(nzb_id: i32, slices: usize, slots: usize, recovery: u32) -> Fixture {
+    fixture_with(nzb_id, slices, slots, slots, recovery, VolumeScheme::Single)
+}
+
+/// [`fixture`] with `preallocated` of `slots` recovery slots allocated up front (as
+/// `parlive::resources` sizes an unplanned session: a few preallocated, the cap and the
+/// syndrome bytes for all of them) and the recovery blocks spread by `volumes`.
+fn fixture_with(
+    nzb_id: i32,
+    slices: usize,
+    preallocated: usize,
+    slots: usize,
+    recovery: u32,
+    volumes: VolumeScheme,
+) -> Fixture {
     let dir = std::env::temp_dir().join(format!(
         "rustyget-live-trust-{}-{nzb_id}",
         std::process::id()
@@ -50,7 +64,7 @@ fn fixture(nzb_id: i32, slices: usize, slots: usize, recovery: u32) -> Fixture {
             slice_size: SLICE,
             recovery_blocks: recovery,
             first_exponent: 0,
-            volumes: VolumeScheme::Single,
+            volumes,
             creator: "rustyget-test".to_string(),
             unicode_names: false,
             kernel: Kernel::detect(),
@@ -69,7 +83,7 @@ fn fixture(nzb_id: i32, slices: usize, slots: usize, recovery: u32) -> Fixture {
         &index,
         &dir,
         SessionOptions {
-            preallocated_syndrome_slots: slots,
+            preallocated_syndrome_slots: preallocated,
             max_syndrome_slots: slots,
             max_syndrome_bytes: (slots.max(1) * SLICE) as u64,
             max_working_bytes: 8 << 20,
@@ -948,4 +962,140 @@ fn a_live_repair_reads_nothing_back() {
             if decode_ahead { lost.len() as u64 } else { 0 }
         );
     }
+}
+
+/// The write-back case at RustyGet's capture: the article cache dropped an article's bytes
+/// before its write landed (a write queued behind a flush), so the capture takes it as
+/// written and par-rs reads the preallocated zeros. Since par-rs 2524277 (#145) the slice
+/// waits instead of counting as damaged, because the zeros do not match the CRC of the
+/// bytes the article will be written with; the cache's hand-over after the write
+/// (`articles_written`) makes the next drain run `complete_staged_slices`, which verifies
+/// it. No damage is ever reported and no recovery volume is asked for.
+#[test]
+fn an_article_taken_as_written_before_its_write_lands_is_not_damaged() {
+    let f = fixture(0x7a75_0020, 6, 2, 2);
+    let path = f.dir.join("part01.rar");
+    std::fs::write(&path, vec![0u8; f.data.len()]).unwrap();
+    let entry = active_streaming_session(f.nzb_id).unwrap();
+    let half = SLICE / 2;
+    let identity = (None, &b"part01.rar"[..], &b""[..]);
+    let pieces: Vec<(u64, &[u8])> = f.data[..2 * SLICE]
+        .chunks(half)
+        .enumerate()
+        .map(|(i, c)| ((i * half) as u64, c))
+        .collect();
+    for &(offset, piece) in &pieces {
+        streaming_session_defer_committed_article(
+            f.nzb_id,
+            identity,
+            offset,
+            piece.len() as u64,
+            par_rs::crc::crc32(piece),
+            Some(&path),
+            || None,
+        )
+        .unwrap()
+        .unwrap();
+    }
+    streaming_session_drain_articles(f.nzb_id).unwrap().unwrap();
+    let status = entry.session.status();
+    assert_eq!(status.damaged, 0, "slices read before their write wait");
+    assert_eq!(status.verified, 0);
+    assert!(entry.pending_unpause_ids.lock().unwrap().is_empty());
+    // The writes land, then the cache hands the written articles over.
+    let mut disk = std::fs::read(&path).unwrap();
+    disk[..2 * SLICE].copy_from_slice(&f.data[..2 * SLICE]);
+    std::fs::write(&path, &disk).unwrap();
+    streaming_session_articles_written(f.nzb_id, identity, true, &pieces);
+    assert!(
+        entry.staged_due.load(Ordering::Acquire),
+        "the flush asks for a staged check"
+    );
+    streaming_session_drain_articles(f.nzb_id).unwrap().unwrap();
+    let status = entry.session.status();
+    assert_eq!(status.damaged, 0, "never damaged");
+    assert_eq!(status.verified, 2, "both slices verify once their bytes are on disk");
+    assert!(
+        entry.pending_unpause_ids.lock().unwrap().is_empty(),
+        "no recovery asked for"
+    );
+}
+
+/// par-rs 985b373 (#147) at RustyGet's arrival and back-fill thread: a recovery volume
+/// whose exponent no slot was allocated for, arriving after slices verified, costs one
+/// back-fill pass (every verified slice read once), and that pass also allocates spare
+/// slots, so the next volumes of the set land in them and read nothing back.
+#[test]
+fn an_unplanned_volume_mid_download_costs_one_back_fill_pass() {
+    // 25 slices (the last short), 2 slots preallocated (exponents 0 and 1) of a cap of 40
+    // (as `parlive::resources` sizes an unplanned session), one recovery block per volume.
+    let f = fixture_with(0x7a75_0021, 24, 2, 40, 8, VolumeScheme::Uniform(1));
+    let entry = active_streaming_session(f.nzb_id).unwrap();
+    let id = file_id(f.nzb_id);
+    let lost = [1usize, 3, 5, 7, 9, 11];
+    for (i, chunk) in f.data.chunks(SLICE).enumerate() {
+        let offset = (i * SLICE) as u64;
+        if lost.contains(&i) {
+            streaming_session_on_article_failed_permanently(
+                f.nzb_id,
+                &id,
+                offset,
+                chunk.len() as u64,
+            )
+            .unwrap()
+            .unwrap();
+        } else {
+            streaming_session_on_article_finished_by_name(
+                f.nzb_id,
+                b"part01.rar",
+                offset,
+                chunk.len() as u64,
+                par_rs::crc::crc32(chunk),
+                Some(chunk),
+            )
+            .unwrap()
+            .unwrap();
+        }
+    }
+    let pass = (f.data.len() - lost.len() * SLICE) as u64;
+    let backfill_read = || entry.session.io_stats().backfill_bytes_read;
+    let wait_backfill = || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while entry.session.needs_backfill() || entry.backfill_running.load(Ordering::Acquire) {
+            assert!(std::time::Instant::now() < deadline, "back-fill never finished");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    };
+    let arrive = |exponent: usize| {
+        let (name, volume) = &f.volumes[exponent];
+        let path = f.dir.join(name);
+        std::fs::write(&path, volume).unwrap();
+        streaming_session_on_recovery_volume_arrived(
+            f.nzb_id,
+            &path,
+            Some(500 + exponent as u64),
+        )
+        .unwrap()
+        .unwrap();
+    };
+    // Volumes for the preallocated slots: nothing to back-fill.
+    arrive(0);
+    arrive(1);
+    assert!(!entry.session.needs_backfill());
+    assert_eq!(backfill_read(), 0);
+    // An unplanned exponent: one pass, which also fills the spare slots.
+    arrive(2);
+    wait_backfill();
+    assert_eq!(backfill_read(), pass, "one pass over the verified slices");
+    let slots = entry.session.status().syndrome_slots;
+    assert!(slots >= 32, "the pass allocated spares: {slots} slots");
+    // The next volumes land in spares: no further pass.
+    for exponent in 3..6 {
+        arrive(exponent);
+        wait_backfill();
+    }
+    assert_eq!(backfill_read(), pass, "later volumes landed in spares");
+    let status = entry.session.status();
+    assert_eq!(status.ready_recovery, 6);
+    assert_eq!(status.damaged, 6);
 }

@@ -742,7 +742,14 @@ fn build_streaming_session_with(
         base_dir: base_dir.to_path_buf(),
         par_name: Mutex::new(Vec::new()),
         catchup_source_bytes: AtomicU64::new(0),
-        metrics: live_metrics::LiveMetricCounters::default(),
+        metrics: {
+            let metrics = live_metrics::LiveMetricCounters::default();
+            metrics.flush_snapshots_base.store(
+                crate::articledl::SNAPSHOTS_DURING_FLUSH.load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            metrics
+        },
         last_error: Mutex::new(None),
         warning_reported: AtomicBool::new(false),
         refusals: Mutex::new(Vec::new()),
@@ -889,6 +896,12 @@ impl ActiveStreamingSession {
     /// This is the one place a cache write meets live PAR.
     fn articles_written(&self, id: FileId, in_file: bool, items: &[(u64, &[u8])]) -> usize {
         self.backfill_held(&id, items);
+        self.hand_over_written(id, in_file, items)
+    }
+
+    /// [`Self::articles_written`] without keeping bytes for a pending back-fill: for a writer
+    /// that keeps those itself (file completion joins whole runs for it).
+    fn hand_over_written(&self, id: FileId, in_file: bool, items: &[(u64, &[u8])]) -> usize {
         // Committed gaps of staged slices may be readable now: the next drain finishes them.
         if !items.is_empty() {
             self.staged_due.store(true, Ordering::Release);
@@ -2067,6 +2080,11 @@ pub(crate) fn streaming_session_defer_committed_article(
                     bytes: None,
                     committed: true,
                 });
+                // Taken as written: a later write of it (rare: the cache dropped it unwritten)
+                // must not keep a copy that no capture ever takes.
+                if queue.captured.len() < LIVE_MARK_LIMIT {
+                    queue.captured.insert((id, offset));
+                }
                 entry
                     .metrics
                     .committed_articles
@@ -2327,6 +2345,32 @@ pub(crate) fn streaming_session_articles_written(
     entry.articles_written(id, in_file, items)
 }
 
+/// File completion wrote `items` (offset, bytes) of a data file's cached articles, into its
+/// DirectWrite file when `in_file`, and frees them next: live PAR keeps what it has not
+/// captured yet, as for a cache flush (`articles_written`), except bytes for a pending
+/// back-fill (the completion keeps those itself). No I/O.
+pub(crate) fn streaming_session_articles_completed(
+    nzb_id: i32,
+    identity: (Option<i32>, &[u8], &[u8]),
+    in_file: bool,
+    items: &[(u64, &[u8])],
+) -> usize {
+    if let Some(queue_id) = identity.0 {
+        let offsets: Vec<u64> = items.iter().map(|&(offset, _)| offset).collect();
+        presession_drop(nzb_id, queue_id, &offsets);
+    }
+    let Some(entry) = active_streaming_session(nzb_id) else {
+        return 0;
+    };
+    if entry.session.is_cancelled() || items.is_empty() {
+        return 0;
+    }
+    let Ok(id) = live_source_id(&entry, identity.0, identity.1, identity.2) else {
+        return 0;
+    };
+    entry.hand_over_written(id, in_file, items)
+}
+
 /// Bytes RustyGet wrote for a job before its live session could take them: articles written
 /// before the session started (the par2 index has to arrive and be parsed first), and
 /// recovery volume articles written before the volume's size was known. Kept, within
@@ -2338,6 +2382,8 @@ pub(crate) fn streaming_session_articles_written(
 struct PresessionKept {
     jobs: HashMap<i32, PresessionJob>,
     bytes: u64,
+    /// Jobs whose bytes passed [`PRESESSION_LIMIT`] (logged once each).
+    overflowed: std::collections::HashSet<i32>,
 }
 
 struct PresessionJob {
@@ -2373,6 +2419,7 @@ pub(crate) fn presession_keep(nzb_id: i32, file_id: i32, items: &[(u64, &[u8])])
     });
     kept.bytes -= freed;
     let mut added = 0u64;
+    let mut refused = 0usize;
     for &(offset, bytes) in items {
         let size = bytes.len() as u64;
         // A copy of an earlier write of this article is stale now: never hand it over.
@@ -2381,7 +2428,11 @@ pub(crate) fn presession_keep(nzb_id: i32, file_id: i32, items: &[(u64, &[u8])])
             .get_mut(&nzb_id)
             .and_then(|job| job.articles.remove(&(file_id, offset)));
         kept.bytes -= stale.map_or(0, |b| b.len() as u64);
-        if size == 0 || kept.bytes.saturating_add(size) > PRESESSION_LIMIT {
+        if size == 0 {
+            continue;
+        }
+        if kept.bytes.saturating_add(size) > PRESESSION_LIMIT {
+            refused += 1;
             continue;
         }
         let job = kept.jobs.entry(nzb_id).or_insert_with(|| PresessionJob {
@@ -2394,6 +2445,16 @@ pub(crate) fn presession_keep(nzb_id: i32, file_id: i32, items: &[(u64, &[u8])])
         added += size;
     }
     kept.jobs.retain(|_, job| !job.articles.is_empty());
+    let first_overflow = refused > 0 && kept.overflowed.len() < 4096 && kept.overflowed.insert(nzb_id);
+    drop(kept);
+    if first_overflow {
+        // The fallback is a read back from disk once the session starts: say so, once a job.
+        let message = format!(
+            "Live PAR (job {nzb_id}): bytes written before its session passed the {} MB kept for it; par-rs reads the articles past that back from disk",
+            PRESESSION_LIMIT >> 20
+        );
+        crate::log::log_active_bytes(crate::queuesubsys_host::MK_DETAIL, message.as_bytes());
+    }
     added
 }
 
@@ -2482,6 +2543,7 @@ fn presession_volume(nzb_id: i32, file_id: i32, len: u64) -> Option<Vec<u8>> {
 /// Drops what is kept for job `nzb_id` (its session ended, or the job left the queue).
 pub(crate) fn presession_forget(nzb_id: i32) {
     let mut kept = PRESESSION.lock().unwrap_or_else(|e| e.into_inner());
+    kept.overflowed.remove(&nzb_id);
     if let Some(job) = kept.jobs.remove(&nzb_id) {
         kept.bytes -= job.articles.values().map(|b| b.len() as u64).sum::<u64>();
     }

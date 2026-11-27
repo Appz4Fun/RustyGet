@@ -2019,6 +2019,69 @@ fn live_flush_before_capture_lends_for_the_kept_bytes() {
     streaming_session_forget(id);
 }
 
+/// File completion writes a data file's last cached articles and frees them; captures that
+/// come after it take the copies it handed over (`streaming_session_articles_completed`), so
+/// par-rs reads nothing back. Unlike a cache flush, it keeps nothing for a back-fill here.
+#[test]
+fn live_completion_write_hands_its_bytes_to_later_captures() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1909015; // unique: sessions are process-wide
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 * 1024 * 1024)
+        .unwrap();
+    let files = written_copies(&fx, &set);
+    let entry = active_streaming_session(id).unwrap();
+    for (name, _, bytes) in &files {
+        for (i, chunk) in bytes.chunks(1000).enumerate() {
+            streaming_session_articles_completed(id, (None, name, &[]), true, &[((i * 1000) as u64, chunk)]);
+        }
+    }
+    assert_eq!(entry.held_backfill.lock().unwrap().1, 0);
+    for (name, path, bytes) in &files {
+        defer_uncached(id, name, path, bytes, (0, bytes.len()), 1000);
+    }
+    streaming_session_drain_articles(id).unwrap().unwrap();
+    let status = streaming_session_status(id).unwrap();
+    assert_eq!(status.verified, status.total);
+    assert_eq!(streaming_session_io_stats(id).unwrap().source_bytes_read, 0);
+    assert_eq!(entry.metrics.committed_articles.load(Ordering::Relaxed), 0);
+    assert!(entry.metrics.stashed_articles.load(Ordering::Relaxed) > 0);
+    assert_eq!(entry.articles.lock().unwrap().bytes, 0);
+    drop(entry);
+    streaming_session_forget(id);
+}
+
+/// An article taken as written (RAM had no copy: par-rs reads it from its file) and written
+/// again later keeps no copy: no capture would ever take it, and it would hold ParBuffer
+/// until its file completed.
+#[test]
+fn live_article_taken_as_written_keeps_no_copy_of_a_later_write() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1909016; // unique: sessions are process-wide
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 * 1024 * 1024)
+        .unwrap();
+    let files = written_copies(&fx, &set);
+    let entry = active_streaming_session(id).unwrap();
+    let (name, path, bytes) = &files[0];
+    defer_uncached(id, name, path, bytes, (0, bytes.len()), 1000);
+    let items: Vec<(u64, &[u8])> = bytes
+        .chunks(1000)
+        .enumerate()
+        .map(|(i, chunk)| ((i * 1000) as u64, chunk))
+        .collect();
+    streaming_session_articles_written(id, (None, name, &[]), true, &items);
+    {
+        let queue = entry.articles.lock().unwrap();
+        assert!(queue.stash.is_empty(), "no copy kept");
+    }
+    streaming_session_drain_articles(id).unwrap().unwrap();
+    assert_eq!(entry.articles.lock().unwrap().bytes, 0);
+    assert_eq!(entry.metrics.stash_refusals.load(Ordering::Relaxed), 0);
+    drop(entry);
+    streaming_session_forget(id);
+}
+
 /// Articles written before the job's live session started (the par2 index arrives first and
 /// is parsed off the queue) are kept for it: the catch-up capture finds them gone from the
 /// cache and takes the kept bytes, so par-rs reads nothing back. Recovery volume articles

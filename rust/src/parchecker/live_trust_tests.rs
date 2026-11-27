@@ -453,10 +453,13 @@ fn a_ram_article_completing_a_committed_slice_raises_no_transient_damage() {
 }
 
 /// The hazard M6f's caution names, at the par-rs boundary: a committed range reported
-/// before its write reads the preallocated zeros and shows the slice damaged. RustyGet's
-/// capture never reports a committed article before its write (test above).
+/// before its write reads the preallocated zeros. Since par-rs 2524277 (#145) that slice is
+/// not damaged: the zeros do not match the CRC the article was reported with, so the slice
+/// waits, and once the bytes land the next `complete_staged_slices` (RustyGet runs it after
+/// each flush, `staged_due`) verifies it. RustyGet's capture never reports a committed
+/// article before its write (test above); this is the safety net for a write-back cache.
 #[test]
-fn a_committed_range_reported_before_its_write_reads_zeros() {
+fn a_committed_range_reported_before_its_write_waits_for_it() {
     let f = fixture(0x7a75_0009, 6, 2, 2);
     let path = f.dir.join("part01.rar");
     std::fs::write(&path, vec![0u8; f.data.len()]).unwrap();
@@ -477,8 +480,20 @@ fn a_committed_range_reported_before_its_write_reads_zeros() {
         outcome
             .events
             .iter()
-            .any(|e| e.state == SliceState::Damaged),
-        "the zero gap fails the slice"
+            .all(|e| e.state != SliceState::Damaged),
+        "the zero gap does not match its article CRC: the slice waits"
+    );
+    // The write lands; the staged check after the flush verifies the slice.
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[..half].copy_from_slice(a);
+    std::fs::write(&path, &bytes).unwrap();
+    let done = entry.session.complete_staged_slices().unwrap();
+    assert!(
+        done.events
+            .iter()
+            .any(|e| e.slice_idx == 0 && e.state == SliceState::VerifiedGood),
+        "{:?}",
+        done.events
     );
 }
 
@@ -611,7 +626,7 @@ fn decode_ahead_rebuilds_a_lost_slice_before_the_download_ends() {
     assert_eq!(hashes.unwrap().crc32, par_rs::crc::crc32(&f.data));
     assert!(entry
         .io_stats_line(f.nzb_id)
-        .ends_with("1 slice(s) rebuilt ahead (1 re-verified at completion)"));
+        .contains("1 slice(s) rebuilt ahead (1 re-verified at completion), "));
 }
 
 /// The write order of decode-ahead: a late write of a corrupt copy into a slice rebuilt

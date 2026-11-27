@@ -12662,6 +12662,10 @@ def _livepar_io(t, timeout=30):
                               r'before the session', t.read_file('nzbget.log').decode(errors='replace'))
             if kept:
                 io.update({'not_kept': int(kept[-1][0]), 'presession': int(kept[-1][1])})
+            during = re.findall(r'(\d+) copied from the cache during a flush',
+                                t.read_file('nzbget.log').decode(errors='replace'))
+            if during:
+                io['during_flush'] = int(during[-1])
             stashed = re.findall(r'(\d+) taken from bytes kept at write',
                                  t.read_file('nzbget.log').decode(errors='replace'))
             if stashed:
@@ -12671,8 +12675,8 @@ def _livepar_io(t, timeout=30):
     return {}
 
 
-def _livepar_run(daemon, t, tag, seed, missing, recovery, volumes=1, block=524288):
-    members, payloads = _livepar_release(t, tag, seed, missing, recovery, block=block,
+def _livepar_run(daemon, t, tag, seed, missing, recovery, volumes=1, block=524288, size=2_000_000):
+    members, payloads = _livepar_release(t, tag, seed, missing, recovery, size=size, block=block,
                                          volumes=volumes)
     api = daemon.wait_ready()
     daemon.append(api, 'Live', build_multi_nzb(members), False, tag + '-key', 100)
@@ -12833,6 +12837,32 @@ def scenario_liveparzeroreads(daemon, t):
           and io.get('not_kept', 99) == 0)
     return ('liveparzeroreads', ok, 'status=%s intact=%s live_repairs=%d batch_repairs=%d io=%s'
             % (h['Status'], intact, live, batch, io))
+
+
+def scenario_liveparflushrace(daemon, t):
+    """liveparzeroreads at line speed with the cache flushing the files being downloaded:
+    a 1 MB article cache (it flushes everything, files with downloads running included,
+    whenever it is nearly full), 16 connections, and each flush holding its file's flush lock 150 ms before it
+    writes (RUSTYGET_TEST_FLUSH_HOLD_MS, as a busy disk does). Articles that finish while
+    their file is flushed are still in the cache: live PAR copies them there (the cache's
+    snapshot no longer refuses during a flush), takes the bytes a flush or the file's
+    completion wrote before its capture, and par-rs reads no source byte back
+    (source_bytes_read 0, no article read from its file). Before: every article finishing
+    during a flush of its file was read back (6790: 437 articles, 335.8 MB of a 3.3 GB
+    set), and its later write kept a copy no capture took. The I/O line's "copied from the
+    cache during a flush" count proves the race happened (main on this scenario: 35
+    articles read back, 2.5 MB)."""
+    h, intact, io = _livepar_run(daemon, t, 'lfr', 12560, {1: {6}, 4: {17}, 6: {29}}, 8, volumes=4,
+                                 size=6_000_000)
+    live = _grep_log(t, 'as the download ended')
+    batch = _grep_log(t, 'PAR repair timings for')
+    flushes = _grep_log(t, 'Flushing cache for')
+    ok = (h['Status'].startswith('SUCCESS') and intact and live >= 1 and batch == 0 and bool(io)
+          and flushes >= 4 and io.get('during_flush', 0) > 0
+          and io['source_mb'] == 0.0 and io['read_by_parrs'] == 0
+          and io['backfill_mb'] == 0.0 and io.get('not_kept', 99) == 0)
+    return ('liveparflushrace', ok, 'status=%s intact=%s live_repairs=%d batch_repairs=%d flushes=%d io=%s'
+            % (h['Status'], intact, live, batch, flushes, io))
 
 
 def scenario_liveparheldvolume(daemon, t):
@@ -15551,6 +15581,7 @@ SCENARIOS = {
     'liveparplanned': scenario_liveparplanned,
     'livepargrow': scenario_livepargrow,
     'liveparzeroreads': scenario_liveparzeroreads,
+    'liveparflushrace': scenario_liveparflushrace,
     'liveparheldvolume': scenario_liveparheldvolume,
     'livepardecodeahead': scenario_livepardecodeahead,
     'livepartrusted': scenario_livepartrusted,
@@ -15702,6 +15733,9 @@ SCENARIO_ENV = {
     'persistdeadprimary': {'RUSTYGET_PERSISTENT_UNPACK': '1'},
     'persistrestart': {'RUSTYGET_PERSISTENT_UNPACK': '1'},
     'persistrestartdamaged': {'RUSTYGET_PERSISTENT_UNPACK': '1'},
+    # Each cache flush holds its file's flush lock 150 ms before writing (articledl.rs
+    # `flush_test_hold`): captures land while their file is flushed.
+    'liveparflushrace': {'RUSTYGET_TEST_FLUSH_HOLD_MS': '150'},
 }
 SCENARIO_ENV_KEYS = sorted({k for env in SCENARIO_ENV.values() for k in env})
 
@@ -16018,6 +16052,8 @@ SCENARIO_OPTIONS = {
     'liveparplanned': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
     'livepargrow': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
     'liveparzeroreads': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
+    'liveparflushrace': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=1', 'DirectWrite=yes',
+                         'Server1.Connections=16'],
     'liveparheldvolume': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
     'livepardecodeahead': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
     'livepartrusted': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],

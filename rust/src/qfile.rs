@@ -746,11 +746,18 @@ pub(crate) unsafe fn host_cache_op(
         }
     };
     match a1 {
-        // copy the article's cached data out
+        // copy the article's cached data out, also while a flush of the file runs: its
+        // segments are freed only under the cache content lock (sub-op 6, output op 9/5),
+        // which the caller holds, so a non-null pointer stays valid for the copy. Refusing
+        // during a flush made live PAR read every article finishing then back from disk.
         1 => {
             let data = art(null_l, p2, 110, 0, null_i, null_l.cast(), null_s) as *const u8;
-            if file.get(FLUSH_LOCKED) == 0 && !data.is_null() && a2 > 0 {
+            if !data.is_null() && a2 > 0 {
                 unsafe { ptr::copy_nonoverlapping(data, *i64s as usize as *mut u8, a2 as usize) };
+                if file.get(FLUSH_LOCKED) != 0 {
+                    crate::articledl::SNAPSHOTS_DURING_FLUSH
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 1
             } else {
                 0
@@ -845,7 +852,10 @@ pub(crate) unsafe fn host_cache_op(
                 let parking = !nzb.is_null() && unsafe { (*nzb).parking };
                 return usize::from(file.get(DELETED) != 0 && !parking);
             }
-            art(null_l, p2, 111, 0, null_i, null_l.cast(), null_s);
+            // Under the content lock: a snapshot (sub-op 1) may be copying it right now.
+            crate::articledl::with_cache_content_lock(|| {
+                art(null_l, p2, 111, 0, null_i, null_l.cast(), null_s);
+            });
             0
         }
         7 => {
@@ -1157,16 +1167,19 @@ pub(crate) unsafe fn host_output_op(
                     null_l.cast(),
                     null_s,
                 );
-                art_op(
-                    null_l,
-                    pa,
-                    111,
-                    0,
-                    ptr::null(),
-                    null_i,
-                    null_l.cast(),
-                    null_s,
-                );
+                // Under the content lock: a live PAR snapshot may be copying it right now.
+                crate::articledl::with_cache_content_lock(|| {
+                    art_op(
+                        null_l,
+                        pa,
+                        111,
+                        0,
+                        ptr::null(),
+                        null_i,
+                        null_l.cast(),
+                        null_s,
+                    );
+                });
                 0
             }
             6 => {
@@ -1466,6 +1479,62 @@ mod tests {
         }
         FILE_IDS.reset_to_floor();
         assert!(FILE_IDS.last() >= 9000);
+    }
+
+    /// A live PAR snapshot (cache sub-op 1) copies a cached article also while a flush of its
+    /// file runs (the flush lock is set): articles finishing during a flush used to be refused
+    /// and read back from disk by par-rs. Once the flush frees the segment (sub-op 6, under the
+    /// content lock), the snapshot finds nothing.
+    #[test]
+    fn snapshot_copies_a_cached_article_while_its_file_is_flushed() {
+        let f = nzbget_rs_file_new(0);
+        let (ni, nl, ns) = (
+            ptr::null_mut::<c_int>(),
+            ptr::null_mut::<i64>(),
+            ptr::null_mut::<*const c_char>(),
+        );
+        let data: Vec<u8> = (0..64u8).collect();
+        let mid = CString::new("a@b").unwrap();
+        unsafe {
+            let list = (*f).articles;
+            crate::qarticle::nzbget_rs_article_host(
+                list, ptr::null_mut(), 11, 1, 64, mid.as_ptr(), ni, nl, ns,
+            );
+            let pa = crate::qarticle::nzbget_rs_article_host(
+                list, ptr::null_mut(), 106, 0, 0, ptr::null(), ni, nl, ns,
+            );
+            assert_ne!(pa, 0);
+            // allocation 0: the test owns `data`, the discard frees nothing
+            let mut ints = [0 as c_int, 64];
+            let mut i64s = [0i64, data.as_ptr() as usize as i64];
+            crate::qarticle::nzbget_rs_article_host(
+                ptr::null_mut(),
+                pa as *mut _,
+                112,
+                0,
+                0,
+                ptr::null(),
+                ints.as_mut_ptr(),
+                i64s.as_mut_ptr(),
+                ns,
+            );
+            nzbget_rs_file_set(f, field::FLUSH_LOCKED, 1);
+            let snapshot = |out: &mut Vec<u8>| {
+                let mut dst = [out.as_mut_ptr() as usize as i64];
+                crate::articledl::with_cache_content_lock(|| {
+                    host_cache_op(f, 1, 64, pa, ptr::null(), ni, dst.as_mut_ptr(), ns)
+                })
+            };
+            let mut out = vec![0u8; 64];
+            assert_eq!(snapshot(&mut out), 1, "copied during the flush");
+            assert_eq!(out, data);
+            // the flush frees it after writing
+            host_cache_op(f, 6, 1, pa, ptr::null(), ni, nl, ns);
+            let mut out = vec![0u8; 64];
+            assert_eq!(snapshot(&mut out), 0, "freed: nothing to copy");
+            nzbget_rs_file_set(f, field::FLUSH_LOCKED, 0);
+            nzbget_rs_file_free(f);
+        }
     }
 
     #[test]

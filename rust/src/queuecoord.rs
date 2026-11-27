@@ -8247,6 +8247,18 @@ fn downloaded_ranges(
 
 /// What a started queue item's unpack will still write next to its archives: its data size
 /// (par2 files are not extracted) until its unpack has run (or was skipped: no archives);
+/// Whether a started download's articles still land on the disk the InterDir budget measures
+/// (the current InterDir, or DestDir without one): not when its folder was named by an earlier
+/// InterDir (`unpack::job_dir_is_intermediate`), which keeps it on that earlier disk.
+fn budget_counts_download_bytes(dest_dir: &[u8], inter_dir: &[u8], nzb_id: i32) -> bool {
+    let sep = crate::paths::PATH_SEPARATOR;
+    if inter_dir.is_empty() {
+        !crate::unpack::named_by_an_inter_dir(dest_dir, sep, Some(nzb_id))
+    } else {
+        crate::unpack::use_inter_dir(dest_dir, inter_dir, sep)
+    }
+}
+
 /// 0 with unpacking off. A download without archives is overcounted while it downloads.
 fn interdir_unpack_bytes(nzb: &crate::queuesubsys_host::NzbSnap, unpack_on: bool) -> i64 {
     if !unpack_on || nzb.unpack_status != UnpackStatus::None {
@@ -8317,11 +8329,7 @@ fn interdir_budget_admits(
                     let unpack = interdir_unpack_bytes(snap, unpack_on);
                     // a download still in a folder an earlier InterDir named writes its
                     // articles to that disk, not this one; only its unpack lands here
-                    let here = crate::unpack::use_inter_dir(
-                        &snap.dest_dir,
-                        &inter_now,
-                        crate::paths::PATH_SEPARATOR,
-                    );
+                    let here = budget_counts_download_bytes(&snap.dest_dir, &inter_now, snap.id);
                     crate::interbudget::need_bytes(
                         if here { remaining } else { 0 },
                         if here { paused } else { 0 },
@@ -8413,6 +8421,15 @@ type CopiesByKey = std::collections::HashMap<Vec<u8>, Vec<usize>>;
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_budget_counts_download_bytes_only_on_the_measured_disk() {
+        use super::budget_counts_download_bytes as f;
+        assert!(f(b"/dst/Movies/Movie", b"", 42));
+        assert!(f(b"/hdd/inter/Movie.#42", b"/hdd/inter", 42));
+        assert!(!f(b"/nvme/inter/Movie.#42", b"/hdd/inter", 42));
+        assert!(!f(b"/nvme/inter/Movie.#42", b"", 42));
+    }
 
     #[test]
     fn only_unwritten_downloads_from_an_earlier_inter_dir_are_renamed() {

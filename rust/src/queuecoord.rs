@@ -38,6 +38,19 @@ const LIVE_HEAD_RETRY_MS: u64 = 500;
 /// How often running articles are checked for ones far slower than the rest.
 const STRAGGLER_CHECK_MS: u64 = 250;
 static NEXT_STRAGGLER_CHECK_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// How often the queue is checked for jobs that should have a live PAR session and have none.
+const LIVE_REARM_CHECK_MS: u64 = 5_000;
+/// A job's live session start from its completed par2 index is retried at most this often,
+/// and at most this many times.
+const LIVE_REARM_RETRY_MS: u64 = 120_000;
+const LIVE_REARM_ATTEMPTS: u32 = 5;
+static NEXT_LIVE_REARM_CHECK_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Queued jobs by id: when their live session start was last re-armed
+/// (`liveorder::now_ms`) and how often. A job seen with a session, or re-armed from a
+/// recovery volume (parsing it reads the whole volume), is done (`LIVE_REARM_ATTEMPTS`):
+/// a session that ended is not started again by this.
+static LIVE_REARMED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<i32, (u64, u32)>>> =
+    std::sync::LazyLock::new(Default::default);
 
 /// A download's live extraction order (`liveorder`) and its lowest unfinished volume.
 struct LiveOrder {
@@ -2504,6 +2517,7 @@ impl NzbgetRsQueueCoordinator {
             test_coord_pass_delay();
 
             crate::parchecker::streaming_session_retry_completion_tick();
+            Self::rearm_live_par_sessions(host);
             self.drain_live_par_completed_files(host);
             Self::drain_live_par_articles(host);
             self.order_by_names(host);
@@ -3543,6 +3557,118 @@ impl NzbgetRsQueueCoordinator {
             }
             seen.retain(|id| present.contains(id));
         });
+    }
+
+    /// A live PAR session starts only when a par2 file of the job completes. A job whose par2
+    /// index completed earlier had none after a restart (or a start that was refused): it ran
+    /// without one until its next par2 file completed, a recovery volume at the very end, and
+    /// that session read every byte downloaded meanwhile back from disk (6790 job 2466: 86 GB).
+    /// Such a job, still downloading data (an unpaused data file queued), gets its completed
+    /// index queued as the start again (the same path as its completion), retried every two
+    /// minutes (5 times at most) while it has no session. A job seen with a session is not
+    /// re-armed when that session ends (within this run of the daemon).
+    fn rearm_live_par_sessions(host: &crate::queuesubsys_host::QueueSubsysHost) {
+        use std::sync::atomic::Ordering;
+        let now = crate::liveorder::now_ms();
+        if now < NEXT_LIVE_REARM_CHECK_MS.load(Ordering::Relaxed) {
+            return;
+        }
+        NEXT_LIVE_REARM_CHECK_MS.store(now + LIVE_REARM_CHECK_MS, Ordering::Relaxed);
+        if !live_par_syndromes(&host.opts()) {
+            return;
+        }
+        let mut rearmed = LIVE_REARMED.lock().unwrap_or_else(|e| e.into_inner());
+        let mut queued_ids = std::collections::HashSet::new();
+        let mut starts = Vec::new();
+        host.with_locked_queue(|dq| {
+            // Read under the queue lock: a completion queues its file under it too.
+            let pending = crate::parchecker::streaming_session_pending_completed_jobs();
+            for i in 0..host.queue_len(dq) {
+                let ptr = host.queue_at(dq, i);
+                if ptr.is_none() {
+                    continue;
+                }
+                let nzb = host.nzb_snap(ptr, false);
+                queued_ids.insert(nzb.id);
+                if crate::parchecker::streaming_session_has_session(nzb.id) {
+                    rearmed.insert(nzb.id, (now, LIVE_REARM_ATTEMPTS));
+                    continue;
+                }
+                if pending.contains(&nzb.id) {
+                    // A completion of it waits to be drained (maybe a start re-armed here):
+                    // not now. A re-armed start still waiting delays its retry; a first
+                    // re-arm only waits for the next check.
+                    if let Some(entry) = rearmed.get_mut(&nzb.id) {
+                        entry.0 = now;
+                    }
+                    continue;
+                }
+                if rearmed.get(&nzb.id).is_some_and(|&(at, attempts)| {
+                    attempts >= LIVE_REARM_ATTEMPTS || now < at.saturating_add(LIVE_REARM_RETRY_MS)
+                }) || !live_start_context_matches(&nzb, crate::fsops::path(&nzb.dest_dir), true)
+                {
+                    continue;
+                }
+                // Only while data is still to come: what is on disk already is read once
+                // either way, the point is to capture the rest from RAM.
+                let downloading = (0..host.nzb_file_len(ptr)).any(|j| {
+                    let file = host.file_snap(host.nzb_file_at(ptr, j));
+                    !file.deleted && !file.paused && !file.par_file
+                });
+                if !downloading {
+                    continue;
+                }
+                // The index (no recovery blocks) if it completed, else the first volume.
+                let mut found: Option<(bool, crate::queuesubsys_host::CompletedFileSnap)> = None;
+                for j in 0..host.nzb_completed_files_len(ptr) {
+                    let file = host.nzb_completed_file_at(ptr, j);
+                    let par = file.par_file
+                        || crate::parparser::parse_par_filename(&file.filename, true).is_some();
+                    if !par || file.status != crate::queuesubsys_host::CF_SUCCESS {
+                        continue;
+                    }
+                    let volume = crate::parchecker::volume_range(&file.filename).is_some();
+                    if found.is_none() || !volume {
+                        found = Some((volume, file));
+                    }
+                    if !volume {
+                        break;
+                    }
+                }
+                if let Some((volume, file)) = found {
+                    starts.push((nzb, file, volume));
+                }
+            }
+        });
+        rearmed.retain(|id, _| queued_ids.contains(id));
+        for (nzb, file, volume) in starts {
+            let attempts = rearmed.get(&nzb.id).map_or(0, |&(_, n)| n) + 1;
+            rearmed.insert(nzb.id, (now, if volume { LIVE_REARM_ATTEMPTS } else { attempts }));
+            let bytes = 1024 + 2 * (nzb.dest_dir.len() + file.filename.len() + file.hash16k.len());
+            let queued = crate::parchecker::streaming_session_queue_completed_file(nzb.id, bytes as u64, || {
+                let path = join_path(&nzb.dest_dir, &file.filename);
+                Ok(crate::parchecker::LiveCompletedFile {
+                    nzb_id: nzb.id,
+                    base_dir: crate::fsops::path(&nzb.dest_dir).to_path_buf(),
+                    path: crate::fsops::path(&path).to_path_buf(),
+                    name: file.filename.clone(),
+                    hash16k: file.hash16k.clone(),
+                    par_file: true,
+                    successful: true,
+                    accepted: Vec::new(),
+                    queued_id: u64::try_from(file.id).ok(),
+                })
+            });
+            if queued.is_ok() {
+                let mut message = b"Live PAR: queued a session start from ".to_vec();
+                message.extend_from_slice(&file.filename);
+                message.extend_from_slice(b", which completed before (a restart, or a start that did not happen then)");
+                host.with_locked_queue(|dq| {
+                    let ptr = host.queue_find_by_id(dq, nzb.id);
+                    host.nzb_print_message(ptr, crate::queuesubsys_host::MK_DETAIL, &message);
+                });
+            }
+        }
     }
 
     /// Asks again for articles a live extraction will wait for that run far longer than the

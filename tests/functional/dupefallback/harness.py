@@ -13153,6 +13153,66 @@ def scenario_liveparflushrace(daemon, t):
             % (h['Status'], intact, live, batch, flushes, io))
 
 
+def scenario_liveparrestart(daemon, t):
+    """The daemon restarts while a job downloads, after its par2 index completed and its live
+    PAR session started. A session starts only when a par2 file of the job completes, so
+    after the restart the job had none until its next par2 file completed (a recovery
+    volume, at the very end); that session then read everything downloaded meanwhile back
+    from disk, or no session came and a batch par-repair ran (6790 job 2466: 86 GB read
+    back). Now the queue coordinator queues the completed index as the start again
+    ("queued a session start from"), the session resumes while the rest downloads
+    (data still left when its status line returns), and the live repair finishes the job as
+    the download ends: no batch par-repair. The damage is in the last two files, so no
+    recovery volume is unpaused before the restart (one completing would bring a session
+    back by itself). Main: the session came back only when a recovery volume completed
+    near the end (6 of 30 MB left) and read 26.2 MB back; with the fix it comes back at once
+    (30 MB left) and reads 3.9 MB, what was on disk at the restart (whole slices)."""
+    members, payloads = _livepar_release(t, 'lrs', 12570, {6: {60}, 7: {70}}, 8, size=4_000_000,
+                                         volumes=4)
+    api = daemon.wait_ready()
+    daemon.append(api, 'Live', build_multi_nzb(members), False, 'lrs-key', 100)
+    deadline = time.time() + 60
+    while time.time() < deadline and _grep_log(t, 'Live par2 for Live') == 0:
+        time.sleep(0.2)
+    started = _grep_log(t, 'Live par2 for Live')
+    time.sleep(1.5)
+    g = next((g for g in api.listgroups() if g['NZBName'] == 'Live'), None)
+    left_mb = g.get('RemainingSizeMB', 0) if g else 0
+    try:
+        api.shutdown()
+    except Exception:
+        pass
+    t.procs[-1].wait(timeout=60)
+    live_before = _grep_log(t, 'as the download ended')
+    sessions_before = _grep_log(t, 'Live par2 for Live')
+    daemon.start()
+    api = daemon.wait_ready()
+    # Data left when the session came back: without the re-arm it came only with a par2
+    # file completing at the end (nothing left), or never.
+    left_at_resume = None
+    deadline = time.time() + 120
+    while time.time() < deadline and left_at_resume is None:
+        g = next((g for g in api.listgroups() if g['NZBName'] == 'Live'), None)
+        if g is None:
+            break
+        if _grep_log(t, 'Live par2 for Live') > sessions_before:
+            left_at_resume = g.get('RemainingSizeMB', 0)
+        time.sleep(0.2)
+    h = daemon.wait_history(api, 'Live', timeout=300)
+    intact = all(_verify_output(t, data, name, dirs=(('main', 'dst'), ('main', 'inter')))
+                 for name, data in payloads.items())
+    io = _livepar_io(t)
+    rearmed = _grep_log(t, 'queued a session start from')
+    live = _grep_log(t, 'as the download ended') - live_before
+    batch = _grep_log(t, 'PAR repair timings for')
+    ok = (h['Status'].startswith('SUCCESS') and intact and started > 0 and left_mb > 0
+          and rearmed >= 1 and bool(left_at_resume) and left_at_resume >= 0.7 * left_mb
+          and bool(io) and io['source_mb'] <= 6.0 and live >= 1 and batch == 0)
+    return ('liveparrestart', ok, 'status=%s intact=%s started=%d left_mb=%s left_at_resume=%s rearmed=%d '
+            'live_repairs=%d batch_repairs=%d io=%s' % (h['Status'], intact, started, left_mb, left_at_resume,
+                                                         rearmed, live, batch, io))
+
+
 def scenario_liveparheldvolume(daemon, t):
     """The planned recovery volumes cover the damage, but the volume past the plan is never
     fetched for it (6790, PR #729: a volume past the plan was fetched after ~620 of 634 slices
@@ -16121,6 +16181,7 @@ SCENARIOS = {
     'livepargrow': scenario_livepargrow,
     'liveparzeroreads': scenario_liveparzeroreads,
     'liveparflushrace': scenario_liveparflushrace,
+    'liveparrestart': scenario_liveparrestart,
     'liveparheldvolume': scenario_liveparheldvolume,
     'livepardecodeahead': scenario_livepardecodeahead,
     'liveparrarclean': scenario_liveparrarclean,
@@ -16608,6 +16669,8 @@ SCENARIO_OPTIONS = {
     'liveparplanned': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
     'livepargrow': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
     'liveparzeroreads': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
+    'liveparrestart': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes',
+                       'DownloadRate=3000'],
     'liveparflushrace': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=1', 'DirectWrite=yes',
                          'Server1.Connections=16'],
     'liveparheldvolume': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],

@@ -13352,7 +13352,8 @@ def scenario_livepardecodeahead(daemon, t):
     return ('livepardecodeahead', ok, 'status=%s intact=%s rebuilt_ahead=%s end_repaired=%s '
             'before_end=%s before_last_data=%s batch_repairs=%d io=%s'
             % (h['Status'], intact, rebuilt, ended, before_end, before_last, batch, io))
-def _livepar_rar_run(daemon, t, tag, seed, missing, corrupt=None, recovery=24, obfuscate=False):
+def _livepar_rar_run(daemon, t, tag, seed, missing, corrupt=None, recovery=24, obfuscate=False,
+                     timeout=300):
     """A RAR set under the production options with live PAR: 8 store-mode volumes of
     movie.mkv (real CRCs, so direct unpack extracts it while it downloads) and a par2 set of
     64 KiB blocks with <recovery> recovery blocks in two volumes. <missing> maps a volume
@@ -13398,7 +13399,7 @@ def _livepar_rar_run(daemon, t, tag, seed, missing, corrupt=None, recovery=24, o
     api = daemon.wait_ready()
     name = 'Rel' + tag
     daemon.append(api, name, nzb, False, tag + '-key', 100)
-    deadline = time.time() + 300
+    deadline = time.time() + timeout
     end = None
     h = None
     while time.time() < deadline:
@@ -13520,6 +13521,38 @@ def scenario_liveparraroff(daemon, t):
             'par_check_lines=%d missing_lines=%d par2_loads=%d end_to_history_s=%s'
             % (h['Status'], h['ParStatus'], h['UnpackStatus'], intact, repaired, trusted, verify,
                missing, loads, end_s))
+
+
+def scenario_liveparrarlatedeclare(daemon, t):
+    """Direct unpack finds damage of its own only after the download ended: one article of
+    Rel.part07.rar is served corrupt with a valid yEnc CRC (nothing is missing, so no volume
+    is held when the download ends), and the extraction is slowed down
+    (RUSTYGET_TEST_EXTRACT_BOUNDARY_DELAY_MS), so it reaches part07 and declares it bad after
+    "Collection ... completely downloaded". Live PAR is off and ParCheck=force, so only the
+    post-processing par-check can repair it. Post-processing takes the job back ("found
+    damage after the download ended"), the par-check repairs part07, direct unpack resumes
+    and patches its hole: SUCCESS, byte-exact, the movie extracted once. Before: the job stayed
+    marked as working for direct unpack, nothing repaired the volume, and the extraction
+    waited until the timeout (the liveparrartrust/liveparrarobfuscated hang under load)."""
+    try:
+        h, intact, verify, missing, loads, end_s = _livepar_rar_run(
+            daemon, t, 'lld', 13760, {}, corrupt=(6, 4), timeout=120)
+    except RuntimeError as e:
+        return ('liveparrarlatedeclare', False, 'hang: %s' % e)
+    log = t.read_file('nzbget.log').decode(errors='replace')
+    declared_after = _log_before(t, 'Collection Rellld completely downloaded',
+                                 'failed its own check in Rel.part07.rar')
+    handed = _grep_log(t, 'Direct unpack for Rellld found damage after the download ended')
+    resumed = _grep_log(t, 'Resuming direct unpack for Rellld after repair')
+    repaired = _grep_log(t, 'Successfully repaired Rellld/')
+    first_reads = len(re.findall(r'Unrar: Extracting from Rel\.part01\.rar', log))
+    ok = (h['Status'].startswith('SUCCESS') and intact and declared_after and handed == 1
+          and resumed == 1 and repaired >= 1 and first_reads == 1
+          and h['UnpackStatus'] == 'SUCCESS')
+    return ('liveparrarlatedeclare', ok, 'status=%s par=%s unpack=%s intact=%s declared_after_end=%s '
+            'handed_back=%d resumed=%d repaired=%d first_reads=%d end_to_history_s=%s'
+            % (h['Status'], h['ParStatus'], h['UnpackStatus'], intact, declared_after, handed,
+               resumed, repaired, first_reads, end_s))
 
 
 def scenario_parinplace(daemon, t):
@@ -16470,6 +16503,7 @@ SCENARIOS = {
     'liveparrarobfuscated': scenario_liveparrarobfuscated,
     'liveparrarobfuscatedslow': scenario_liveparrarobfuscatedslow,
     'liveparraroff': scenario_liveparraroff,
+    'liveparrarlatedeclare': scenario_liveparrarlatedeclare,
     'livepartrusted': scenario_livepartrusted,
     'livepartrustedtemp': scenario_livepartrustedtemp,
     'parinplace': scenario_parinplace,
@@ -16635,6 +16669,10 @@ SCENARIO_ENV = {
     # (postproc.rs `test_boundary_delay`): an extraction onto a slow disk.
     'slotpreemptpaused': {'RUSTYGET_TEST_EXTRACT_BOUNDARY_DELAY_MS': '3000'},
     'slotfinishedlive': {'RUSTYGET_TEST_EXTRACT_BOUNDARY_DELAY_MS': '4000'},
+    # The extraction reaches the corrupt part only after the download ended (persistent
+    # partial files on every platform, as on Linux by default).
+    'liveparrarlatedeclare': {'RUSTYGET_TEST_EXTRACT_BOUNDARY_DELAY_MS': '700',
+                              'RUSTYGET_PERSISTENT_UNPACK': '1'},
 }
 SCENARIO_ENV_KEYS = sorted({k for env in SCENARIO_ENV.values() for k in env})
 
@@ -16974,6 +17012,8 @@ SCENARIO_OPTIONS = {
     'liveparrarobfuscatedslow': PROD_OPTIONS + ['LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes', 'UnpackCleanupDisk=no',
                                  'DownloadRate=1000'],
     'liveparraroff': PROD_OPTIONS + ['LiveParRepair=no', 'ArticleCache=256', 'DirectWrite=yes', 'UnpackCleanupDisk=no'],
+    'liveparrarlatedeclare': PROD_OPTIONS + ['LiveParRepair=no', 'ParCheck=force', 'ArticleCache=256',
+                                             'DirectWrite=yes', 'UnpackCleanupDisk=no'],
     'parinplace': ['ParCheck=auto', 'LiveParRepair=no'],
     'parlesscritical': ['HealthCheck=dupe', 'DupeArticleFallback=no'],
     'parlesstwin': ['HealthCheck=dupe', 'DupeArticleFallback=no'],

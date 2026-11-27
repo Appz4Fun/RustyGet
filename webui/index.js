@@ -506,6 +506,12 @@ var Frontend = (new function($)
 		var modals = $('.modal:visible');
 		if (modals.length > 0)
 		{
+			// Enter in a search box (a details panel's Log search) runs the search;
+			// it must not save and close the panel the log is read in
+			if (key === 'Enter' && $(e.target).is('input.search-query'))
+			{
+				return false;
+			}
 			if (key === 'Enter' && !Util.wantsReturn(e.target))
 			{
 				// A focused control in the active modal keeps native activation;

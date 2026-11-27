@@ -225,3 +225,18 @@ recovery-block bar and only the rows that have a value.
 ```sh
 node tests/webui/history-repair.js http://127.0.0.1:17999/
 ```
+
+The history log check uses the same fixture with a SUCCESS download of 54
+messages, a FAILURE download of 141 and a FAILURE download without a kept log.
+In both themes at 1440 and 390 pixels it checks that the Log page asks for the
+whole log (`loadlog id, 0, 10000`), shows ten rows a page newest first, keeps
+every row's text inside the panel, unclipped, with a contrast of at least 4.5,
+reaches the last row of a page and the oldest message on one 1000-row page,
+filters by search (Enter runs the search and never saves and closes the
+panel), and says "No log was kept for this download." for the one
+without a log (the daemon keeps every download's log in `QueueDir/n<id>.log`,
+so History logs outlive a restart; harness scenario `historylogrestart`).
+
+```sh
+node tests/webui/history-log.js http://127.0.0.1:17999/
+```

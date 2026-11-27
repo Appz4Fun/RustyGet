@@ -4841,6 +4841,10 @@
     "message": "No log messages for this download yet.",
     "description": "Details panel Log page: shown when the download has no log messages."
   },
+  "details_log_not_kept": {
+    "message": "No log was kept for this download.",
+    "description": "History details panel Log page: shown when a finished download has no log messages (older releases lost them at a restart)."
+  },
   "details_files": {
     "message": "Files",
     "description": "Details panel tile: number of files in the download."

@@ -8309,6 +8309,17 @@ fn run_active_diskstate_exec(
     ctx: &mut ActiveDiskExecCtx<'_>,
     out_flag: *mut c_int,
 ) -> c_int {
+    run_active_diskstate_exec_text(op, ctx, out_flag, None)
+}
+
+/// [`run_active_diskstate_exec`] with the env's `time_str` and `text` set.
+#[cfg(unix)]
+fn run_active_diskstate_exec_text(
+    op: DiskOp,
+    ctx: &mut ActiveDiskExecCtx<'_>,
+    out_flag: *mut c_int,
+    texts: Option<(&std::ffi::CStr, &std::ffi::CStr)>,
+) -> c_int {
     let opts = crate::options::active_options();
     let qdir_c = opts
         .as_ref()
@@ -8340,6 +8351,10 @@ fn run_active_diskstate_exec(
     env.continue_partial = continue_partial;
     env.now = now;
     env.out_flag = out_flag;
+    if let Some((time_str, text)) = texts {
+        env.time_str = time_str.as_ptr();
+        env.text = text.as_ptr();
+    }
     unsafe { diskstate_exec(op, &env) }
 }
 
@@ -8646,6 +8661,49 @@ pub(crate) fn active_disk_load_file_for_inspect(
     (fi_ptr, state_ok)
 }
 
+/// Appends message `text` of `kind`, logged at `time`, to download
+/// `nzb_id`'s log file (`<QueueDir>/n<id>.log`), so the download's log
+/// outlives a restart; `loadlog` reads the file back. False when no queue
+/// dir is configured or the file can't be written.
+#[cfg(unix)]
+pub(crate) fn append_active_nzb_message(nzb_id: i32, kind: i32, time: i32, text: &[u8]) -> bool {
+    // one writer at a time keeps every line whole and in logged order
+    static APPEND: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let has_queue_dir = crate::options::active_options()
+        .is_some_and(|o| !o.str_bytes(OptStr::QueueDir).is_empty());
+    if !has_queue_dir || nzb_id <= 0 {
+        return false;
+    }
+    let text = &text[..text.iter().position(|&b| b == 0).unwrap_or(text.len())];
+    let text_c = std::ffi::CString::new(text).unwrap_or_default();
+    let time_c = std::ffi::CString::new(log_line_time(time)).unwrap_or_default();
+    let _g = APPEND.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut ctx = ActiveDiskExecCtx::new(None);
+    run_active_diskstate_exec_text(
+        DiskOp::AppendNzbMessage { nzb_id, kind, time },
+        &mut ctx,
+        std::ptr::null_mut(),
+        Some((&time_c, &text_c)),
+    ) == 1
+}
+
+/// The readable local time leading a log file line ("Sat Nov 14 16:38:19 2026").
+#[cfg(unix)]
+fn log_line_time(time: i32) -> Vec<u8> {
+    let t = libc::time_t::from(time);
+    let mut buf = [0u8; 64];
+    // SAFETY: localtime_r and strftime write into locals of the given size.
+    let n = unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&t, &mut tm).is_null() {
+            0
+        } else {
+            libc::strftime(buf.as_mut_ptr().cast(), buf.len(), c"%a %b %e %H:%M:%S %Y".as_ptr(), &tm)
+        }
+    };
+    buf[..n].to_vec()
+}
+
 #[cfg(unix)]
 pub(crate) fn load_active_nzb_messages(nzb_id: i32) -> Vec<(i32, i32, i32, std::ffi::CString)> {
     let mut ctx = ActiveDiskExecCtx::new(None);
@@ -8664,6 +8722,87 @@ mod tests {
 
     fn vec_to_string(b: Vec<u8>) -> String {
         String::from_utf8(b).unwrap()
+    }
+
+    /// A download's log file round-trips through the append and load ops the
+    /// History Log tab (loadlog) reads after a restart: kinds, times and text,
+    /// with tabs/newlines flattened and a long line cut at 1023 bytes; the
+    /// log goes with the download's files.
+    #[cfg(unix)]
+    #[test]
+    fn nzb_log_file_round_trip() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = std::env::temp_dir().join(format!(
+            "rustyget_nzblog_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let qdir_c = bytes_to_cstring_trunc(dir.as_os_str().as_bytes());
+        #[derive(Default)]
+        struct Msgs(Vec<(i32, i32, i32, Vec<u8>)>, usize);
+        impl DiskStateHost for Msgs {
+            fn log(&mut self, _level: DiskLogLevel, _msg: &[u8]) {
+                self.1 += 1;
+            }
+            fn ctrl(&mut self, cmd: DiskCtrl<'_>) -> i32 {
+                if let DiskCtrl::AddMessage { nzb_id, kind, time, text } = cmd {
+                    self.0.push((nzb_id, kind, time, text.to_vec()));
+                }
+                0
+            }
+        }
+        let long = "x".repeat(2000);
+        let written: [(i32, i32, &str); 3] = [
+            (0, 1_794_695_899, "Collection Example.Release added to history"),
+            (2, 1_794_695_900, "Par-check failed:\tbad\nblocks"),
+            (1, 1_794_695_901, long.as_str()),
+        ];
+        let mut msgs = Msgs::default();
+        for (kind, time, text) in written {
+            let time_c = std::ffi::CString::new(log_line_time(time)).unwrap();
+            let text_c = std::ffi::CString::new(text).unwrap();
+            let mut env = NzbgetRsDiskStateEnv::new(&mut msgs);
+            env.queue_dir = qdir_c.as_ptr();
+            env.sep = b'/' as c_int;
+            env.line_ending = c"\n".as_ptr();
+            env.time_str = time_c.as_ptr();
+            env.text = text_c.as_ptr();
+            assert_eq!(
+                unsafe { diskstate_exec(DiskOp::AppendNzbMessage { nzb_id: 42, kind, time }, &env) },
+                1
+            );
+        }
+        let file = std::fs::read(dir.join("n42.log")).unwrap();
+        assert!(file.starts_with(&log_line_time(1_794_695_899)));
+        assert!(!log_line_time(1_794_695_899).is_empty());
+        {
+            let mut env = NzbgetRsDiskStateEnv::new(&mut msgs);
+            env.queue_dir = qdir_c.as_ptr();
+            env.sep = b'/' as c_int;
+            assert_eq!(unsafe { diskstate_exec(DiskOp::LoadNzbMessages { nzb_id: 42 }, &env) }, 1);
+        }
+        let texts: Vec<(i32, i32, i32, Vec<u8>)> = std::mem::take(&mut msgs.0);
+        assert_eq!(texts.len(), 3);
+        assert_eq!(texts[0], (1, 0, 1_794_695_899, b"Collection Example.Release added to history".to_vec()));
+        assert_eq!(texts[1], (2, 2, 1_794_695_900, b"Par-check failed: bad blocks".to_vec()));
+        assert_eq!((texts[2].0, texts[2].1, texts[2].2), (3, 1, 1_794_695_901));
+        assert_eq!(texts[2].3, vec![b'x'; 1023]);
+        // another download has no log file: nothing, and no error
+        {
+            let mut env = NzbgetRsDiskStateEnv::new(&mut msgs);
+            env.queue_dir = qdir_c.as_ptr();
+            env.sep = b'/' as c_int;
+            assert_eq!(unsafe { diskstate_exec(DiskOp::LoadNzbMessages { nzb_id: 43 }, &env) }, 1);
+            assert_eq!(unsafe { diskstate_exec(DiskOp::DeleteNzbLog { nzb_id: 42 }, &env) }, 1);
+        }
+        assert!(msgs.0.is_empty());
+        assert_eq!(msgs.1, 0);
+        assert!(!dir.join("n42.log").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

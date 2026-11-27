@@ -2294,7 +2294,10 @@ impl QueueSubsysHost {
 
     pub fn nzb_copy_cached_messages_silent(&self, dst_nzb: NzbRef, src_nzb: NzbRef) {
         if self.use_active {
-            crate::qnzb::copy_cached_messages(dst_nzb, src_nzb);
+            let (time, copied) = crate::qnzb::copy_cached_messages(dst_nzb, src_nzb);
+            for (kind, text) in copied {
+                unsafe { crate::qqueue::keep_nzb_message(dst_nzb.addr(), kind, time, text.as_bytes()) };
+            }
         }
     }
 

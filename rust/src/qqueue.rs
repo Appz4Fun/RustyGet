@@ -610,13 +610,34 @@ pub unsafe fn nzb_message(nzb: usize, kind: i32, add: bool, msg: &[u8]) {
     }
     let log_buffer = crate::options::active_options().map_or(0, |o| o.scalars().log_buffer);
     let kept = std::ffi::CString::new(text).unwrap_or_default();
+    let time = i64::from(now() as c_int);
     crate::qnzb::add_message(
         crate::queuesubsys_host::NzbRef::from_addr(nzb),
         kind,
         kept,
-        i64::from(now() as c_int),
+        time,
         log_buffer,
     );
+    unsafe { keep_nzb_message(nzb, kind, time, text) };
+}
+
+/// Keeps a message the download logged in its log file as well as in
+/// memory: the in-memory log is gone after a restart, and a finished or
+/// failed download in History must still show what happened to it.
+///
+/// # Safety
+/// `nzb` is 0 or a live collection.
+pub unsafe fn keep_nzb_message(nzb: usize, kind: i32, time: i64, text: &[u8]) {
+    if nzb == 0 {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        let id = unsafe { (*(nzb as *const NzbScalars)).id };
+        if crate::diskstate_format::append_active_nzb_message(id, kind, time as c_int, text) {
+            crate::qnzb::count_logged_message(crate::queuesubsys_host::NzbRef::from_addr(nzb));
+        }
+    }
 }
 
 /// Starts a collection's live-repair job.

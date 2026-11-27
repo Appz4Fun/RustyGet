@@ -5,7 +5,7 @@
 #
 # A missing mold is an error, never a silent fallback to another linker, so a build
 # host without it is noticed and fixed instead of quietly building slower.
-if ! command -v mold >/dev/null 2>&1; then
+if ! command -v ld.mold >/dev/null 2>&1; then
     echo "error: RustyGet links Linux builds with mold, which is not installed." >&2
     echo "       Debian/Ubuntu: sudo apt install mold    Fedora: sudo dnf install mold" >&2
     echo "       Arch: sudo pacman -S mold    (see site/content/install.md)" >&2

@@ -2,7 +2,9 @@
 # install hint when mold is missing. The wrapper is set as the linker rather than through
 # `rustflags`, because an environment RUSTFLAGS (`-D warnings`, the `-C target-cpu` tiers
 # set by `just build`) replaces config rustflags and would silently drop the linker choice.
-# Cargo resolves this relative path against the repository root. macOS keeps Apple's linker.
+# Cargo resolves this relative path against the repository root. Cargo reads this file only
+# when it runs inside the repository (cwd, not --manifest-path, decides), so run it from here;
+# `just`, build-deb.sh and the harnesses do. macOS keeps Apple's linker.
 [target.x86_64-unknown-linux-gnu]
 linker = "scripts/link-mold.sh"
 

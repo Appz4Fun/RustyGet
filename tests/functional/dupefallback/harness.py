@@ -12760,6 +12760,112 @@ def scenario_liveparheldvolume(daemon, t):
             'volumes_fetched=%s io=%s' % (h['Status'], intact, live, batch, fetched, io))
 
 
+def _livepar_rar_run(daemon, t, tag, seed, missing, corrupt=None, recovery=24):
+    """A RAR set under the production options with live PAR: 8 store-mode volumes of
+    movie.mkv (real CRCs, so direct unpack extracts it while it downloads) and a par2 set of
+    64 KiB blocks with <recovery> recovery blocks in two volumes. <missing> maps a volume
+    number to the article numbers it loses; <corrupt> = (volume, article) is served from a
+    copy of the volume with 4 KiB XOR-ed, its yEnc CRC still valid (a provider's bad copy:
+    only par2 or the archive checksums catch it). Returns (history, extracted intact,
+    post-processing par-check lines, par-rename missing lines, post-processing loads of the
+    par2 index, seconds from the end of the download to the history entry)."""
+    import subprocess as _sp
+    seg = 100_000
+    movie = _payload(6_000_000, seed)
+    vols = generators.rar3_store_volumes_valid('movie.mkv', movie, 800_000)
+    work = t.path('data', tag)
+    os.makedirs(work, exist_ok=True)
+    names = []
+    for i, data in enumerate(vols):
+        name = 'Rel.part%02d.rar' % (i + 1)
+        t.write_file(os.path.join('data', tag, name), data)
+        names.append(name)
+    _sp.run(['par2', 'create', '-q', '-q', '-s65536', '-c%d' % recovery, '-n2', '-a', 'Rel',
+             'Rel.par2'] + names, cwd=work, check=True, capture_output=True)
+    members = [('%s/%s' % (tag, n), n, os.path.getsize(os.path.join(work, n)), seg, set())
+               for n in sorted(n for n in os.listdir(work) if n.endswith('.par2'))]
+    members += [('%s/%s' % (tag, n), n, len(vols[i]), seg, set(missing.get(i, ())))
+                for i, n in enumerate(names)]
+    nzb = build_multi_nzb(members)
+    if corrupt:
+        vol, part = corrupt
+        bad = bytearray(vols[vol])
+        start = (part - 1) * seg + 1000
+        for k in range(start, start + 4096):
+            bad[k] ^= 0x5A
+        t.write_file(os.path.join('data', tag, 'bad%d' % vol), bytes(bad))
+        old = '>%s/%s?%d=' % (tag, names[vol], part)
+        assert old in nzb
+        nzb = nzb.replace(old, '>%s/bad%d?%d=' % (tag, vol, part))
+    api = daemon.wait_ready()
+    name = 'Rel' + tag
+    daemon.append(api, name, nzb, False, tag + '-key', 100)
+    deadline = time.time() + 300
+    end = None
+    h = None
+    while time.time() < deadline:
+        h = next((x for x in api.history() if x.get('NZBName') == name), None)
+        if h:
+            break
+        g = next((g for g in api.listgroups() if g['NZBName'] == name), None)
+        if end is None and (g is None or str(g.get('Status', '')).startswith('PP_')):
+            end = time.time()
+        time.sleep(0.1)
+    if h is None:
+        raise RuntimeError('timeout waiting for %s in history' % name)
+    done = time.time()
+    intact = _verify_output(t, movie, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
+    log = t.read_file('nzbget.log').decode(errors='replace')
+    # The par-check's own lines: "Verifying <nzb>/<par2 set>", one per verified file
+    # ("Verifying file"/quick checks are progress, not log lines), "Repair not needed".
+    verify = log.count('Verifying %s/' % name) + log.count('Repair not needed for %s/' % name)
+    missing_lines = len(re.findall(r'File Rel\.part\d+\.rar is missing', log))
+    # Post-processing loads of the par2 index: par-rename's ("Loaded par2-file") and the
+    # par-check's ("Loading file X.par2"). Once is par-rename alone.
+    loads = len(re.findall(r'Loaded par2-file [^\n]* for par-rename', log)) + \
+        len(re.findall(r'Loading file [^\n]*\.par2', log))
+    return h, intact, verify, missing_lines, loads, (round(done - end, 2) if end else None)
+
+
+def scenario_liveparrarclean(daemon, t):
+    """A clean RAR set with live PAR on (6790 audit, finding 3): every slice verified as
+    it arrived, direct unpack extracted it while it downloaded. Post-processing runs no
+    par-check (no "Verifying"/"Repair not needed" for the set), par-rename reports no
+    volume missing (it read the queue's printed 16k hashes backwards before) and loads the
+    par2 index once, and the statuses are nzbget's for a clean download with ParCheck=auto:
+    SUCCESS, ParStatus NONE (par-check not needed), UnpackStatus SUCCESS."""
+    h, intact, verify, missing, loads, end_s = _livepar_rar_run(daemon, t, 'lrc', 13710, {})
+    ok = (h['Status'].startswith('SUCCESS') and intact and verify == 0 and missing == 0
+          and loads == 1 and h['ParStatus'] == 'NONE' and h['UnpackStatus'] == 'SUCCESS')
+    return ('liveparrarclean', ok, 'status=%s par=%s unpack=%s intact=%s par_check_lines=%d '
+            'missing_lines=%d par2_loads=%d end_to_history_s=%s'
+            % (h['Status'], h['ParStatus'], h['UnpackStatus'], intact, verify, missing, loads, end_s))
+
+
+def scenario_liveparrartrust(daemon, t):
+    """A damaged RAR set with live PAR on (6790 audit, finding 3): three articles lost in
+    two volumes and one served corrupt (valid yEnc CRC) in a third, so direct unpack stops
+    at the bad bytes. Live PAR verifies every slice as it arrives and repairs the damage
+    as the download ends; post-processing trusts that verified state: no par-check reads
+    the set again (no "Verifying"/"Repair not needed" for the set; before, par-rename
+    reported the volumes missing and a full par verify of every volume followed), par-rename
+    reports no volume missing, the par2 index is loaded once (by par-rename; before, the
+    par-check loaded it and both recovery volumes again), and the statuses are what nzbget
+    shows after a par-repair:
+    SUCCESS, ParStatus SUCCESS, UnpackStatus SUCCESS, the movie byte-exact."""
+    h, intact, verify, missing, loads, end_s = _livepar_rar_run(daemon, t, 'lrt', 13720,
+                                                         {1: {3}, 4: {2, 6}}, corrupt=(6, 4))
+    live = _grep_log(t, 'Live par-repair for Rellrt')
+    trusted = _grep_log(t, 'live PAR verified every file')
+    ok = (h['Status'].startswith('SUCCESS') and intact and verify == 0 and missing == 0
+          and live >= 1 and trusted == 1 and loads == 1
+          and h['ParStatus'] == 'SUCCESS' and h['UnpackStatus'] == 'SUCCESS')
+    return ('liveparrartrust', ok, 'status=%s par=%s unpack=%s intact=%s live_repairs=%d trusted=%d '
+            'par_check_lines=%d missing_lines=%d par2_loads=%d end_to_history_s=%s'
+            % (h['Status'], h['ParStatus'], h['UnpackStatus'], intact, live, trusted, verify, missing,
+               loads, end_s))
+
+
 def scenario_parinplace(daemon, t):
     """The batch fallback (live PAR off) repairs in place: only the damaged blocks are
     written into the damaged files, no full-size backup copy is made, and the phase
@@ -15426,6 +15532,8 @@ SCENARIOS = {
     'livepargrow': scenario_livepargrow,
     'liveparzeroreads': scenario_liveparzeroreads,
     'liveparheldvolume': scenario_liveparheldvolume,
+    'liveparrarclean': scenario_liveparrarclean,
+    'liveparrartrust': scenario_liveparrartrust,
     'livepartrusted': scenario_livepartrusted,
     'livepartrustedtemp': scenario_livepartrustedtemp,
     'parinplace': scenario_parinplace,
@@ -15892,6 +16000,8 @@ SCENARIO_OPTIONS = {
     'liveparheldvolume': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
     'livepartrusted': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
     'livepartrustedtemp': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=0', 'DirectWrite=no'],
+    'liveparrarclean': PROD_OPTIONS + ['LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes', 'UnpackCleanupDisk=no'],
+    'liveparrartrust': PROD_OPTIONS + ['LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes', 'UnpackCleanupDisk=no'],
     'parinplace': ['ParCheck=auto', 'LiveParRepair=no'],
     'parlesscritical': ['HealthCheck=dupe', 'DupeArticleFallback=no'],
     'parlesstwin': ['HealthCheck=dupe', 'DupeArticleFallback=no'],

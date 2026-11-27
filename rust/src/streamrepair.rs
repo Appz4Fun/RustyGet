@@ -8728,6 +8728,19 @@ fn guarded_donor_write(
     use std::io::{Seek, SeekFrom, Write};
     let offset = u64::try_from(offset).map_err(|_| std::io::ErrorKind::InvalidInput)?;
     let _permit = context.descriptor_permit(file)?;
+    // Borrowed bytes of a dead volume go to its scratch file, which is no file of the par2
+    // set: live PAR never reads it, so writing it must not stop live PAR (it did, at every
+    // borrowed article: the set was then verified again whole after the download).
+    if context.names_scratch_file() {
+        return file
+            .seek(SeekFrom::Start(offset))
+            .and_then(|position| {
+                if position != offset {
+                    return Err(std::io::Error::other("seek mismatch"));
+                }
+                file.write_all(data).and_then(|()| file.flush())
+            });
+    }
     // A live PAR session reading this download takes the patch in once it is on disk (it
     // re-verifies the slices the range touches); without one, or when it cannot reconcile
     // the new bytes, the file's identity changes as before and live PAR stops.
@@ -11278,6 +11291,26 @@ impl CrossPackRepairSession {
                     msg.extend_from_slice(name);
                     msg.extend_from_slice(b" from a duplicate; direct unpack reads it in place");
                     emit(TargetMessageKind::Info, &msg);
+                    if d.on_disk_target.is_none() {
+                        let (kind, tell): (_, Vec<u8>) = match self.write_live_volume(&d) {
+                            Ok(true) => (
+                                TargetMessageKind::Info,
+                                b" written as posted (headers rebuilt from a sibling) for live PAR to verify".to_vec(),
+                            ),
+                            Ok(false) => (
+                                TargetMessageKind::Detail,
+                                b" written as posted, but live PAR could not take it in: par-check verifies it".to_vec(),
+                            ),
+                            Err(e) => (
+                                TargetMessageKind::Detail,
+                                format!(" left as borrowed only ({e}): par-check verifies it").into_bytes(),
+                            ),
+                        };
+                        let mut msg = b"Dead volume ".to_vec();
+                        msg.extend_from_slice(name);
+                        msg.extend_from_slice(&tell);
+                        emit(kind, &msg);
+                    }
                 }
                 Err(e) => {
                     // A volume handed over with holes is still read through its scratch file.
@@ -11386,43 +11419,8 @@ impl CrossPackRepairSession {
             hasher.update(&buf[..n]);
         }
         let part_crc = hasher.finalize();
+        let (head, tail) = self.faithful_volume_frame(d, part_crc)?;
         let at = d.template_data_offset as u64;
-        let end = at + d.template_packed as u64;
-        let mut sibling = std::fs::File::open(crate::fsops::path(&path_of(d.template_member)))
-            .map_err(io("sibling volume"))?;
-        let sibling_len = sibling.metadata().map_err(io("sibling volume"))?.len();
-        if end > sibling_len || sibling_len - end > 1 << 24 {
-            return Err("sibling volume changed".into());
-        }
-        // The sibling's framing is copied: none of it may be a hole of its own.
-        let sibling_holes = self
-            .member_targets
-            .get(d.template_member as usize)
-            .filter(|&&t| t >= 0)
-            .and_then(|&t| self.target_holes.get(t as usize))
-            .map_or(&[][..], |h| h.as_slice());
-        if sibling_holes.iter().any(|h| {
-            h.size > 0 && (h.offset < at as i64 || h.offset + h.size > end as i64)
-        }) {
-            return Err("the sibling's headers or tail are not all there".into());
-        }
-        let mut sib_head = vec![0u8; at as usize];
-        sibling.read_exact(&mut sib_head).map_err(io("sibling volume"))?;
-        let mut sib_tail = Vec::new();
-        sibling.seek(SeekFrom::Start(end)).map_err(io("sibling volume"))?;
-        sibling.read_to_end(&mut sib_tail).map_err(io("sibling volume"))?;
-        let (head, tail) = crate::deadvolume::faithful_frame(
-            5,
-            &sib_head,
-            &sib_tail,
-            d.template_index,
-            d.index,
-            part_crc,
-        )
-        .map_err(|e| e.to_string())?;
-        if head.len() as u64 != at {
-            return Err(format!("rebuilt headers are {} bytes, the sibling's {at}", head.len()));
-        }
         let mut f = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -11602,6 +11600,237 @@ impl CrossPackRepairSession {
             let _ = std::fs::remove_file(&v.data);
         }
         Ok(())
+    }
+
+    /// The exact headers and tail of RAR5 dead volume `d`, whose part has checksum `part_crc`,
+    /// rebuilt from its sibling's (see [`crate::deadvolume::faithful_frame`]): the sibling's
+    /// framing must all be there, and the rebuilt headers as long as the sibling's.
+    fn faithful_volume_frame(&self, d: &DeadFill, part_crc: u32) -> Result<(Vec<u8>, Vec<u8>), String> {
+        use std::io::{Read, Seek, SeekFrom};
+        let path_of = |m: i32| {
+            crate::artwritercore::article_writer_format_dest_file_path(
+                &self.dest_dir,
+                std::path::MAIN_SEPARATOR as u8,
+                &self.set_members[m as usize].name,
+            )
+        };
+        fn io(what: &'static str) -> impl Fn(std::io::Error) -> String {
+            move |e| format!("{what}: {e}")
+        }
+        let at = d.template_data_offset as u64;
+        let end = at + d.template_packed as u64;
+        let mut sibling = std::fs::File::open(crate::fsops::path(&path_of(d.template_member)))
+            .map_err(io("sibling volume"))?;
+        let sibling_len = sibling.metadata().map_err(io("sibling volume"))?.len();
+        if end > sibling_len || sibling_len - end > 1 << 24 {
+            return Err("sibling volume changed".into());
+        }
+        // The sibling's framing is copied: none of it may be a hole of its own.
+        let sibling_holes = self
+            .member_targets
+            .get(d.template_member as usize)
+            .filter(|&&t| t >= 0)
+            .and_then(|&t| self.target_holes.get(t as usize))
+            .map_or(&[][..], |h| h.as_slice());
+        if sibling_holes.iter().any(|h| {
+            h.size > 0 && (h.offset < at as i64 || h.offset + h.size > end as i64)
+        }) {
+            return Err("the sibling's headers or tail are not all there".into());
+        }
+        let mut sib_head = vec![0u8; at as usize];
+        sibling.read_exact(&mut sib_head).map_err(io("sibling volume"))?;
+        let mut sib_tail = Vec::new();
+        sibling.seek(SeekFrom::Start(end)).map_err(io("sibling volume"))?;
+        sibling.read_to_end(&mut sib_tail).map_err(io("sibling volume"))?;
+        let (head, tail) = crate::deadvolume::faithful_frame(
+            5,
+            &sib_head,
+            &sib_tail,
+            d.template_index,
+            d.index,
+            part_crc,
+        )
+        .map_err(|e| e.to_string())?;
+        if head.len() as u64 != at {
+            return Err(format!("rebuilt headers are {} bytes, the sibling's {at}", head.len()));
+        }
+        Ok((head, tail))
+    }
+
+    /// Writes RAR5 dead volume `d`, borrowed whole and handed to direct unpack, as the real
+    /// volume at its own path, byte for byte as posted (headers and tail rebuilt exactly from
+    /// its sibling's, [`Self::faithful_volume_frame`]), and hands it to the live PAR session
+    /// that watches the download, which verifies its slices as if it had downloaded. Live PAR
+    /// then covers the whole set and no par-check reads it again after the download; left
+    /// under its scratch name only, the volume counted as missing, and the post-job par-check
+    /// verified every volume (4.5-5.1 GB read again at 4 GiB) to rebuild it.
+    ///
+    /// Direct unpack goes on reading the stand-in (its scratch file stays until direct unpack
+    /// forgets its holds): its headers may be laid out otherwise. Written under a temporary
+    /// name and linked into place, so the volume is either absent or whole, and never over a
+    /// file that reached the disk meanwhile (a live repair, say). The one file it is written
+    /// into is the empty repair target live PAR's admission created for it (a live repair
+    /// that could not run yet keeps it): filled in place under the write permit, which no
+    /// live repair runs through, and emptied again if the fill fails. A crash during that
+    /// fill leaves a partial volume at its name, which the par-check repairs. Refused for a sibling whose
+    /// tail holds more than the quick-open copy (a recovery record). `Ok(true)` when
+    /// live PAR took it in, `Ok(false)` when it could not (the par-check verifies it then).
+    fn write_live_volume(&self, d: &DeadFill) -> Result<bool, String> {
+        use std::io::{Read, Write};
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        const CHUNK: usize = 1 << 20;
+        if d.version != 5 || d.last {
+            return Err("only a RAR5 volume in front of the last is rebuilt exactly".into());
+        }
+        if d.packed != d.template_packed {
+            return Err("its part is not the size of the sibling's".into());
+        }
+        let target = crate::fsops::path(&d.volume_path).to_path_buf();
+        // Either nothing of the volume is on disk, or only the empty file live PAR's repair
+        // admission created to rebuild it into (no slice of it was ever written).
+        let empty_target = |target: &std::path::Path| -> Result<Option<std::fs::Metadata>, String> {
+            match std::fs::symlink_metadata(target) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Ok(meta) if meta.file_type().is_file() && meta.len() == 0 => Ok(Some(meta)),
+                _ => Err("something of it is on disk already".into()),
+            }
+        };
+        empty_target(&target)?;
+        let dir = target.parent().ok_or("the volume has no folder")?;
+        let leaf = target.file_name().ok_or("the volume has no name")?;
+        let context = self
+            .target_files
+            .write_root
+            .as_ref()
+            .map(|root| root.for_path(&target))
+            .ok_or("no write permission for the volume")?;
+        if !context.watched_by_live_par() {
+            return Err("no live PAR session reads the download".into());
+        }
+        let data_path = crate::artwritercore::article_writer_format_dest_file_path(
+            &self.dest_dir,
+            std::path::MAIN_SEPARATOR as u8,
+            &self.set_members[d.member as usize].name,
+        );
+        let mut data = std::fs::File::open(crate::fsops::path(&data_path))
+            .map_err(|e| format!("borrowed data: {e}"))?;
+        if data.metadata().map_err(|e| format!("borrowed data: {e}"))?.len() != d.packed as u64 {
+            return Err("the borrowed data is not the part's size".into());
+        }
+        let mut buf = vec![0u8; CHUNK];
+        let mut hasher = crc32fast::Hasher::new();
+        loop {
+            let n = data.read(&mut buf).map_err(|e| format!("borrowed data: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        let (head, tail) = self.faithful_volume_frame(d, hasher.finalize())?;
+        // Nothing arrived of the volume to check the rebuilt frame against: only a tail that
+        // holds nothing but the quick-open copy (resealed for this part) is rebuilt exactly.
+        // A recovery record there belongs to the sibling.
+        if !crate::deadvolume::rar5_tail_is_rebuilt(&tail) {
+            return Err("the sibling's tail holds records that cannot be rebuilt".into());
+        }
+        // The same barrier as every donor write, held through the link and live PAR's
+        // reading: no write to a file live PAR has sealed, none during a live repair (one
+        // running is waited for: this is the one chance to hand the volume to live PAR).
+        let _permit = context
+            .permit()
+            .map_err(|blocked| format!("the volume is not writable now ({blocked:?})"))?;
+        // A live repair waited for may have rebuilt the volume meanwhile: it stays.
+        let in_place =
+            empty_target(&target).map_err(|_| "the volume reached the disk meanwhile".to_string())?;
+        // Leftovers of an earlier write of this volume (a crash) go first.
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            let mut suffix = std::ffi::OsString::from("-");
+            suffix.push(leaf);
+            suffix.push(".tmp");
+            let suffix = suffix.to_string_lossy().into_owned();
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with(".rustyget-dead-") && name.ends_with(&suffix) {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+        let mut temp_name = std::ffi::OsString::from(format!(
+            ".rustyget-dead-{}-{}-",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        temp_name.push(leaf);
+        temp_name.push(".tmp");
+        let temp = dir.join(temp_name);
+        let total = head.len() as u64 + d.packed as u64 + tail.len() as u64;
+        let mut fill = |out: &mut std::fs::File| -> std::io::Result<()> {
+            use std::io::Seek;
+            out.write_all(&head)?;
+            data.seek(std::io::SeekFrom::Start(0))?;
+            let copied = std::io::copy(&mut (&mut data).take(d.packed as u64), out)?;
+            if copied != d.packed as u64 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "borrowed data is short",
+                ));
+            }
+            out.write_all(&tail)?;
+            out.sync_all()
+        };
+        if let Some(meta) = in_place {
+            // Live PAR's own empty repair target, no live repair running while the permit is
+            // held: filled where it is, never replaced, and only while it is still that empty
+            // file.
+            use std::os::unix::fs::MetadataExt;
+            let mut out = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&target)
+                .map_err(|e| e.to_string())?;
+            let now = out.metadata().map_err(|e| e.to_string())?;
+            if !now.file_type().is_file()
+                || now.len() != 0
+                || now.dev() != meta.dev()
+                || now.ino() != meta.ino()
+            {
+                return Err("the volume reached the disk meanwhile".into());
+            }
+            // A writer that wrote into the file meanwhile (permits are shared) shows as a
+            // length other than the volume's: the file is then handed to the par-check.
+            let filled = fill(&mut out).and_then(|()| match out.metadata()?.len() {
+                len if len == total => Ok(()),
+                _ => Err(std::io::Error::other("the file changed while it was filled")),
+            });
+            if let Err(e) = filled {
+                // Back to the empty target live PAR repairs into; if even that fails, live
+                // PAR stops trusting the file.
+                if out.set_len(0).and_then(|()| out.sync_all()).is_err() {
+                    context.invalidate();
+                }
+                return Err(e.to_string());
+            }
+            return Ok(context.range_replaced(0, total) && context.watched_by_live_par());
+        }
+        let written = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .and_then(|mut out| fill(&mut out));
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&temp);
+            return Err(e.to_string());
+        }
+        // Nothing of the volume ever reached the disk, so live PAR knew nothing of it: the
+        // new file is new data to it, not a changed source. Linked into place, never over a
+        // file that appeared after all.
+        let linked = std::fs::hard_link(&temp, &target);
+        let _ = std::fs::remove_file(&temp);
+        linked.map_err(|e| e.to_string())?;
+        if let Ok(folder) = std::fs::File::open(dir) {
+            let _ = folder.sync_all();
+        }
+        // `range_replaced` also says yes when no session is left to ask.
+        Ok(context.range_replaced(0, total) && context.watched_by_live_par())
     }
 
     /// The scratch file a dead volume's borrowed bytes are written to.
@@ -20266,6 +20495,38 @@ mod tests {
 mod live_donor_writer_tests {
     use super::*;
     use std::os::unix::ffi::OsStrExt;
+    #[test]
+    fn borrowed_bytes_into_a_scratch_file_leave_live_par_running() {
+        // prybar 4 GiB alt: every borrowed article written into a dead volume's scratch file
+        // stopped live PAR ("source identity changed: ...rustyget-deadvol-...data"), so the
+        // whole set was verified again after the download.
+        let run = |id: i32, leaf: &[u8]| -> (bool, Vec<u8>) {
+            let dir = std::env::temp_dir().join(format!(
+                "rustyget-scratch-write-{}-{}",
+                std::process::id(),
+                -id
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir(&dir).unwrap();
+            let path = dir.join(std::ffi::OsStr::from_bytes(leaf));
+            std::fs::write(&path, [0u8; 16]).unwrap();
+            let gate = crate::parlive::download_writes(id, &dir).unwrap();
+            gate.advance_generation(crate::parlive::SessionGeneration(1)).unwrap();
+            let context = crate::parlive::donor_write_context(&dir, &path).unwrap();
+            let mut file = std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
+            guarded_donor_write(&mut file, &context, 4, b"borrowed").unwrap();
+            let running = gate.advance_generation(crate::parlive::SessionGeneration(2)).is_ok();
+            let bytes = std::fs::read(&path).unwrap();
+            crate::parlive::forget_download_writes(id);
+            std::fs::remove_dir_all(dir).unwrap();
+            (running, bytes)
+        };
+        let mut want = vec![0u8; 16];
+        want[4..12].copy_from_slice(b"borrowed");
+        assert_eq!(run(-1900301, &crate::deadvolume::scratch_name(b"Rel.part13.rar")), (true, want.clone()));
+        // A file of the download itself still stops live PAR when it cannot take the patch in.
+        assert_eq!(run(-1900302, b"Rel.part13.rar"), (false, want));
+    }
     #[test]
     fn live_donor_actual_descriptor_mismatch_never_writes_other_file() {
         let dir =

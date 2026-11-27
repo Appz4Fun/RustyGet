@@ -1,4 +1,4 @@
-//! Donor articles fetched to map or sample a duplicate, kept on disk by message-id so no
+//! Donor articles fetched to map or sample a donor copy (a twin or alt), kept on disk by message-id so no
 //! later pass fetches them again.
 //!
 //! Mapping an alt walks every volume of its container (`ContentMapper::build_map_with_tls`):
@@ -101,9 +101,11 @@ fn remove_stale(base: &Path) {
     };
     for de in rd.flatten() {
         let name = de.file_name();
+        // `<prefix><pid>-<nonce>`
         let Some(pid) = name
             .to_str()
             .and_then(|n| n.strip_prefix(DIR_PREFIX))
+            .and_then(|p| p.split('-').next())
             .and_then(|p| p.parse::<i32>().ok())
         else {
             continue;
@@ -131,21 +133,46 @@ fn process_alive(_pid: i32) -> bool {
     true
 }
 
+/// A new directory only this user can enter, named for this process and a nonce: never one
+/// that exists already (another daemon's, a reused process id's, or one planted in a shared
+/// temp folder), and never through a symlink.
+fn create_private_dir(base: &Path) -> Option<PathBuf> {
+    use std::hash::{BuildHasher, Hasher};
+    for _ in 0..8 {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u128(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos()),
+        );
+        let dir = base.join(format!("{DIR_PREFIX}{}-{:016x}", std::process::id(), h.finish()));
+        let mut b = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            b.mode(0o700);
+        }
+        match b.create(&dir) {
+            Ok(()) => return Some(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
 fn store_dir(s: &mut Store) -> Option<PathBuf> {
     if let Some(d) = &s.dir {
         return Some(d.clone());
     }
-    let base = base_dir();
-    remove_stale(&base);
-    let dir = base.join(format!("{DIR_PREFIX}{}", std::process::id()));
-    if std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
-        // left by this process id before (a reused id after a restart): start empty
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-    std::fs::create_dir_all(&dir).ok()?;
+    let dir = create_private_dir(&base_dir())?;
     s.dir = Some(dir.clone());
     Some(dir)
 }
+
+/// Stores of earlier processes are removed once, before the first article is kept, outside
+/// the store's lock (a large one takes a while).
+static CLEANED: std::sync::Once = std::sync::Once::new();
 
 fn drop_entry(s: &mut Store, msg_id: &[u8]) {
     if let Some(e) = s.entries.remove(msg_id) {
@@ -160,10 +187,24 @@ fn key(msg_id: &[u8]) -> &[u8] {
     m.strip_suffix(b">").unwrap_or(m)
 }
 
-fn read_bounded(path: &Path, len: u64) -> Option<Vec<u8>> {
+/// The bytes of `path` as [`put`] wrote them for `msg_id` (the key's length in 4 bytes, the
+/// key, then `len` article bytes), or `None` unless it is a regular file of exactly that size
+/// holding that key: a file of another article is never served under this message-id.
+fn read_bounded(path: &Path, msg_id: &[u8], len: u64) -> Option<Vec<u8>> {
+    let head = 4 + msg_id.len() as u64;
     let mut f = std::fs::File::open(path).ok()?;
     let meta = f.metadata().ok()?;
-    if !meta.is_file() || meta.len() != len {
+    if !meta.is_file() || meta.len() != head + len {
+        return None;
+    }
+    let mut key_len = [0u8; 4];
+    f.read_exact(&mut key_len).ok()?;
+    let mut stored_key = vec![0u8; usize::try_from(u32::from_le_bytes(key_len)).ok()?];
+    if stored_key.len() != msg_id.len() {
+        return None;
+    }
+    f.read_exact(&mut stored_key).ok()?;
+    if stored_key != msg_id {
         return None;
     }
     let mut data = vec![0u8; usize::try_from(len).ok()?];
@@ -184,7 +225,7 @@ pub fn get(owner: i32, msg_id: &[u8]) -> Option<StoredArticle> {
         }
         (e.file.clone(), e.len, e.offset, e.file_size)
     };
-    match read_bounded(&file, len) {
+    match read_bounded(&file, msg_id, len) {
         Some(data) => {
             if let Some(s) = lock().as_mut() {
                 s.hits += 1;
@@ -200,6 +241,7 @@ pub fn get(owner: i32, msg_id: &[u8]) -> Option<StoredArticle> {
                 // only the entry that pointed at this file
                 if s.entries.get(msg_id).is_some_and(|e| e.file == file) {
                     drop_entry(s, msg_id);
+                    s.order.retain(|id| id.as_slice() != msg_id);
                 }
             }
             None
@@ -218,9 +260,10 @@ pub fn contains(msg_id: &[u8]) -> bool {
 /// Keeps an article fetched whole for `owner`. One already held only gains the owner.
 pub fn put(owner: i32, msg_id: &[u8], offset: i64, file_size: i64, data: &[u8]) {
     let msg_id = key(msg_id);
-    if msg_id.is_empty() || data.is_empty() || data.len() > STORE_MAX_ARTICLE {
+    if msg_id.is_empty() || msg_id.len() > 1024 || data.is_empty() || data.len() > STORE_MAX_ARTICLE {
         return;
     }
+    CLEANED.call_once(|| remove_stale(&base_dir()));
     let file = {
         let mut g = lock();
         let s = g.get_or_insert_with(Store::default);
@@ -241,7 +284,12 @@ pub fn put(owner: i32, msg_id: &[u8], offset: i64, file_size: i64, data: &[u8]) 
         .write(true)
         .create_new(true)
         .open(&file)
-        .and_then(|mut f| f.write_all(data));
+        .and_then(|mut f| {
+            let key_len = u32::try_from(msg_id.len()).unwrap_or(u32::MAX);
+            f.write_all(&key_len.to_le_bytes())?;
+            f.write_all(msg_id)?;
+            f.write_all(data)
+        });
     if written.is_err() {
         let _ = std::fs::remove_file(&file);
         return;

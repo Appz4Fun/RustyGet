@@ -5326,7 +5326,10 @@ def scenario_altfetchonce(daemon, t):
     bound = lost + edges + margin
     runs = _grep_log(t, 'Fetch cost of borrowing from Backup')
     stored = len(re.findall(r'[1-9]\d* from the fetched-article store', _log_text(t)))
-    ok = (integ and hp['Status'].startswith('SUCCESS') and again == 0 and not twice and served <= bound)
+    # two repair runs at least (one per hole), and a later one served from the store: the
+    # case the store exists for was exercised, not avoided
+    ok = (integ and hp['Status'].startswith('SUCCESS') and again == 0 and not twice and served <= bound
+          and runs >= 2 and stored >= 1)
     costs = [m.group(1, 2, 3, 4, 5) for m in re.finditer(
         r'Fetch cost of borrowing from Backup: ([\d.]+) MB.*?; (\d+) single.*?of (\d+) article.*?'
         r'(\d+) taken from memory(?:, (\d+) from the fetched-article store)?', _log_text(t))]

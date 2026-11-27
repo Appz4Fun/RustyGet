@@ -544,7 +544,7 @@ fn recent_single(msg_id: &[u8]) -> Option<FetchedDonorArticle> {
 }
 
 /// An article already fetched: from the memos of recent articles, or else from the store of
-/// donor articles fetched to map or sample a duplicate ([`crate::donorstore`], on disk, which
+/// donor articles fetched to map or sample a donor copy ([`crate::donorstore`], on disk, which
 /// `owner`, the download repaired, now also owns). The flag is true when the store served it.
 fn held_article(owner: i32, msg_id: &[u8]) -> Option<(FetchedDonorArticle, bool)> {
     if let Some(hit) = recent_single(msg_id) {

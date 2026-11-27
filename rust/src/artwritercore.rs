@@ -1235,6 +1235,13 @@ pub fn article_writer_flush_cache(
 /// `not_written` names each item counted (and discarded) without being written: one whose
 /// target live PAR has certified already. Its bytes never reached the file, so they must not
 /// be reported to live PAR as written.
+///
+/// `uncommitted` names each item whose write failed (a full disk, an I/O error): counted and
+/// discarded too, so the cache gives its memory back and a stop can finish, but its bytes
+/// are not on disk; the caller downloads the article again (see
+/// `queuecoord::articles_uncommitted`). The items after a failed write are not tried (on a full
+/// disk they would fail too) but handed back the same way, so none stays held in memory and
+/// what was written is still the items before the first failure.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn article_writer_flush_cache_guarded(
     items: &[ArticleWriterFlushItem<'_>],
@@ -1245,15 +1252,24 @@ pub(crate) fn article_writer_flush_cache_guarded(
     mut should_stop: impl FnMut() -> bool,
     mut discard: impl FnMut(usize),
     mut not_written: impl FnMut(usize),
+    mut uncommitted: impl FnMut(usize),
     mut log_error: impl FnMut(&[u8]),
 ) -> (i32, i64) {
     use std::io::{Seek, SeekFrom, Write};
     let mut count = 0;
     let mut size = 0;
+    let mut failed = 0;
     let mut direct_file = None;
     for (index, item) in items.iter().enumerate() {
         if should_stop() {
             break;
+        }
+        if failed > 0 {
+            failed += 1;
+            count += 1;
+            uncommitted(index);
+            discard(index);
+            continue;
         }
         if skip_disk_write {
             count += 1;
@@ -1309,7 +1325,12 @@ pub(crate) fn article_writer_flush_cache_guarded(
                     .create(true)
                     .truncate(true)
                     .open(crate::fsops::path(&temporary))?;
-                file.write_all(&item.segment_content[..length])?;
+                if let Err(error) = file.write_all(&item.segment_content[..length]) {
+                    // A short temporary would pass for the article later: it is fetched again.
+                    drop(file);
+                    let _ = std::fs::remove_file(crate::fsops::path(&temporary));
+                    return Err(error);
+                }
                 drop(file);
                 let source = std::ffi::CString::new(temporary)
                     .map_err(|_| std::io::ErrorKind::InvalidInput)?;
@@ -1326,20 +1347,35 @@ pub(crate) fn article_writer_flush_cache_guarded(
         }
         drop(permit);
         count += 1;
-        discard(index);
         match result {
-            Ok(()) => size += i64::from(item.segment_size),
+            Ok(()) => {
+                size += i64::from(item.segment_size);
+                discard(index);
+            }
             Err(error) => {
+                failed += 1;
                 let message = join_c_slices(&[
                     b"Could not commit cached article for ",
                     output_filename,
                     b": ",
                     error.to_string().as_bytes(),
+                    b"; it will be downloaded again",
                 ]);
                 log_error(&message);
-                break;
+                uncommitted(index);
+                discard(index);
             }
         }
+    }
+    if failed > 1 {
+        let message = join_c_slices(&[
+            b"Could not commit ",
+            (failed - 1).to_string().as_bytes(),
+            b" more cached articles for ",
+            output_filename,
+            b" after that failure; they will be downloaded again",
+        ]);
+        log_error(&message);
     }
     (count, size)
 }
@@ -2179,6 +2215,7 @@ mod tests {
             || false,
             |idx| discarded.push(idx),
             |idx| skipped.push(idx),
+            |_| panic!("a certified drop is not a failed write"),
             |_| panic!("certified discard is expected"),
         );
         assert_eq!(result, (1, 8));
@@ -2241,6 +2278,7 @@ mod tests {
                 || false,
                 |_| {},
                 |idx| skipped.push(idx),
+                |_| panic!("the write succeeds"),
                 |msg| errors.push(msg.to_vec()),
             );
             (result, skipped, errors)
@@ -2279,6 +2317,7 @@ mod tests {
             result_filename: None,
         }];
         let mut errors = 0;
+        let mut uncommitted = Vec::new();
         let result = article_writer_flush_cache_guarded(
             &items,
             true,
@@ -2288,6 +2327,7 @@ mod tests {
             || false,
             |_| assert_eq!(gate.status().active_writers, 0),
             |_| panic!("a failed write is not a certified drop"),
+            |idx| uncommitted.push(idx),
             |_| {
                 assert_eq!(gate.status().active_writers, 0);
                 assert!(!gate.is_current_generation(generation));
@@ -2296,6 +2336,7 @@ mod tests {
         );
         assert_eq!(result, (1, 0));
         assert_eq!(errors, 1);
+        assert_eq!(uncommitted, [0], "the failed article is handed back to be downloaded again");
         assert!(!path.exists());
         crate::parlive::forget_download_writes(-1900231);
         std::fs::remove_dir_all(dir).unwrap();

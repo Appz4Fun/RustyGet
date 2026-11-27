@@ -1102,6 +1102,245 @@ pub fn calc_propagation_wait_log_mins(
     (posted_min, start_min)
 }
 
+/// The counters a finished article whose bytes were lost (`articles_uncommitted`) changes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LostArticleCounters {
+    pub file_success_size: i64,
+    pub file_success_articles: i32,
+    pub file_failed_size: i64,
+    pub file_failed_articles: i32,
+    pub file_remaining_size: i64,
+    pub file_completed_articles: i32,
+    pub nzb_success_size: i64,
+    pub nzb_success_articles: i32,
+    pub nzb_par_success_size: i64,
+    pub nzb_failed_size: i64,
+    pub nzb_failed_articles: i32,
+    pub nzb_par_failed_size: i64,
+    pub nzb_remaining_size: i64,
+    pub nzb_paused_size: i64,
+}
+
+/// What becomes of a finished article whose cached bytes could not be written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LostArticle {
+    /// Back to not downloaded: the queue fetches it again (once the disk has room: the
+    /// `DiskSpace` pause holds downloading meanwhile).
+    Refetch,
+    /// Counted as failed (a hole par2 or a duplicate fills): the file's completion is already
+    /// decided (every article has its result), or the article was lost too often.
+    Fail,
+}
+
+/// How often one article may be lost and fetched again before it counts as failed: a disk
+/// that fails every write (DiskSpace=0 on a full disk) must not download it forever.
+pub const MAX_LOST_REFETCHES: u32 = 3;
+
+/// The fate of a lost article: `completed`/`total` its file's counts (the lost article still
+/// among the completed), `refetches` how often it was fetched again already, `open` whether
+/// the file still downloads (not deleted, not cut over to a donor: the pick never hands out
+/// articles of such a file, so a reset one would wait forever).
+pub fn lost_article_fate(completed: i32, total: i32, refetches: u32, open: bool) -> LostArticle {
+    if !open || completed >= total || refetches >= MAX_LOST_REFETCHES {
+        LostArticle::Fail
+    } else {
+        LostArticle::Refetch
+    }
+}
+
+/// Takes a lost finished article of `size` bytes out of the success counters, and puts it
+/// back to remaining (`Refetch`; to paused as well when its file is paused) or into the
+/// failed counters (`Fail`).
+pub fn apply_lost_article(
+    c: &mut LostArticleCounters,
+    size: i32,
+    par_file: bool,
+    file_paused: bool,
+    fate: LostArticle,
+) {
+    let size = i64::from(size.max(0));
+    c.file_success_size = (c.file_success_size - size).max(0);
+    c.file_success_articles = (c.file_success_articles - 1).max(0);
+    c.nzb_success_size = (c.nzb_success_size - size).max(0);
+    c.nzb_success_articles = (c.nzb_success_articles - 1).max(0);
+    if par_file {
+        c.nzb_par_success_size = (c.nzb_par_success_size - size).max(0);
+    }
+    match fate {
+        LostArticle::Refetch => {
+            c.file_remaining_size += size;
+            c.nzb_remaining_size += size;
+            if file_paused {
+                c.nzb_paused_size += size;
+            }
+            c.file_completed_articles = (c.file_completed_articles - 1).max(0);
+        }
+        LostArticle::Fail => {
+            c.file_failed_size += size;
+            c.file_failed_articles += 1;
+            c.nzb_failed_size += size;
+            c.nzb_failed_articles += 1;
+            if par_file {
+                c.nzb_par_failed_size += size;
+            }
+        }
+    }
+}
+
+/// How often each lost article (by download id, file id and part number) was fetched again.
+/// Bounded: cleared when it grows past `LOST_REFETCH_TRACKED`.
+static LOST_REFETCHES: std::sync::Mutex<Option<std::collections::HashMap<(i32, i32, i32), u32>>> =
+    std::sync::Mutex::new(None);
+const LOST_REFETCH_TRACKED: usize = 65536;
+
+/// Articles of file `file_id` that the cache flush counted as finished but could not write
+/// (a full disk, an I/O error; `article_ptrs`): their bytes are gone, so each goes back to
+/// the queue to be downloaded again, or, when that is no longer possible, counts as failed.
+/// Never leaves a hole counted as downloaded.
+///
+/// The caller still holds the cache flush lock (not the file's busy mark), and the flush left
+/// these articles in the file's cached count: a completion of this file that starts meanwhile
+/// sees cached articles, waits for the flush lock and so reads the articles' new status, never
+/// the finished one of bytes that are not on disk. The cached count is taken down here. Takes
+/// the queue lock. A file that left the queue (deleted) needs nothing. Returns how many
+/// articles were handed back (fetched again, failed).
+#[cfg(unix)]
+pub(crate) fn articles_uncommitted(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    file_id: i32,
+    article_ptrs: &[usize],
+) -> (u32, u32) {
+    use crate::queuesubsys_host as h;
+    host.with_locked_queue(|dq_ptr| {
+        // By file id across the queue: a split or merge may have moved the file to another job.
+        let Some(file_ptr) = (0..host.queue_len(dq_ptr))
+            .map(|i| host.queue_at(dq_ptr, i))
+            .flat_map(|n| (0..host.nzb_file_len(n)).map(move |j| host.nzb_file_at(n, j)))
+            .find(|&f| host.file_snap(f).id == file_id)
+        else {
+            return (0, 0);
+        };
+        let mut refetched = 0u32;
+        let mut failed = 0u32;
+        for &art_ptr in article_ptrs {
+            let Some((_, art)) = host.file_find_article(file_ptr, art_ptr) else {
+                continue;
+            };
+            if art.status != h::AI_FINISHED {
+                continue;
+            }
+            let file = host.file_snap(file_ptr);
+            let nzb = host.nzb_snap(file.nzb_ptr, false);
+            let open = !file.deleted && !file.dupe_deleted && !file.dupe_cutover;
+            let key = (nzb.id, file_id, art.part_number);
+            let fate = {
+                let mut g = LOST_REFETCHES.lock().unwrap_or_else(|e| e.into_inner());
+                let map = g.get_or_insert_with(Default::default);
+                if map.len() >= LOST_REFETCH_TRACKED {
+                    map.clear();
+                }
+                let n = map.entry(key).or_insert(0);
+                let fate =
+                    lost_article_fate(file.completed_articles, file.articles_len as i32, *n, open);
+                if fate == LostArticle::Refetch {
+                    *n += 1;
+                } else {
+                    map.remove(&key);
+                }
+                fate
+            };
+            let mut c = LostArticleCounters {
+                file_success_size: file.success_size,
+                file_success_articles: file.success_articles,
+                file_failed_size: file.failed_size,
+                file_failed_articles: file.failed_articles,
+                file_remaining_size: file.remaining_size,
+                file_completed_articles: file.completed_articles,
+                nzb_success_size: nzb.current_success_size,
+                nzb_success_articles: nzb.current_success_articles,
+                nzb_par_success_size: nzb.par_current_success_size,
+                nzb_failed_size: nzb.current_failed_size,
+                nzb_failed_articles: nzb.current_failed_articles,
+                nzb_par_failed_size: nzb.par_current_failed_size,
+                nzb_remaining_size: nzb.remaining_size,
+                nzb_paused_size: nzb.paused_size,
+            };
+            apply_lost_article(&mut c, art.size, file.par_file, file.paused, fate);
+            // As `count_as_failed`: a lost article no longer backs a live repair source claim,
+            // and a borrowed one no longer counts as recovered. A borrowed article keeps its
+            // donor's message id: donors lend one for one only as proven twins, so fetching it
+            // again from there gives the same bytes.
+            host.invalidate_source_replacement(file_ptr, art.ptr);
+            if !art.dupe_proactive
+                && !art.dupe_original_message_id.is_empty()
+                && art.message_id != art.dupe_original_message_id
+            {
+                host.file_set_int(
+                    file_ptr,
+                    h::FILE_INT_DUPE_RECOVERED_ARTICLES,
+                    file.dupe_recovered_articles.saturating_sub(1).max(0),
+                );
+                host.nzb_set_int(
+                    nzb.ptr,
+                    h::NZB_INT_DUPE_RECOVERED_ARTICLES,
+                    nzb.dupe_recovered_articles.saturating_sub(1).max(0),
+                );
+                if file.par_file {
+                    note_dupe_par_article(host, nzb.ptr, file_id, false);
+                }
+            }
+            match fate {
+                LostArticle::Refetch => {
+                    host.article_edit(art.ptr, crate::qarticle::ArticleEdit::ResetForRetry);
+                    refetched += 1;
+                }
+                LostArticle::Fail => {
+                    host.article_edit(art.ptr, crate::qarticle::ArticleEdit::Status(h::AI_FAILED));
+                    failed += 1;
+                }
+            }
+            host.file_set_i64(file_ptr, h::FILE_I64_SUCCESS_SIZE, c.file_success_size);
+            host.file_set_int(file_ptr, h::FILE_INT_SUCCESS_ARTICLES, c.file_success_articles);
+            host.file_set_i64(file_ptr, h::FILE_I64_FAILED_SIZE, c.file_failed_size);
+            host.file_set_int(file_ptr, h::FILE_INT_FAILED_ARTICLES, c.file_failed_articles);
+            host.file_set_i64(file_ptr, h::FILE_I64_REMAINING_SIZE, c.file_remaining_size);
+            host.file_set_int(file_ptr, h::FILE_INT_COMPLETED_ARTICLES, c.file_completed_articles);
+            host.file_set_int(file_ptr, h::FILE_INT_PARTIAL_CHANGED, 1);
+            host.nzb_set_i64(nzb.ptr, h::NZB_I64_CUR_SUCCESS_SIZE, c.nzb_success_size);
+            host.nzb_set_int(nzb.ptr, h::NZB_INT_CUR_SUCCESS_ARTICLES, c.nzb_success_articles);
+            host.nzb_set_i64(nzb.ptr, h::NZB_I64_PAR_CUR_SUCCESS_SIZE, c.nzb_par_success_size);
+            host.nzb_set_i64(nzb.ptr, h::NZB_I64_CUR_FAILED_SIZE, c.nzb_failed_size);
+            host.nzb_set_int(nzb.ptr, h::NZB_INT_CUR_FAILED_ARTICLES, c.nzb_failed_articles);
+            host.nzb_set_i64(nzb.ptr, h::NZB_I64_PAR_CUR_FAILED_SIZE, c.nzb_par_failed_size);
+            host.nzb_set_i64(nzb.ptr, h::NZB_I64_REMAINING_SIZE, c.nzb_remaining_size);
+            host.nzb_set_i64(nzb.ptr, h::NZB_I64_PAUSED_SIZE, c.nzb_paused_size);
+        }
+        // Only now, every lost article reset or failed: a completion that reads the cached
+        // count without the queue lock must not see it drop while one is still finished.
+        let cached = host.file_snap(file_ptr).cached_articles;
+        let lost_count = i32::try_from(article_ptrs.len()).unwrap_or(i32::MAX);
+        host.file_set_int(
+            file_ptr,
+            h::FILE_INT_CACHED_ARTICLES,
+            cached.saturating_sub(lost_count).max(0),
+        );
+        if refetched + failed > 0 {
+            let file = host.file_snap(file_ptr);
+            let mut msg = file.filename.clone();
+            msg.extend_from_slice(
+                format!(
+                    ": {} article(s) could not be written and will be downloaded again, {} counted as failed",
+                    refetched, failed
+                )
+                .as_bytes(),
+            );
+            host.nzb_print_message(file.nzb_ptr, h::MK_WARNING, &msg);
+            host.dq_save_changed(dq_ptr);
+        }
+        (refetched, failed)
+    })
+}
+
 /// Applies article completion success counters to file and NZB counters in `QueueCoordinator::ArticleCompleted`.
 #[allow(clippy::too_many_arguments)]
 #[inline]
@@ -7933,6 +8172,69 @@ type CopiesByKey = std::collections::HashMap<Vec<u8>, Vec<usize>>;
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_lost_article_is_fetched_again_until_the_file_is_decided_closed_or_it_was_lost_too_often() {
+        use super::{lost_article_fate, LostArticle, MAX_LOST_REFETCHES};
+        assert_eq!(lost_article_fate(5, 10, 0, true), LostArticle::Refetch);
+        assert_eq!(lost_article_fate(9, 10, MAX_LOST_REFETCHES - 1, true), LostArticle::Refetch);
+        assert_eq!(lost_article_fate(10, 10, 0, true), LostArticle::Fail, "completion is decided");
+        assert_eq!(lost_article_fate(5, 10, MAX_LOST_REFETCHES, true), LostArticle::Fail);
+        assert_eq!(lost_article_fate(5, 10, 0, false), LostArticle::Fail, "deleted or cut over");
+    }
+
+    #[test]
+    fn a_lost_article_leaves_the_success_counters() {
+        use super::{apply_lost_article, LostArticle, LostArticleCounters};
+        let base = LostArticleCounters {
+            file_success_size: 300,
+            file_success_articles: 3,
+            file_remaining_size: 700,
+            file_completed_articles: 3,
+            nzb_success_size: 1300,
+            nzb_success_articles: 13,
+            nzb_par_success_size: 50,
+            nzb_remaining_size: 5000,
+            nzb_paused_size: 40,
+            ..Default::default()
+        };
+        let mut c = base;
+        apply_lost_article(&mut c, 100, false, false, LostArticle::Refetch);
+        assert_eq!(
+            c,
+            LostArticleCounters {
+                file_success_size: 200,
+                file_success_articles: 2,
+                file_remaining_size: 800,
+                file_completed_articles: 2,
+                nzb_success_size: 1200,
+                nzb_success_articles: 12,
+                nzb_remaining_size: 5100,
+                ..base
+            }
+        );
+        let mut c = base;
+        apply_lost_article(&mut c, 50, true, true, LostArticle::Refetch);
+        assert_eq!((c.nzb_par_success_size, c.nzb_paused_size), (0, 90));
+        let mut c = base;
+        apply_lost_article(&mut c, 100, true, false, LostArticle::Fail);
+        assert_eq!(
+            c,
+            LostArticleCounters {
+                file_success_size: 200,
+                file_success_articles: 2,
+                file_failed_size: 100,
+                file_failed_articles: 1,
+                nzb_success_size: 1200,
+                nzb_success_articles: 12,
+                nzb_par_success_size: 0,
+                nzb_failed_size: 100,
+                nzb_failed_articles: 1,
+                nzb_par_failed_size: 100,
+                ..base
+            }
+        );
+    }
 
     /// Dune on 6790 (item 2): a 77% primary next to a held 100% alt of the
     /// same video switches while little of it came.

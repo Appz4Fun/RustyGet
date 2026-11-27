@@ -130,7 +130,11 @@ fn refresh(
         .fold(0i64, i64::saturating_add);
     // An item that is gone or has started is no longer held: log it again if it is held
     // again later.
-    b.logged.retain(|id| all.iter().any(|i| i.id == *id && !i.started));
+    if !b.logged.is_empty() {
+        let waiting: std::collections::HashSet<i32> =
+            all.iter().filter(|i| !i.started).map(|i| i.id).collect();
+        b.logged.retain(|id| waiting.contains(id));
+    }
 }
 
 /// The outcome of a budget check for one unstarted download.
@@ -168,6 +172,8 @@ fn check_with(
         return Verdict::Start;
     }
     if b.logged.insert(id) {
+        // Free: what the started downloads leave (DiskSpace and the reserve not taken off;
+        // they are in the need).
         let free = b.avail.saturating_sub(b.reserved).max(0);
         let mb = |v: i64| v / (1024 * 1024);
         return Verdict::Hold(Some((mb(need) + b.keep_mb, mb(free))));

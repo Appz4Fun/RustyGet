@@ -3191,6 +3191,8 @@ impl NzbgetRsQueueCoordinator {
         // The queue's copies by duplicate key, indexed once per call when first needed (see
         // `has_active_dupe`).
         let mut copies_by_key: Option<CopiesByKey> = None;
+        // Downloads the InterDir budget holds this call: the pick goes round without them.
+        let mut budget_held: Vec<NzbRef> = Vec::new();
 
         loop {
             let mut best_file: Option<(
@@ -3221,14 +3223,12 @@ impl NzbgetRsQueueCoordinator {
 
                 if nzb_higher
                     && !nzb_paused
+                    && !budget_held.contains(&nzb_ptr)
                     && !self.has_active_dupe(host, &queue, entry.snap(host), &mut copies_by_key)
                     && ((!opts.pause_download && !opts.quota_reached)
                         || entry.snap(host).force_priority)
                 {
                     let nzb = entry.snap(host);
-                    if !nzb.force_priority && !interdir_budget_admits(host, &queue, entry, cur_date) {
-                        continue;
-                    }
                     let propagation_delay = opts.propagation_delay;
                     let order = cached_live_order(&mut orders, host, nzb_ptr, nzb.id);
                     // A par2 file with articles to fetch seen earlier in the list: the window
@@ -3311,6 +3311,17 @@ impl NzbgetRsQueueCoordinator {
             };
             // The snapshot was taken at the start of the call (see `queue`).
             nzb = host.nzb_snap(nzb.ptr, false);
+
+            // The InterDir budget, for the download actually picked (checked earlier, a
+            // lower-priority item met first in the queue would take the room of a higher one).
+            if !nzb.force_priority {
+                if let Some(entry) = queue.iter().find(|e| e.ptr == nzb.ptr) {
+                    if !interdir_budget_admits(host, &queue, entry, cur_date) {
+                        budget_held.push(nzb.ptr);
+                        continue;
+                    }
+                }
+            }
 
             if opts.direct_rename
                 && nzb.direct_rename_status <= DirectRenameStatus::Running
@@ -7782,7 +7793,7 @@ fn interdir_budget_admits(
     entry: &PickEntry,
     now: i64,
 ) -> bool {
-    let Some((remaining, paused, success, failed, active)) = host.nzb_budget_fields(entry.ptr)
+    let Some((_, remaining, paused, success, failed, active)) = host.nzb_budget_fields(entry.ptr)
     else {
         return true;
     };
@@ -7795,9 +7806,10 @@ fn interdir_budget_admits(
         queue
             .iter()
             .filter_map(|e| {
-                let (remaining, paused, success, failed, active) = host.nzb_budget_fields(e.ptr)?;
+                let (id, remaining, paused, success, failed, active) =
+                    host.nzb_budget_fields(e.ptr)?;
                 Some(crate::interbudget::Item {
-                    id: e.snap(host).id,
+                    id,
                     remaining,
                     paused,
                     started: crate::interbudget::started(success, failed, active),

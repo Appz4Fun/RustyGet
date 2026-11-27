@@ -2137,9 +2137,9 @@ impl QueueSubsysHost {
         crate::qnzb::nzb_pick_fields(nzb_ptr).unwrap_or((0, false, 0))
     }
 
-    /// Remaining, paused, success and failed sizes and articles in flight, as `nzb_snap`
+    /// Id, remaining, paused, success and failed sizes and articles in flight, as `nzb_snap`
     /// has them, without the rest of the snapshot (the InterDir budget). None on a mock host.
-    pub fn nzb_budget_fields(&self, nzb_ptr: NzbRef) -> Option<(i64, i64, i64, i64, i32)> {
+    pub fn nzb_budget_fields(&self, nzb_ptr: NzbRef) -> Option<(i32, i64, i64, i64, i64, i32)> {
         if nzb_ptr.is_none() || !self.use_active {
             return None;
         }

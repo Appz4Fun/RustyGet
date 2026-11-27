@@ -222,6 +222,9 @@ fn destroy_instance() {
     if let Some(ws) = WORK_STATE.lock().unwrap_or_else(PoisonError::into_inner).take() {
         crate::ffi::uninstall_workstate(&ws);
     }
+    // Every queued state save runs now; one still failing (a full queue disk) makes the
+    // stop unclean: logged here, and the process exits with status 1.
+    crate::statesaver::stop_report();
     if let Some(opts) = OPTIONS.lock().unwrap_or_else(PoisonError::into_inner).take() {
         crate::options::release_options(opts);
     }

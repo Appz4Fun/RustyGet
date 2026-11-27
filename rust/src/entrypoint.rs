@@ -149,7 +149,13 @@ pub unsafe extern "C" fn nzbget_rs_main(
     }
 
     // 3. Lifecycle coordinator loop (4-Phase Lifecycle)
-    LifecycleManager::global().run_daemon_loop(argc, argv, argp)
+    let rc = LifecycleManager::global().run_daemon_loop(argc, argv, argp);
+    // A stop that left state files unsaved is not a clean exit (statesaver).
+    if rc == 0 && crate::statesaver::stopped_unclean() {
+        1
+    } else {
+        rc
+    }
 }
 
 #[cfg(test)]

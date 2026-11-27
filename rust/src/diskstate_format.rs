@@ -2111,15 +2111,20 @@ fn queue_file_path(qdir: &[u8], sep: u8, name: &[u8]) -> Vec<u8> {
     crate::artwritercore::article_writer_format_dest_file_path(qdir, sep, name)
 }
 
-/// Deletes a queue-dir file, in order with the saves queued for it (statesaver).
+/// Deletes a queue-dir file and its `.new` (a load would restore a `.new` found alone),
+/// in order with the saves queued for it (statesaver).
 fn remove_queue_file(qdir: &[u8], sep: u8, name: &[u8]) {
     let p = queue_file_path(qdir, sep, name);
     let job = crate::statesaver::Job {
         seq: 0,
-        temp: p.clone(),
+        temp: diskstate_format_new_path(&p),
         path: p,
         sep,
-        kind: crate::statesaver::JobKind::Delete { temp_too: false },
+        kind: crate::statesaver::JobKind::Delete {
+            temp_too: true,
+            after: None,
+        },
+        retry: Default::default(),
     };
     crate::statesaver::submit(job, &mut active_disk_log_cb);
 }
@@ -4560,6 +4565,30 @@ pub(crate) fn test_state_sync_delay() {
     }
 }
 
+/// A failed sync that may have lost the written data (`EIO`, a full disk or quota):
+/// the save fails. Others (a file system that cannot sync) only warn, as before.
+fn sync_lost_data(errno: i32) -> bool {
+    errno == libc::EIO || errno == libc::ENOSPC || errno == libc::EDQUOT
+}
+
+/// Unit-test hook: a write of a state file whose path ends with a name in
+/// `FAIL_WRITES` fails as on a full disk.
+#[cfg(test)]
+pub(crate) static FAIL_WRITES: std::sync::Mutex<Vec<Vec<u8>>> = std::sync::Mutex::new(Vec::new());
+
+fn test_state_write_fails(_path: &[u8]) -> Option<std::io::Error> {
+    #[cfg(test)]
+    if FAIL_WRITES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .any(|n| _path.ends_with(n))
+    {
+        return Some(std::io::Error::from_raw_os_error(libc::ENOSPC));
+    }
+    None
+}
+
 /// Writes or deletes one state file as `RsStateFile` always has: a transactional write
 /// goes to `<file>.new`, is synced (FlushQueue), renamed over the file, and the
 /// directory synced. Runs inline or on the `queue-saver` thread (statesaver).
@@ -4570,7 +4599,7 @@ pub(crate) fn run_state_job(
     let dest_c = bytes_to_cstring_trunc(&job.path);
     let temp_c = bytes_to_cstring_trunc(&job.temp);
     let (bytes, transactional, sync) = match &job.kind {
-        crate::statesaver::JobKind::Delete { temp_too } => {
+        crate::statesaver::JobKind::Delete { temp_too, .. } => {
             crate::fsops::delete_file(&dest_c);
             if *temp_too {
                 crate::fsops::delete_file(&temp_c);
@@ -4599,7 +4628,27 @@ pub(crate) fn run_state_job(
         return false;
     }
     let mut file: std::fs::File = unsafe { std::os::unix::io::FromRawFd::from_raw_fd(fd) };
-    let _ = file.write_all(bytes);
+    // A write cut short (6790: the queue disk full) is never renamed over the last good
+    // file: the temporary file goes and the save fails (statesaver retries it).
+    let written = test_state_write_fails(&job.path)
+        .map_or_else(|| file.write_all(bytes), Err);
+    if let Err(e) = written {
+        log(
+            DiskLogLevel::Error,
+            &[
+                b"Error saving diskstate: Could not write file ",
+                &job.temp[..],
+                b": ",
+                e.to_string().as_bytes(),
+            ]
+            .concat(),
+        );
+        drop(file);
+        if transactional {
+            crate::fsops::delete_file(&temp_c);
+        }
+        return false;
+    }
     if !transactional {
         return true;
     }
@@ -4617,6 +4666,23 @@ pub(crate) fn run_state_job(
         let fd = std::os::unix::io::AsRawFd::as_raw_fd(&file);
         test_state_sync_delay();
         if !crate::fsops::flush_file_buffers(fd, &mut errmsg) {
+            let errno = crate::fsops::last_errno();
+            if sync_lost_data(errno) {
+                // The data may not be on disk: keep the last good file.
+                log(
+                    DiskLogLevel::Error,
+                    &[
+                        b"Error saving diskstate: Could not flush file ",
+                        &job.temp[..],
+                        b" into disk: ",
+                        &errmsg,
+                    ]
+                    .concat(),
+                );
+                drop(file);
+                crate::fsops::delete_file(&temp_c);
+                return false;
+            }
             log(
                 DiskLogLevel::Warning,
                 &[
@@ -4632,7 +4698,7 @@ pub(crate) fn run_state_job(
 
     drop(file);
 
-    crate::fsops::delete_file(&dest_c);
+    // rename(2) replaces the last good file in one step: no moment without it.
     if !crate::fsops::move_file(&temp_c, &dest_c) {
         let err = crate::fsops::error_message(crate::fsops::last_errno());
         log(
@@ -4714,6 +4780,15 @@ impl RsStateFile {
     }
 
     fn discard(&self) {
+        self.discard_job(None);
+    }
+
+    /// Deletes the file once the save of `after` queued before has reached the disk.
+    fn discard_after(&self, after: &[u8]) {
+        self.discard_job(Some(after.to_vec()));
+    }
+
+    fn discard_job(&self, after: Option<Vec<u8>>) {
         let job = crate::statesaver::Job {
             seq: 0,
             path: self.dest.clone(),
@@ -4721,7 +4796,9 @@ impl RsStateFile {
             sep: self.sep,
             kind: crate::statesaver::JobKind::Delete {
                 temp_too: self.transactional,
+                after,
             },
+            retry: Default::default(),
         };
         crate::statesaver::submit(job, &mut active_disk_log_cb);
     }
@@ -4762,6 +4839,7 @@ impl RsStateFile {
                 transactional: self.transactional,
                 sync: self.flush && flush_queue,
             },
+            retry: Default::default(),
         };
         crate::statesaver::submit(job, &mut |level, msg| emit_log(env, level, msg))
     }
@@ -5673,7 +5751,7 @@ unsafe fn save_single_file_or_state(
     qdir: &[u8],
     sep: u8,
     part: FilePart,
-    replace: bool,
+    _replace: bool, // every save is transactional and unsynced now (see below)
 ) -> bool {
     let export_mode = match part {
         FilePart::Info => FileExport::InfoWithArticles,
@@ -5699,15 +5777,22 @@ unsafe fn save_single_file_or_state(
     } else {
         diskstate_format_file_state_name(file_id, part == FilePart::CompletedState)
     };
+    // Always written to `<file>.new` and renamed: a partial state (`<id>s`) written in
+    // place was cut short when the queue disk filled (6790), and the load then threw away
+    // every article it recorded (57 GB downloaded again). A write error now keeps the
+    // last good file. Not synced, as before: the partial states of every downloading
+    // file are saved each second, and a sync each (with the directory's) queued the
+    // saves behind one another (queuesyncslow: a thread waiting for its save waited
+    // seconds); rename over an existing file is ordered after its data on ext4.
     let mut sf = RsStateFile::new(
         qdir,
         sep,
         &fname,
         DISKSTATE_FILE_VERSION,
-        replace,
+        true,
         DISKSTATE_FILE_VERSION,
     );
-    sf.flush = !replace;
+    sf.flush = false;
     let Some(mut w) = (unsafe { sf.begin_write(env) }) else {
         return false;
     };
@@ -5741,7 +5826,9 @@ unsafe fn load_single_file_or_state(
         sep,
         &fname,
         DISKSTATE_FILE_VERSION,
-        false,
+        // Transactional: a `.new` left by a crash is dropped next to the file, or
+        // restored when it is all there is.
+        true,
         DISKSTATE_FILE_LEGACY_VERSION,
     );
     let Some(mut r) = (unsafe { sf.begin_read(env) }) else {
@@ -5871,6 +5958,10 @@ unsafe fn load_all_file_states_op(
     let cache_was_active = cache_was_active(qdir, sep);
 
     for filename in crate::fsops::list_dir_entries(qdir) {
+        // `<id>s.new` is a state's temporary file: read through its `<id>s` (begin_read).
+        if filename.contains(&b'.') {
+            continue;
+        }
         if let Some((id, suffix)) = diskstate_parse_queue_file_id_and_suffix(&filename) {
             if suffix == b'c' || (env.continue_partial != 0 && !cache_was_active) {
                 let found = call_ctrl(env, DiskCtrl::SelectFileWithCounters { file_id: id }) != 0;
@@ -6768,7 +6859,9 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                     true,
                     DISKSTATE_QUEUE_VERSION,
                 );
-                p_sf.discard();
+                // Obsolete once this queue save is on disk: deleted after it, never while it
+                // fails (statesaver retries it; the progress since the last good queue stays).
+                p_sf.discard_after(&q_sf.dest);
 
                 let last_nzb = call_ctrl(env, DiskCtrl::LastNzbId);
                 let last_file = call_ctrl(env, DiskCtrl::LastFileId);

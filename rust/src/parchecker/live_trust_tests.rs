@@ -1095,7 +1095,6 @@ fn an_unplanned_volume_mid_download_costs_one_back_fill_pass() {
         wait_backfill();
     }
     assert_eq!(backfill_read(), pass, "later volumes landed in spares");
-    let status = entry.session.status();
-    assert_eq!(status.ready_recovery, 6);
-    assert_eq!(status.damaged, 6);
+    // Six recovery blocks for six damaged slices: decode-ahead may already have rebuilt them.
+    assert_eq!(entry.session.status().ready_recovery, 6);
 }

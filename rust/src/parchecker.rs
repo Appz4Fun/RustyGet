@@ -7058,9 +7058,14 @@ mod tests {
         streaming_session_on_recovery_volume_arrived(nzb_id, &path, Some(9))
             .unwrap()
             .unwrap();
-        while entry.session.needs_backfill() {
+        // Bounded: since par-rs 985b373 a slice not on disk leaves it pending with Ok.
+        for _ in 0..8 {
+            if !entry.session.needs_backfill() {
+                break;
+            }
             entry.session.backfill_pending().unwrap();
         }
+        assert!(!entry.session.needs_backfill(), "back-fill still pending");
         let report = streaming_session_repair_available_targets_now(nzb_id, &[id0])
             .unwrap()
             .unwrap();
@@ -7238,9 +7243,14 @@ mod tests {
         let _ = streaming_session_poll(nzb_id, true);
         let more = streaming_session_take_unpause_ids(nzb_id);
         assert!(more.is_empty(), "nothing more fetched: {more:?}");
-        while entry.session.needs_backfill() {
+        // Bounded: since par-rs 985b373 a slice not on disk leaves it pending with Ok.
+        for _ in 0..8 {
+            if !entry.session.needs_backfill() {
+                break;
+            }
             entry.session.backfill_pending().unwrap();
         }
+        assert!(!entry.session.needs_backfill(), "back-fill still pending");
         let id0 = entry.session.file_id_by_name(b"part01.rar").unwrap();
         let report = streaming_session_repair_available_targets_now(nzb_id, &[id0])
             .unwrap()

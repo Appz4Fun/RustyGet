@@ -2868,8 +2868,10 @@ impl NzbgetRsQueueCoordinator {
             }
 
             // (a download held for its probe's connection resumes as soon as the probe has one)
-            let standby =
-                !article_downloads_running && !PROBE_HELD.load(std::sync::atomic::Ordering::Relaxed);
+            // (and one held while live PAR's hashing catches up resumes as soon as it has)
+            let standby = !article_downloads_running
+                && !PROBE_HELD.load(std::sync::atomic::Ordering::Relaxed)
+                && !crate::parchecker::streaming_session_holding();
             if standby != was_standby {
                 host.stat_meter_enter_leave_standby(standby);
                 host.work_state_set_downloading(!standby);
@@ -3606,6 +3608,11 @@ impl NzbgetRsQueueCoordinator {
                         || entry.snap(host).force_priority)
                 {
                     let nzb = entry.snap(host);
+                    // Live PAR's hashing is behind: no new article of this download until
+                    // it catches up (bounded), rather than parking articles to read back.
+                    if crate::parchecker::streaming_session_holds_downloads(nzb.id) {
+                        continue;
+                    }
                     let propagation_delay = opts.propagation_delay;
                     let order = cached_live_order(&mut orders, host, nzb_ptr, nzb.id);
                     // A par2 file with articles to fetch seen earlier in the list: the window
@@ -4535,6 +4542,89 @@ impl NzbgetRsQueueCoordinator {
             crate::parchecker::streaming_session_forget(id);
             return;
         }
+        // Finished articles of files still downloading first: their bytes are in the
+        // cache or kept aside now, and a file completing before this walk reaches it
+        // would read them back.
+        // Accepted in-progress bytes may still be in the cache. Snapshot a few
+        // at a time; uncached data waits for its own committed completion event.
+        let mut ids = Vec::new();
+        host.with_locked_queue(|dq| {
+            let ptr = host.queue_find_by_id(dq, id);
+            if ptr.is_none() {
+                return;
+            }
+            for i in 0..host.nzb_file_len(ptr).min(32768) {
+                let file = host.file_snap(host.nzb_file_at(ptr, i));
+                if !file.deleted && !file.par_file {
+                    ids.push(file.id);
+                }
+            }
+        });
+        for file_id in ids {
+            let mut article = 0;
+            loop {
+                if self.stopped.load(std::sync::atomic::Ordering::Acquire) {
+                    return;
+                }
+                let mut done = false;
+                host.with_locked_queue(|dq| {
+                    let ptr = host.queue_find_by_id(dq, id);
+                    if ptr.is_none() || !live_par_syndromes(&host.opts()) {
+                        done = true;
+                        return;
+                    }
+                    let nzb = host.nzb_snap(ptr, false);
+                    if nzb.deleting {
+                        done = true;
+                        return;
+                    }
+                    let file = (0..host.nzb_file_len(ptr))
+                        .map(|i| host.file_snap(host.nzb_file_at(ptr, i)))
+                        .find(|file| file.id == file_id && !file.deleted);
+                    let Some(file) = file else {
+                        done = true;
+                        return;
+                    };
+                    for _ in 0..32 {
+                        if article >= file.articles_len {
+                            done = true;
+                            break;
+                        }
+                        let part = host.article_at(file.ptr, article);
+                        article += 1;
+                        if part.status == crate::queuesubsys_host::AI_FINISHED
+                            && part.segment_size > 0
+                            && part.segment_offset >= 0
+                        {
+                            let written = live_written_file(&file);
+                            if let Some(Err(_error)) =
+                                crate::parchecker::streaming_session_defer_committed_article(
+                                    id,
+                                    (Some(file.id), &file.filename, &file.hash16k),
+                                    part.segment_offset as u64,
+                                    part.segment_size as u64,
+                                    part.crc,
+                                    written.as_deref(),
+                                    || {
+                                        host.article_cache_snapshot_segment(
+                                            file.ptr,
+                                            part.ptr,
+                                            part.segment_size as usize,
+                                        )
+                                    },
+                                )
+                            {
+                                Self::report_live_par_warning(host, ptr, id);
+                            }
+                        }
+                    }
+                });
+                if done {
+                    break;
+                }
+            }
+        }
+        Self::drain_live_par_articles(host);
         // Walk completed history one owned item at a time. Large prefixes never
         // require a second queue-sized snapshot or a long global queue lock.
         let mut index = 0;
@@ -4637,86 +4727,6 @@ impl NzbgetRsQueueCoordinator {
                 Err(error) => Self::report_live_completion_error(host, id, &error),
             }
             Self::drain_live_par_articles(host);
-        }
-        // Accepted in-progress bytes may still be in the cache. Snapshot a few
-        // at a time; uncached data waits for its own committed completion event.
-        let mut ids = Vec::new();
-        host.with_locked_queue(|dq| {
-            let ptr = host.queue_find_by_id(dq, id);
-            if ptr.is_none() {
-                return;
-            }
-            for i in 0..host.nzb_file_len(ptr).min(32768) {
-                let file = host.file_snap(host.nzb_file_at(ptr, i));
-                if !file.deleted && !file.par_file {
-                    ids.push(file.id);
-                }
-            }
-        });
-        for file_id in ids {
-            let mut article = 0;
-            loop {
-                if self.stopped.load(std::sync::atomic::Ordering::Acquire) {
-                    return;
-                }
-                let mut done = false;
-                host.with_locked_queue(|dq| {
-                    let ptr = host.queue_find_by_id(dq, id);
-                    if ptr.is_none() || !live_par_syndromes(&host.opts()) {
-                        done = true;
-                        return;
-                    }
-                    let nzb = host.nzb_snap(ptr, false);
-                    if nzb.deleting {
-                        done = true;
-                        return;
-                    }
-                    let file = (0..host.nzb_file_len(ptr))
-                        .map(|i| host.file_snap(host.nzb_file_at(ptr, i)))
-                        .find(|file| file.id == file_id && !file.deleted);
-                    let Some(file) = file else {
-                        done = true;
-                        return;
-                    };
-                    for _ in 0..4 {
-                        if article >= file.articles_len {
-                            done = true;
-                            break;
-                        }
-                        let part = host.article_at(file.ptr, article);
-                        article += 1;
-                        if part.status == crate::queuesubsys_host::AI_FINISHED
-                            && part.segment_size > 0
-                            && part.segment_offset >= 0
-                        {
-                            let written = live_written_file(&file);
-                            if let Some(Err(_error)) =
-                                crate::parchecker::streaming_session_defer_committed_article(
-                                    id,
-                                    (Some(file.id), &file.filename, &file.hash16k),
-                                    part.segment_offset as u64,
-                                    part.segment_size as u64,
-                                    part.crc,
-                                    written.as_deref(),
-                                    || {
-                                        host.article_cache_snapshot_segment(
-                                            file.ptr,
-                                            part.ptr,
-                                            part.segment_size as usize,
-                                        )
-                                    },
-                                )
-                            {
-                                Self::report_live_par_warning(host, ptr, id);
-                            }
-                        }
-                    }
-                });
-                Self::drain_live_par_articles(host);
-                if done {
-                    break;
-                }
-            }
         }
     }
 
@@ -7903,7 +7913,11 @@ fn discard_direct_rename_host(
             f.cached_articles,
         );
 
-        if discard_par && host.file_try_acquire_flush_lock(fp) {
+        // Live PAR unpauses recovery volumes while the download runs: one unpaused would
+        // fetch its probed first article a second time. A paused volume keeps the article
+        // until the download ends (`discard_par_probes_at_download_end`).
+        let keep_probe = f.paused && live_par_syndromes(opts);
+        if discard_par && !keep_probe && host.file_try_acquire_flush_lock(fp) {
             discarded_size += f.success_size;
             discarded_count += 1;
             discard_downloaded_articles_host(host, opts, nzb_ptr, fp);
@@ -7930,6 +7944,52 @@ fn discard_direct_rename_host(
         msg.extend_from_slice(&fmt_sz);
         msg.extend_from_slice(
             format!(" from {} files used for direct renaming", discarded_count).as_bytes(),
+        );
+        host.nzb_print_message(nzb_ptr, crate::queuesubsys_host::MK_DETAIL, &msg);
+    }
+}
+
+/// The download of job `nzb_ptr` ended: the par2 files still paused give back the first
+/// article direct rename probed and live PAR kept for them
+/// ([`discard_direct_rename_host`]), as direct rename would have, so post-processing never
+/// takes a partial par2 file for a whole one (par-rename reads every file in the folder).
+/// A volume unpaused meanwhile was downloaded on from that article, not fetched twice.
+#[cfg(unix)]
+pub(crate) fn discard_par_probes_at_download_end(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb_ptr: NzbRef,
+) {
+    let opts = host.opts();
+    if !live_par_syndromes(&opts) {
+        return;
+    }
+    let mut discarded_size = 0i64;
+    let mut discarded_count = 0i32;
+    for i in 0..host.nzb_file_len(nzb_ptr) {
+        let fp = host.nzb_file_at(nzb_ptr, i);
+        let f = host.file_snap(fp);
+        let (discard_par, _) = eval_discard_direct_rename_file(
+            f.par_file,
+            f.completed_articles,
+            f.total_articles,
+            f.active_downloads,
+            opts.server_mode,
+            f.articles_len > 0,
+            opts.continue_partial,
+            f.cached_articles,
+        );
+        if discard_par && f.paused && host.file_try_acquire_flush_lock(fp) {
+            discarded_size += f.success_size;
+            discarded_count += 1;
+            discard_downloaded_articles_host(host, &opts, nzb_ptr, fp);
+            host.file_release_flush_lock(fp);
+        }
+    }
+    if discarded_count > 0 {
+        let mut msg = b"Discarded ".to_vec();
+        msg.extend_from_slice(&crate::util::format_size(discarded_size));
+        msg.extend_from_slice(
+            format!(" from {discarded_count} paused par2-files probed for direct renaming").as_bytes(),
         );
         host.nzb_print_message(nzb_ptr, crate::queuesubsys_host::MK_DETAIL, &msg);
     }

@@ -250,6 +250,30 @@ struct ActiveStreamingSession {
     /// Files whose rebuilt slices `recheck_rebuilt` is reading again right now: their slice
     /// states are not final until it ends (see `streaming_session_ranges_good`).
     rechecking: Mutex<HashSet<FileId>>,
+    /// Threads the article drain may fold on at once (par-rs admits as many payloads),
+    /// itself included; see [`ActiveStreamingSession::drain_helpers`].
+    hash_workers: usize,
+    /// Helpers beside the draining thread whose scratch (two slices each) is lent from
+    /// ParBuffer so far.
+    hash_helpers: AtomicUsize,
+    /// The hashing thread count was logged.
+    hash_logged: AtomicBool,
+    /// Queued snapshot bytes past which new downloads wait for hashing to catch up
+    /// ([`streaming_session_holds_downloads`]), so free ParBuffer stays for staging and no
+    /// article is parked for a read-back only because the hashers are behind.
+    hold_bytes: u64,
+    /// When the current hold of new downloads began ([`live_hold_clock_ms`]), 0 without
+    /// one, `u64::MAX` after one timed out until the queue falls below `hold_bytes`.
+    hold_since_ms: AtomicU64,
+    /// The first wait for hashing was logged.
+    hold_logged: AtomicBool,
+    /// A thread drains the queue for a hold ([`ActiveStreamingSession::kick_drain`]).
+    drain_kicked: AtomicBool,
+    /// The fewest bytes queued since the current hold began, and when that low was last
+    /// lowered ([`live_hold_clock_ms`]): a hold gives up only after the drain made no
+    /// progress for [`LIVE_HOLD_MAX`].
+    hold_low: AtomicU64,
+    hold_progress_ms: AtomicU64,
     // Drop last, after the session, queue and all owned metadata. Grows with
     // the syndrome slots as damage appears (see `grow_for_damage`).
     budget: Mutex<SessionBudgetLease>,
@@ -719,6 +743,27 @@ fn build_streaming_session_with(
         })
         .map_err(|_| live_error("live PAR generation", "exhausted"))?;
     let article_byte_limit = options.max_working_bytes;
+    // Hashing (CRC32 + MD5) and folding a verified slice into every syndrome slot cost about
+    // as much as a core downloads; one thread caps live PAR well below line speed, the
+    // snapshot queue overruns, and every article staging then refuses costs a whole slice
+    // read back at its file's completion. par-rs admits `max_working_bytes / (2 * slice)`
+    // payloads at once: raise that to the hashing threads, while staging keeps its own cap
+    // and the extra scratch is lent from ParBuffer before a helper runs (`drain_helpers`).
+    let hash_workers = live_hash_workers();
+    let hold_bytes = live_hold_bytes(lease_pool_bytes(&budget), article_byte_limit);
+    let mut options = options;
+    if hash_workers > 1 {
+        options.max_staging_bytes = options.max_staging_bytes.min(options.max_working_bytes);
+        // The drain's threads fold inline: par-rs's own fold lanes would leave folds pending
+        // after an article returns (a verified cover needs none pending).
+        let payloads = main
+            .slice_size
+            .checked_mul(2 * hash_workers as u64)
+            .and_then(|bytes| bytes.checked_add(1 << 20))
+            .unwrap_or(u64::MAX);
+        options.max_working_bytes = options.max_working_bytes.max(payloads);
+        options.fold_threads = 0;
+    }
     let session = match plan {
         Some((plan, syndrome_ram)) => {
             let slots = usize::try_from(syndrome_ram / main.slice_size.max(1)).unwrap_or(usize::MAX);
@@ -800,8 +845,53 @@ fn build_streaming_session_with(
         cover_seal: Mutex::new(None),
         bad_slices: Mutex::new(Vec::new()),
         rechecking: Mutex::new(HashSet::new()),
+        hash_workers,
+        hash_helpers: AtomicUsize::new(0),
+        hash_logged: AtomicBool::new(false),
+        hold_bytes,
+        hold_since_ms: AtomicU64::new(0),
+        hold_logged: AtomicBool::new(false),
+        drain_kicked: AtomicBool::new(false),
+        hold_low: AtomicU64::new(u64::MAX),
+        hold_progress_ms: AtomicU64::new(0),
     }))
 }
+
+/// [`ActiveStreamingSession::hold_bytes`]: an eighth of ParBuffer (loans may take half),
+/// at most [`LIVE_HOLD_BYTES`] and never below the queue's own first limit.
+fn live_hold_bytes(pool: u64, first_limit: u64) -> u64 {
+    (pool / 8).min(LIVE_HOLD_BYTES).max(first_limit)
+}
+
+/// About a quarter second of a gigabit line queued for hashing: the most the hashers
+/// still have to fold after the last article, when they are the bottleneck.
+const LIVE_HOLD_BYTES: u64 = 256 << 20;
+/// Longest a hold of new downloads lasts while its queue does not shrink.
+const LIVE_HOLD_MAX: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Threads one job's live PAR may hash on: ParThreads (all cores when 0), at most half the
+/// cores (downloads, decoding and extraction run too) and at most [`MAX_HASH_WORKERS`].
+fn live_hash_workers() -> usize {
+    #[cfg(test)]
+    if let Some(workers) = TEST_HASH_WORKERS.with(std::cell::Cell::get) {
+        return workers;
+    }
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let configured = crate::options::active_options()
+        .map_or(0, |options| options.scalars().par_threads)
+        .max(0) as usize;
+    let wanted = if configured == 0 { cores } else { configured };
+    wanted.min(cores / 2).clamp(1, MAX_HASH_WORKERS)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's hashing thread count for sessions started on its thread.
+    static TEST_HASH_WORKERS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// Cap on [`live_hash_workers`]: eight threads hash and fold well past 1 GB/s.
+const MAX_HASH_WORKERS: usize = 8;
 
 fn active_streaming_session(nzb_id: i32) -> Option<Arc<ActiveStreamingSession>> {
     STREAMING_SESSIONS
@@ -1322,6 +1412,57 @@ impl ActiveStreamingSession {
         }
     }
 
+    /// Queues every article of completed file `id` (queue file `queue_id`) whose bytes are
+    /// still kept in RAM: kept before the session started (`presession_take_file`) or
+    /// stashed at their write before a capture that has not come. A file that completed
+    /// while the session started has no capture left to take them (it left the queue), so
+    /// without this its completion replay read those bytes back from disk.
+    fn queue_kept_bytes(&self, nzb_id: i32, id: FileId, queue_id: Option<i32>) {
+        let length = self.file_lengths.get(&id).copied().unwrap_or(0);
+        let presession = queue_id.map_or_else(Vec::new, |queue_id| presession_take_file(nzb_id, queue_id));
+        let mut queue = self.articles.lock().unwrap_or_else(|e| e.into_inner());
+        let stashed: Vec<(FileId, u64)> = queue
+            .stash
+            .keys()
+            .filter(|(file, _)| *file == id)
+            .copied()
+            .collect();
+        let committed = self.has_written_file(&id);
+        let mut items: Vec<(u64, Vec<u8>, bool)> = Vec::new();
+        for key in stashed {
+            if let Some(bytes) = queue.stash.remove(&key) {
+                items.push((key.1, bytes, true)); // stays charged: it moves into the queue
+            }
+        }
+        items.extend(presession.into_iter().map(|(offset, bytes)| (offset, bytes, false)));
+        items.sort_by_key(|item| item.0);
+        for (offset, bytes, charged) in items {
+            let size = bytes.len() as u64;
+            if size == 0 || offset.checked_add(size).is_none_or(|end| end > length) || queue.pending.len() >= 4096 {
+                if charged {
+                    queue.bytes -= size;
+                }
+                continue;
+            }
+            if !charged {
+                queue.bytes = queue.bytes.saturating_add(size);
+                self.metrics.presession_articles.fetch_add(1, Ordering::Relaxed);
+            } else {
+                self.metrics.stashed_articles.fetch_add(1, Ordering::Relaxed);
+            }
+            let crc32 = crc32fast::hash(&bytes);
+            Self::note_taken(&mut queue, id, offset, size, crc32);
+            queue.pending.push_back(DeferredArticle {
+                file_id: id,
+                offset,
+                crc32,
+                size,
+                bytes: Some(bytes),
+                committed,
+            });
+        }
+    }
+
     /// Stashes `bytes` of the article of `id` at `offset`, already charged to the queue.
     fn stash_charged(&self, id: FileId, offset: u64, bytes: Vec<u8>, charged: u64) {
         let mut queue = self.articles.lock().unwrap_or_else(|e| e.into_inner());
@@ -1458,6 +1599,13 @@ impl ActiveStreamingSession {
     /// replayed when its file completes. The memory returns with the
     /// session's budget. Returns whether the limit now holds `required_bytes`.
     fn lend_memory(&self, error: &RepairError) -> bool {
+        self.lend_memory_with(error, false)
+    }
+
+    /// [`Self::lend_memory`]; with `wait` it waits for the budget instead of giving up when
+    /// another thread holds it. Only for callers that hold neither the daemon queue lock
+    /// nor a par-rs payload: the drain's threads, which lend at once and may race.
+    fn lend_memory_with(&self, error: &RepairError, wait: bool) -> bool {
         let RepairError::StreamingMemoryLimit {
             context,
             required_bytes,
@@ -1481,8 +1629,25 @@ impl ActiveStreamingSession {
         let unit = self.session.slice_size();
         // Callers may hold the daemon queue lock; growth of repair slots holds
         // the budget across volume absorbs, so never wait for it here.
-        let Ok(mut lease) = self.budget.try_lock() else {
-            return false;
+        let current = || {
+            if staging {
+                self.session.max_staging_bytes()
+            } else {
+                self.article_byte_limit.load(Ordering::Acquire)
+            }
+        };
+        let mut lease = match self.budget.try_lock() {
+            Ok(lease) => lease,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) if wait => {
+                let lease = self.budget.lock().unwrap_or_else(|e| e.into_inner());
+                // Another drain thread lent meanwhile: its loan may cover this too.
+                if current() >= *required_bytes {
+                    return true;
+                }
+                lease
+            }
+            Err(std::sync::TryLockError::WouldBlock) => return current() >= *required_bytes,
         };
         let pool = lease_pool_bytes(&lease);
         let before = self.lent_memory.load(Ordering::Relaxed);
@@ -1533,6 +1698,74 @@ impl ActiveStreamingSession {
             crate::log::log_active_bytes(crate::queuesubsys_host::MK_DETAIL, msg.as_bytes());
         }
         limit >= *required_bytes
+    }
+
+    /// Articles queued for the drain.
+    fn pending_articles(&self) -> usize {
+        self.articles
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pending
+            .len()
+    }
+
+    /// Helper threads the article drain may fold on beside its own, up to
+    /// `hash_workers - 1`. Each needs scratch for two slices in par-rs (the slice it
+    /// assembles and its split for folding), lent from free ParBuffer under the same rules
+    /// as [`Self::lend_memory`]; a helper without its loan does not run. Logged once.
+    fn drain_helpers(&self) -> usize {
+        let want = self.hash_workers.saturating_sub(1);
+        let have = self.hash_helpers.load(Ordering::Acquire);
+        if have >= want || self.session.is_cancelled() {
+            return have;
+        }
+        let unit = self.session.slice_size().saturating_mul(2);
+        let Ok(mut lease) = self.budget.try_lock() else {
+            return have;
+        };
+        let pool = lease_pool_bytes(&lease);
+        let before = self.lent_memory.load(Ordering::Relaxed);
+        let ceiling = crate::parlive::JOB_CEILING;
+        let keep_free = if pool >= 2 * ceiling {
+            (pool / 4).max(ceiling)
+        } else {
+            pool / 4
+        };
+        let room = if unit == 0 {
+            0
+        } else {
+            (pool / 2).saturating_sub(before) / unit
+        };
+        let units = lease.grow_by_units(
+            unit,
+            ((want - have) as u64).min(room),
+            pool.saturating_sub(keep_free),
+        );
+        self.lent_memory
+            .store(before + units * unit, Ordering::Relaxed);
+        let have = have + units as usize;
+        self.hash_helpers.store(have, Ordering::Release);
+        drop(lease);
+        if !self.hash_logged.swap(true, Ordering::Relaxed) {
+            let name = self.par_name.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let msg = if have == 0 {
+                format!(
+                    "Live PAR for {}: hashing on one thread: no free ParBuffer for {} more ({} MB each)",
+                    String::from_utf8_lossy(&name),
+                    want,
+                    unit.div_ceil(1024 * 1024),
+                )
+            } else {
+                format!(
+                    "Live PAR for {}: hashing on {} threads ({} MB of ParBuffer lent for their scratch)",
+                    String::from_utf8_lossy(&name),
+                    have + 1,
+                    (have as u64 * unit).div_ceil(1024 * 1024),
+                )
+            };
+            crate::log::log_active_bytes(crate::queuesubsys_host::MK_DETAIL, msg.as_bytes());
+        }
+        have
     }
 
     /// Log once why this session stopped taking work.
@@ -2284,6 +2517,130 @@ pub(crate) fn streaming_session_take_warning(nzb_id: i32) -> Option<String> {
         .map(|_| warning)
 }
 
+impl ActiveStreamingSession {
+    fn queued_bytes(&self) -> u64 {
+        self.articles.lock().unwrap_or_else(|e| e.into_inner()).bytes
+    }
+
+    /// While new downloads are held no article completes, and completions are what start
+    /// drains: a thread of its own drains the queue for the hold (one at a time). It ends
+    /// once the queue is empty, the hold is over, or after twice the hold's bound.
+    fn kick_drain(self: &Arc<Self>, nzb_id: i32) {
+        if self.drain_kicked.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let entry = Arc::clone(self);
+        let spawned = std::thread::Builder::new()
+            .name("live-par-drain".to_owned())
+            .spawn(move || {
+                let started = std::time::Instant::now();
+                while started.elapsed() < 2 * LIVE_HOLD_MAX && !entry.session.is_cancelled() {
+                    // Another thread draining (or a repair) holds the operation lock: wait.
+                    if matches!(streaming_session_drain_articles(nzb_id), Some(Ok(n)) if n > 0) {
+                        continue;
+                    }
+                    if entry.pending_articles() == 0
+                        || entry.hold_since_ms.load(Ordering::Relaxed) == 0
+                    {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                entry.drain_kicked.store(false, Ordering::Release);
+            });
+        if spawned.is_err() {
+            self.drain_kicked.store(false, Ordering::Release);
+        }
+    }
+}
+
+/// When a hold of new downloads was last reported ([`live_hold_clock_ms`]), 0 if never.
+static LIVE_HOLD_SEEN_MS: AtomicU64 = AtomicU64::new(0);
+
+/// A job's new downloads were held within the last 100 ms: the coordinator keeps polling
+/// (no standby) so they resume as soon as the hashers catch up.
+pub(crate) fn streaming_session_holding() -> bool {
+    let seen = LIVE_HOLD_SEEN_MS.load(Ordering::Relaxed);
+    seen != 0 && live_hold_clock_ms().saturating_sub(seen) < 100
+}
+
+/// Backpressure from live PAR on the downloads: true while job `nzb_id`'s snapshot queue
+/// holds more than its `hold_bytes`, and the coordinator starts no new article of the job
+/// meanwhile. When the hashers are slower than the line, downloads slow to their pace
+/// instead of the queue filling, every further article being parked and read back from
+/// disk (hashed either way, so nothing is gained but the read), and the free ParBuffer the
+/// queue borrows starving RAM staging. A hold in which the queue does not shrink for
+/// [`LIVE_HOLD_MAX`] (the drain is held up, e.g. by a repair) is dropped until the queue
+/// falls below `hold_bytes`. Logged once per job; totals in its I/O line. No I/O, no wait: the caller
+/// holds the daemon queue lock.
+pub(crate) fn streaming_session_holds_downloads(nzb_id: i32) -> bool {
+    let Some(entry) = active_streaming_session(nzb_id) else {
+        return false;
+    };
+    let now = live_hold_clock_ms();
+    let since = entry.hold_since_ms.load(Ordering::Relaxed);
+    let queued = entry.queued_bytes();
+    if entry.session.is_cancelled() || queued < entry.hold_bytes {
+        if since != 0 {
+            entry.hold_since_ms.store(0, Ordering::Relaxed);
+            if since != u64::MAX {
+                entry.metrics.held_downloads.fetch_add(1, Ordering::Relaxed);
+                entry
+                    .metrics
+                    .held_ns
+                    .fetch_add(now.saturating_sub(since).saturating_mul(1_000_000), Ordering::Relaxed);
+            }
+        }
+        return false;
+    }
+    if since == u64::MAX {
+        return false;
+    }
+    LIVE_HOLD_SEEN_MS.store(now, Ordering::Relaxed);
+    entry.kick_drain(nzb_id);
+    if since == 0 {
+        entry.hold_since_ms.store(now.max(1), Ordering::Relaxed);
+        entry.hold_low.store(queued, Ordering::Relaxed);
+        entry.hold_progress_ms.store(now, Ordering::Relaxed);
+        if !entry.hold_logged.swap(true, Ordering::Relaxed) {
+            let message = format!(
+                "Live PAR (job {nzb_id}): new downloads wait for hashing to catch up ({} MB queued); they go on at its pace",
+                queued >> 20
+            );
+            crate::log::log_active_bytes(crate::queuesubsys_host::MK_DETAIL, message.as_bytes());
+        }
+        return true;
+    }
+    // A big backlog takes a while to drain; only a drain making no progress gives up.
+    if queued < entry.hold_low.load(Ordering::Relaxed) {
+        entry.hold_low.store(queued, Ordering::Relaxed);
+        entry.hold_progress_ms.store(now, Ordering::Relaxed);
+    }
+    let progress = entry.hold_progress_ms.load(Ordering::Relaxed);
+    if now.saturating_sub(progress) >= LIVE_HOLD_MAX.as_millis() as u64 {
+        // Given up until the queue falls below the mark.
+        entry.hold_since_ms.store(u64::MAX, Ordering::Relaxed);
+        entry.metrics.held_downloads.fetch_add(1, Ordering::Relaxed);
+        entry
+            .metrics
+            .held_ns
+            .fetch_add(now.saturating_sub(since).saturating_mul(1_000_000), Ordering::Relaxed);
+        entry.metrics.hold_timeouts.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
+    true
+}
+
+/// Milliseconds on a monotonic clock that starts an hour in (any hold's start minus its
+/// bound stays positive), never 0 or `u64::MAX` (the hold's markers).
+fn live_hold_clock_ms() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let start = *START.get_or_init(std::time::Instant::now);
+    (start.elapsed().as_millis() as u64)
+        .saturating_add(3_600_000)
+        .min(u64::MAX - 1)
+}
+
 /// Consume owned snapshots outside the daemon queue lock. Another active drain
 /// retains ownership; the coordinator will retry on its next tick.
 pub(crate) fn streaming_session_drain_articles(nzb_id: i32) -> Option<Result<usize, RepairError>> {
@@ -2301,67 +2658,240 @@ fn drain_live_articles_locked(
     entry: &Arc<ActiveStreamingSession>,
 ) -> Result<usize, RepairError> {
     entry.record((|| {
-        let mut count = 0;
         entry.apply_target_paths()?;
-        loop {
-            ensure_current_generation(nzb_id, entry)?;
-            let Some(article) = take_live_article(entry) else {
-                if entry.staged_due.swap(false, Ordering::AcqRel) {
-                    entry.complete_staged_slices(nzb_id)?;
-                }
-                return Ok(count);
-            };
-            let mut result = entry.timed(nzb_id, || article.fold());
-            // Staging that a loan of free ParBuffer enlarges enough takes the article after
-            // all: not a refusal. A shortfall no loan covers parks the article's slices,
-            // read back whole from its file once complete; without a known file it is
-            // refused and reported. Since par-rs M6f a RAM-only article that completes a
-            // slice partly committed on disk is no longer refused ("RAM-only slice
-            // coverage"): par-rs reads only the committed gap, or keeps the RAM bytes staged
-            // until `complete_staged_slices`. Only a full partial-slice staging cap parks.
-            if matches!(&result, Err(error) if entry.lend_memory(error)) {
-                result = entry.timed(nzb_id, || article.fold());
-            }
-            // Only while its cache write is still to come (it hands the bytes over again);
-            // after it, the refusal is reported and the completion replay covers it.
-            let parked = matches!(&result, Err(RepairError::StreamingMemoryLimit { .. }))
-                && article.article.as_ref().is_some_and(|a| {
-                    a.bytes.is_some()
-                        && entry.write_pending(a.file_id, a.offset)
-                        && entry.await_commit(a.file_id, a.offset, a.size, a.crc32)
-                });
-            // The file was renamed (completed) before par-rs learned its new path: an article
-            // read from its file, or a slice par-rs completes from the file, finds nothing
-            // there. Its completion replay covers it: no warning, and the drain goes on.
-            let renamed = article
-                .article
-                .as_ref()
-                .is_some_and(|a| renamed_away(&result, a.committed));
-            let parked = parked || renamed;
-            // An article that arrived (bytes, or in its file), not one that failed for good:
-            // a slice it turns Damaged failed its own check.
-            let arrived = article
-                .article
-                .as_ref()
-                .is_some_and(|a| a.bytes.is_some() || a.committed);
-            drop(article);
-            if parked {
+        // A drain lasts as long as articles keep arriving: one that starts with a short
+        // queue still takes helpers once it grows (`drain_live_articles_parallel`).
+        let count = if entry.hash_workers <= 1 {
+            let mut count = 0;
+            loop {
+                ensure_current_generation(nzb_id, entry)?;
+                let Some(article) = take_live_article(entry) else {
+                    break;
+                };
+                drain_live_article(nzb_id, entry, article)?;
                 count += 1;
+            }
+            count
+        } else {
+            drain_live_articles_parallel(nzb_id, entry)?
+        };
+        if entry.staged_due.swap(false, Ordering::AcqRel) {
+            entry.complete_staged_slices(nzb_id)?;
+        }
+        Ok(count)
+    })())
+}
+
+/// Which queued articles may fold beside others: those that bring bytes. A failure, or an
+/// article par-rs reads from its file, waits until every article taken before it folded and
+/// folds alone, so the order a slice sees arrivals and losses in stays the queue's.
+fn folds_alongside(article: &DeferredArticle) -> bool {
+    article.bytes.is_some()
+}
+
+#[derive(Default)]
+struct DrainGate {
+    /// Articles (file, offset) folding beside each other now.
+    in_flight: Vec<(FileId, u64)>,
+    /// An article that must fold alone waits for, or is in, its turn.
+    exclusive: bool,
+    /// An error stops every thread; the first one is returned.
+    error: Option<RepairError>,
+    count: usize,
+}
+
+/// The drain on up to `helpers + 1` threads: the caller's (which holds the operation lock,
+/// so no repair or completion replay runs meanwhile) and scoped helpers, started while the
+/// queue holds more articles than threads fold (a drain runs as long as articles keep
+/// arriving). Each takes the next queued article and folds it; par-rs verifies and folds
+/// concurrent payloads on their own threads (one lock per syndrome slot). A repeat of an
+/// article still folding, a failure and an article without bytes fold alone
+/// ([`folds_alongside`]).
+fn drain_live_articles_parallel(
+    nzb_id: i32,
+    entry: &Arc<ActiveStreamingSession>,
+) -> Result<usize, RepairError> {
+    let gate = Mutex::new(DrainGate::default());
+    let turn = std::sync::Condvar::new();
+    // One article: false once the queue is empty or the drain stopped.
+    let step = || -> bool {
+        let mut state = gate.lock().unwrap_or_else(|e| e.into_inner());
+        let (article, alone) = loop {
+            if state.error.is_some() {
+                return false;
+            }
+            if state.exclusive {
+                state = turn.wait(state).unwrap_or_else(|e| e.into_inner());
                 continue;
             }
-            let outcome = result?;
-            if arrived {
-                entry.note_bad_slices(&outcome.events);
+            let alongside = {
+                let queue = entry.articles.lock().unwrap_or_else(|e| e.into_inner());
+                match queue.pending.front() {
+                    None => return false,
+                    Some(next) => {
+                        folds_alongside(next)
+                            && !state.in_flight.contains(&(next.file_id, next.offset))
+                    }
+                }
+            };
+            if alongside {
+                let Some(article) = take_live_article(entry) else {
+                    return false;
+                };
+                let key = article.article.as_ref().map(|a| (a.file_id, a.offset));
+                state.in_flight.extend(key);
+                break (article, false);
             }
-            ensure_current_generation(nzb_id, entry)?;
-            entry.unpause(outcome.unpause.as_ref());
-            entry.note_admission_progress();
-            // The fold that verifies the last other slice rebuilds the damaged ones: hand
-            // them on at once, not after the rest of the queue.
-            entry.hand_over_rebuilt();
-            count += 1;
+            state.exclusive = true;
+            while !state.in_flight.is_empty() && state.error.is_none() {
+                state = turn.wait(state).unwrap_or_else(|e| e.into_inner());
+            }
+            let article = if state.error.is_none() {
+                take_live_article(entry)
+            } else {
+                None
+            };
+            let Some(article) = article else {
+                state.exclusive = false;
+                turn.notify_all();
+                return false;
+            };
+            break (article, true);
+        };
+        drop(state);
+        let key = article.article.as_ref().map(|a| (a.file_id, a.offset));
+        let result = ensure_current_generation(nzb_id, entry)
+            .and_then(|()| drain_live_article(nzb_id, entry, article));
+        let mut state = gate.lock().unwrap_or_else(|e| e.into_inner());
+        if alone {
+            state.exclusive = false;
+        } else if let Some(position) =
+            key.and_then(|key| state.in_flight.iter().position(|k| *k == key))
+        {
+            state.in_flight.swap_remove(position);
         }
-    })())
+        let more = match result {
+            Ok(()) => {
+                state.count += 1;
+                true
+            }
+            Err(error) => {
+                if state.error.is_none() {
+                    state.error = Some(error);
+                }
+                false
+            }
+        };
+        drop(state);
+        turn.notify_all();
+        more
+    };
+    let running = AtomicUsize::new(0);
+    // Wall time is charged once, by this thread, for the whole drain: the helpers' own
+    // folds are not timed again (`timed` charges only the outermost call on a thread).
+    entry.timed(nzb_id, || {
+        std::thread::scope(|scope| {
+            let mut spawn_failed = false;
+            // Helpers with their scratch lent (`drain_helpers`), asked for once the queue
+            // first holds more than one article.
+            let mut helpers = None;
+            loop {
+                let backlog = entry.pending_articles();
+                if helpers.is_none() && backlog > 1 {
+                    helpers = Some(entry.drain_helpers());
+                }
+                // Helpers leave when the queue runs dry; new ones start when it grows again.
+                while !spawn_failed
+                    && running.load(Ordering::Acquire) < helpers.unwrap_or(0)
+                    && backlog > running.load(Ordering::Acquire) + 1
+                {
+                    running.fetch_add(1, Ordering::AcqRel);
+                    let spawned = std::thread::Builder::new()
+                        .name("live-par-hash".to_owned())
+                        .spawn_scoped(scope, || {
+                            LIVE_PAR_TIMING.with(|timing| timing.set(true));
+                            while step() {}
+                            running.fetch_sub(1, Ordering::AcqRel);
+                        });
+                    if spawned.is_err() {
+                        running.fetch_sub(1, Ordering::AcqRel);
+                        spawn_failed = true;
+                    }
+                }
+                if !step() {
+                    break;
+                }
+            }
+        });
+    });
+    let state = gate.into_inner().unwrap_or_else(|e| e.into_inner());
+    match state.error {
+        Some(error) => Err(error),
+        None => Ok(state.count),
+    }
+}
+
+/// Folds one queued article (`drain_live_articles_locked`): a parked or renamed-away one
+/// counts as consumed; any other error ends the drain.
+fn drain_live_article(
+    nzb_id: i32,
+    entry: &Arc<ActiveStreamingSession>,
+    article: LiveArticleLease,
+) -> Result<(), RepairError> {
+    let mut result = entry.timed(nzb_id, || article.fold());
+    // Staging that a loan of free ParBuffer enlarges enough takes the article after
+    // all: not a refusal. A shortfall no loan covers parks the article's slices,
+    // read back whole from its file once complete; without a known file it is
+    // refused and reported. Since par-rs M6f a RAM-only article that completes a
+    // slice partly committed on disk is no longer refused ("RAM-only slice
+    // coverage"): par-rs reads only the committed gap, or keeps the RAM bytes staged
+    // until `complete_staged_slices`. Only a full partial-slice staging cap parks.
+    // Drain threads overrunning together: a loan another thread made may cover this
+    // article's shortfall as it was measured but not once theirs is staged too, so
+    // lend again while each loan helps, a bounded number of times.
+    for _ in 0..=entry.hash_workers {
+        if !matches!(&result, Err(error) if entry.lend_memory_with(error, true)) {
+            break;
+        }
+        result = entry.timed(nzb_id, || article.fold());
+    }
+    // Only while its cache write is still to come (it hands the bytes over again);
+    // after it, the refusal is reported and the completion replay covers it.
+    let parked = matches!(&result, Err(RepairError::StreamingMemoryLimit { .. }))
+        && article.article.as_ref().is_some_and(|a| {
+            a.bytes.is_some()
+                && entry.write_pending(a.file_id, a.offset)
+                && entry.await_commit(a.file_id, a.offset, a.size, a.crc32)
+        });
+    // The file was renamed (completed) before par-rs learned its new path: an article
+    // read from its file, or a slice par-rs completes from the file, finds nothing
+    // there. Its completion replay covers it: no warning, and the drain goes on.
+    let renamed = article
+        .article
+        .as_ref()
+        .is_some_and(|a| renamed_away(&result, a.committed));
+    let parked = parked || renamed;
+    // An article that arrived (bytes, or in its file), not one that failed for good:
+    // a slice it turns Damaged failed its own check.
+    let arrived = article
+        .article
+        .as_ref()
+        .is_some_and(|a| a.bytes.is_some() || a.committed);
+    drop(article);
+    if parked {
+        return Ok(());
+    }
+    let outcome = result?;
+    if arrived {
+        entry.note_bad_slices(&outcome.events);
+    }
+    ensure_current_generation(nzb_id, entry)?;
+    entry.unpause(outcome.unpause.as_ref());
+    entry.note_admission_progress();
+    // The fold that verifies the last other slice rebuilds the damaged ones: hand
+    // them on at once, not after the rest of the queue.
+    entry.hand_over_rebuilt();
+    Ok(())
 }
 
 /// An article's fold failed only because its file was renamed away: any I/O error for one
@@ -3720,6 +4250,10 @@ pub(crate) fn streaming_session_process_completed_file_with_start(
             }
             Ok(())
         })?;
+        // Bytes of it still kept in RAM (written before the session started, or before
+        // their capture) are queued first: the drain below folds them, and the replay
+        // skips the slices they complete instead of reading them back.
+        entry.queue_kept_bytes(nzb_id, id, queue_id);
         // Replay one slice at a time and prioritize incoming snapshots between
         // slices, so a late index's prefix cannot monopolize the operation gate.
         for range in accepted {
@@ -3737,10 +4271,15 @@ pub(crate) fn streaming_session_process_completed_file_with_start(
                         return Err(error);
                     }
                 }
-                with_live_entry(nzb_id, &entry, |entry| {
+                with_live_entry(nzb_id, &entry, |held| {
+                    // Under the operation lock, so no drain runs elsewhere: articles still
+                    // queued fold first. A slice whose bytes wait in RAM is then verified
+                    // and skipped, not read back from the file (and its RAM bytes dropped
+                    // as a repeat afterwards).
+                    drain_live_articles_locked(nzb_id, &entry)?;
                     reconcile_live_file(
                         nzb_id,
-                        entry,
+                        held,
                         id,
                         &file.path,
                         &[ByteRange::new(offset as i64, (end - offset) as i64)],
@@ -4469,14 +5008,24 @@ fn reconcile_live_file(
             // Verified already, or damaged (an article of it failed for good, or it failed
             // its check): reading its good bytes again changes nothing (a later write into
             // it calls `on_range_replaced`, which takes it out of Damaged).
-            if matches!(
-                entry.session.slice_state(&file_id, slice as usize)?,
-                SliceState::VerifiedGood | SliceState::Damaged
-            ) {
+            let state = entry.session.slice_state(&file_id, slice as usize)?;
+            if matches!(state, SliceState::VerifiedGood | SliceState::Damaged) {
                 offset = chunk_end;
                 continue;
             }
             let count = (chunk_end - offset) as usize;
+            // A read-back of bytes RAM may have seen: the first few are named, to find
+            // their cause; the total is in the job's I/O line.
+            if entry.metrics.replayed_slices.fetch_add(1, Ordering::Relaxed) < 8 {
+                let name = entry
+                    .target_names
+                    .get(&file_id)
+                    .map_or_else(String::new, |name| name.display().to_string());
+                let message = format!(
+                    "Live PAR (job {nzb_id}): slice {slice} of {name} ({count} bytes) is read back from its file at completion ({state:?})"
+                );
+                crate::log::log_active_bytes(crate::queuesubsys_host::MK_DETAIL, message.as_bytes());
+            }
             let _charge = CallerPayloadCharge::acquire(entry, count as u64)?;
             let mut buffer = vec![0u8; count];
             source
@@ -5146,18 +5695,27 @@ pub(crate) fn streaming_session_can_schedule_repair(nzb_id: i32) -> bool {
     if status.early_cutover_possible {
         return true;
     }
-    let size = entry.session.slice_size();
+    // A repair holds every writer of the job behind its barrier while it waits for the
+    // operation lock and drains the queue: one that cannot succeed stalls the download for
+    // nothing. Slices damaged for good need a recovery block each whatever the queue holds.
+    if status.damaged > status.ready_recovery {
+        return false;
+    }
+    // Queued articles can at most complete the slices they touch, each slice once (about
+    // five articles share one): counting an article per slice made a long queue look like
+    // enough to finish every unknown slice, and a futile repair was tried on every tick.
+    let size = entry.session.slice_size().max(1);
+    let mut touched: HashSet<(FileId, u64)> = HashSet::new();
+    for article in queue.pending.iter().filter(|article| article.bytes.is_some()) {
+        let first = article.offset / size;
+        let last = (article.offset + article.size.max(1) - 1) / size;
+        for slice in first..=last.min(first + 64) {
+            touched.insert((article.file_id, slice));
+        }
+    }
     let queued_upper_bound = queue
-        .pending
-        .iter()
-        .filter(|article| article.bytes.is_some())
-        .fold(queue.active_upper_bound, |sum, article| {
-            sum.saturating_add(
-                (article.offset % size)
-                    .saturating_add(article.size)
-                    .div_ceil(size),
-            )
-        });
+        .active_upper_bound
+        .saturating_add(touched.len() as u64);
     let unknown = status.unarrived + status.partially_arrived + status.damaged;
     unknown as u64 <= (status.ready_recovery as u64).saturating_add(queued_upper_bound)
 }
@@ -7028,6 +7586,200 @@ mod tests {
         assert!(entry.session.max_staging_bytes() >= 9000);
         assert!(entry.refusals.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
         assert!(streaming_session_take_warning(nzb_id).is_none());
+        streaming_session_forget(nzb_id);
+        drop(entry);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The drain folds queued articles on several threads (#740): every slice two half
+    /// articles complete verifies from RAM, a loss still marks its slice damaged in queue
+    /// order, nothing is refused and nothing is read back.
+    #[test]
+    fn live_drain_folds_on_several_threads_in_queue_order() {
+        use par_rs::create::{build_set, SetOptions, VolumeScheme};
+
+        let nzb_id = 0x6a0f_0740;
+        let dir = std::env::temp_dir().join(format!(
+            "rustyget-parchecker-parallel-drain-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let slices = 64u64;
+        let f0 = make_deterministic_bytes((slices * 4096) as usize, 740);
+        let built = build_set(
+            "parallel",
+            &[("part01.rar", &f0)],
+            &SetOptions {
+                slice_size: 4096,
+                recovery_blocks: 2,
+                first_exponent: 0,
+                volumes: VolumeScheme::Single,
+                creator: "rustyget-test".to_string(),
+                unicode_names: false,
+                kernel: Kernel::detect(),
+            },
+        )
+        .unwrap();
+        let index_path = dir.join("parallel.par2");
+        std::fs::write(&index_path, &built.index).unwrap();
+        let pool = Arc::new(crate::parlive::BudgetPool::with_size(500 << 20));
+        TEST_HASH_WORKERS.with(|workers| workers.set(Some(4)));
+        streaming_session_start_in_pool(
+            &pool,
+            nzb_id,
+            &index_path,
+            &dir,
+            SessionOptions {
+                preallocated_syndrome_slots: 2,
+                max_syndrome_slots: 2,
+                max_syndrome_bytes: 2 * 4096,
+                max_working_bytes: 4 << 20,
+                max_staging_bytes: 1 << 20,
+                solve_mem_limit_bytes: 16 << 20,
+                ..SessionOptions::default()
+            },
+        )
+        .unwrap();
+        TEST_HASH_WORKERS.with(|workers| workers.set(None));
+        let entry = active_streaming_session(nzb_id).unwrap();
+        assert_eq!(entry.hash_workers, 4);
+        // Second halves first, then first halves: every slice completes on the article
+        // folded after its partner, whichever thread took that one. The last slice's second
+        // half is lost (queued after its first half arrived).
+        let mut queued = 0;
+        for half in [1u64, 0] {
+            for slice in 0..slices {
+                let offset = slice * 4096 + half * 2048;
+                if slice == slices - 1 && half == 1 {
+                    continue;
+                }
+                let piece = f0[offset as usize..offset as usize + 2048].to_vec();
+                let crc = crc32fast::hash(&piece);
+                streaming_session_defer_article(nzb_id, (b"part01.rar", &[]), offset, 2048, crc, || {
+                    Some(piece)
+                })
+                .unwrap()
+                .unwrap();
+                queued += 1;
+            }
+        }
+        streaming_session_defer_failure(nzb_id, (b"part01.rar", &[]), (slices - 1) * 4096 + 2048, 2048)
+            .unwrap()
+            .unwrap();
+        queued += 1;
+        assert_eq!(streaming_session_drain_articles(nzb_id).unwrap().unwrap(), queued);
+        assert_eq!(entry.hash_helpers.load(Ordering::Relaxed), 3);
+        let status = entry.session.status();
+        assert_eq!(status.verified as u64, slices - 1);
+        assert_eq!(status.damaged, 1);
+        assert!(entry.refusals.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
+        assert_eq!(entry.catchup_source_bytes.load(Ordering::Relaxed), 0);
+        assert_eq!(entry.session.io_stats().source_bytes_read, 0);
+        streaming_session_forget(nzb_id);
+        drop(entry);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Backpressure: past its hold mark the queue holds new downloads of the job; the hold
+    /// ends (and is counted) once the queue falls below the mark, and one that outlasts
+    /// `LIVE_HOLD_MAX` is dropped until it does. A completed file's bytes kept in RAM before
+    /// the session are queued, so its slices verify without a read-back.
+    #[test]
+    fn live_queue_holds_downloads_and_completed_file_takes_kept_bytes() {
+        use par_rs::create::{build_set, SetOptions, VolumeScheme};
+
+        let nzb_id = 0x6a0f_0741;
+        let dir = std::env::temp_dir().join(format!(
+            "rustyget-parchecker-hold-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f0 = make_deterministic_bytes(8 * 4096, 741);
+        let built = build_set(
+            "hold",
+            &[("part01.rar", &f0)],
+            &SetOptions {
+                slice_size: 4096,
+                recovery_blocks: 2,
+                first_exponent: 0,
+                volumes: VolumeScheme::Single,
+                creator: "rustyget-test".to_string(),
+                unicode_names: false,
+                kernel: Kernel::detect(),
+            },
+        )
+        .unwrap();
+        let index_path = dir.join("hold.par2");
+        std::fs::write(&index_path, &built.index).unwrap();
+        let pool = Arc::new(crate::parlive::BudgetPool::with_size(500 << 20));
+        streaming_session_start_in_pool(
+            &pool,
+            nzb_id,
+            &index_path,
+            &dir,
+            SessionOptions {
+                preallocated_syndrome_slots: 2,
+                max_syndrome_slots: 2,
+                max_syndrome_bytes: 2 * 4096,
+                max_working_bytes: 4 << 20,
+                max_staging_bytes: 1 << 20,
+                solve_mem_limit_bytes: 16 << 20,
+                ..SessionOptions::default()
+            },
+        )
+        .unwrap();
+        let entry = active_streaming_session(nzb_id).unwrap();
+        assert_eq!(entry.hold_bytes, live_hold_bytes(500 << 20, 4 << 20));
+        assert!(!streaming_session_holds_downloads(nzb_id));
+        let set_queued = |bytes: u64| {
+            entry.articles.lock().unwrap_or_else(|e| e.into_inner()).bytes = bytes;
+        };
+        set_queued(entry.hold_bytes);
+        assert!(streaming_session_holds_downloads(nzb_id));
+        assert!(streaming_session_holds_downloads(nzb_id));
+        set_queued(entry.hold_bytes - 1);
+        assert!(!streaming_session_holds_downloads(nzb_id));
+        assert_eq!(entry.metrics.held_downloads.load(Ordering::Relaxed), 1);
+        assert_eq!(entry.metrics.hold_timeouts.load(Ordering::Relaxed), 0);
+        // A hold that outlasts its bound is dropped until the queue falls below the mark.
+        set_queued(entry.hold_bytes);
+        assert!(streaming_session_holds_downloads(nzb_id));
+        let past = live_hold_clock_ms().saturating_sub(LIVE_HOLD_MAX.as_millis() as u64);
+        entry.hold_since_ms.store(past, Ordering::Relaxed);
+        entry.hold_progress_ms.store(past, Ordering::Relaxed);
+        assert!(!streaming_session_holds_downloads(nzb_id));
+        assert!(!streaming_session_holds_downloads(nzb_id));
+        assert_eq!(entry.metrics.hold_timeouts.load(Ordering::Relaxed), 1);
+        set_queued(0);
+        assert!(!streaming_session_holds_downloads(nzb_id));
+        set_queued(entry.hold_bytes);
+        assert!(streaming_session_holds_downloads(nzb_id));
+        set_queued(0);
+        assert!(!streaming_session_holds_downloads(nzb_id));
+        // The holds kicked a drain thread; on a loaded host it may start late and would
+        // drain the articles queued below itself. It ends once no hold is active.
+        let kicked_since = std::time::Instant::now();
+        while entry.drain_kicked.load(Ordering::Acquire) {
+            assert!(kicked_since.elapsed() < std::time::Duration::from_secs(30));
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        // Every article of queue file 7 kept before the session: queued at its completion.
+        let queue_id = 7;
+        let items: Vec<(u64, &[u8])> = (0..16u64)
+            .map(|i| (i * 2048, &f0[(i * 2048) as usize..((i + 1) * 2048) as usize]))
+            .collect();
+        presession_keep(nzb_id, queue_id, &items);
+        let id = entry.session.file_id_by_name(b"part01.rar").unwrap();
+        entry.queue_kept_bytes(nzb_id, id, Some(queue_id));
+        assert_eq!(entry.pending_articles(), 16);
+        assert_eq!(streaming_session_drain_articles(nzb_id).unwrap().unwrap(), 16);
+        assert_eq!(entry.session.status().verified, 8);
+        assert_eq!(entry.metrics.presession_articles.load(Ordering::Relaxed), 16);
+        assert_eq!(entry.catchup_source_bytes.load(Ordering::Relaxed), 0);
+        assert_eq!(entry.session.io_stats().source_bytes_read, 0);
         streaming_session_forget(nzb_id);
         drop(entry);
         let _ = std::fs::remove_dir_all(&dir);

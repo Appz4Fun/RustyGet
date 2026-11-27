@@ -1587,6 +1587,8 @@ impl NzbgetRsPrePostProcessor {
         if nzb_ptr.is_some() {
             // Every file is written: nothing more is reported for live extraction.
             crate::livewrite::forget(host.nzb_snap(nzb_ptr, false).id);
+            #[cfg(unix)]
+            crate::queuecoord::discard_par_probes_at_download_end(host, nzb_ptr);
         }
         if nzb_ptr.is_none() {
             return;

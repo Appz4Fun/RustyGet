@@ -327,7 +327,8 @@ fn first_volume_qualifies(first: &Path, password: &str) -> Result<usize, String>
     // that are not there yet (members starting later are checked by zipfast when reached).
     let source = super::header_source(first);
     let live = source.as_path() != first;
-    let mut vol = Volume::open_with_password(&source, pw).map_err(|e| format!("headers: {e}"))?;
+    let mut vol = Volume::open_damaged(&source, pw, zipfast::extract::DamagedInput::Refuse)
+        .map_err(|e| format!("headers: {e}"))?;
     let mut members = 0;
     for _ in 0..100_000 {
         match vol.next_block() {
@@ -1233,9 +1234,9 @@ impl<'a> Run<'a> {
                 unix_modes: Default::default(),
                 backslashes: Default::default(),
                 unsupported_filters: Default::default(),
-                // Progressive and persistent sessions refuse a damaged header whatever this says
-                // (zipfast #310), and 7z ignores it: RustyGet runs no RarSession, where Salvage applies.
                 damaged_input: Default::default(),
+                unverified_output: Default::default(),
+                encrypted_links: Default::default(),
             },
             first_name,
         );

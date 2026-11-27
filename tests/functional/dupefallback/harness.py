@@ -2012,7 +2012,7 @@ def scenario_diskfullrestart(daemon, t):
             print('       diskfullrestart: unmount of %s failed, lazy unmount rc=%d' % (mnt, rc))
 
 
-def scenario_cachecommitfull(daemon, t):
+def _cache_commit_full(daemon, t, name):
     """6790, 2026-11-27: on the full NVMe the article cache could not write its articles
     ("Could not commit cached article ... No space left on device", 2628 times); it dropped
     their bytes while the articles stayed counted as downloaded, which left holes of zeros
@@ -2032,7 +2032,7 @@ def scenario_cachecommitfull(daemon, t):
     mnt = t.path('main', 'small')
     umount, why = _small_fs_mount(t, mnt, 64)
     if umount is None:
-        return ('cachecommitfull', None, 'SKIP: %s' % why)
+        return (name, None, 'SKIP: %s' % why)
     filler = None
     try:
         os.makedirs(os.path.join(mnt, 'inter'))
@@ -2074,15 +2074,19 @@ def scenario_cachecommitfull(daemon, t):
         reason = re.findall(r'Could not commit cached article for [^:]*: ([^;\n]*)', log)
         handed_n = sum(int(n) for n, _ in handed)
         downloaded_mb = h.get('DownloadedSizeMB', 0)
-        # The handed-back articles came again: more than the file was downloaded in all.
+        # The handed-back articles came again: the daemon downloaded more articles than the
+        # file has (nserv may log none of them: a fetched-again body can come from the
+        # client's shared body cache, so the daemon's own log counts).
+        fetched = len(re.findall(r'Successfully downloaded RelCC/cc\.bin \[', log))
+        fetched_again = fetched - total
         ok = (h['Status'].startswith('SUCCESS') and integ and lost_logs > 0 and paused > 0
-              and refetch_logs > 0 and handed_n > 0 and downloaded_mb > size // 1048576)
-        return ('cachecommitfull', ok,
+              and refetch_logs > 0 and handed_n > 0 and fetched_again >= handed_n)
+        return (name, ok,
                 'status=%s integrity=%s commit_errors=%d paused_logs=%d refetch_logs=%d '
                 'requests_before_resume=%d total_requests=%d repeated_requests=%d repeated_after_resume=%d '
-                'handed_back=%s more=%s reason=%s paused_state=%s saved=%s downloaded_mb=%s'
+                'handed_back=%s more=%s reason=%s paused_state=%s saved=%s downloaded_mb=%s fetched_again=%d'
                 % (h['Status'], integ, lost_logs, paused, refetch_logs, requests_before, len(ids),
-                   again, again_after, handed, more, reason[:2], state, saved[:12], downloaded_mb))
+                   again, again_after, handed, more, reason[:2], state, saved[:12], downloaded_mb, fetched_again))
     finally:
         if filler:
             filler.release()
@@ -2093,7 +2097,18 @@ def scenario_cachecommitfull(daemon, t):
         if subprocess.run(umount, capture_output=True).returncode != 0:
             lazy = umount[:-1] + ['-l', umount[-1]] if umount[0] == 'sudo' else umount
             rc = subprocess.run(lazy, capture_output=True).returncode
-            print('       cachecommitfull: unmount of %s failed, lazy unmount rc=%d' % (mnt, rc))
+            print('       %s: unmount of %s failed, lazy unmount rc=%d' % (name, mnt, rc))
+
+
+def scenario_cachecommitfull(daemon, t):
+    """See `_cache_commit_full`: DirectWrite=yes, the cache writes into the output file."""
+    return _cache_commit_full(daemon, t, 'cachecommitfull')
+
+
+def scenario_cachecommitfullnodw(daemon, t):
+    """See `_cache_commit_full`: DirectWrite=no, the cache writes one temporary per article
+    (a failed one must not stay behind as a short article)."""
+    return _cache_commit_full(daemon, t, 'cachecommitfullnodw')
 
 
 def scenario_streamtimeout(daemon, t):
@@ -15918,6 +15933,7 @@ SCENARIOS = {
     'queuesyncslow': scenario_queuesyncslow,
     'diskfullrestart': scenario_diskfullrestart,
     'cachecommitfull': scenario_cachecommitfull,
+    'cachecommitfullnodw': scenario_cachecommitfullnodw,
     'queuebatchstart': scenario_queuebatchstart,
     'streamrestartcredit': scenario_streamrestartcredit,
     'streamtimeout': scenario_streamtimeout,
@@ -16428,6 +16444,7 @@ SCENARIO_OPTIONS = {
     'queuesyncslow': ['ContinuePartial=yes', 'FlushQueue=yes', 'Server1.Connections=6'],
     'diskfullrestart': ['ContinuePartial=yes', 'FlushQueue=yes', 'DiskSpace=0', 'Server1.Connections=4'],
     'cachecommitfull': ['ArticleCache=16', 'DirectWrite=yes', 'DiskSpace=1', 'Server1.Connections=4'],
+    'cachecommitfullnodw': ['ArticleCache=16', 'DirectWrite=no', 'DiskSpace=1', 'Server1.Connections=4'],
     'queuebatchstart': ['Server1.Connections=30'],
     'streamrestartcredit': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'streamdeaddonor': ['DupeArticleFallback=stream', 'ParCheck=auto'],
@@ -16856,10 +16873,10 @@ def _promote_fallback(options, mode):
 # finished job is rightly not redone
 FALLBACK_MODE_BOUND = {'livegate', 'streamrestartcredit', 'wholefilerestart', 'wholefilestale'}
 # scenarios that read nserv's request log (nserv.log)
-CAPTURE_REQUESTS = {'repost', 'diskfullrestart', 'cachecommitfull', 'altfetchonce', 'wholefileproofcost', 'dropnzbdir', 'fleetstaysqueued', 'fleetprimaryfirst'} | {
+CAPTURE_REQUESTS = {'repost', 'diskfullrestart', 'cachecommitfull', 'cachecommitfullnodw', 'altfetchonce', 'wholefileproofcost', 'dropnzbdir', 'fleetstaysqueued', 'fleetprimaryfirst'} | {
     'failcont_twin25', 'failcont_twin50', 'failcont_twin90', 'failcont_alt25', 'failcont_alt50', 'failcont_altlive', 'failcont_alt90', 'failcont_aes25', 'failcont_aes50', 'failcont_aes90', 'failcont_compressed', 'failcont_othervideo', 'failcont_twinlabel', 'failcont_fleettwin', 'failcont_fleetalt', 'failcont_fleetaes', 'failcont_aestwin', 'failcont_aesalt', 'failcont_rar5m3', 'failcont_rar5m3aes', 'failcont_rar5m3other', 'failcont_lzma2', 'failcont_norestart', 'weakswitchalt', 'weakswitchtwin', 'weakswitchaes', 'weakswitchm3', 'failcont_aescontainer', 'failcont_alt25busy'}
 # extra nserv arguments per scenario (-w: response latency in ms)
-SCENARIO_NSERV_ARGS = {'diskfullrestart': ['-w', '300'], 'cachecommitfull': ['-w', '100'], 'streamtimeoutwrites': ['-w', '800'], 'fleetslowprobe': ['-x', '2000'], 'fleetprobespeed': ['-w', '300'], 'fleetprobebusy': ['-w', '300'], 'fleetprobehealthfail': ['-w', '800'], 'finaldeletemidway': ['-w', '300'], 'finaldeleterestart': ['-w', '300'], 'restartmidway': ['-w', '300'], 'xpacklatency': ['-w', '1000'], 'deadpickprobe': ['-w', '500'], 'deadpickafterreload': ['-w', '500'],
+SCENARIO_NSERV_ARGS = {'diskfullrestart': ['-w', '300'], 'cachecommitfull': ['-w', '100'], 'cachecommitfullnodw': ['-w', '100'], 'streamtimeoutwrites': ['-w', '800'], 'fleetslowprobe': ['-x', '2000'], 'fleetprobespeed': ['-w', '300'], 'fleetprobebusy': ['-w', '300'], 'fleetprobehealthfail': ['-w', '800'], 'finaldeletemidway': ['-w', '300'], 'finaldeleterestart': ['-w', '300'], 'restartmidway': ['-w', '300'], 'xpacklatency': ['-w', '1000'], 'deadpickprobe': ['-w', '500'], 'deadpickafterreload': ['-w', '500'],
                        'deadpickpartial': ['-w', '100'], 'deadpickstray': ['-w', '500'], 'forcefailover': ['-w', '500'], 'copybackup': ['-w', '500'], 'copyoffailed': ['-w', '500'], 'deaddownloadstray2': ['-w', '300'], 'deaddownloadrestart': ['-w', '300'], 'deadbackupsonly': ['-w', '500'], 'backuporder': ['-w', '500'], 'deaddownloadlate': ['-w', '300'], 'deadpickservers': ['-w', '200'],
                        'deadpickfewservers': ['-w', '200'],
                        # a missing article answers late, so the dead volumes fail one after another and later

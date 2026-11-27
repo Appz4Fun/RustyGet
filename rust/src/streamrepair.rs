@@ -6522,6 +6522,10 @@ pub struct DonorMemberSource {
     bad: bool,
     /// `ranges` are exact (see [`uniform_donor_ranges`]): reads need no edge margin.
     exact: bool,
+    /// Last articles a batch brought before the size was known (see
+    /// [`ContentSourceSet::prefetch_member_edges`]): checked against it when first served,
+    /// as a single fetch at that point would have been.
+    unchecked: std::collections::BTreeSet<i32>,
 }
 
 impl DonorMemberSource {
@@ -6542,6 +6546,7 @@ impl DonorMemberSource {
             drift: 0,
             bad: false,
             exact: false,
+            unchecked: std::collections::BTreeSet::new(),
         }
     }
 
@@ -6625,6 +6630,23 @@ impl DonorMemberSource {
         if self.bad || part_index < 0 || (part_index as usize) >= self.article_sizes.len() {
             return None;
         }
+        if self.size >= 0 && self.unchecked.remove(&part_index) {
+            let size = self.size;
+            if let Some(cached) = self.cache.get_mut(&part_index) {
+                let (invalid, mark_bad) = donor_check_fetched_part(
+                    cached.success,
+                    cached.data.len(),
+                    cached.offset,
+                    cached.file_size,
+                    size,
+                );
+                if invalid {
+                    cached.success = false;
+                    self.bad = mark_bad;
+                    return None;
+                }
+            }
+        }
         if self.cache.contains_key(&part_index) {
             let cached = self.cache.get(&part_index)?;
             return cached.success.then_some(cached);
@@ -6667,9 +6689,13 @@ impl DonorMemberSource {
     }
 
     /// Keeps an article a batch fetched for [`ContentSourceSet::prefetch_member_edges`],
-    /// as the single fetch that would have asked for it does.
+    /// as the single fetch that would have asked for it does (its article use counts it as
+    /// single: fetched for the map, not for a read).
     fn store_edge(&mut self, part_index: i32, fetched: FetchedDonorArticle) {
         if !self.cache.contains_key(&part_index) {
+            if self.size < 0 && part_index > 0 {
+                self.unchecked.insert(part_index);
+            }
             self.store_fetched(part_index, fetched);
         }
     }
@@ -8043,11 +8069,10 @@ impl ContentMapper {
         if inner_bytes.is_empty() {
             return Err(MapError::NotMedia);
         }
-        sources.prefetch_member_edges(&set.members, &[]);
         let mut map = ContentMap::default();
         map.set_inner_name_bytes(&inner_bytes);
         let mut inner_offset = 0i64;
-        for &member_index in &set.members {
+        for (i, &member_index) in set.members.iter().enumerate() {
             let Some(source) = sources.get_source(member_index) else {
                 return Err(MapError::MemberUnreadable(Some(
                     String::from_utf8_lossy(&members[member_index as usize].name).into_owned(),
@@ -8059,6 +8084,11 @@ impl ContentMapper {
                     String::from_utf8_lossy(&members[member_index as usize].name).into_owned(),
                 )));
             };
+            if i == 0 {
+                // The first one read: the others' sizes in one batch (see
+                // `prefetch_member_edges`).
+                sources.prefetch_member_edges(&set.members[1..], &[]);
+            }
             map.runs_mut().push(NzbgetRsContentRun {
                 inner_offset,
                 member_index,
@@ -8082,8 +8112,7 @@ impl ContentMapper {
         let mut volumes: Vec<Option<(crate::rarreader::Volume, Vec<crate::rarreader::RarFile>)>> =
             vec![None; set.members.len()];
         let mut unknown_volume: i32 = -1;
-        // Every volume's headers, and its end-of-archive block after the member data.
-        sources.prefetch_member_edges(&set.members, &set.members);
+        let mut edges_fetched = false;
 
         for (i, &member_index) in set.members.iter().enumerate() {
             if sources.aborted() {
@@ -8142,6 +8171,14 @@ impl ContentMapper {
             let parsed = parsed || (!files.is_empty() && !vol.encrypted);
             if parsed {
                 volumes[i] = Some((vol, files));
+                if !edges_fetched {
+                    // The first volume read: the headers and end-of-archive blocks of the
+                    // rest in one batch, and this one's end block if not read yet (see
+                    // `prefetch_member_edges`). Not before: a set that fails at its first
+                    // volume (encrypted headers, no password) fetches no more than before.
+                    edges_fetched = true;
+                    sources.prefetch_member_edges(&set.members[i + 1..], &set.members[i..]);
+                }
                 continue;
             }
             match content_mapper_classify_unreadable_rar_vol(
@@ -8254,9 +8291,6 @@ impl ContentMapper {
         sources: &dyn ContentSourceSet,
         pick: &mut LayerPick,
     ) -> Result<ContentMap, MapError> {
-        // Every member's size first, then the end of the set (the zip central directory,
-        // the 7z end header).
-        sources.prefetch_member_edges(&set.members, &set.members[set.members.len().saturating_sub(1)..]);
         let mut member_sizes = Vec::with_capacity(set.members.len());
         for &member_index in &set.members {
             let Some(source) = sources.get_source(member_index) else {
@@ -8265,6 +8299,15 @@ impl ContentMapper {
             let sz = source.size();
             if sz <= 0 {
                 return Err(MapError::MemberUnreadable(None));
+            }
+            if member_sizes.is_empty() {
+                // The first size known: the other members' sizes and the end of the set
+                // (the zip central directory, the 7z end header) in one batch (see
+                // `prefetch_member_edges`).
+                sources.prefetch_member_edges(
+                    &set.members[1..],
+                    &set.members[set.members.len() - 1..],
+                );
             }
             member_sizes.push(sz);
         }
@@ -8292,9 +8335,6 @@ impl ContentMapper {
         password: Option<&[u8]>,
         pick: &mut LayerPick,
     ) -> Result<ContentMap, MapError> {
-        // Every member's size first, then the end of the set (the zip central directory,
-        // the 7z end header).
-        sources.prefetch_member_edges(&set.members, &set.members[set.members.len().saturating_sub(1)..]);
         let mut member_sizes = Vec::with_capacity(set.members.len());
         for &member_index in &set.members {
             let Some(source) = sources.get_source(member_index) else {
@@ -8303,6 +8343,15 @@ impl ContentMapper {
             let sz = source.size();
             if sz <= 0 {
                 return Err(MapError::MemberUnreadable(None));
+            }
+            if member_sizes.is_empty() {
+                // The first size known: the other members' sizes and the end of the set
+                // (the zip central directory, the 7z end header) in one batch (see
+                // `prefetch_member_edges`).
+                sources.prefetch_member_edges(
+                    &set.members[1..],
+                    &set.members[set.members.len() - 1..],
+                );
             }
             member_sizes.push(sz);
         }
@@ -8839,6 +8888,11 @@ pub trait CrossPackDonorEnv {
     fn begin_donor_prefetch_multi(&mut self, _parts: &[(i32, i32)]) -> bool {
         false
     }
+    /// [`Self::begin_donor_prefetch_multi`] for a payload map's per-volume articles (see
+    /// [`ContentSourceSet::prefetch_member_edges`]): the same batch, not counted as a wave.
+    fn begin_donor_prefetch_edges(&mut self, parts: &[(i32, i32)]) -> bool {
+        self.begin_donor_prefetch_multi(parts)
+    }
     fn next_donor_prefetch(&mut self) -> Option<FetchedDonorArticle>;
     fn cancel_donor_prefetch(&mut self);
     fn begin_materialize_member(&mut self, member_index: i32);
@@ -9074,7 +9128,7 @@ impl ContentSourceSet for DonorSetSources<'_, '_> {
             }
             self.shared.fetch_budget.set(Some(left - plan.len() as i32));
         }
-        if !self.shared.env.borrow_mut().begin_donor_prefetch_multi(&plan) {
+        if !self.shared.env.borrow_mut().begin_donor_prefetch_edges(&plan) {
             self.shared.fetch_budget.set(budget);
             return;
         }
@@ -20461,10 +20515,20 @@ mod dead_volume_fill_tests {
         singles: Vec<(i32, i32)>,
         multi_batches: Vec<Vec<(i32, i32)>>,
         queue: std::collections::VecDeque<FetchedDonorArticle>,
+        /// A member whose last article claims another file's size (misfiled in the NZB).
+        wrong_tail: Option<i32>,
     }
     impl VolumeDonor {
         fn new(volumes: Vec<Vec<u8>>, article: usize, batching: bool) -> Self {
-            Self { volumes, article, batching, singles: Vec::new(), multi_batches: Vec::new(), queue: Default::default() }
+            Self {
+                volumes,
+                article,
+                batching,
+                singles: Vec::new(),
+                multi_batches: Vec::new(),
+                queue: Default::default(),
+                wrong_tail: None,
+            }
         }
         fn sizes(&self) -> Vec<Vec<i32>> {
             self.volumes
@@ -20475,10 +20539,11 @@ mod dead_volume_fill_tests {
         fn part(&self, member: i32, part: i32) -> FetchedDonorArticle {
             let v = &self.volumes[member as usize];
             let from = part as usize * self.article;
+            let last = from + self.article >= v.len();
             FetchedDonorArticle {
                 success: true,
                 offset: from as i64,
-                file_size: v.len() as i64,
+                file_size: v.len() as i64 + i64::from(last && self.wrong_tail == Some(member)),
                 data: v[from..(from + self.article).min(v.len())].to_vec(),
             }
         }
@@ -20523,8 +20588,32 @@ mod dead_volume_fill_tests {
     /// Maps `names`/`volumes` as the cross-packing repair maps a donor (rationed fetches),
     /// and returns the map with the donor env that served it.
     fn map_volume_donor(names: &[String], volumes: Vec<Vec<u8>>, batching: bool) -> (ContentMap, VolumeDonor) {
+        let (map, env) = try_map_volume_donor(names, volumes, batching, None);
+        (map.unwrap(), env)
+    }
+
+    fn try_map_volume_donor(
+        names: &[String],
+        volumes: Vec<Vec<u8>>,
+        batching: bool,
+        wrong_tail: Option<i32>,
+    ) -> (Result<ContentMap, MapError>, VolumeDonor) {
+        let (map, env, _) = try_map_volume_donor_ends(names, volumes, batching, wrong_tail, false);
+        (map, env)
+    }
+
+    /// [`try_map_volume_donor`], and (with `read_ends`) whether each member's last byte
+    /// reads after the map.
+    fn try_map_volume_donor_ends(
+        names: &[String],
+        volumes: Vec<Vec<u8>>,
+        batching: bool,
+        wrong_tail: Option<i32>,
+        read_ends: bool,
+    ) -> (Result<ContentMap, MapError>, VolumeDonor, Vec<bool>) {
         // Articles as long as a header read ahead (a few KB), as real ones are (~700 KB).
         let mut env = VolumeDonor::new(volumes, 10_000, batching);
+        env.wrong_tail = wrong_tail;
         let members: Vec<SetMember> = names
             .iter()
             .zip(&env.volumes)
@@ -20538,18 +20627,27 @@ mod dead_volume_fill_tests {
         let sources = DonorSetSources::new(&cell, sizes);
         sources.set_fetch_budget(Some(8 + (sets[0].members.len() as i32) * 4));
         let map = ContentMapper::build_map_with_tls(&members, &sets[0], &sources, None, true);
-        let map = map.unwrap();
+        sources.set_fetch_budget(None);
+        let ends = members
+            .iter()
+            .enumerate()
+            .filter(|_| read_ends)
+            .map(|(i, m)| {
+                let mut b = [0u8; 1];
+                sources.get_source(i as i32).is_some_and(|s| s.read(m.size - 1, &mut b).is_ok())
+            })
+            .collect();
         drop(sources);
         env_ref = cell.into_inner();
         let _ = env_ref;
-        (map, env)
+        (map, env, ends)
     }
 
     #[test]
     fn a_donor_map_fetches_every_volume_edge_in_one_batch() {
         // 6790: a split 7z of 207 volumes cost 207 single fetches (one per volume, for its
-        // size), 231 s one after another. The same articles now come in one batch, and the map
-        // is the one the single fetches built.
+        // size), 231 s one after another. Once the first volume reads, the same articles of
+        // the others come in one batch, and the map is the one the single fetches built.
         let data: Vec<u8> = (0..60_000u32).map(|i| (i.wrapping_mul(2654435761) >> 11) as u8).collect();
         let split: Vec<Vec<u8>> = data.chunks(2_500).map(<[u8]>::to_vec).collect();
         let split_names: Vec<String> = (1..=split.len()).map(|i| format!("Movie.mkv.{i:03}")).collect();
@@ -20558,9 +20656,9 @@ mod dead_volume_fill_tests {
         let (batched, env) = map_volume_donor(&split_names, split.clone(), true);
         assert_eq!(batched.runs(), one_by_one.runs());
         assert_eq!(batched.inner_size(), data.len() as i64);
-        assert!(env.singles.is_empty(), "singles {:?}", env.singles);
+        assert_eq!(env.singles, vec![(0, 0)]);
         assert_eq!(env.multi_batches.len(), 1);
-        assert_eq!(env.multi_batches[0], (0..split.len() as i32).map(|m| (m, 0)).collect::<Vec<_>>());
+        assert_eq!(env.multi_batches[0], (1..split.len() as i32).map(|m| (m, 0)).collect::<Vec<_>>());
 
         // A RAR set: every volume's headers and its end block, which the map reads anyway.
         let data: Vec<u8> = (0..2_000_000u32).map(|i| (i.wrapping_mul(2654435761) >> 11) as u8).collect();
@@ -20571,11 +20669,47 @@ mod dead_volume_fill_tests {
         let (batched, env) = map_volume_donor(&rar_names, rar.clone(), true);
         assert_eq!(batched.runs(), one_by_one.runs());
         assert_eq!(batched.inner_size(), data.len() as i64);
-        assert!(env.singles.is_empty(), "singles {:?}", env.singles);
+        assert!(env.singles.iter().all(|&(m, _)| m == 0), "singles {:?}", env.singles);
         assert_eq!(env.multi_batches.len(), 1);
-        let edges: std::collections::BTreeSet<(i32, i32)> = env.multi_batches[0].iter().copied().collect();
+        let mut fetched: std::collections::BTreeSet<(i32, i32)> = env.multi_batches[0].iter().copied().collect();
+        fetched.extend(env.singles.iter().copied());
         // the batch fetches what the single fetches asked for, nothing more
-        assert_eq!(edges, asked);
+        assert_eq!(fetched, asked);
+        assert_eq!(fetched.len(), env.multi_batches[0].len() + env.singles.len());
+    }
+
+    #[test]
+    fn a_donor_map_that_fails_at_its_first_volume_fetches_no_batch() {
+        // Volumes whose headers cannot be read: the map gives up as before, with no batch
+        // of the other volumes' articles fetched for nothing.
+        let junk: Vec<Vec<u8>> = (0..6).map(|i| vec![i as u8 + 1; 30_000]).collect();
+        let names: Vec<String> = (1..=junk.len()).map(|i| format!("Movie.part{i:02}.rar")).collect();
+        let (alone, one_by_one) = try_map_volume_donor(&names, junk.clone(), false, None);
+        let (batched, env) = try_map_volume_donor(&names, junk, true, None);
+        assert!(alone.is_err());
+        assert_eq!(format!("{:?}", batched.map(|m| m.runs().to_vec())), format!("{:?}", alone.map(|m| m.runs().to_vec())));
+        assert!(env.multi_batches.is_empty(), "batches {:?}", env.multi_batches);
+        assert_eq!(env.singles, one_by_one.singles);
+    }
+
+    #[test]
+    fn a_donor_map_batched_last_article_of_another_file_marks_the_member_bad() {
+        // The last article of volume 3 claims another size: fetched alone after the first
+        // article it marks the member bad when first used; fetched in the batch before the
+        // size was known it must too, at the same point, so map and reads come out the same.
+        let data: Vec<u8> = (0..2_000_000u32).map(|i| (i.wrapping_mul(2654435761) >> 11) as u8).collect();
+        let rar = rar5_set("Movie.mkv", &data, 200_000);
+        let names: Vec<String> = (1..=rar.len()).map(|i| format!("Movie.part{i:02}.rar")).collect();
+        let (alone, _, alone_ends) = try_map_volume_donor_ends(&names, rar.clone(), false, Some(2), true);
+        let (batched, env, batched_ends) = try_map_volume_donor_ends(&names, rar, true, Some(2), true);
+        assert!(env.multi_batches[0].contains(&(2, 20)), "batch {:?}", env.multi_batches);
+        assert_eq!(
+            format!("{:?}", batched.map(|m| m.runs().to_vec())),
+            format!("{:?}", alone.map(|m| m.runs().to_vec()))
+        );
+        assert_eq!(batched_ends, alone_ends);
+        // (the wrong last article is caught: the check is exercised)
+        assert!(!alone_ends[2] && alone_ends[3], "{alone_ends:?}");
     }
 
     struct BareDonor {

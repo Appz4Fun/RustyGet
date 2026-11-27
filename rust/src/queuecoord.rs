@@ -839,6 +839,22 @@ pub(crate) fn backup_may_lend_while_extracting(
     )
 }
 
+/// Test hook: `RUSTYGET_TEST_COORD_PASS_DELAY_MS` sleeps that long after each pass of
+/// the coordinator loop (outside the queue lock), as a pass slowed by a long queue and
+/// lock waits is (6790). The queuebatchstart scenario sets it; unset, it costs one load.
+fn test_coord_pass_delay() {
+    static DELAY_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let ms = *DELAY_MS.get_or_init(|| {
+        std::env::var("RUSTYGET_TEST_COORD_PASS_DELAY_MS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0)
+    });
+    if ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+}
+
 /// Set while the download next in line waits for its dead-pick probe's connection (see
 /// `dupeprobe::probe_waiting_for_connection`): the queue has work left, so it neither idles
 /// nor, in standalone mode, ends with the download unfinished.
@@ -2462,6 +2478,7 @@ impl NzbgetRsQueueCoordinator {
                     }
                 }
             });
+            test_coord_pass_delay();
 
             crate::parchecker::streaming_session_retry_completion_tick();
             self.drain_live_par_completed_files(host);

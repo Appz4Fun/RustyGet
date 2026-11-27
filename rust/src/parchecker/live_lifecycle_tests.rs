@@ -2354,11 +2354,11 @@ fn live_hint_hash16k_round_trips_printed_and_first_article() {
     assert_eq!(live_hint_hash16k(&first_article_hash16k(short)), Some(digest));
 }
 
-/// The queue's printed hash binds an obfuscated file, and a file first bound by its first
-/// article keeps its binding when later writes carry the queue's hash (before, the queue's
-/// text was read reversed: no hash match, then "bound source hash identity changed").
+/// The queue's printed hash binds an obfuscated file to its par2 entry and gives its length;
+/// the digest-order text names none (before, live PAR read the queue's text that way, so
+/// no queue hash ever matched).
 #[test]
-fn live_queue_printed_hash_binds_and_keeps_first_article_binding() {
+fn live_queue_printed_hash_binds_an_obfuscated_file() {
     let fx = Fixture::new();
     let set = fx.set();
     let id = -1900119;

@@ -3286,7 +3286,6 @@ pub(crate) fn live_hint_hash16k(hint: &[u8]) -> Option<[u8; 16]> {
     crate::parrenamer::parse_printed_hash16k(hint)
 }
 
-
 #[cfg(test)]
 pub(crate) fn streaming_session_process_completed_file(
     nzb_id: i32,

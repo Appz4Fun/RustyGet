@@ -3331,7 +3331,9 @@ fn spawn_head_rebuild(
                     }
                     None => return,
                 },
-                HolePlacement::Tail { .. } | HolePlacement::Header => return,
+                HolePlacement::Tail { .. } | HolePlacement::Header | HolePlacement::Compressed => {
+                    return
+                }
             };
             let moved = if holes.is_empty() {
                 // Every lost byte was header, now written back: the volume is whole.

@@ -973,7 +973,7 @@ fn a_live_repair_reads_nothing_back() {
 /// it. No damage is ever reported and no recovery volume is asked for.
 #[test]
 fn an_article_taken_as_written_before_its_write_lands_is_not_damaged() {
-    let f = fixture(0x7a75_0020, 6, 2, 2);
+    let f = fixture(0x7a75_0030, 6, 2, 2);
     let path = f.dir.join("part01.rar");
     std::fs::write(&path, vec![0u8; f.data.len()]).unwrap();
     let entry = active_streaming_session(f.nzb_id).unwrap();
@@ -1029,7 +1029,7 @@ fn an_article_taken_as_written_before_its_write_lands_is_not_damaged() {
 fn an_unplanned_volume_mid_download_costs_one_back_fill_pass() {
     // 25 slices (the last short), 2 slots preallocated (exponents 0 and 1) of a cap of 40
     // (as `parlive::resources` sizes an unplanned session), one recovery block per volume.
-    let f = fixture_with(0x7a75_0021, 24, 2, 40, 8, VolumeScheme::Uniform(1));
+    let f = fixture_with(0x7a75_0031, 24, 2, 40, 8, VolumeScheme::Uniform(1));
     let entry = active_streaming_session(f.nzb_id).unwrap();
     let id = file_id(f.nzb_id);
     let lost = [1usize, 3, 5, 7, 9, 11];

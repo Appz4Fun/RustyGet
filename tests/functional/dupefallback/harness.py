@@ -16430,7 +16430,7 @@ def _promote_fallback(options, mode):
 # finished job is rightly not redone
 FALLBACK_MODE_BOUND = {'livegate', 'streamrestartcredit', 'wholefilerestart', 'wholefilestale'}
 # scenarios that read nserv's request log (nserv.log)
-CAPTURE_REQUESTS = {'repost', 'wholefileproofcost', 'dropnzbdir', 'fleetstaysqueued', 'fleetprimaryfirst'} | {
+CAPTURE_REQUESTS = {'repost', 'altfetchonce', 'wholefileproofcost', 'dropnzbdir', 'fleetstaysqueued', 'fleetprimaryfirst'} | {
     'failcont_twin25', 'failcont_twin50', 'failcont_twin90', 'failcont_alt25', 'failcont_alt50', 'failcont_altlive', 'failcont_alt90', 'failcont_aes25', 'failcont_aes50', 'failcont_aes90', 'failcont_compressed', 'failcont_othervideo', 'failcont_twinlabel', 'failcont_fleettwin', 'failcont_fleetalt', 'failcont_fleetaes', 'failcont_aestwin', 'failcont_aesalt', 'failcont_rar5m3', 'failcont_rar5m3aes', 'failcont_rar5m3other', 'failcont_lzma2', 'failcont_norestart', 'weakswitchalt', 'weakswitchtwin', 'weakswitchaes', 'weakswitchm3', 'failcont_aescontainer', 'failcont_alt25busy'}
 # extra nserv arguments per scenario (-w: response latency in ms)
 SCENARIO_NSERV_ARGS = {'streamtimeoutwrites': ['-w', '800'], 'fleetslowprobe': ['-x', '2000'], 'fleetprobespeed': ['-w', '300'], 'fleetprobebusy': ['-w', '300'], 'fleetprobehealthfail': ['-w', '800'], 'finaldeletemidway': ['-w', '300'], 'finaldeleterestart': ['-w', '300'], 'restartmidway': ['-w', '300'], 'xpacklatency': ['-w', '1000'], 'deadpickprobe': ['-w', '500'], 'deadpickafterreload': ['-w', '500'],

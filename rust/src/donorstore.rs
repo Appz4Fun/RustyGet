@@ -347,7 +347,7 @@ mod tests {
         put(7010, &id, 0, 10, b"0123456789");
         let file = lock()
             .as_ref()
-            .and_then(|s| s.entries.get(&id).map(|e| e.file.clone()))
+            .and_then(|s| s.entries.get(key(&id)).map(|e| e.file.clone()))
             .expect("entry");
         std::fs::write(&file, b"0123").unwrap();
         assert!(get(7010, &id).is_none());

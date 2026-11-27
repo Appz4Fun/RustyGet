@@ -4564,6 +4564,7 @@ pub(crate) fn streaming_session_verified_cover(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
+    let bound_ids: HashSet<FileId> = bindings.values().copied().collect();
     let mut stamps: Vec<(FileId, crate::parlive::FileStamp)> =
         Vec::with_capacity(entry.target_names.len());
     let mut queue_ids = Vec::with_capacity(entry.target_names.len());
@@ -4580,7 +4581,7 @@ pub(crate) fn streaming_session_verified_cover(
         }
         let owned = match bindings.get(queue_id) {
             Some(bound) => *bound == id,
-            None => !bindings.values().any(|bound| *bound == id),
+            None => !bound_ids.contains(&id),
         };
         if !owned {
             return Err(format!(

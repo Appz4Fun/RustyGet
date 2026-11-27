@@ -2017,9 +2017,10 @@ def _interdir_budget_run(daemon, t, scen, first_prio, second_prio):
     (RUSTYGET_TEST_STATE_RESERVE_MB): each needs 33 MB (remaining plus 10 %), so only one
     may run. BudgetA is added first with ``first_prio``, BudgetB 0.3 s later with
     ``second_prio``; the one with the higher priority (A on a tie: queue order) is the
-    lead. Each comes in 4 articles over 8 connections, every request held 2 s (nserv -w),
-    so without the budget both run at once: the API is sampled and the other must show no
-    active download or downloaded byte while the lead is queued. Once the lead has moved
+    lead (both are queued while downloading is paused, then it is resumed). Each comes in 4
+    articles over 8 connections, every request held 2 s (nserv -w), so without the budget
+    both run at once: the API is sampled and the other must show no active download or
+    downloaded byte while the lead still downloads. Once the lead has moved
     to DestDir, the other starts. Both end SUCCESS and byte-exact, the other's hold is
     logged once and the lead's never."""
     seg, size = 7_500_000, 30_000_000
@@ -2044,11 +2045,18 @@ def _interdir_budget_run(daemon, t, scen, first_prio, second_prio):
             f.write(('InterDir=%s\n' % os.path.join(mnt, 'inter')).encode())
         daemon.start()
         api = daemon.wait_ready()
+        # Both are in the queue before the first pick: downloading is paused meanwhile.
+        api.pausedownload()
         content = base64.standard_b64encode(build_nzb(pa, 'a.bin', size, seg, set()).encode()).decode()
         api.append('BudgetA', content, 'test', first_prio, False, False, 'bud-a', 100, 'score', [])
         time.sleep(0.3)
         content = base64.standard_b64encode(build_nzb(pb, 'b.bin', size, seg, set()).encode()).decode()
         api.append('BudgetB', content, 'test', second_prio, False, False, 'bud-b', 100, 'score', [])
+        deadline = time.time() + 30
+        while time.time() < deadline and len(api.listgroups()) < 2:
+            time.sleep(0.1)
+        time.sleep(0.5)
+        api.resumedownload()
         samples = lead_seen = overlap = 0
         deadline = time.time() + 120
         while time.time() < deadline:
@@ -2057,9 +2065,13 @@ def _interdir_budget_run(daemon, t, scen, first_prio, second_prio):
             if a is None:
                 break
             samples += 1
+            # The lead downloads while it has articles in flight or left to fetch; once it is
+            # all down (moving to DestDir) the other may start.
+            downloading = a.get('ActiveDownloads', 0) > 0 or a.get('RemainingSizeMB', 0) > 0
             if a.get('ActiveDownloads', 0) > 0:
                 lead_seen += 1
-            if b is not None and (b.get('ActiveDownloads', 0) > 0 or b.get('DownloadedSizeMB', 0) > 0):
+            if downloading and b is not None and (b.get('ActiveDownloads', 0) > 0
+                                                  or b.get('DownloadedSizeMB', 0) > 0):
                 overlap += 1
             time.sleep(0.2)
         ha = daemon.wait_history(api, 'BudgetA', timeout=180)
@@ -2073,7 +2085,7 @@ def _interdir_budget_run(daemon, t, scen, first_prio, second_prio):
               and lead_seen > 0 and overlap == 0 and got_other > 0 and held == 1 and held_lead == 0)
         return (scen, ok,
                 'lead=%s statusA=%s statusB=%s integrity=%s samples=%d lead_active_samples=%d '
-                'other_active_while_lead_queued=%d other_requests=%d held_logs_other=%d held_logs_lead=%d'
+                'other_active_while_lead_downloads=%d other_requests=%d held_logs_other=%d held_logs_lead=%d'
                 % (lead, ha['Status'], hb['Status'], integ, samples, lead_seen, overlap, got_other,
                    held, held_lead))
     finally:

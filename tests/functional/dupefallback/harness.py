@@ -2106,6 +2106,108 @@ def scenario_cachecommitfull(daemon, t):
     return _cache_commit_full(daemon, t, 'cachecommitfull')
 
 
+def _interdir_budget_run(daemon, t, scen, first_prio, second_prio):
+    """Two 30 MB downloads in a 64 MB InterDir with DiskSpace=4 and a 1 MB state reserve
+    (RUSTYGET_TEST_STATE_RESERVE_MB): each needs 33 MB (remaining plus 10 %), so only one
+    may run. BudgetA is added first with ``first_prio``, BudgetB 0.3 s later with
+    ``second_prio``; the one with the higher priority (A on a tie: queue order) is the
+    lead (both are queued while downloading is paused, then it is resumed). Each comes in 4
+    articles over 8 connections, every request held 2 s (nserv -w), so without the budget
+    both run at once: the API is sampled and the other must show no active download or
+    downloaded byte while the lead still downloads. Once the lead has moved
+    to DestDir, the other starts. Both end SUCCESS and byte-exact, the other's hold is
+    logged once and the lead's never."""
+    seg, size = 7_500_000, 30_000_000
+    data_a, data_b = _payload(size, 7101), _payload(size, 7102)
+    pa = _place_copy(t, 'bgA', data_a, 'a.bin')
+    pb = _place_copy(t, 'bgB', data_b, 'b.bin')
+    lead, other = ('BudgetB', 'BudgetA') if second_prio > first_prio else ('BudgetA', 'BudgetB')
+    api = daemon.wait_ready()
+    try:
+        api.shutdown()
+    except Exception:
+        pass
+    t.procs[-1].wait(timeout=60)
+    mnt = t.path('main', 'small')
+    umount, why = _small_fs_mount(t, mnt, 64)
+    if umount is None:
+        return (scen, None, 'SKIP: %s' % why)
+    try:
+        os.makedirs(os.path.join(mnt, 'inter'))
+        conf = t.path(daemon.conf_rel)
+        with open(conf, 'ab') as f:
+            f.write(('InterDir=%s\n' % os.path.join(mnt, 'inter')).encode())
+        daemon.start()
+        api = daemon.wait_ready()
+        # Both are in the queue before the first pick: downloading is paused meanwhile.
+        api.pausedownload()
+        content = base64.standard_b64encode(build_nzb(pa, 'a.bin', size, seg, set()).encode()).decode()
+        api.append('BudgetA', content, 'test', first_prio, False, False, 'bud-a', 100, 'score', [])
+        time.sleep(0.3)
+        content = base64.standard_b64encode(build_nzb(pb, 'b.bin', size, seg, set()).encode()).decode()
+        api.append('BudgetB', content, 'test', second_prio, False, False, 'bud-b', 100, 'score', [])
+        deadline = time.time() + 30
+        while time.time() < deadline and len(api.listgroups()) < 2:
+            time.sleep(0.1)
+        time.sleep(0.5)
+        api.resumedownload()
+        samples = lead_seen = overlap = 0
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            groups = {g['NZBName']: g for g in api.listgroups()}
+            a, b = groups.get(lead), groups.get(other)
+            if a is None:
+                break
+            samples += 1
+            # The lead downloads while it has articles in flight or left to fetch; once it is
+            # all down (moving to DestDir) the other may start.
+            downloading = a.get('ActiveDownloads', 0) > 0 or a.get('RemainingSizeMB', 0) > 0
+            if a.get('ActiveDownloads', 0) > 0:
+                lead_seen += 1
+            if downloading and b is not None and (b.get('ActiveDownloads', 0) > 0
+                                                  or b.get('DownloadedSizeMB', 0) > 0):
+                overlap += 1
+            time.sleep(0.2)
+        ha = daemon.wait_history(api, 'BudgetA', timeout=180)
+        hb = daemon.wait_history(api, 'BudgetB', timeout=180)
+        ids = _failcont_requests(t)
+        got_other = sum(1 for m in ids if m.startswith('bgB/' if other == 'BudgetB' else 'bgA/'))
+        integ = _verify_output(t, data_a) and _verify_output(t, data_b)
+        held = _grep_log(t, 'Holding %s: needs' % other)
+        held_lead = _grep_log(t, 'Holding %s: needs' % lead)
+        ok = (ha['Status'].startswith('SUCCESS') and hb['Status'].startswith('SUCCESS') and integ
+              and lead_seen > 0 and overlap == 0 and got_other > 0 and held == 1 and held_lead == 0)
+        return (scen, ok,
+                'lead=%s statusA=%s statusB=%s integrity=%s samples=%d lead_active_samples=%d '
+                'other_active_while_lead_downloads=%d other_requests=%d held_logs_other=%d held_logs_lead=%d'
+                % (lead, ha['Status'], hb['Status'], integ, samples, lead_seen, overlap, got_other,
+                   held, held_lead))
+    finally:
+        for p in t.procs:
+            if p.poll() is None:
+                p.kill()
+                p.wait(timeout=30)
+        if subprocess.run(umount, capture_output=True).returncode != 0:
+            lazy = umount[:-1] + ['-l', umount[-1]] if umount[0] == 'sudo' else umount
+            rc = subprocess.run(lazy, capture_output=True).returncode
+            print('       %s: unmount of %s failed, lazy unmount rc=%d' % (scen, mnt, rc))
+
+
+def scenario_interdirbudget(daemon, t):
+    """6790, 2026-11-27: about 450 GB of downloads started together in a 470 GB InterDir,
+    which filled up. Two downloads that do not both fit: the second added waits until the
+    first has left InterDir (see `_interdir_budget_run`)."""
+    return _interdir_budget_run(daemon, t, 'interdirbudget', 0, 0)
+
+
+def scenario_interdirbudgetprio(daemon, t):
+    """The budget goes by the pick, not by queue order: a high-priority download added
+    after a low-priority one that does not fit beside it runs first, the low one waits
+    (checking each item met in the queue walk would let the earlier, lower one take the
+    room)."""
+    return _interdir_budget_run(daemon, t, 'interdirbudgetprio', 0, 100)
+
+
 def scenario_streamtimeout(daemon, t):
     """DupeStreamTimeout: the only duplicate is stalled (every request for its
     articles waits 8 s, longer than the timeout), so the repair of the
@@ -16269,6 +16371,8 @@ SCENARIOS = {
     'queuesyncslow': scenario_queuesyncslow,
     'diskfullrestart': scenario_diskfullrestart,
     'cachecommitfull': scenario_cachecommitfull,
+    'interdirbudget': scenario_interdirbudget,
+    'interdirbudgetprio': scenario_interdirbudgetprio,
     'queuebatchstart': scenario_queuebatchstart,
     'streamrestartcredit': scenario_streamrestartcredit,
     'streamtimeout': scenario_streamtimeout,
@@ -16721,6 +16825,10 @@ SCENARIO_ENV = {
     'corruptpartdurar5': {'RUSTYGET_PERSISTENT_UNPACK': '1'},
     # each state-file sync takes 1 s (diskstate_format::test_state_sync_delay)
     'queuesyncslow': {'RUSTYGET_TEST_STATE_SYNC_DELAY_MS': '1000'},
+    # the InterDir budget (interbudget.rs) holds a download that needs 1 GB of state reserve on a 64 MB disk
+    'cachecommitfull': {'RUSTYGET_TEST_STATE_RESERVE_MB': '1'},
+    'interdirbudget': {'RUSTYGET_TEST_STATE_RESERVE_MB': '1'},
+    'interdirbudgetprio': {'RUSTYGET_TEST_STATE_RESERVE_MB': '1'},
     # each pass of the queue coordinator takes 100 ms (queuecoord::test_coord_pass_delay)
     'queuebatchstart': {'RUSTYGET_TEST_COORD_PASS_DELAY_MS': '100'},
     # Each cache flush holds its file's flush lock 150 ms before writing (articledl.rs
@@ -16790,6 +16898,8 @@ SCENARIO_OPTIONS = {
     'queuesyncslow': ['ContinuePartial=yes', 'FlushQueue=yes', 'Server1.Connections=6'],
     'diskfullrestart': ['ContinuePartial=yes', 'FlushQueue=yes', 'DiskSpace=0', 'Server1.Connections=4'],
     'cachecommitfull': ['ArticleCache=16', 'DirectWrite=yes', 'DiskSpace=1', 'Server1.Connections=4'],
+    'interdirbudget': ['DiskSpace=4', 'Server1.Connections=8'],
+    'interdirbudgetprio': ['DiskSpace=4', 'Server1.Connections=8'],
     'queuebatchstart': ['Server1.Connections=30'],
     'streamrestartcredit': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'streamdeaddonor': ['DupeArticleFallback=stream', 'ParCheck=auto'],
@@ -17225,10 +17335,10 @@ def _promote_fallback(options, mode):
 # finished job is rightly not redone
 FALLBACK_MODE_BOUND = {'livegate', 'streamrestartcredit', 'wholefilerestart', 'wholefilestale'}
 # scenarios that read nserv's request log (nserv.log)
-CAPTURE_REQUESTS = {'repost', 'diskfullrestart', 'cachecommitfull', 'altfetchonce', 'wholefileproofcost', 'dropnzbdir', 'fleetstaysqueued', 'fleetprimaryfirst'} | {
+CAPTURE_REQUESTS = {'repost', 'diskfullrestart', 'cachecommitfull', 'interdirbudget', 'interdirbudgetprio', 'altfetchonce', 'wholefileproofcost', 'dropnzbdir', 'fleetstaysqueued', 'fleetprimaryfirst'} | {
     'failcont_twin25', 'failcont_twin50', 'failcont_twin90', 'failcont_alt25', 'failcont_alt50', 'failcont_altlive', 'failcont_alt90', 'failcont_aes25', 'failcont_aes50', 'failcont_aes90', 'failcont_compressed', 'failcont_othervideo', 'failcont_twinlabel', 'failcont_fleettwin', 'failcont_fleetalt', 'failcont_fleetaes', 'failcont_aestwin', 'failcont_aesalt', 'failcont_rar5m3', 'failcont_rar5m3aes', 'failcont_rar5m3other', 'failcont_lzma2', 'failcont_norestart', 'weakswitchalt', 'weakswitchtwin', 'weakswitchaes', 'weakswitchm3', 'failcont_aescontainer', 'failcont_alt25busy'}
 # extra nserv arguments per scenario (-w: response latency in ms)
-SCENARIO_NSERV_ARGS = {'diskfullrestart': ['-w', '300'], 'cachecommitfull': ['-w', '100'], 'streamtimeoutwrites': ['-w', '800'], 'fleetslowprobe': ['-x', '2000'], 'fleetprobespeed': ['-w', '300'], 'fleetprobebusy': ['-w', '300'], 'fleetprobehealthfail': ['-w', '800'], 'finaldeletemidway': ['-w', '300'], 'finaldeleterestart': ['-w', '300'], 'restartmidway': ['-w', '300'], 'xpacklatency': ['-w', '1000'], 'deadpickprobe': ['-w', '500'], 'deadpickafterreload': ['-w', '500'],
+SCENARIO_NSERV_ARGS = {'diskfullrestart': ['-w', '300'], 'cachecommitfull': ['-w', '100'], 'interdirbudget': ['-w', '2000'], 'interdirbudgetprio': ['-w', '2000'], 'streamtimeoutwrites': ['-w', '800'], 'fleetslowprobe': ['-x', '2000'], 'fleetprobespeed': ['-w', '300'], 'fleetprobebusy': ['-w', '300'], 'fleetprobehealthfail': ['-w', '800'], 'finaldeletemidway': ['-w', '300'], 'finaldeleterestart': ['-w', '300'], 'restartmidway': ['-w', '300'], 'xpacklatency': ['-w', '1000'], 'deadpickprobe': ['-w', '500'], 'deadpickafterreload': ['-w', '500'],
                        'deadpickpartial': ['-w', '100'], 'deadpickstray': ['-w', '500'], 'forcefailover': ['-w', '500'], 'copybackup': ['-w', '500'], 'copyoffailed': ['-w', '500'], 'deaddownloadstray2': ['-w', '300'], 'deaddownloadrestart': ['-w', '300'], 'deadbackupsonly': ['-w', '500'], 'backuporder': ['-w', '500'], 'deaddownloadlate': ['-w', '300'], 'deadpickservers': ['-w', '200'],
                        'deadpickfewservers': ['-w', '200'],
                        # a missing article answers late, so the dead volumes fail one after another and later

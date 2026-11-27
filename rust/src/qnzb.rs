@@ -887,15 +887,19 @@ pub(crate) enum NzbAction {
     ClearCompletedFiles = 113,
 }
 
-/// The download behind `nzb` as its scalars and model data; `None` for
-/// [`NzbRef::NONE`].
-///
-/// The scalars are plain memory changed only under the queue lock, which
-/// every caller of the field setters holds.
-fn scalars_mut<'a>(nzb: NzbRef) -> Option<(*mut NzbScalars, &'a mut NzbScalars, &'a NzbData)> {
+/// The download behind `nzb` as its scalars pointer and model data; `None` for
+/// [`NzbRef::NONE`]. No `&mut` to the scalars is made here: see [`with_scalars`].
+fn scalars_mut<'a>(nzb: NzbRef) -> Option<(*mut NzbScalars, &'a NzbData)> {
     let d = nzb_data(nzb)?;
-    let p = nzb.addr() as *mut NzbScalars;
-    Some((p, unsafe { &mut *p }, d))
+    Some((nzb.addr() as *mut NzbScalars, d))
+}
+
+/// Runs `f` on the download's scalars under the scalar lock. The lock is a leaf: take nothing
+/// else (a file, list or text lock, a callback) inside `f`, so no lock order can form.
+pub(crate) fn with_scalars<R>(p: *const NzbScalars, f: impl FnOnce(&mut NzbScalars) -> R) -> R {
+    let _scalars = data(p).scalar_lock();
+    // the `&mut` exists only now: making it is itself a write as far as another thread's read goes
+    f(unsafe { &mut *p.cast_mut() })
 }
 
 /// Sets an integer or flag field (NzbInfo's int setters).
@@ -1007,10 +1011,10 @@ pub(crate) fn set_int(nzb: NzbRef, field: NzbInt, v: i32) {
 
 /// Sets a 64-bit size or time field.
 pub(crate) fn set_i64(nzb: NzbRef, field: NzbI64, v: i64) {
-    let Some((_, s, _)) = scalars_mut(nzb) else {
+    if nzb_data(nzb).is_none() {
         return;
-    };
-    match field {
+    }
+    with_scalars(scalars(nzb), |s| match field {
         NzbI64::RemainingSize => s.remainingSize = v,
         NzbI64::PausedSize => s.pausedSize = v,
         NzbI64::CurSuccessSize => s.currentSuccessSize = v,
@@ -1027,13 +1031,13 @@ pub(crate) fn set_i64(nzb: NzbRef, field: NzbI64, v: i64) {
         NzbI64::Size => s.size = v,
         NzbI64::MinTime => s.minTime = v,
         NzbI64::MaxTime => s.maxTime = v,
-    }
+    })
 }
 
 /// Sets a text field; `None` unsets it, which reads as empty (the dupe key,
 /// hard-link path and final directory store an empty text instead).
 pub(crate) fn set_str(nzb: NzbRef, field: NzbStr, value: Option<&[u8]>) {
-    let Some((p, _, _)) = scalars_mut(nzb) else {
+    let Some((p, _)) = scalars_mut(nzb) else {
         return;
     };
     let value = value.map(c_string);
@@ -1066,7 +1070,7 @@ pub(crate) fn add_file_totals(
     file: crate::queuesubsys_host::FileRef,
     totals: FileTotals,
 ) {
-    let Some((p, _, _)) = scalars_mut(nzb) else {
+    let Some((p, _)) = scalars_mut(nzb) else {
         return;
     };
     let f = file.addr() as *const crate::qfile::File;
@@ -1079,7 +1083,7 @@ pub(crate) fn add_file_totals(
 /// Runs one of the download's self-updates.
 pub(crate) fn act(nzb: NzbRef, action: NzbAction) {
     use std::sync::atomic::Ordering::SeqCst;
-    let Some((p, _, d)) = scalars_mut(nzb) else {
+    let Some((p, d)) = scalars_mut(nzb) else {
         return;
     };
     match action {
@@ -1438,12 +1442,15 @@ fn post_set(p: *const Post, field: PostField, v: i64) {
     post.vals[field.index()].store(v, SeqCst);
     let nzb = post_nzb(p);
     if let (PostField::Int(f), false) = (field, nzb.is_null()) {
-        let s = unsafe { &mut *nzb };
-        match f {
-            PostInt::ParRepaired => s.parRepaired = v != 0,
-            PostInt::UnpackTried => s.unpackTried = v != 0,
-            PostInt::LastUnpackStatus => s.lastUnpackStatus = v as i32,
-            _ => {}
+        // only these three live in the collection; the others must not take the scalar lock
+        // (`set_int` holds it while it sets the stage and force flags)
+        if matches!(f, PostInt::ParRepaired | PostInt::UnpackTried | PostInt::LastUnpackStatus) {
+            with_scalars(nzb, |s| match f {
+                PostInt::ParRepaired => s.parRepaired = v != 0,
+                PostInt::UnpackTried => s.unpackTried = v != 0,
+                PostInt::LastUnpackStatus => s.lastUnpackStatus = v as i32,
+                _ => {}
+            });
         }
     }
 }
@@ -1454,11 +1461,10 @@ fn post_get(p: *const Post, field: PostField) -> i64 {
     use std::sync::atomic::Ordering::SeqCst;
     let nzb = post_nzb(p);
     if let (PostField::Int(f), false) = (field, nzb.is_null()) {
-        let s = unsafe { &*nzb };
         match f {
-            PostInt::ParRepaired => return i64::from(s.parRepaired),
-            PostInt::UnpackTried => return i64::from(s.unpackTried),
-            PostInt::LastUnpackStatus => return i64::from(s.lastUnpackStatus),
+            PostInt::ParRepaired => return i64::from(with_scalars(nzb, |s| s.parRepaired)),
+            PostInt::UnpackTried => return i64::from(with_scalars(nzb, |s| s.unpackTried)),
+            PostInt::LastUnpackStatus => return i64::from(with_scalars(nzb, |s| s.lastUnpackStatus)),
             _ => {}
         }
     }
@@ -1496,9 +1502,10 @@ pub(crate) unsafe fn enter_post_process(p: *mut NzbScalars) {
 pub(crate) unsafe fn leave_post_process(p: *mut NzbScalars) {
     let old = swap_slot(p, Slot::Post, 0);
     unsafe { nzbget_rs_post_free(old as *mut Post) };
-    let s = unsafe { &mut *p };
-    s.unpackTried = false;
-    s.lastUnpackStatus = 0;
+    with_scalars(p, |s| {
+        s.unpackTried = false;
+        s.lastUnpackStatus = 0;
+    });
     data(p).files().extracted.clear();
 }
 
@@ -1562,13 +1569,13 @@ pub unsafe extern "C" fn nzbget_rs_nzb_start_direct_unpack(p: *mut NzbScalars) {
     let job = JobHandle::new_unpack(unsafe { (*p).id });
     swap_slot(p, Slot::UnpackJob, job.addr());
     // NzbInfo::nsRunning
-    unsafe { (*p).directUnpackStatus = 1 };
+    with_scalars(p, |s| s.directUnpackStatus = 1);
     if !job.start() {
         unsafe {
             swap_slot(p, Slot::UnpackJob, 0);
-            (*p).directUnpackStatus = 0;
             job.free(false);
         }
+        with_scalars(p, |s| s.directUnpackStatus = 0);
     }
 }
 
@@ -1673,35 +1680,36 @@ pub(crate) unsafe fn host_post_job_op(
 /// # Safety
 /// `p` is a live collection; the caller holds the queue lock.
 pub(crate) unsafe fn host_set_stats(p: *mut NzbScalars, ints: &[i32; 12], i64s: &[i64; 16]) {
-    let s = unsafe { &mut *p };
-    s.fileCount = ints[0];
-    set_active_downloads(s, ints[1], unix_now());
-    s.fullContentHash = ints[2] as u32;
-    s.filteredContentHash = ints[3] as u32;
-    s.size = i64s[0];
-    s.remainingSize = i64s[1];
-    s.pausedFileCount = ints[4];
-    s.pausedSize = i64s[2];
-    s.successSize = i64s[3];
-    s.currentSuccessSize = i64s[4];
-    s.failedSize = i64s[5];
-    s.currentFailedSize = i64s[6];
-    s.parSize = i64s[7];
-    s.parSuccessSize = i64s[8];
-    s.parCurrentSuccessSize = i64s[9];
-    s.parFailedSize = i64s[10];
-    s.parCurrentFailedSize = i64s[11];
-    s.remainingParCount = ints[5];
-    s.totalArticles = ints[6];
-    s.successArticles = ints[7];
-    s.failedArticles = ints[8];
-    s.currentSuccessArticles = ints[9];
-    s.currentFailedArticles = ints[10];
-    s.downloadSec = ints[11];
-    s.minTime = i64s[12];
-    s.maxTime = i64s[13];
-    s.downloadedSize = i64s[14];
-    s.downloadStartTime = i64s[15];
+    with_scalars(p, |s| {
+        s.fileCount = ints[0];
+        set_active_downloads(s, ints[1], unix_now());
+        s.fullContentHash = ints[2] as u32;
+        s.filteredContentHash = ints[3] as u32;
+        s.size = i64s[0];
+        s.remainingSize = i64s[1];
+        s.pausedFileCount = ints[4];
+        s.pausedSize = i64s[2];
+        s.successSize = i64s[3];
+        s.currentSuccessSize = i64s[4];
+        s.failedSize = i64s[5];
+        s.currentFailedSize = i64s[6];
+        s.parSize = i64s[7];
+        s.parSuccessSize = i64s[8];
+        s.parCurrentSuccessSize = i64s[9];
+        s.parFailedSize = i64s[10];
+        s.parCurrentFailedSize = i64s[11];
+        s.remainingParCount = ints[5];
+        s.totalArticles = ints[6];
+        s.successArticles = ints[7];
+        s.failedArticles = ints[8];
+        s.currentSuccessArticles = ints[9];
+        s.currentFailedArticles = ints[10];
+        s.downloadSec = ints[11];
+        s.minTime = i64s[12];
+        s.maxTime = i64s[13];
+        s.downloadedSize = i64s[14];
+        s.downloadStartTime = i64s[15];
+    });
 }
 
 fn ptr_list_op(l: usize, op: c_int, a: i64, item: usize, order: *const usize, other: usize) -> i64 {
@@ -1740,6 +1748,10 @@ unsafe fn move_file_list(dst: *mut NzbScalars, src: *const NzbScalars) {
             )
         };
     }
+    // both scalar locks, lowest address first, so two opposite moves cannot deadlock
+    let (first, second) = if (dst as usize) < (src as usize) { (dst.cast_const(), src) } else { (src, dst.cast_const()) };
+    let _lock1 = data(first).scalar_lock();
+    let _lock2 = data(second).scalar_lock();
     let (d, s) = unsafe { (&mut *dst, &*src) };
     d.fullContentHash = s.fullContentHash;
     d.filteredContentHash = s.filteredContentHash;
@@ -2451,9 +2463,10 @@ unsafe fn update_min_max_time(p: *mut NzbScalars) {
         .map(|f| file_get(f, crate::qfile::field::TIME))
         .collect();
     let (min_t, max_t) = crate::downloadinfo::calc_min_max_time(&times);
-    let s = unsafe { &mut *p };
-    s.minTime = min_t;
-    s.maxTime = max_t;
+    with_scalars(p, |s| {
+        s.minTime = min_t;
+        s.maxTime = max_t;
+    });
 }
 
 /// NzbInfo::UpdateCompletedStats: a file finished downloading.
@@ -2461,8 +2474,8 @@ unsafe fn update_completed_stats(p: *mut NzbScalars, f: *const crate::qfile::Fil
     use crate::qfile::field;
     let g = |id| file_get(f, id);
     {
-        let s = unsafe { &mut *p };
-        crate::downloadinfo::update_completed_stats(
+        // the file's fields first: its lock must not be taken under the scalar lock
+        let args = (
             g(field::SUCCESS_SIZE),
             g(field::FAILED_SIZE),
             g(field::FAILED_ARTICLES) as i32,
@@ -2470,6 +2483,15 @@ unsafe fn update_completed_stats(p: *mut NzbScalars, f: *const crate::qfile::Fil
             g(field::EXTRA_PRIORITY) != 0,
             g(field::PAR_FILE) != 0,
             g(field::PAUSED) != 0,
+        );
+        with_scalars(p, |s| crate::downloadinfo::update_completed_stats(
+            args.0,
+            args.1,
+            args.2,
+            args.3,
+            args.4,
+            args.5,
+            args.6,
             &mut s.successSize,
             &mut s.failedSize,
             &mut s.failedArticles,
@@ -2479,7 +2501,7 @@ unsafe fn update_completed_stats(p: *mut NzbScalars, f: *const crate::qfile::Fil
             &mut s.parFailedSize,
             &mut s.remainingParCount,
             &mut s.pausedFileCount,
-        );
+        ));
     }
     unsafe { crate::qfile::add_file_stats(p as usize, f, StatList::Total, StatOp::Add) };
 }
@@ -2489,8 +2511,8 @@ unsafe fn update_deleted_stats(p: *mut NzbScalars, f: *const crate::qfile::File)
     use crate::qfile::field;
     let g = |id| file_get(f, id);
     {
-        let s = unsafe { &mut *p };
-        crate::downloadinfo::update_deleted_stats(
+        // the file's fields first: its lock must not be taken under the scalar lock
+        let a = (
             g(field::SIZE),
             g(field::SUCCESS_SIZE),
             g(field::FAILED_SIZE),
@@ -2503,6 +2525,9 @@ unsafe fn update_deleted_stats(p: *mut NzbScalars, f: *const crate::qfile::File)
             g(field::EXTRA_PRIORITY) != 0,
             g(field::PAR_FILE) != 0,
             g(field::PAUSED) != 0,
+        );
+        with_scalars(p, |s| crate::downloadinfo::update_deleted_stats(
+            a.0, a.1, a.2, a.3, a.4, a.5, a.6, a.7, a.8, a.9, a.10, a.11,
             &mut s.fileCount,
             &mut s.size,
             &mut s.currentSuccessSize,
@@ -2521,7 +2546,7 @@ unsafe fn update_deleted_stats(p: *mut NzbScalars, f: *const crate::qfile::File)
             &mut s.parCurrentFailedSize,
             &mut s.pausedFileCount,
             &mut s.pausedSize,
-        );
+        ));
     }
     unsafe { crate::qfile::add_file_stats(p as usize, f, StatList::Current, StatOp::Subtract) };
 }
@@ -2530,8 +2555,7 @@ unsafe fn update_deleted_stats(p: *mut NzbScalars, f: *const crate::qfile::File)
 /// from the totals and the files still queued.
 unsafe fn update_current_stats(p: *mut NzbScalars) {
     use crate::qfile::field;
-    let mut acc = {
-        let s = unsafe { &*p };
+    let mut acc = with_scalars(p, |s| {
         crate::downloadinfo::RsDownloadCurrentStatsAcc {
             current_success_articles: s.successArticles,
             current_failed_articles: s.failedArticles,
@@ -2541,7 +2565,7 @@ unsafe fn update_current_stats(p: *mut NzbScalars) {
             par_current_failed_size: s.parFailedSize,
             ..Default::default()
         }
-    };
+    });
     sync_current_server_stats(NzbRef::from_addr(p as usize));
     for f in files_of(p) {
         let g = |id| file_get(f, id);
@@ -2558,18 +2582,19 @@ unsafe fn update_current_stats(p: *mut NzbScalars) {
         );
         unsafe { crate::qfile::add_file_stats(p as usize, f, StatList::Current, StatOp::Add) };
     }
-    let s = unsafe { &mut *p };
-    s.pausedFileCount = acc.paused_file_count;
-    s.remainingParCount = acc.remaining_par_count;
-    s.remainingSize = acc.remaining_size;
-    s.pausedSize = acc.paused_size;
-    s.currentSuccessArticles = acc.current_success_articles;
-    s.currentFailedArticles = acc.current_failed_articles;
-    s.currentSuccessSize = acc.current_success_size;
-    s.currentFailedSize = acc.current_failed_size;
-    s.parCurrentSuccessSize = acc.par_current_success_size;
-    s.parCurrentFailedSize = acc.par_current_failed_size;
-    s.extraPriority = acc.extra_priority;
+    with_scalars(p, |s| {
+        s.pausedFileCount = acc.paused_file_count;
+        s.remainingParCount = acc.remaining_par_count;
+        s.remainingSize = acc.remaining_size;
+        s.pausedSize = acc.paused_size;
+        s.currentSuccessArticles = acc.current_success_articles;
+        s.currentFailedArticles = acc.current_failed_articles;
+        s.currentSuccessSize = acc.current_success_size;
+        s.currentFailedSize = acc.current_failed_size;
+        s.parCurrentSuccessSize = acc.par_current_success_size;
+        s.parCurrentFailedSize = acc.par_current_failed_size;
+        s.extraPriority = acc.extra_priority;
+    });
 }
 
 /// Whether a file still downloading has its output file open (host op 31
@@ -3230,6 +3255,66 @@ mod tests {
         }
         assert_eq!(nzb_snapshot(nzb, TextStatus::Off).cached_message_count, 50);
         unsafe { nzbget_rs_nzb_scalars_free(n as *mut NzbScalars) };
+    }
+
+    /// The remaining mutators (64-bit setters, self-updates, host stats, the post job's flags
+    /// and a file's pause counts) run on other threads while the queue thread snapshots; as
+    /// with the test above, ThreadSanitizer is what shows the race, a plain run checks values.
+    #[test]
+    fn other_scalar_mutators_are_snapshotted_without_a_race() {
+        use crate::queuesubsys_host::FileRef;
+        let n = nzbget_rs_nzb_scalars_new() as usize;
+        let file = crate::qfile::nzbget_rs_file_new(1) as usize;
+        unsafe { crate::qfile::nzbget_rs_file_set(file as *const _, crate::qfile::field::NZB, n as i64) };
+        act(NzbRef::from_addr(n), NzbAction::EnterPostProcess);
+        let post = slot(n as *const NzbScalars, Slot::Post);
+        const ROUNDS: i64 = 300;
+        let writers: Vec<_> = (0..3)
+            .map(|w| {
+                std::thread::spawn(move || {
+                    let nzb = NzbRef::from_addr(n);
+                    for i in 0..ROUNDS {
+                        match w {
+                            0 => {
+                                set_i64(nzb, NzbI64::RemainingSize, i);
+                                set_i64(nzb, NzbI64::Size, i);
+                                act(nzb, NzbAction::UpdateMinMaxTime);
+                                act(nzb, NzbAction::UpdateCurrentStats);
+                            }
+                            1 => {
+                                let ints = [i as i32; 12];
+                                let i64s = [i; 16];
+                                unsafe { host_set_stats(n as *mut NzbScalars, &ints, &i64s) };
+                            }
+                            _ => {
+                                // the post job exists for the whole run: entering and leaving it is
+                                // the queue lock's business, not a scalar's
+                                let post = post as *const Post;
+                                post_set(post, PostField::Int(PostInt::ParRepaired), i % 2);
+                                post_set(post, PostField::Int(PostInt::UnpackTried), i % 2);
+                                crate::qfile::set_int(
+                                    FileRef::from_addr(file),
+                                    crate::qfile::FileInt::Paused,
+                                    (i % 2) as i32,
+                                );
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+        let nzb = NzbRef::from_addr(n);
+        for _ in 0..ROUNDS {
+            let _ = nzb_snapshot(nzb, TextStatus::Off);
+        }
+        for w in writers {
+            w.join().unwrap();
+        }
+        unsafe {
+            crate::qfile::nzbget_rs_file_free(file as *mut _);
+            act(nzb, NzbAction::LeavePostProcess);
+            nzbget_rs_nzb_scalars_free(n as *mut NzbScalars);
+        }
     }
 
     #[test]

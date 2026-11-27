@@ -499,9 +499,10 @@ pub(crate) fn set_int(file: FileRef, field: FileInt, v: i32) {
             let paused = v != 0;
             if (file.get(PAUSED) != 0) != paused && !nzb.is_null() {
                 let remaining = file.get(REMAINING_SIZE);
-                let n = unsafe { &mut *nzb };
-                n.pausedFileCount += if paused { 1 } else { -1 };
-                n.pausedSize += if paused { remaining } else { -remaining };
+                crate::qnzb::with_scalars(nzb, |n| {
+                    n.pausedFileCount += if paused { 1 } else { -1 };
+                    n.pausedSize += if paused { remaining } else { -remaining };
+                });
             }
             file.set(PAUSED, i64::from(paused));
         }
@@ -512,7 +513,7 @@ pub(crate) fn set_int(file: FileRef, field: FileInt, v: i32) {
         FileInt::ExtraPriority => {
             let extra = v != 0;
             if (file.get(EXTRA_PRIORITY) != 0) != extra && !nzb.is_null() {
-                unsafe { &mut *nzb }.extraPriority += if extra { 1 } else { -1 };
+                crate::qnzb::with_scalars(nzb, |n| n.extraPriority += if extra { 1 } else { -1 });
             }
             file.set(EXTRA_PRIORITY, i64::from(extra));
         }

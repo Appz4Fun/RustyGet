@@ -84,6 +84,24 @@ fn test_boundary_delay() {
     }
 }
 
+/// Test hook: with `RUSTYGET_TEST_EXTRACT_AFTER_DOWNLOAD=1` each safe point of a direct
+/// unpack waits (up to 120 s) until the download of `nzb_id` ended, so the extraction reads
+/// every volume but the first only after the download: damage it finds of its own is found
+/// after the end of the download. The liveparrarlatedeclare scenarios set it; unset, it costs
+/// one load.
+fn test_wait_download_end(nzb_id: i32) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| {
+        std::env::var("RUSTYGET_TEST_EXTRACT_AFTER_DOWNLOAD").is_ok_and(|v| v.trim() == "1")
+    }) {
+        return;
+    }
+    let started = std::time::Instant::now();
+    while !direct_unpack_download_finished(nzb_id) && started.elapsed() < Duration::from_secs(120) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 #[inline]
 pub(crate) fn current_time_sec() -> i64 {
     // SAFETY: `libc::time(null)` is async-signal-safe and reads the wall clock.
@@ -4426,6 +4444,25 @@ pub(crate) fn direct_unpack_awaiting_repair(nzb_id: i32) -> bool {
         .is_some_and(|st| st.awaiting_repair && !st.live_repair_running)
 }
 
+/// True when direct unpack of `nzb_id` found damage of its own after the download ended
+/// (`direct_unpack_declare_damaged` with the download finished): it waits for a repair of
+/// volumes it holds, no live repair of them runs, and post-processing has not resumed it
+/// after its repair stages yet. Post-processing must take the job back then (see
+/// `prepost::hand_back_late_declared_damage`, which has the unpack controller's
+/// `nzb_downloaded` run again): the download-end hand-off found nothing held and left the
+/// job marked as working for direct unpack, which blocks both the post stages and a live
+/// repair.
+pub(crate) fn direct_unpack_late_damage_unclaimed(nzb_id: i32) -> bool {
+    direct_unpack_holds().get(&nzb_id).is_some_and(|st| {
+        st.awaiting_repair
+            && st.download_finished
+            && !st.held.is_empty()
+            && !st.live_repair_running
+            && !st.abandoned
+            && !st.resumed_after_repair
+    })
+}
+
 fn direct_unpack_set_awaiting_repair(nzb_id: i32) -> bool {
     let mut map = direct_unpack_holds();
     match map.get_mut(&nzb_id) {
@@ -4813,6 +4850,7 @@ impl NzbgetRsDirectUnpack {
     /// never with the queue locked.
     fn yield_if_wanted(&self, host: &QueueSubsysHost) {
         test_boundary_delay();
+        test_wait_download_end(self.nzb_id);
         if !crate::unpackslots::anyone_waiting() {
             return;
         }
@@ -6967,6 +7005,40 @@ mod live_hold_tests {
         direct_unpack_holds().remove(&id);
         assert!(!direct_unpack_widen_hold(id, path, vec![(70_000, 10)]));
         assert_eq!(direct_unpack_hole_view(path), None);
+    }
+
+    #[test]
+    fn damage_declared_after_the_download_ended_is_unclaimed_until_repaired_or_resumed() {
+        let id = -1900252;
+        let (a, b) = (b"/dl/y.part07.rar".as_slice(), b"/dl/y.part02.rar".as_slice());
+        // Declared while downloading: the download-end hand-off sees the hold, not this.
+        assert!(direct_unpack_declare_damaged(id, b, vec![(0, 10)]));
+        assert!(!direct_unpack_late_damage_unclaimed(id));
+        direct_unpack_release_path(b);
+        direct_unpack_mark_downloaded(id);
+        assert!(!direct_unpack_late_damage_unclaimed(id), "nothing held");
+        // Declared after the download ended: post-processing must take the job back.
+        assert!(direct_unpack_declare_damaged(id, a, vec![(0, 800_000)]));
+        assert!(direct_unpack_late_damage_unclaimed(id));
+        // Not while a live repair of the held volumes runs.
+        direct_unpack_holds().get_mut(&id).unwrap().live_repair_running = true;
+        assert!(!direct_unpack_late_damage_unclaimed(id));
+        direct_unpack_holds().get_mut(&id).unwrap().live_repair_running = false;
+        assert!(direct_unpack_late_damage_unclaimed(id));
+        // Released by a repair: nothing left to claim.
+        direct_unpack_release_path(a);
+        assert!(!direct_unpack_late_damage_unclaimed(id));
+        // Resumed by post-processing, or given up: never again.
+        assert!(direct_unpack_declare_damaged(id, a, vec![(0, 10)]));
+        direct_unpack_release_all(id);
+        assert!(direct_unpack_declare_damaged(id, a, vec![(0, 10)]));
+        assert!(!direct_unpack_late_damage_unclaimed(id));
+        direct_unpack_forget_holds(id);
+        direct_unpack_mark_downloaded(id);
+        assert!(direct_unpack_declare_damaged(id, a, vec![(0, 10)]));
+        direct_unpack_abandon(id);
+        assert!(!direct_unpack_late_damage_unclaimed(id));
+        direct_unpack_forget_holds(id);
     }
 
     #[test]

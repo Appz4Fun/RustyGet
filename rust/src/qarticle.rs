@@ -14,7 +14,7 @@
 
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::ptr;
-use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 pub const AI_UNDEFINED: i32 = 0;
@@ -88,6 +88,9 @@ pub struct Article {
     segment_alloc_size: AtomicI32,
     segment_offset: AtomicI64,
     segment_size: AtomicI32,
+    // The geometry came from the saved queue (a restart), not from a fetch in this
+    // process; any fetch or reset since clears it.
+    geometry_restored: AtomicBool,
     crc: AtomicU32,
     d: Mutex<Data>,
 }
@@ -158,7 +161,14 @@ impl Article {
     pub(crate) fn edit(&self, edit: ArticleEdit<'_>) {
         let mut d = self.lock();
         match edit {
-            ArticleEdit::Status(v) => d.status = v,
+            ArticleEdit::Status(v) => {
+                d.status = v;
+                // Finished (or failed after finishing) without new geometry: a session may
+                // replay these bytes now, so they are no longer unseen restored ones.
+                if v == AI_FINISHED || v == AI_FAILED {
+                    self.geometry_restored.store(false, Ordering::SeqCst);
+                }
+            }
             ArticleEdit::FallbackRound(v) => d.dupe_fallback_round = v,
             ArticleEdit::DonorId(v) => d.dupe_donor_id = v,
             ArticleEdit::Proactive(v) => d.dupe_proactive = v,
@@ -199,6 +209,7 @@ impl Article {
     }
 
     fn set_geometry(&self, offset: i64, size: i32) {
+        self.geometry_restored.store(false, Ordering::SeqCst);
         self.segment_offset.store(offset, Ordering::SeqCst);
         self.segment_size.store(size, Ordering::SeqCst);
     }
@@ -300,9 +311,13 @@ impl ArticleList {
             let t = &self.items[index];
             let d = t.lock();
             // An independently fetched replacement cannot prove same-payload identity.
+            // Geometry restored from the saved queue for an unfinished article is not
+            // such a fetch: a stop cancels articles whose bytes the flush still wrote,
+            // and no session of this process captured or replayed them (replay reads
+            // finished articles only), so the next fetch is this process's first.
             if d.live_par_claim_begin != -1
                 || d.live_par_claim_end != -1
-                || t.segment_size() != 0
+                || (t.segment_size() != 0 && !t.geometry_restored.load(Ordering::SeqCst))
                 || d.status == AI_FINISHED
             {
                 return false;
@@ -491,6 +506,7 @@ pub unsafe extern "C" fn nzbget_rs_article_host(
                 let mut d = a.lock();
                 if d.status == AI_FINISHED {
                     d.status = AI_FAILED;
+                    a.geometry_restored.store(false, Ordering::SeqCst);
                 }
             }
             0
@@ -606,6 +622,11 @@ unsafe fn list_change(
                     d.result_filename = opt_cstring(s1);
                 }
                 d.status = *ints.add(4);
+                // Finished bytes are replayed into a session; only unfinished ones are not.
+                a.geometry_restored.store(
+                    *ints >= 2 && d.status != AI_FINISHED && a.segment_size() != 0,
+                    Ordering::SeqCst,
+                );
             }
             0
         }
@@ -782,6 +803,81 @@ mod tests {
         assert_eq!(claim(first, 150, 250), 0);
         assert_eq!(claim(first, 0, 100), 1);
         assert_eq!(claim(first, -1, 5), 0);
+        unsafe { nzbget_rs_artlist_free(list) };
+    }
+
+    /// A stop cancels articles whose bytes the flush still wrote: the saved queue keeps their
+    /// geometry with an unfinished status. After the restart that is not an earlier fetch of
+    /// this process, so their next fetch may claim the header; a fetch in this process (or
+    /// finished restored geometry, which a session replays) still refuses one.
+    #[test]
+    fn restored_unfinished_geometry_admits_a_claim() {
+        let list = nzbget_rs_artlist_new();
+        let restore = |idx: c_int, status: c_int, offset: i64, size: c_int| {
+            let mut ints = [5, size, 0, 0, status, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+            let mut i64s = [offset, 0, 0, 0];
+            unsafe {
+                nzbget_rs_article_host(
+                    list,
+                    ptr::null_mut(),
+                    12,
+                    idx,
+                    1,
+                    ptr::null(),
+                    ints.as_mut_ptr(),
+                    i64s.as_mut_ptr(),
+                    ptr::null_mut(),
+                );
+            }
+            host(list, 0, 106, idx, 0, ptr::null()).0
+        };
+        let claim = |art: usize, b: i64, e: i64| {
+            let mut i64s = [b, e, 0, 0];
+            unsafe {
+                nzbget_rs_article_host(
+                    list,
+                    art as *mut Article,
+                    13,
+                    0,
+                    0,
+                    ptr::null(),
+                    ptr::null_mut(),
+                    i64s.as_mut_ptr(),
+                    ptr::null_mut(),
+                )
+            }
+        };
+        let finished = restore(0, AI_FINISHED, 0, 100);
+        let cancelled = restore(1, AI_UNDEFINED, 100, 100);
+        let refetched = restore(2, AI_UNDEFINED, 200, 100);
+        assert_eq!(claim(finished, 0, 100), 0);
+        assert_eq!(claim(cancelled, 100, 200), 1);
+        assert_eq!(claim(cancelled, 100, 200), 0);
+        // geometry from a fetch of this process replaces the restored one
+        let mut ints = [100, 0];
+        let mut i64s = [200, 0];
+        unsafe {
+            nzbget_rs_article_host(
+                ptr::null_mut(),
+                refetched as *mut Article,
+                113,
+                0,
+                0,
+                ptr::null(),
+                ints.as_mut_ptr(),
+                i64s.as_mut_ptr(),
+                ptr::null_mut(),
+            );
+        }
+        assert_eq!(claim(refetched, 200, 300), 0);
+        // finished without new geometry (a session may replay it), then failed by op 103:
+        // the refetch is a replacement of replayed bytes and still refuses the claim
+        let replayed = restore(3, AI_UNDEFINED, 300, 100);
+        set_status(replayed, AI_FINISHED);
+        host(list, 0, 103, 0, 0, ptr::null());
+        assert_eq!(host(list, replayed, 1, 0, 0, ptr::null()).1[2], AI_FAILED);
+        set_status(replayed, AI_RUNNING);
+        assert_eq!(claim(replayed, 300, 400), 0);
         unsafe { nzbget_rs_artlist_free(list) };
     }
 

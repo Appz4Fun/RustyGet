@@ -2021,12 +2021,21 @@ impl RsArticleWriter {
                 && !fsnap.par_file
                 && memory_monitor_tier() != PRESSURE_CRITICAL
             {
-                self.live_tee = crate::parchecker::streaming_session_reserve_tee(
-                    nzb.id,
-                    u64::try_from(self.article_size).unwrap_or(0),
-                );
-                if self.live_tee.is_none()
-                    && !crate::parchecker::streaming_session_has_session(nzb.id)
+                let size = u64::try_from(self.article_size).unwrap_or(0);
+                let reserved = crate::parchecker::streaming_session_try_reserve_tee(nzb.id, size);
+                let no_session = reserved
+                    .as_ref()
+                    .is_err_and(|why| *why == crate::parchecker::TeeRefused::NoSession);
+                self.live_tee = reserved.ok();
+                let session_now = self.live_tee.is_none()
+                    && crate::parchecker::streaming_session_has_session(nzb.id);
+                if no_session && session_now {
+                    // The session was installed after the reservation looked: without this
+                    // the article got neither a tee nor a pre-session copy, and its capture
+                    // had par-rs read it back. Reserve from the new session.
+                    self.live_tee = crate::parchecker::streaming_session_reserve_tee(nzb.id, size);
+                } else if self.live_tee.is_none()
+                    && !session_now
                     && crate::parchecker::presession_wanted(nzb.par_size)
                 {
                     self.presession_tee = Some((

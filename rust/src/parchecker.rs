@@ -2758,7 +2758,32 @@ pub(crate) fn presession_bytes_for_test(nzb_id: i32) -> u64 {
 /// decoded bytes are kept aside for live PAR's capture, charged to the session's snapshot
 /// byte limit (ParBuffer, a cap) while held. `None` without a session or room.
 pub(crate) fn streaming_session_reserve_tee(nzb_id: i32, size: u64) -> Option<LiveTee> {
-    let entry = active_streaming_session(nzb_id)?;
+    streaming_session_try_reserve_tee(nzb_id, size).ok()
+}
+
+/// Why [`streaming_session_try_reserve_tee`] gave no tee.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum TeeRefused {
+    /// No session for the job when it looked.
+    NoSession,
+    /// A session was there and kept nothing (cancelled, empty, or no room).
+    Refused,
+}
+
+/// [`streaming_session_reserve_tee`], saying whether a session was there to refuse.
+pub(crate) fn streaming_session_try_reserve_tee(
+    nzb_id: i32,
+    size: u64,
+) -> Result<LiveTee, TeeRefused> {
+    let entry = active_streaming_session(nzb_id).ok_or(TeeRefused::NoSession)?;
+    reserve_tee_from(entry, nzb_id, size).ok_or(TeeRefused::Refused)
+}
+
+fn reserve_tee_from(
+    entry: Arc<ActiveStreamingSession>,
+    nzb_id: i32,
+    size: u64,
+) -> Option<LiveTee> {
     if entry.session.is_cancelled() || size == 0 {
         return None;
     }

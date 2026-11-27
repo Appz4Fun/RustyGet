@@ -2372,7 +2372,7 @@ fn live_queue_printed_hash_binds_and_keeps_first_article_binding() {
     );
     assert_eq!(
         streaming_session_source_length(id, b"x9q2obf", printed.as_bytes()),
-        Some(desc.length)
+        Some(desc.file_length)
     );
     // The digest-order text names no par2 file.
     let digest_order: String = desc.hash_16k.iter().map(|b| format!("{b:02x}")).collect();

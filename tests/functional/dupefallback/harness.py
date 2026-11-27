@@ -13053,7 +13053,7 @@ def scenario_liveparrartrust(daemon, t):
                loads, end_s))
 
 
-def _livepar_rar_obfuscated(daemon, t, tag, par2_last):
+def _livepar_rar_obfuscated(daemon, t, tag, par2_last, damaged=True):
     """liveparrartrust with the volumes posted under random names (DirectRename=yes: the
     queue stores each file's first-16-KiB MD5 printed nzbget-style, bytes last to first).
     Live PAR matches the volumes to their par2 entries by that hash. Before, it read the
@@ -13061,11 +13061,12 @@ def _livepar_rar_obfuscated(daemon, t, tag, par2_last):
     stopped the session on its next write ("bound source hash identity changed"), and
     post-processing ran a full par-check."""
     h, intact, verify, missing, loads, end_s = _livepar_rar_run(
-        daemon, t, tag, 13740, {1: {3}, 4: {2, 6}}, corrupt=(6, 4), obfuscate=True,
-        par2_last=par2_last)
+        daemon, t, tag, 13740, {1: {3}, 4: {2, 6}} if damaged else {},
+        corrupt=(6, 4) if damaged else None, obfuscate=True, par2_last=par2_last)
     live = _grep_log(t, 'Live par-repair for Rel%s' % tag)
     trusted = _grep_log(t, 'live PAR verified every file')
-    stopped = len(re.findall(r'Live PAR \(job \d+\) stopped',
+    # A stop other than the end of the job (its history entry cancels the session).
+    stopped = len(re.findall(r'Live PAR \(job \d+\) stopped: (?!cancelled from )',
                              t.read_file('nzbget.log').decode(errors='replace')))
     ok = (h['Status'].startswith('SUCCESS') and intact and verify == 0 and missing == 0
           and live >= 1 and trusted == 1 and stopped == 0
@@ -13086,8 +13087,16 @@ def scenario_liveparrarobfuscatedlate(daemon, t):
     """_livepar_rar_obfuscated with the par2 files last in the NZB (ReorderFiles=no): every
     volume's 16k hash is in the queue before the par2 index arrives, so live PAR captures
     the volumes under their obfuscated names and binds them by that hash."""
-    ok, detail = _livepar_rar_obfuscated(daemon, t, 'lrl', par2_last=True)
+    ok, detail = _livepar_rar_obfuscated(daemon, t, 'lrl', par2_last=True, damaged=False)
     return ('liveparrarobfuscatedlate', ok, detail)
+
+
+def scenario_liveparrarobfuscatedslow(daemon, t):
+    """liveparrarobfuscated on a slow line (DownloadRate=1000): the volumes' later articles
+    are written under their obfuscated names, with the queue's 16k hash, before the direct
+    rename gives them their par2 names."""
+    ok, detail = _livepar_rar_obfuscated(daemon, t, 'lrs', par2_last=False)
+    return ('liveparrarobfuscatedslow', ok, detail)
 
 
 def scenario_liveparraroff(daemon, t):
@@ -15783,6 +15792,7 @@ SCENARIOS = {
     'liveparrartrust': scenario_liveparrartrust,
     'liveparrarobfuscated': scenario_liveparrarobfuscated,
     'liveparrarobfuscatedlate': scenario_liveparrarobfuscatedlate,
+    'liveparrarobfuscatedslow': scenario_liveparrarobfuscatedslow,
     'liveparraroff': scenario_liveparraroff,
     'livepartrusted': scenario_livepartrusted,
     'livepartrustedtemp': scenario_livepartrustedtemp,
@@ -16262,6 +16272,8 @@ SCENARIO_OPTIONS = {
     'liveparrarclean': PROD_OPTIONS + ['LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes', 'UnpackCleanupDisk=no'],
     'liveparrartrust': PROD_OPTIONS + ['LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes', 'UnpackCleanupDisk=no'],
     'liveparrarobfuscated': PROD_OPTIONS + ['LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes', 'UnpackCleanupDisk=no'],
+    'liveparrarobfuscatedslow': PROD_OPTIONS + ['LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes', 'UnpackCleanupDisk=no',
+                                 'DownloadRate=1000'],
     'liveparrarobfuscatedlate': [o for o in PROD_OPTIONS if o != 'ReorderFiles=yes'] + [
         'ReorderFiles=no', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes', 'UnpackCleanupDisk=no'],
     'liveparraroff': PROD_OPTIONS + ['LiveParRepair=no', 'ArticleCache=256', 'DirectWrite=yes', 'UnpackCleanupDisk=no'],

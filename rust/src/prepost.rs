@@ -895,6 +895,104 @@ fn has_main_pars(dest_dir: &[u8]) -> bool {
     crate::parparser::find_main_pars(bytes_to_path(dest_dir), false, |_| {})
 }
 
+/// Live PAR's verified cover of the download, when post-processing may take it instead of a
+/// par-check (`parchecker::streaming_session_verified_cover`: every slice of every file
+/// verified or rebuilt and verified, every file under its par2 name at its par2 length and
+/// unchanged since). Only with ParCheck=auto (always and force ask for a par-check of every
+/// download), not for a post-process-again, not for a par-check asked for after an unpack
+/// (it failed: the files on disk may not be the bytes live PAR verified) or a forced full
+/// check or repair, not while live PAR still works on the download, and only when the folder
+/// holds that one par2 set: a second set was never verified live. `Err` says why not.
+#[cfg(unix)]
+fn live_par_cover(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb: &crate::queuesubsys_host::NzbSnap,
+    ps: &crate::queuesubsys_host::PostSnap,
+) -> Result<crate::parchecker::LiveCover, String> {
+    if host.opts().par_check != crate::queuesubsys_host::PC_AUTO {
+        return Err("ParCheck asks for a par-check of every download".into());
+    }
+    if nzb.reprocess {
+        return Err("post-processing again".into());
+    }
+    if nzb.unpack_tried || ps.force_par_full || ps.force_repair {
+        return Err("a full par-check was asked for".into());
+    }
+    if !crate::postproc::live_par_work_idle(nzb.id) {
+        return Err("live PAR is still working".into());
+    }
+    let par_name = crate::parchecker::streaming_session_par_filename(nzb.id)
+        .ok_or("no live PAR session")?;
+    let dir = bytes_to_path(&nzb.dest_dir);
+    let mut mains: Vec<Vec<u8>> = Vec::new();
+    crate::parparser::find_main_pars(dir, true, |name| mains.push(name.to_vec()));
+    match mains.as_slice() {
+        [main] if crate::parparser::same_par_collection(main, &par_name, true) => {}
+        [_] => return Err("the folder's par2 set is not the one live PAR verified".into()),
+        _ => return Err(format!("{} par2 sets in the folder", mains.len())),
+    }
+    let count = host.nzb_completed_files_len(nzb.ptr);
+    if count > 4096 {
+        return Err("too many files".into());
+    }
+    let files: Vec<(i32, Vec<u8>)> = (0..count)
+        .map(|index| host.nzb_completed_file_at(nzb.ptr, index))
+        .filter(|file| !file.par_file)
+        .map(|file| (file.id, file.filename))
+        .collect();
+    crate::parchecker::streaming_session_verified_cover(nzb.id, dir, &files)
+}
+
+/// Takes live PAR's verified cover instead of the par-check post-processing was about to run
+/// for `nzb` (see [`live_par_cover`]): the job gets what nzbget stores after a quick
+/// par-check that found nothing to repair (ParStatus SUCCESS, not a full check), the
+/// stream-repair jobs of the verified files go as a verified file's do, and no byte of the
+/// set is read again. False, with the reason in the detail log, when the cover is not
+/// complete: the normal par-check runs.
+#[cfg(unix)]
+fn trust_live_par(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb: &crate::queuesubsys_host::NzbSnap,
+    ps: &crate::queuesubsys_host::PostSnap,
+) -> bool {
+    use crate::queuesubsys_host::{MK_DETAIL, MK_INFO, NZB_INT_CHANGED, NZB_INT_PAR_FULL};
+    let cover = match live_par_cover(host, nzb, ps) {
+        Ok(cover) => cover,
+        Err(why) => {
+            if crate::parchecker::streaming_session_has_session(nzb.id) {
+                let mut msg = b"Live PAR does not cover ".to_vec();
+                msg.extend_from_slice(&nzb.name);
+                msg.extend_from_slice(format!(" ({why}): par-check runs").as_bytes());
+                host.nzb_print_message(nzb.ptr, MK_DETAIL, &msg);
+            }
+            return false;
+        }
+    };
+    let mut msg = b"Skipping par-check for ".to_vec();
+    msg.extend_from_slice(&nzb.name);
+    msg.extend_from_slice(b": live PAR verified every file of ");
+    msg.extend_from_slice(&cover.par_name);
+    msg.extend_from_slice(
+        format!(" ({} file(s), every slice checked or repaired as it downloaded)", cover.files)
+            .as_bytes(),
+    );
+    host.nzb_print_message(nzb.ptr, MK_INFO, &msg);
+    host.nzb_set_par_status(nzb.ptr, NzbParStatus::Success);
+    // A par-check that quick-verified any file stores par_full 0 (`ParChecker`); a failed
+    // unpack then still asks for a full par-check.
+    host.nzb_set_int(nzb.ptr, NZB_INT_PAR_FULL, 0);
+    // As `RepairController::register_verified_file` does for each verified file: nothing
+    // is left for stream repair to fetch for them.
+    for index in (0..host.nzb_stream_repair_jobs_len(nzb.ptr)).rev() {
+        let job = host.nzb_stream_repair_job_detail(nzb.ptr, index);
+        if cover.queue_ids.contains(&job.file_id) {
+            host.nzb_stream_repair_erase_job(nzb.ptr, index, true);
+        }
+    }
+    host.nzb_set_int(nzb.ptr, NZB_INT_CHANGED, 1);
+    true
+}
+
 #[cfg(unix)]
 fn has_completed_archive_files(
     host: &crate::queuesubsys_host::QueueSubsysHost,
@@ -2109,6 +2207,16 @@ impl NzbgetRsPrePostProcessor {
         }
         host.post_reset_stage_progress(post_ptr, opts.cur_time);
 
+        if nzb.par_status <= NzbParStatus::Skipped
+            && nzb.delete_status == DeleteStatus::None
+            && crate::parchecker::streaming_session_has_session(nzb.id)
+            && !crate::parchecker::streaming_session_cover_sealed(nzb.id)
+        {
+            // Seals live PAR's cover (its files as they are now) before any stage may touch
+            // them, so the par decision below sees a change made in between.
+            let _ = live_par_cover(host, &nzb, &ps);
+        }
+
         if nzb.par_rename_status == RS_NONE
             && nzb.delete_status == DeleteStatus::None
             && opts.par_rename
@@ -2276,6 +2384,9 @@ impl NzbgetRsPrePostProcessor {
 
             if nzb.par_status == NzbParStatus::None && nzb.delete_status == DeleteStatus::None {
                 if has_main_pars(&nzb.dest_dir) {
+                    if trust_live_par(host, &nzb, &ps) {
+                        return;
+                    }
                     if !allow_par {
                         host.post_set_int(post_ptr, POST_INT_NEED_PAR_CHECK, 1);
                         return;
@@ -2323,6 +2434,9 @@ impl NzbgetRsPrePostProcessor {
                         }
                         host.nzb_set_par_status(nzb.ptr, NzbParStatus::Failure);
                     } else {
+                        if trust_live_par(host, &nzb, &ps) {
+                            return;
+                        }
                         let h_s = fmt_tenths(nzb.health);
                         let mut msg = b"Collection ".to_vec();
                         msg.extend_from_slice(&nzb.name);

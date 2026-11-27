@@ -3576,6 +3576,19 @@ pub(crate) fn live_repair_should_defer_post(nzb_id: i32) -> bool {
     false
 }
 
+/// No live PAR work of `nzb_id` is running or still due: no repair helper (download-end or
+/// of held direct-unpack volumes) and no completed file waiting to be folded in. Read-only:
+/// unlike [`live_repair_should_defer_post`] it starts no clock and cancels nothing.
+#[cfg(unix)]
+pub(crate) fn live_par_work_idle(nzb_id: i32) -> bool {
+    !live_end_repair_running(nzb_id)
+        && !direct_unpack_holds()
+            .get(&nzb_id)
+            .is_some_and(|state| state.live_repair_running)
+        && !crate::parchecker::streaming_session_pending_completed_jobs().contains(&nzb_id)
+        && !crate::parchecker::streaming_session_completion_drain_active(nzb_id)
+}
+
 /// Within `limit` of the last progress at `since`: post-processing still waits.
 #[cfg(unix)]
 fn live_defer_within(since: std::time::Instant, now: std::time::Instant, limit: Duration) -> bool {
@@ -6004,7 +6017,8 @@ impl NzbgetRsPostJob {
                 let n = self.nzb_ptr(host);
                 let ns = host.nzb_snap(n, false);
                 // The first-16-KiB MD5 of every file downloaded whole, as its first article
-                // gave it: par-rename identifies those without reading them.
+                // gave it (stored printed, bytes last to first): par-rename identifies those
+                // without reading them.
                 // (The analyzer sets hash16k only for a first article whose NZB size is at
                 // least 16 KiB, or a file's only article: the MD5 of min(16 KiB, file size),
                 // except for a first article that decodes to just under 16 KiB, where the
@@ -6013,7 +6027,7 @@ impl NzbgetRsPostJob {
                 let mut known: Vec<(Vec<u8>, [u8; 16])> = (0..host.nzb_completed_files_len(n))
                     .map(|i| host.nzb_completed_file_at(n, i))
                     .filter(|f| f.status == crate::queuesubsys_host::CF_SUCCESS && !f.par_file)
-                    .filter_map(|f| Some((f.filename, crate::parrenamer::parse_hash16k(&f.hash16k)?)))
+                    .filter_map(|f| Some((f.filename, crate::parrenamer::parse_printed_hash16k(&f.hash16k)?)))
                     .collect();
                 let names: Vec<Vec<u8>> = known.iter().map(|(name, _)| name.clone()).collect();
                 known.retain(|(name, _)| names.iter().filter(|other| *other == name).count() == 1);

@@ -235,6 +235,11 @@ struct ActiveStreamingSession {
     /// their lost articles, so the repair as the download ends still takes them and
     /// certifies them (see [`streaming_session_download_end_targets`]).
     rebuilt_files: Mutex<HashSet<FileId>>,
+    /// The set lists files outside its recovery set: live PAR never verifies those.
+    non_recoverable: bool,
+    /// Every file of the set as post-processing first found it fully verified (see
+    /// [`streaming_session_verified_cover`]): a later change to one ends the trust.
+    cover_seal: Mutex<Option<Vec<(FileId, crate::parlive::FileStamp)>>>,
     // Drop last, after the session, queue and all owned metadata. Grows with
     // the syndrome slots as damage appears (see `grow_for_damage`).
     budget: Mutex<SessionBudgetLease>,
@@ -758,6 +763,8 @@ fn build_streaming_session_with(
         completed_sources: Mutex::new(HashSet::new()),
         rebuilt_recheck: Mutex::new(Vec::new()),
         rebuilt_files: Mutex::new(HashSet::new()),
+        non_recoverable: !main.non_recoverable_file_ids.is_empty(),
+        cover_seal: Mutex::new(None),
     }))
 }
 
@@ -4667,6 +4674,150 @@ pub(crate) fn streaming_session_verified_target_crc(
         queue_id,
         &base_dir.join(crate::fsops::path(filename)),
     )
+}
+
+/// What live PAR proved about a download's par2 set by the time post-processing asks: see
+/// [`streaming_session_verified_cover`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LiveCover {
+    /// The par2 file the session was built from.
+    pub par_name: Vec<u8>,
+    /// Files of the set (every one of them verified).
+    pub files: usize,
+    /// The queue ids of those files.
+    pub queue_ids: Vec<i32>,
+}
+
+/// Whether live PAR of job `nzb_id` has a complete verified state of its par2 set, so a
+/// post-processing par-check would only read the set again to learn nothing new:
+///
+/// - the session is current (not cancelled, stopped or replaced: every RustyGet writer into
+///   a source either reported its write to live PAR or stopped it), repairs `dest_dir`, and
+///   still takes verified slices as proof (`trust_revoked` unset: each verified byte is the
+///   byte written);
+/// - every slice of every file is verified, or was rebuilt by a live repair and verified,
+///   none diverged after a patch, and no fold is pending;
+/// - the set has no file outside its recovery set (live PAR never checks those);
+/// - each file of the set is one of `files` (the download's completed queue files as
+///   `(queue id, name in dest_dir)`), under its par2 name, the queue file whose bytes live
+///   PAR verified for it (its binding, or no other queue file bound to it), and on disk at
+///   its par2 length;
+/// - and no file changed since the first call that found all this: that call records each
+///   file's inode, length and modification time, later ones compare.
+///
+/// `Err` says what is missing (for the log). Metadata only, at most one `stat` per file;
+/// callers may hold the queue lock.
+pub(crate) fn streaming_session_verified_cover(
+    nzb_id: i32,
+    dest_dir: &Path,
+    files: &[(i32, Vec<u8>)],
+) -> Result<LiveCover, String> {
+    let entry = active_streaming_session(nzb_id).ok_or("no live PAR session")?;
+    ensure_current_generation(nzb_id, &entry).map_err(|_| "live PAR stopped".to_string())?;
+    if entry.base_dir != dest_dir {
+        return Err("live PAR verified another folder".into());
+    }
+    if entry.trust_revoked.load(Ordering::Acquire) {
+        return Err("a write into a file was not vouched for".into());
+    }
+    if entry.non_recoverable {
+        return Err("the par2 set lists files outside its recovery set".into());
+    }
+    let status = entry.session.status();
+    if status.total == 0
+        || status.verified != status.total
+        || status.damaged > 0
+        || status.unarrived + status.partially_arrived > 0
+        || status.pending_folds > 0
+    {
+        return Err(format!(
+            "{} of {} slice(s) verified, {} damaged, {} not arrived",
+            status.verified,
+            status.total,
+            status.damaged,
+            status.unarrived + status.partially_arrived
+        ));
+    }
+    if !entry.session.diverged_slices().is_empty() {
+        return Err("a slice changed after it was verified".into());
+    }
+    if !entry.rebuilt_recheck.lock().unwrap_or_else(|e| e.into_inner()).is_empty() {
+        return Err("a slice rebuilt ahead waits for its file to complete".into());
+    }
+    if !entry.rebuilt_files.lock().unwrap_or_else(|e| e.into_inner()).is_empty() {
+        return Err("a file rebuilt ahead is not certified by the end repair yet".into());
+    }
+    let bindings = entry
+        .queue_bindings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let bound_ids: HashSet<FileId> = bindings.values().copied().collect();
+    let mut stamps: Vec<(FileId, crate::parlive::FileStamp)> =
+        Vec::with_capacity(entry.target_names.len());
+    let mut queue_ids = Vec::with_capacity(entry.target_names.len());
+    for (queue_id, name) in files {
+        let Some(id) = entry.session.file_id_by_name(name) else {
+            continue; // not a file of this set, or not under its par2 name
+        };
+        let par_name = entry
+            .target_names
+            .get(&id)
+            .map(|n| par_rs::filenames::os_str_bytes(n.as_os_str()));
+        if par_name.as_deref() != Some(name.as_slice()) {
+            continue;
+        }
+        let owned = match bindings.get(queue_id) {
+            Some(bound) => *bound == id,
+            None => !bound_ids.contains(&id),
+        };
+        if !owned {
+            return Err(format!(
+                "{} is not the file live PAR verified under that name",
+                String::from_utf8_lossy(name)
+            ));
+        }
+        if stamps.iter().any(|(known, _)| *known == id) {
+            return Err(format!("two files named {}", String::from_utf8_lossy(name)));
+        }
+        let stamp = crate::parlive::FileStamp::of(&dest_dir.join(crate::fsops::path(name)))
+            .ok_or_else(|| format!("{} is not on disk", String::from_utf8_lossy(name)))?;
+        if Some(stamp.len()) != entry.file_lengths.get(&id).copied() {
+            return Err(format!("{} changed length", String::from_utf8_lossy(name)));
+        }
+        stamps.push((id, stamp));
+        queue_ids.push(*queue_id);
+    }
+    if stamps.len() != entry.target_names.len() {
+        return Err(format!(
+            "{} of {} file(s) under their par2 names",
+            stamps.len(),
+            entry.target_names.len()
+        ));
+    }
+    stamps.sort_unstable_by_key(|(id, _)| id.0);
+    let mut seal = entry.cover_seal.lock().unwrap_or_else(|e| e.into_inner());
+    match seal.as_ref() {
+        Some(sealed) if *sealed != stamps => {
+            return Err("a file changed after live PAR verified it".into());
+        }
+        Some(_) => {}
+        None => *seal = Some(stamps),
+    }
+    drop(seal);
+    let par_name = entry.par_name.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    Ok(LiveCover {
+        par_name,
+        files: entry.target_names.len(),
+        queue_ids,
+    })
+}
+
+/// Whether [`streaming_session_verified_cover`] already recorded job `nzb_id`'s files.
+pub(crate) fn streaming_session_cover_sealed(nzb_id: i32) -> bool {
+    active_streaming_session(nzb_id).is_some_and(|entry| {
+        entry.cover_seal.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+    })
 }
 
 /// A bounded count upper bound only: the helper must authenticate owned RAM and

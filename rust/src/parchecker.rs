@@ -193,6 +193,8 @@ struct ActiveStreamingSession {
     base_dir: PathBuf,
     par_name: Mutex<Vec<u8>>,
     catchup_source_bytes: AtomicU64,
+    /// Bytes read back from disk already handed to the job's repair record.
+    read_back_taken: AtomicU64,
     metrics: live_metrics::LiveMetricCounters,
     last_error: Mutex<Option<String>>,
     warning_reported: AtomicBool,
@@ -770,6 +772,7 @@ fn build_streaming_session_with(
         base_dir: base_dir.to_path_buf(),
         par_name: Mutex::new(Vec::new()),
         catchup_source_bytes: AtomicU64::new(0),
+        read_back_taken: AtomicU64::new(0),
         metrics: {
             let metrics = live_metrics::LiveMetricCounters::default();
             metrics.flush_snapshots_base.store(
@@ -2960,6 +2963,13 @@ impl ActiveStreamingSession {
         self.metrics
             .rebuilt_ahead_slices
             .fetch_add(rebuilt.len() as u64, Ordering::Relaxed);
+        // one recovery block per rebuilt slice
+        crate::repairsummary::note_live(
+            nzb_id,
+            rebuilt.len(),
+            rebuilt.len(),
+            self.session.status().ready_recovery,
+        );
         let message = format!(
             "Live PAR (job {nzb_id}): rebuilt {} damaged slice(s) ({:.1} MB) ahead while downloading",
             rebuilt.len(),
@@ -4317,6 +4327,24 @@ pub(crate) fn streaming_session_source_length(
         live_hint_hash16k(hash16k).and_then(|hash| entry.session.file_id_by_hash16k(&hash))
     })?;
     entry.file_lengths.get(&id).copied()
+}
+
+impl ActiveStreamingSession {
+    /// Bytes read back from disk (par-rs reads, RustyGet replays, back-fill) not
+    /// handed out before.
+    fn take_read_back(&self) -> u64 {
+        let io = self.session.io_stats();
+        let total = io
+            .source_bytes_read
+            .saturating_add(self.catchup_source_bytes.load(Ordering::Relaxed))
+            .saturating_add(io.backfill_bytes_read);
+        total.saturating_sub(self.read_back_taken.fetch_max(total, Ordering::AcqRel))
+    }
+}
+
+/// What job `nzb_id`'s live PAR session read back from disk since last asked (0 without one).
+pub(crate) fn streaming_session_take_read_back(nzb_id: i32) -> u64 {
+    active_streaming_session(nzb_id).map_or(0, |entry| entry.take_read_back())
 }
 
 /// Logical successful I/O, including bounded source reads made by caller catch-up.

@@ -118,6 +118,7 @@ pub mod artwritercore;
 pub mod diskstate_format;
 pub(crate) mod statesaver;
 pub(crate) mod donorkind;
+pub(crate) mod repairsummary;
 pub mod dupefallback;
 pub mod dupeidentity;
 pub(crate) mod ncurses_format;

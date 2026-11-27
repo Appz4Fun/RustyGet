@@ -211,3 +211,17 @@ Set `NZBGET_CHROME_CHANNEL=none` to use Playwright's bundled Chromium.
 ```sh
 node tests/webui/download-details.js http://127.0.0.1:17999/
 ```
+
+The history repair check uses the same fixture with `RepairStats` records added
+to history (the parameter `rust/src/repairsummary.rs` writes). It checks, in both
+themes at 1440 and 390 pixels, each way's badge (live PAR, par-repair, borrowed
+from a twin, alt or other container, video bytes from a twin or alt, mixed,
+par-check failed, nothing to repair, not repaired), that older and unsettled
+records and unknown method names show no badge and never render markup, that
+`repair:<way>` and `repaired>N` find rows while free text does not match the
+repair way, and that the details panel's Repair section shows the counts, the
+recovery-block bar and only the rows that have a value.
+
+```sh
+node tests/webui/history-repair.js http://127.0.0.1:17999/
+```

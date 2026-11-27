@@ -11089,6 +11089,10 @@ impl CrossPackRepairSession {
                                     h.clear();
                                 }
                                 self.note_put_back();
+                                crate::repairsummary::note_dead_volume(
+                                    self.dead_nzb_id,
+                                    &d.volume_path,
+                                );
                                 crate::postproc::direct_unpack_forget_borrowed(
                                     self.dead_nzb_id,
                                     &d.volume_path,

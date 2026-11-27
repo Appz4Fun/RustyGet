@@ -2610,6 +2610,12 @@ impl NzbgetRsStreamRepairCtrl {
                 || counters.recovered_bytes > 0
                 || counters.recovered_holes > 0
             {
+                crate::repairsummary::note_payload(
+                    ns.id,
+                    counters.recovered_articles.max(0) as u64,
+                    counters.recovered_bytes.max(0) as u64,
+                    counters.recovered_holes.max(0) as u64,
+                );
                 host.nzb_set_int(
                     nzb_ptr,
                     NZB_INT_DUPE_RECOVERED_ARTICLES,
@@ -2703,6 +2709,7 @@ impl NzbgetRsStreamRepairCtrl {
         let ns = host.nzb_snap(nzb_ptr, false);
         let rec_bytes = counters.recovered_bytes;
         if ns.live_repair_thread_ptr != q.thread_ptr() {
+            crate::repairsummary::note_payload(ns.id, 0, rec_bytes.max(0) as u64, 0);
             // Another live repair took the job over: keep only the byte count.
             host.nzb_set_i64(
                 nzb_ptr,
@@ -2713,6 +2720,12 @@ impl NzbgetRsStreamRepairCtrl {
         }
         let rec_holes = counters.recovered_holes;
         if rec_bytes > 0 || rec_holes > 0 {
+            crate::repairsummary::note_payload(
+                ns.id,
+                0,
+                rec_bytes.max(0) as u64,
+                rec_holes.max(0) as u64,
+            );
             host.nzb_set_i64(
                 nzb_ptr,
                 NZB_I64_DUPE_RECOVERED_BYTES,

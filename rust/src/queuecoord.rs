@@ -839,8 +839,11 @@ pub(crate) fn backup_may_lend_while_extracting(
     )
 }
 
-/// Articles the coordinator starts at most in one hold of the queue lock.
+/// Articles the coordinator starts at most in one hold of the queue lock ...
 const MAX_STARTS_PER_PASS: usize = 64;
+/// ... and the time it goes on starting more in one hold (a long queue makes each pick
+/// a scan; the API and edits wait for the lock meanwhile).
+const MAX_START_PASS_TIME: std::time::Duration = std::time::Duration::from_millis(5);
 
 /// Test hook: `RUSTYGET_TEST_COORD_PASS_DELAY_MS` sleeps that long after each pass of
 /// the coordinator loop (outside the queue lock), as a pass slowed by a long queue and
@@ -2435,7 +2438,11 @@ impl NzbgetRsQueueCoordinator {
             // 345 connections busy on one item while 148 waited).
             host.with_locked_queue(|dq_ptr| {
                 let opts = host.opts();
-                for _ in 0..MAX_STARTS_PER_PASS {
+                let pass_start = std::time::Instant::now();
+                for n in 0..MAX_STARTS_PER_PASS {
+                    if n > 0 && pass_start.elapsed() >= MAX_START_PASS_TIME {
+                        break;
+                    }
                     let next_pair = self.get_next_article(host, &opts, dq_ptr);
                     // The download next in line waits while its dead-pick probe waits for a
                     // connection (see `dupeprobe::probe_waiting_for_connection`): the connection it

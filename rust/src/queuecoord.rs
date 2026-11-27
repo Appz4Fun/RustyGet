@@ -8245,8 +8245,6 @@ fn downloaded_ranges(
     merged
 }
 
-/// What a started queue item's unpack will still write next to its archives: its data size
-/// (par2 files are not extracted) until its unpack has run (or was skipped: no archives);
 /// Whether a started download's articles still land on the disk the InterDir budget measures
 /// (the current InterDir, or DestDir without one): not when its folder was named by an earlier
 /// InterDir (`unpack::job_dir_is_intermediate`), which keeps it on that earlier disk.
@@ -8259,6 +8257,8 @@ fn budget_counts_download_bytes(dest_dir: &[u8], inter_dir: &[u8], nzb_id: i32) 
     }
 }
 
+/// What a started queue item's unpack will still write next to its archives: its data size
+/// (par2 files are not extracted) until its unpack has run (or was skipped: no archives);
 /// 0 with unpacking off. A download without archives is overcounted while it downloads.
 fn interdir_unpack_bytes(nzb: &crate::queuesubsys_host::NzbSnap, unpack_on: bool) -> i64 {
     if !unpack_on || nzb.unpack_status != UnpackStatus::None {

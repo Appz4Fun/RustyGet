@@ -3232,6 +3232,7 @@ pub(crate) fn move_completed_files_on_qh(
         crate::livewrite::forget(nzb.id);
         crate::postproc::direct_unpack_join_live_par_repair(nzb.id);
         crate::parchecker::streaming_session_forget(nzb.id);
+        release_unwritten_outputs(qh, nzb_ptr, cstr::until_nul(old_dest_dir));
     }
     let cfs = qh.nzb_completed_files(nzb_ptr);
     if cfs.is_empty() {
@@ -3245,6 +3246,103 @@ pub(crate) fn move_completed_files_on_qh(
         |msg| qh.nzb_print_message(nzb_ptr, MK_ERROR, msg),
         || qh.nzb_has_busy_output_file(nzb_ptr),
     )
+}
+
+/// After a download's folder changed (category or name edit, or an InterDir
+/// relocation), a file whose direct-write output is still in the old folder
+/// would keep writing there. The write guard refuses that path, because the
+/// download's writes now belong to the new folder, so every later article of
+/// the file failed and the download ended FAILURE with health 0 (6790: 2877,
+/// 2880, 2887). A file that is not being written follows the download: one
+/// holding no article forgets its output (it is created afresh in the new
+/// folder; an empty preallocated `.out.tmp` goes), one holding articles has
+/// its partial output moved into the new folder.
+fn release_unwritten_outputs(qh: &QueueSubsysHost, nzb_ptr: NzbRef, old_dest_dir: &[u8]) {
+    let new_dest_dir = qh.nzb_snap(nzb_ptr, false).dest_dir;
+    for i in 0..qh.nzb_file_len(nzb_ptr) {
+        let f = qh.file_snap(qh.nzb_file_at(nzb_ptr, i));
+        let Some(follow) = output_follow(&f.output_filename, old_dest_dir, &f) else {
+            continue;
+        };
+        let out = cstr::until_nul(&f.output_filename).to_vec();
+        let new_out = match follow {
+            OutputFollow::Forget => {
+                if out.ends_with(b".out.tmp") {
+                    let _ = std::fs::remove_file(crate::fsops::path(&out));
+                }
+                None
+            }
+            OutputFollow::Move => {
+                let moved = crate::artwritercore::article_writer_format_dest_file_path(
+                    cstr::until_nul(&new_dest_dir),
+                    b'/',
+                    &out[crate::paths::base_file_name(&out).min(out.len())..],
+                );
+                if crate::fsops::file_exists(&out, &crate::fsops::posix_stat) {
+                    let _ = std::fs::create_dir_all(crate::fsops::path(cstr::until_nul(&new_dest_dir)));
+                    let res = match (CString::new(out.clone()), CString::new(moved.clone())) {
+                        (Ok(src), Ok(dst)) => crate::fsops::move_file_no_overwrite(&src, &dst),
+                        _ => Err(libc::EINVAL),
+                    };
+                    if let Err(code) = res {
+                        let mut msg = b"Could not move file ".to_vec();
+                        msg.extend_from_slice(&out);
+                        msg.extend_from_slice(b" to ");
+                        msg.extend_from_slice(&moved);
+                        msg.extend_from_slice(b": ");
+                        msg.extend_from_slice(&crate::fsops::error_message(code));
+                        qh.nzb_print_message(nzb_ptr, MK_ERROR, &msg);
+                        continue;
+                    }
+                }
+                Some(moved)
+            }
+        };
+        qh.file_set_str(f.ptr, crate::queuesubsys_host::FILE_STR_OUTPUT_FILENAME, new_out.as_deref());
+        if new_out.is_none() {
+            qh.file_set_int(f.ptr, crate::queuesubsys_host::FILE_INT_OUTPUT_INITIALIZED, 0);
+        }
+        // The saved record holds the articles too: one written while they are
+        // not loaded yet (after a restart) would hold none.
+        if f.articles_len == 0 {
+            qh.disk_load_articles(f.ptr);
+        }
+        if qh.file_snap(f.ptr).articles_len > 0 {
+            qh.disk_save_file(f.ptr);
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum OutputFollow {
+    /// nothing written yet: forget the output, it is created in the new folder
+    Forget,
+    /// articles written: move the partial output into the new folder
+    Move,
+}
+
+/// What a file whose `output` lies in `old_dest_dir` does when its download
+/// moves to another folder; `None` when the output is elsewhere or the file is
+/// being written right now (an article downloading or cached).
+fn output_follow(
+    output: &[u8],
+    old_dest_dir: &[u8],
+    f: &crate::queuesubsys_host::FileSnap,
+) -> Option<OutputFollow> {
+    let output = cstr::until_nul(output);
+    let dir = cstr::until_nul(old_dest_dir);
+    let dir = dir.strip_suffix(b"/").unwrap_or(dir);
+    let inside = !dir.is_empty()
+        && output.len() > dir.len() + 1
+        && output.starts_with(dir)
+        && output[dir.len()] == b'/';
+    if !inside || f.cached_articles != 0 || f.active_downloads != 0 {
+        None
+    } else if f.success_articles == 0 {
+        Some(OutputFollow::Forget)
+    } else {
+        Some(OutputFollow::Move)
+    }
 }
 
 struct DlWorker {
@@ -5838,5 +5936,29 @@ mod tests {
         assert!(article_cache_check_flush(&host, 4096, false));
         assert!(OBSERVED_UNDER_LOCK.load(Ordering::SeqCst));
         assert!(!cache_file_busy(0xdead_beefusize));
+    }
+
+    #[test]
+    fn an_output_in_the_old_folder_follows_the_download() {
+        use crate::queuesubsys_host::FileSnap;
+        let old = b"/nvme/inter/Movie.#7";
+        let out = b"/nvme/inter/Movie.#7/41.out.tmp";
+        let fresh = FileSnap::default();
+        assert_eq!(output_follow(out, old, &fresh), Some(OutputFollow::Forget));
+        assert_eq!(output_follow(out, b"/nvme/inter/Movie.#7/", &fresh), Some(OutputFollow::Forget));
+        let written = FileSnap { success_articles: 3, ..Default::default() };
+        assert_eq!(output_follow(out, old, &written), Some(OutputFollow::Move));
+        // another folder, a sibling with the same prefix, or no output at all
+        assert_eq!(output_follow(b"/hdd/inter/Movie.#7/41.out.tmp", old, &fresh), None);
+        assert_eq!(output_follow(b"/nvme/inter/Movie.#77/41.out.tmp", old, &fresh), None);
+        assert_eq!(output_follow(b"", old, &fresh), None);
+        assert_eq!(output_follow(out, b"", &fresh), None);
+        // a file being written right now is left alone
+        for f in [
+            FileSnap { cached_articles: 1, ..Default::default() },
+            FileSnap { active_downloads: 1, success_articles: 2, ..Default::default() },
+        ] {
+            assert_eq!(output_follow(out, old, &f), None);
+        }
     }
 }

@@ -17,6 +17,10 @@ impl Fixture {
             NEXT_FIXTURE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir(&dir).unwrap();
+        // Sessions this test starts draw on a pool of its own, not the shared 500 MB one.
+        super::TEST_BUDGET_POOL.with(|p| {
+            *p.borrow_mut() = Some(Arc::new(BudgetPool::with_size(500 << 20)));
+        });
         for f in std::fs::read_dir(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/testdata/parchecker"),
         )
@@ -33,6 +37,7 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        super::TEST_BUDGET_POOL.with(|p| *p.borrow_mut() = None);
         if !std::thread::panicking() {
             let _ = std::fs::remove_dir_all(&self.0);
         }

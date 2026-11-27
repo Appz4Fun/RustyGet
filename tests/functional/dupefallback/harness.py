@@ -151,6 +151,7 @@ Usage:
 
 import argparse
 import base64
+import collections
 import io
 import os
 import random
@@ -265,7 +266,93 @@ def build_multi_nzb(members, password=None):
     return '\n'.join(lines) + '\n'
 
 
+def wait_listening(port, proc, what, timeout=90):
+    """Wait until ``port`` on 127.0.0.1 accepts a connection (``proc`` serves it): a fixed
+    sleep after the spawn was too short on a loaded host, and a server that never came up
+    (it died, or could not bind) showed up only as minutes of "Connection refused" and a
+    history timeout. Raises with the reason instead."""
+    deadline = time.time() + timeout
+    while True:
+        try:
+            socket.create_connection(('127.0.0.1', port), timeout=2).close()
+            return
+        except OSError:
+            pass
+        if proc is not None and proc.poll() is not None:
+            raise RuntimeError('%s exited with %s before listening on port %d' % (what, proc.returncode, port))
+        if time.time() > deadline:
+            raise RuntimeError('%s not listening on port %d after %d s' % (what, port, timeout))
+        time.sleep(0.1)
+
+
+def _ephemeral_ports():
+    """The range the OS hands out for bind(0) and outgoing connections' source ports."""
+    try:
+        with open('/proc/sys/net/ipv4/ip_local_port_range') as f:
+            lo, hi = (int(v) for v in f.read().split())
+            return lo, hi
+    except (OSError, ValueError):
+        pass
+    try:
+        lo = int(subprocess.run(['sysctl', '-n', 'net.inet.ip.portrange.first'], capture_output=True, text=True).stdout)
+        hi = int(subprocess.run(['sysctl', '-n', 'net.inet.ip.portrange.last'], capture_output=True, text=True).stdout)
+        return lo, hi
+    except (OSError, ValueError):
+        return 32768, 65535
+
+
+_PORT_RANGE = None
+_PORT_LOCKS = collections.deque()
+_PORT_LOCK_DIR = '/tmp/rustyget-harness-ports'
+
+
 def free_port():
+    """A free local port for a daemon, nserv or proxy to listen on, picked below the OS's
+    ephemeral range and reserved across harness processes. A port from bind(0) was released
+    before the daemon bound it, and with dozens of scenarios at once the OS handed the same
+    ephemeral port to another process's connection in between ("Binding socket failed ...
+    Address already in use", then "nzbget did not become ready"). Ports below the ephemeral
+    range are never handed out by the OS; an flock'd file per port keeps two harness
+    processes from picking the same one (the newest 64 picks of this process stay held)."""
+    global _PORT_RANGE
+    import fcntl
+    if _PORT_RANGE is None:
+        first = _ephemeral_ports()[0]
+        _PORT_RANGE = (max(1024, first - 12000), first) if first > 6000 else None
+    if _PORT_RANGE:
+        try:
+            if not os.path.isdir(_PORT_LOCK_DIR):
+                os.makedirs(_PORT_LOCK_DIR, exist_ok=True)
+                try:   # shared by every user's harness runs (sticky, like /tmp)
+                    os.chmod(_PORT_LOCK_DIR, 0o1777)
+                except OSError:
+                    pass
+            for _ in range(500):
+                p = random.SystemRandom().randrange(*_PORT_RANGE)
+                # read-only is enough for flock, so another user's lock file works too
+                fd = os.open(os.path.join(_PORT_LOCK_DIR, str(p)),
+                             os.O_CREAT | os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0), 0o666)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    os.close(fd)
+                    continue
+                # no SO_REUSEADDR: on macOS it lets this bind succeed beside a listener on
+                # the wildcard address
+                s = socket.socket()
+                try:
+                    s.bind(('127.0.0.1', p))
+                except OSError:
+                    os.close(fd)
+                    continue
+                finally:
+                    s.close()
+                _PORT_LOCKS.append(fd)
+                while len(_PORT_LOCKS) > 64:
+                    os.close(_PORT_LOCKS.popleft())
+                return p
+        except OSError:
+            pass
     s = socket.socket()
     s.bind(('127.0.0.1', 0))
     p = s.getsockname()[1]
@@ -523,10 +610,10 @@ class Daemon:
         # server-list [2]), which is how a "missing" article is simulated on the
         # only server the daemon uses. A second instance would just bind
         # nntp_port+1 and risk colliding with the control port.
-        self.t.spawn([self.t.nzbget, '--nserv', '-d', self.datadir,
-                      '-p', str(port or self.nntp_port), '-i', '1',
-                      '-v', '2' if capture_requests else '0'] + list(extra_args),
-                     output_rel='nserv.log' if capture_requests else None)
+        return self.t.spawn([self.t.nzbget, '--nserv', '-d', self.datadir,
+                             '-p', str(port or self.nntp_port), '-i', '1',
+                             '-v', '2' if capture_requests else '0'] + list(extra_args),
+                            output_rel='nserv.log' if capture_requests else 'nserv.out')
 
     def start(self):
         self.process = self.t.spawn([self.t.nzbget, '-c', self.t.path(self.conf_rel), '-s'])
@@ -789,12 +876,21 @@ class DelayingNntpProxy(RewritingNntpProxy):
     marker for that marker's delay (seconds) before passing it on: a slow
     server, or a duplicate whose articles are slow to come (in practice,
     requests for articles that no server has any more, each waiting out its
-    timeout). ``delays`` is a list of (marker, seconds)."""
+    timeout). ``delays`` is a list of (marker, seconds); seconds may instead be a
+    threading.Event, which holds the request until the scenario sets it (a wait
+    on a condition rather than on a load-dependent number of seconds)."""
 
     def __init__(self, listen_port, upstream_port, delays):
         self.delays = delays
         self.delayed = 0
         self.fired = set()
+        # requests being held now, the most at once, and per marker the (start, end)
+        # times of each hold: what the news server saw, not what an RPC poll sampled
+        self.holding = 0
+        self.peak_holding = 0
+        self.holding_by = {}
+        self.holds = {}
+        self._hold_lock = threading.Lock()
         super().__init__(listen_port, upstream_port, b'', b'')
 
     def _pipe(self, src, dst, rewrite):
@@ -810,7 +906,22 @@ class DelayingNntpProxy(RewritingNntpProxy):
                         if marker in data and not (len(entry) > 2 and entry[2] and marker in self.fired):
                             self.delayed += 1
                             self.fired.add(marker)
-                            time.sleep(delay)
+                            with self._hold_lock:
+                                self.holding += 1
+                                self.peak_holding = max(self.peak_holding, self.holding)
+                                self.holding_by[marker] = self.holding_by.get(marker, 0) + 1
+                            start = time.time()
+                            try:
+                                if hasattr(delay, 'wait'):
+                                    # a threading.Event: held until the scenario sets it
+                                    delay.wait(900)
+                                else:
+                                    time.sleep(delay)
+                            finally:
+                                with self._hold_lock:
+                                    self.holding -= 1
+                                    self.holding_by[marker] -= 1
+                                    self.holds.setdefault(marker, []).append((start, time.time()))
                             break
                 dst.sendall(data)
         except OSError:
@@ -1835,6 +1946,8 @@ def scenario_streamrestartcredit(daemon, t):
     too, and the release ends SUCCESS. The fully repaired file's failed size was
     never credited back to health (its job was dropped as done), so the release
     stayed short of full health though its files were complete."""
+    _SR_SLOW_HOLD.clear()
+    _SR_SR2_LAST_HOLD.clear()
     size, seg_primary, seg_donor = 2_000_000, 500_000, 300_000
     d1, d2 = _payload(size, 7676), _payload(size, 7677)
     p1 = _place_copy(t, 'srA', d1, 'f1.mkv')
@@ -1843,20 +1956,43 @@ def scenario_streamrestartcredit(daemon, t):
     b2 = _place_copy(t, 'srSlow', d2, 'f2.mkv')
     primary = build_multi_nzb([(p1, 'Sr1.mkv', size, seg_primary, {2}), (p2, 'Sr2.mkv', size, seg_primary, {3})])
     donor = build_multi_nzb([(b1, 'obf-sr1.mkv', size, seg_donor, set()), (b2, 'obf-sr2.mkv', size, seg_donor, set())])
+    # Stream repair takes the files in the order they complete, one article at a time on
+    # its light connection: with Sr2 first, its held articles (below) kept Sr1 waiting until
+    # the repair gave up. Sr2's last article (one connection) is held until Sr1 is queued.
+    def release_sr2():
+        deadline = time.time() + 60
+        while time.time() < deadline and not _grep_log(t, 'Queueing stream repair of Sr1.mkv'):
+            time.sleep(0.1)
+        _SR_SR2_LAST_HOLD.set()
+    threading.Thread(target=release_sr2, daemon=True).start()
     api = daemon.wait_ready()
     daemon.append(api, 'DonSR', donor, True, 'sr2-key', 50)
     daemon.append(api, 'RelSR2', primary, False, 'sr2-key', 100)
     # "Recovered ... of Sr1.mkv from duplicate DonSR", not the "Queueing stream repair of
-    # Sr1.mkv from duplicate collections" before it: the shutdown must catch the repair running
+    # Sr1.mkv from duplicate collections" before it: the shutdown must catch the repair running.
+    # The slow duplicate's articles that cover Sr2's hole (srSlow/f2.mkv?4=, ?5=) are held
+    # until the daemon is down, so Sr2's repair is still running at the shutdown however long
+    # Sr1's repair and the shutdown take on a loaded host (with 3 s each, Sr2 could finish
+    # first under load: interrupted=0). Its other articles (the content identity check reads
+    # the head and tail) keep the 3 s delay.
     deadline = time.time() + 120
     while time.time() < deadline and _grep_log(t, 'of Sr1.mkv from duplicate DonSR') == 0:
         time.sleep(0.3)
     first_repaired = _grep_log(t, 'of Sr1.mkv from duplicate DonSR')
+    # ... and until Sr2's repair is waiting on a held article, so it is running at the shutdown
+    while time.time() < deadline and not any(daemon.proxy.holding_by.get(m, 0) > 0
+                                             for m in (b'srSlow/f2.mkv?4=', b'srSlow/f2.mkv?5=')):
+        time.sleep(0.1)
+    sr2_held = any(daemon.proxy.holding_by.get(m, 0) > 0
+                   for m in (b'srSlow/f2.mkv?4=', b'srSlow/f2.mkv?5='))
     try:
         api.shutdown()
     except Exception:
         pass
     t.procs[-1].wait(timeout=60)
+    daemon.proxy.delays = []   # not in place: the list is the shared scenario table
+    _SR_SR2_LAST_HOLD.set()
+    _SR_SLOW_HOLD.set()
     daemon.start()
     api = daemon.wait_ready()
     h = daemon.wait_history(api, 'RelSR2', timeout=240)
@@ -1864,8 +2000,8 @@ def scenario_streamrestartcredit(daemon, t):
         _verify_output(t, d2, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
     interrupted = _grep_log(t, 'Stream repair interrupted')
     ok = first_repaired >= 1 and interrupted >= 1 and h['Status'].startswith('SUCCESS') and h['Health'] == 1000 and integ
-    return ('streamrestartcredit', ok, 'first_repaired=%d interrupted=%d status=%s health=%s integrity=%s' % (
-        first_repaired, interrupted, h['Status'], h['Health'], integ))
+    return ('streamrestartcredit', ok, 'held=%s first_repaired=%d interrupted=%d status=%s health=%s integrity=%s' % (
+        sr2_held, first_repaired, interrupted, h["Status"], h["Health"], integ))
 
 
 def scenario_truncatedstate(daemon, t):
@@ -1901,7 +2037,8 @@ def scenario_truncatedstate(daemon, t):
 
 def scenario_queuebatchstart(daemon, t):
     """Each pass of the queue coordinator takes 100 ms (RUSTYGET_TEST_COORD_PASS_DELAY_MS,
-    as a long queue and lock waits make it on 6790) and each article 1 s (proxy). Started
+    as a long queue and lock waits make it on 6790) and each article 1 s (proxy; 3 s for
+    the small item's). Started
     one per pass, at most about 10 articles are ever in flight however many connections
     there are (6790: 117 of 345); started in a batch per pass, the 30 connections fill.
     A small item (6 articles) comes first: the second item must start in the same passes,
@@ -1911,21 +2048,32 @@ def scenario_queuebatchstart(daemon, t):
     big = _payload(90 * seg, 5101)
     pa = _place_copy(t, 'qbA', small, 'a.bin')
     pb = _place_copy(t, 'qbB', big, 'b.bin')
+    # Both items are queued paused and resumed by one queue edit, so both become due at the
+    # same moment. Appended one after the other they were 1-2 s apart on a loaded host
+    # (building the 90-segment nzb-file between the appends, then each append's RPC), long
+    # enough for the small item's articles to finish before the second item was queued
+    # (both_at_once=False with peak 27 of 30). Its articles take 3 s (proxy) for the same reason.
+    nzb_a = build_nzb(pa, 'qba.bin', len(small), seg, set())
+    nzb_b = build_nzb(pb, 'qbb.bin', len(big), seg, set())
     api = daemon.wait_ready()
-    daemon.append(api, 'RelQBA', build_nzb(pa, 'qba.bin', len(small), seg, set()), False, 'qba-key', 100)
-    daemon.append(api, 'RelQBB', build_nzb(pb, 'qbb.bin', len(big), seg, set()), False, 'qbb-key', 100)
-    peak, both = 0, False
-    deadline = time.time() + 120
-    while time.time() < deadline:
-        groups = api.listgroups()
-        active = {g['NZBName']: g.get('ActiveDownloads', 0) for g in groups}
-        peak = max(peak, sum(active.values()))
-        both |= active.get('RelQBA', 0) > 0 and active.get('RelQBB', 0) > 0
-        if not groups:
-            break
-        time.sleep(0.1)
-    ha = daemon.wait_history(api, 'RelQBA', timeout=60)
-    hb = daemon.wait_history(api, 'RelQBB', timeout=60)
+    daemon.append(api, 'RelQBA', nzb_a, True, 'qba-key', 100)
+    daemon.append(api, 'RelQBB', nzb_b, True, 'qbb-key', 100)
+    ids = [g['NZBID'] for g in api.listgroups() if g['NZBName'] in ('RelQBA', 'RelQBB')]
+    if len(ids) != 2:
+        return ('queuebatchstart', False, 'queued %d of the 2 items' % len(ids))
+    api.editqueue('GroupResume', 0, '', ids)
+    ha = daemon.wait_history(api, 'RelQBA', timeout=180)
+    hb = daemon.wait_history(api, 'RelQBB', timeout=180)
+    # Measured at the news server (the delaying proxy holds each article 1-3 s): the most
+    # requests in flight at once, and whether a request of the second item came while the
+    # first item still had one in flight. Polling listgroups' ActiveDownloads sampled this:
+    # on a loaded host each poll took over a second and missed the small item's 3 s.
+    proxy = daemon.proxy
+    with proxy._hold_lock:
+        peak = proxy.peak_holding
+        a_holds = list(proxy.holds.get(b'qbA/', []))
+        b_holds = list(proxy.holds.get(b'qbB/', []))
+    both = bool(a_holds and b_holds) and min(s for s, _ in b_holds) < max(e for _, e in a_holds)
     ok = (ha['Status'].startswith('SUCCESS') and hb['Status'].startswith('SUCCESS')
           and peak >= 24 and both)
     return ('queuebatchstart', ok, 'status=%s/%s peak_in_flight=%d of 30 (need 24) both_at_once=%s' % (
@@ -16757,14 +16905,25 @@ def _corrupt_part_run(daemon, t, label, tag, rar5=False):
     written = sum(int(n) for n in re.findall(r'persistent partial files wrote (\d+) bytes', log))
     refilled = (sum(int(n) for n in re.findall(r'while extracting \((\d+) bytes\)', log)) +
                 sum(int(n) for n in re.findall(r'(\d+) bytes read back\)', log)))
-    # Each archive byte read once by the extraction, plus at most the repaired part (and a
-    # 64 KiB slice live PAR may count damaged for a moment and rebuild).
-    ok = (h['Status'].startswith('SUCCESS') and intact and du_ok == 1 and declared + late >= 1 and
-          first_reads == 1 and fallback == 0 and again == 0 and
-          0 < written <= len(movie) and 0 < refilled <= 1_000_000 + 2 * 65536)
-    return (label, ok, 'status=%s intact=%s du_ok=%d declared=%d late=%d first_reads=%d fallback=%d '
-            'unpack_again=%d written=%d refilled=%d' % (h['Status'], intact, du_ok, declared, late, first_reads,
-                                                       fallback, again, written, refilled))
+    # live PAR rebuilt the bad slice before the extraction reached it: on a loaded host direct
+    # unpack runs behind the download, and the recovery blocks are in by then. The part never
+    # fails its check, so nothing is read back - a correct outcome, but a different one.
+    ahead = len(re.findall(r'Live PAR \(job \d+\): rebuilt \d+ damaged slice\(s\) \([\d.]+ MB\) ahead while downloading',
+                           log))
+    common = (h['Status'].startswith('SUCCESS') and intact and du_ok == 1 and
+              first_reads == 1 and fallback == 0 and again == 0)
+    if declared + late >= 1:
+        # Each archive byte read once by the extraction, plus at most the repaired part (and a
+        # 64 KiB slice live PAR may count damaged for a moment and rebuild).
+        path = 'met'
+        ok = common and 0 < written <= len(movie) and 0 < refilled <= 1_000_000 + 2 * 65536
+    else:
+        path = 'ahead'
+        ok = common and ahead >= 1 and written == len(movie) and refilled == 0
+    return (label, ok, 'path=%s status=%s intact=%s du_ok=%d declared=%d late=%d ahead=%d first_reads=%d '
+            'fallback=%d unpack_again=%d written=%d refilled=%d' % (
+                path, h['Status'], intact, du_ok, declared, late, ahead, first_reads, fallback, again,
+                written, refilled))
 
 
 def scenario_corruptpartdu(daemon, t):
@@ -17854,15 +18013,23 @@ SCENARIO_REWRITE_PROXY = {'notfound451': (b'430 ', b'451 '),
                           'pathtraversalnzb': (b'name=aaaaaaaa.bin', b'name=../../ab.bin'),
                           'pathtraversalarticle': (b'name=aaaaaaaa.bin', b'name=../../ab.bin'), 'rejectnextserver': (b'=ypart begin=', b'=ypart begxn=')}
 
-# scenarios with a DelayingNntpProxy in front of Server1: [(message-id marker, delay in s)]
+# streamrestartcredit holds the slow duplicate's articles for Sr2's hole until the shutdown
+_SR_SLOW_HOLD = threading.Event()
+# ... and Sr2's last article until Sr1 is queued for stream repair, so Sr1 is repaired first
+_SR_SR2_LAST_HOLD = threading.Event()
+
+# scenarios with a DelayingNntpProxy in front of Server1: [(message-id marker, delay in s
+# or a threading.Event that holds the request until it is set)]
 SCENARIO_DELAY_PROXY = {'fleetbigqueue': [(b'-0-', 600.0)], 'dupausedunpack': [(b'dpuA/testfile3.part03', 200.0)], 'dupausedlive': [(b'dplA/testfile3.part03', 900.0)], 'slotpreemptpaused': [(b'sppA/v07', 900.0)], 'slotfinishedlive': [(b'sflA/v29', 900.0)], 'failcont_alt25busy': [(b'fcBlk/Blk.part03.rar?2=', 900.0)], 'livestraggler': LIVE_STRAGGLERS, 'lightburst': [(b'lbLoad', 0.25)], 'clientthreads': [(b'ctA/', 3.0)], 'xdecomp_slow': [(b'xdzB/', 0.7)], 'damagedfilestate': [(b'?6=500000:', 20.0, True)], 'articledecoyparrestart': [(b'?9=4000000:', 15.0, True), (b'?10=4500000:', 15.0, True)], 'directrenamesubdir': [(b'drA/obf', 0.4)], 'directrenamesubdirjoin': [(b'drA/obf', 0.4)], 'slowprobe': [(b'STAT ', 5.0), (b'spA/', 0.2)],
                         'directunpackkeep': [(b'rel.part03', 2.0)],
                         'directunpackkeepnointer': [(b'rel.part03', 2.0)],
                         'truncatedstate': [(b'tsA/', 0.5)],
                         'queuesyncslow': [(b'qsA/', 0.3)],
-                        'queuebatchstart': [(b'qbA/', 1.0), (b'qbB/', 1.0)],
+                        'queuebatchstart': [(b'qbA/', 3.0), (b'qbB/', 1.0)],
                         'reloadmidrepair': [(b'rlDon/', 2.0)],
-                        'streamrestartcredit': [(b'srSlow/', 3.0)],
+                        'streamrestartcredit': [(b'srC/f2.mkv?4=', _SR_SR2_LAST_HOLD),
+                                                (b'srSlow/f2.mkv?4=', _SR_SLOW_HOLD),
+                                                (b'srSlow/f2.mkv?5=', _SR_SLOW_HOLD), (b'srSlow/', 3.0)],
                         'restartfailover': [(b'rfA/', 0.4)],
                         'ondiskstop': [(b'odB/', 1.0)],
                         'ondiskstoprepairfirst': [(b'ocC/', 0.5)],
@@ -18018,11 +18185,12 @@ def main():
                             'Server2.Username=u', 'Server2.Password=p', 'Server2.Level=0', 'Server2.Connections=2',
                             'Server2.Encryption=no', 'ArticleRetries=0', 'ArticleInterval=0']
             daemon.write_config(options)
+            nserv_proc = None
             if name in SCENARIO_FAKE_NNTP:
                 daemon.fake_nntp = FakeNntp(nserv_port)
             else:
-                daemon.start_nserv(capture_requests=(name in CAPTURE_REQUESTS),
-                                   extra_args=SCENARIO_NSERV_ARGS.get(name, ()), port=nserv_port)
+                nserv_proc = daemon.start_nserv(capture_requests=(name in CAPTURE_REQUESTS),
+                                                extra_args=SCENARIO_NSERV_ARGS.get(name, ()), port=nserv_port)
             if flaky:
                 daemon.proxy = FlakyNntpProxy(proxy_port, nserv_port, *flaky[1:])
             elif corrupt:
@@ -18033,7 +18201,10 @@ def main():
                 daemon.proxy = DelayingNntpProxy(proxy_port, nserv_port, delay)
             elif first_fail:
                 daemon.proxy = FirstFailNntpProxy(proxy_port, nserv_port, *first_fail)
-            time.sleep(1)
+            if args.target == 'local' and nserv_proc is not None:
+                wait_listening(nserv_port, nserv_proc, 'nserv')
+            else:
+                time.sleep(1)
             daemon.start()
             if args.target == 'adb':
                 target.forward_rpc(rpc)

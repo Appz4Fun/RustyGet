@@ -3109,7 +3109,6 @@ pub(crate) fn forget_dead_volume_verdicts(nzb_id: i32) {
     dead_volume_donor_confirmations().retain(|(id, _), _| *id != nzb_id);
     crate::queuecoord::forget_kept_for_borrowing(nzb_id);
     crate::streamrepair_coord::expire_batched();
-    crate::donorstore::forget(nzb_id);
 }
 
 /// Forgets what was put back into the volumes of download `nzb_id` (dead volumes read
@@ -4379,6 +4378,9 @@ fn kept_borrows() -> std::sync::MutexGuard<
 pub(crate) fn direct_unpack_forget_holds(nzb_id: i32) {
     note_dead_volume_borrow(nzb_id, false);
     forget_dead_volume_verdicts(nzb_id);
+    // The donor articles fetched for it go too. Not when post-processing still repairs it
+    // (`direct_unpack_forget_holds_keep_borrows`): its repair maps the donor again.
+    crate::donorstore::forget(nzb_id);
     let gone = direct_unpack_holds().remove(&nzb_id);
     let kept = kept_borrows().remove(&nzb_id);
     for v in gone

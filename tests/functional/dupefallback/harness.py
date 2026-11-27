@@ -1803,6 +1803,39 @@ def scenario_truncatedstate(daemon, t):
         state, h['Status'], integ, _grep_log(t, 'Discarding damaged download state')))
 
 
+def scenario_queuebatchstart(daemon, t):
+    """Each pass of the queue coordinator takes 100 ms (RUSTYGET_TEST_COORD_PASS_DELAY_MS,
+    as a long queue and lock waits make it on 6790) and each article 1 s (proxy). Started
+    one per pass, at most about 10 articles are ever in flight however many connections
+    there are (6790: 117 of 345); started in a batch per pass, the 30 connections fill.
+    A small item (6 articles) comes first: the second item must start in the same passes,
+    so both download at once."""
+    seg = 50_000
+    small = _payload(6 * seg, 5100)
+    big = _payload(90 * seg, 5101)
+    pa = _place_copy(t, 'qbA', small, 'a.bin')
+    pb = _place_copy(t, 'qbB', big, 'b.bin')
+    api = daemon.wait_ready()
+    daemon.append(api, 'RelQBA', build_nzb(pa, 'qba.bin', len(small), seg, set()), False, 'qba-key', 100)
+    daemon.append(api, 'RelQBB', build_nzb(pb, 'qbb.bin', len(big), seg, set()), False, 'qbb-key', 100)
+    peak, both = 0, False
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        groups = api.listgroups()
+        active = {g['NZBName']: g.get('ActiveDownloads', 0) for g in groups}
+        peak = max(peak, sum(active.values()))
+        both |= active.get('RelQBA', 0) > 0 and active.get('RelQBB', 0) > 0
+        if not groups:
+            break
+        time.sleep(0.1)
+    ha = daemon.wait_history(api, 'RelQBA', timeout=60)
+    hb = daemon.wait_history(api, 'RelQBB', timeout=60)
+    ok = (ha['Status'].startswith('SUCCESS') and hb['Status'].startswith('SUCCESS')
+          and peak >= 24 and both)
+    return ('queuebatchstart', ok, 'status=%s/%s peak_in_flight=%d of 30 (need 24) both_at_once=%s' % (
+        ha['Status'], hb['Status'], peak, both))
+
+
 def scenario_queuesyncslow(daemon, t):
     """Every sync of a saved state file takes a second (RUSTYGET_TEST_STATE_SYNC_DELAY_MS,
     as on 6790 while a post-processing move saturated the queue disk with FlushQueue=yes).
@@ -15289,6 +15322,7 @@ SCENARIOS = {
     'stream': scenario_stream,
     'truncatedstate': scenario_truncatedstate,
     'queuesyncslow': scenario_queuesyncslow,
+    'queuebatchstart': scenario_queuebatchstart,
     'streamrestartcredit': scenario_streamrestartcredit,
     'streamtimeout': scenario_streamtimeout,
     'streamdeaddonor': scenario_streamdeaddonor,
@@ -15728,6 +15762,8 @@ SCENARIO_ENV = {
     'persistrestartdamaged': {'RUSTYGET_PERSISTENT_UNPACK': '1'},
     # each state-file sync takes 1 s (diskstate_format::test_state_sync_delay)
     'queuesyncslow': {'RUSTYGET_TEST_STATE_SYNC_DELAY_MS': '1000'},
+    # each pass of the queue coordinator takes 100 ms (queuecoord::test_coord_pass_delay)
+    'queuebatchstart': {'RUSTYGET_TEST_COORD_PASS_DELAY_MS': '100'},
 }
 SCENARIO_ENV_KEYS = sorted({k for env in SCENARIO_ENV.values() for k in env})
 
@@ -15780,6 +15816,7 @@ SCENARIO_OPTIONS = {
     'stream': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'truncatedstate': ['ContinuePartial=yes', 'FlushQueue=yes', 'Server1.Connections=1'],
     'queuesyncslow': ['ContinuePartial=yes', 'FlushQueue=yes', 'Server1.Connections=6'],
+    'queuebatchstart': ['Server1.Connections=30'],
     'streamrestartcredit': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'streamdeaddonor': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'rejectnextserver': ['DupeArticleFallback=article', 'ArticleRetries=0'],
@@ -16237,6 +16274,7 @@ SCENARIO_DELAY_PROXY = {'fleetbigqueue': [(b'-0-', 600.0)], 'dupausedunpack': [(
                         'directunpackkeepnointer': [(b'rel.part03', 2.0)],
                         'truncatedstate': [(b'tsA/', 0.5)],
                         'queuesyncslow': [(b'qsA/', 0.3)],
+                        'queuebatchstart': [(b'qbA/', 1.0), (b'qbB/', 1.0)],
                         'reloadmidrepair': [(b'rlDon/', 2.0)],
                         'streamrestartcredit': [(b'srSlow/', 3.0)],
                         'restartfailover': [(b'rfA/', 0.4)],

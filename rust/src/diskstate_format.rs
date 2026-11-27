@@ -2111,16 +2111,17 @@ fn queue_file_path(qdir: &[u8], sep: u8, name: &[u8]) -> Vec<u8> {
     crate::artwritercore::article_writer_format_dest_file_path(qdir, sep, name)
 }
 
-/// Deletes a queue-dir file, in order with the saves queued for it (statesaver).
+/// Deletes a queue-dir file and its `.new` (a load would restore a `.new` found alone),
+/// in order with the saves queued for it (statesaver).
 fn remove_queue_file(qdir: &[u8], sep: u8, name: &[u8]) {
     let p = queue_file_path(qdir, sep, name);
     let job = crate::statesaver::Job {
         seq: 0,
-        temp: p.clone(),
+        temp: diskstate_format_new_path(&p),
         path: p,
         sep,
         kind: crate::statesaver::JobKind::Delete {
-            temp_too: false,
+            temp_too: true,
             after: None,
         },
         retry: Default::default(),
@@ -5750,7 +5751,7 @@ unsafe fn save_single_file_or_state(
     qdir: &[u8],
     sep: u8,
     part: FilePart,
-    replace: bool,
+    _replace: bool, // every save is transactional and unsynced now (see below)
 ) -> bool {
     let export_mode = match part {
         FilePart::Info => FileExport::InfoWithArticles,
@@ -5957,6 +5958,10 @@ unsafe fn load_all_file_states_op(
     let cache_was_active = cache_was_active(qdir, sep);
 
     for filename in crate::fsops::list_dir_entries(qdir) {
+        // `<id>s.new` is a state's temporary file: read through its `<id>s` (begin_read).
+        if filename.contains(&b'.') {
+            continue;
+        }
         if let Some((id, suffix)) = diskstate_parse_queue_file_id_and_suffix(&filename) {
             if suffix == b'c' || (env.continue_partial != 0 && !cache_was_active) {
                 let found = call_ctrl(env, DiskCtrl::SelectFileWithCounters { file_id: id }) != 0;

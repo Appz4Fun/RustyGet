@@ -113,6 +113,9 @@ struct State {
     queue_saves: bool,
     /// Files whose save was given up ([`Saver::drain`] after its last attempt failed).
     unsaved: Vec<Vec<u8>>,
+    /// Files whose failed save [`Saver::drain`] tries a last time now: out of the queue
+    /// and maybe not yet marked running, so a delete waiting for them checks here too.
+    last_attempt: Vec<Vec<u8>>,
 }
 
 impl State {
@@ -131,6 +134,7 @@ impl State {
                 self.queue.iter().any(|j| j.path == *after)
                     || self.in_flight.iter().any(|(p, _)| p == after)
                     || self.unsaved.contains(after)
+                    || self.last_attempt.contains(after)
             }
             _ => false,
         }
@@ -236,7 +240,7 @@ impl Saver {
         if (st.queue_saves && (coordinator || under_lock)) || st.blocked(&job) {
             let path = job.path.clone();
             let seq = self.enqueue_locked(st, job);
-            if !coordinator {
+            if !coordinator && under_lock {
                 TICKETS.with(|t| t.borrow_mut().push((path, seq)));
             }
             true
@@ -340,8 +344,14 @@ impl Saver {
 
     /// Waits until none of `tickets` (file, seq) is queued or running, but for a save
     /// that failed (retried later) or a delete waiting for another file's write.
-    fn wait_for(&self, tickets: &[(Vec<u8>, u64)]) {
+    fn wait_for(self: &Arc<Self>, tickets: &[(Vec<u8>, u64)]) {
         let mut st = self.lock();
+        if !st.thread_started {
+            // No saver thread: nobody else would run them.
+            drop(st);
+            self.run_queue_inline();
+            st = self.lock();
+        }
         loop {
             let busy = tickets.iter().any(|(p, s)| {
                 st.queue
@@ -402,7 +412,15 @@ impl Saver {
                     break job;
                 }
                 // Asleep until a job comes, or the next retry is due.
-                st = match st.queue.iter().filter_map(|j| j.retry.not_before).min() {
+                // (Only jobs that could run then: one whose file another thread holds
+                // wakes it when that thread is done.)
+                let due = st
+                    .queue
+                    .iter()
+                    .filter(|j| !st.in_flight.iter().any(|(p, _)| *p == j.path) && !st.blocked(j))
+                    .filter_map(|j| j.retry.not_before)
+                    .min();
+                st = match due {
                     Some(due) => {
                         let wait = due.saturating_duration_since(Instant::now());
                         self.cv
@@ -437,9 +455,17 @@ impl Saver {
             let path = job.path.clone();
             let _mark = self.mark(st, &path, job.seq);
             if !(self.exec)(&job, &mut active_log) {
+                // Kept for a later call (its backoff not yet due), merged into a newer
+                // queued save of the file as `exec_job` does; the others go on.
                 let retry = job.retry.failed(Instant::now());
-                self.lock().queue.push_back(Job { retry, ..job });
-                return;
+                let mut st = self.lock();
+                if let Some(newer) = st.queue.iter_mut().find(|j| j.path == job.path) {
+                    if newer.retry.attempts < retry.attempts {
+                        newer.retry = retry;
+                    }
+                } else {
+                    st.queue.push_back(Job { retry, ..job });
+                }
             }
         }
     }
@@ -498,6 +524,11 @@ impl Saver {
     pub(crate) fn drain(self: &Arc<Self>) -> usize {
         let mut st = self.lock();
         loop {
+            if !st.thread_started {
+                drop(st);
+                self.run_queue_inline();
+                st = self.lock();
+            }
             while !st.in_flight.is_empty()
                 || st
                     .queue
@@ -506,43 +537,38 @@ impl Saver {
             {
                 st = self.wait(st);
             }
-            let mut failed = Vec::new();
-            let mut i = 0;
-            while i < st.queue.len() {
-                if st.queue[i].retry.attempts > 0 {
-                    failed.extend(st.queue.remove(i));
-                } else {
-                    i += 1;
-                }
-            }
-            if failed.is_empty() {
+            // One failed save at a time, out of the queue and into `last_attempt` in one
+            // hold, so a delete waiting for it never sees it gone before it is decided.
+            let Some(i) = st.queue.iter().position(|j| j.retry.attempts > 0) else {
                 // Left: deletes waiting for a write that was given up.
                 st.queue.clear();
                 self.cv.notify_all();
                 return st.unsaved.len();
+            };
+            let job = st.queue.remove(i).expect("position is in range");
+            st.last_attempt.push(job.path.clone());
+            let ok = {
+                let _mark = self.mark(st, &job.path, job.seq);
+                (self.exec)(&job, &mut active_log)
+            };
+            st = self.lock();
+            st.last_attempt.retain(|p| *p != job.path);
+            if ok {
+                active_log(DiskLogLevel::Info, &saved_again_message(&job));
+                st.unsaved.retain(|p| *p != job.path);
+            } else if !st.unsaved.contains(&job.path) {
+                active_log(
+                    DiskLogLevel::Error,
+                    &[
+                        &b"Error saving diskstate: giving up on "[..],
+                        &job.path,
+                        b"; the last good copy on disk is kept",
+                    ]
+                    .concat(),
+                );
+                st.unsaved.push(job.path);
             }
-            for job in failed {
-                let ok = {
-                    let _mark = self.mark(st, &job.path, job.seq);
-                    (self.exec)(&job, &mut active_log)
-                };
-                st = self.lock();
-                if ok {
-                    active_log(DiskLogLevel::Info, &saved_again_message(&job));
-                    st.unsaved.retain(|p| *p != job.path);
-                } else if !st.unsaved.contains(&job.path) {
-                    active_log(
-                        DiskLogLevel::Error,
-                        &[
-                            &b"Error saving diskstate: giving up on "[..],
-                            &job.path,
-                            b"; the last good copy on disk is kept",
-                        ]
-                        .concat(),
-                    );
-                    st.unsaved.push(job.path);
-                }
-            }
+            self.cv.notify_all();
         }
     }
 
@@ -619,9 +645,11 @@ static STOPPED_UNCLEAN: std::sync::atomic::AtomicBool = std::sync::atomic::Atomi
 /// At the instance's teardown: [`finish`], and an error naming the unsaved files, if any.
 pub(crate) fn stop_report() {
     let unsaved = finish();
+    STOPPED_UNCLEAN.store(false, std::sync::atomic::Ordering::SeqCst);
     if unsaved.is_empty() {
         return;
     }
+    // (Each teardown decides anew: a reload's unsaved files are saved by a later one.)
     STOPPED_UNCLEAN.store(true, std::sync::atomic::Ordering::SeqCst);
     let mut msg = format!(
         "Stopping is not clean: {} state file(s) could not be saved, their last good copies \

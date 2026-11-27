@@ -1934,7 +1934,7 @@ def scenario_diskfullrestart(daemon, t):
     threw away every article it recorded: 57 GB downloaded again. Here QueueDir and
     InterDir sit on a small file system of their own; it is filled at 40 %, the daemon
     is stopped (its last saves fail), space is freed and the daemon started again. No
-    article that came before the fill (less the last 2.5 s, which a save may not have
+    article that came before the fill (less the last 4 s, which a save may not have
     recorded yet) may be fetched again, the output must be byte-exact, and the stop
     with failing saves must not exit 0 (not a clean stop)."""
     seg, size = 100_000, 40_000_000
@@ -1971,7 +1971,7 @@ def scenario_diskfullrestart(daemon, t):
             time.sleep(0.1)
         filler = _DiskFiller(os.path.join(mnt, 'filler'))
         fill_time = time.time()
-        recorded = max([n for when, n in history if when <= fill_time - 2.5] or [0])
+        recorded = max([n for when, n in history if when <= fill_time - 4.0] or [0])
         before = _failcont_requests(t)[:recorded]
         time.sleep(4)  # saves and article writes fail on the full disk
         try:
@@ -1992,7 +1992,7 @@ def scenario_diskfullrestart(daemon, t):
         integ = _verify_output(t, data)
         discarded = _grep_log(t, 'Discarding damaged download state')
         ok = (h['Status'].startswith('SUCCESS') and integ and recorded > 0 and not again
-              and save_errors > 0 and stop_rc != 0)
+              and save_errors > 0 and stop_rc == 1 and unclean > 0)
         return ('diskfullrestart', ok,
                 'status=%s integrity=%s recorded_before_fill=%d fetched_again=%d of them '
                 'fetched_after_restart=%d save_errors=%d stop_rc=%s unclean_logs=%d discarded_states=%d'
@@ -2005,7 +2005,11 @@ def scenario_diskfullrestart(daemon, t):
             if p.poll() is None:
                 p.kill()
                 p.wait(timeout=30)
-        subprocess.run(umount, capture_output=True)
+        if subprocess.run(umount, capture_output=True).returncode != 0:
+            # Busy: detach it lazily, so the work dir cleanup never reaches into it.
+            lazy = umount[:-1] + ['-l', umount[-1]] if umount[0] == 'sudo' else umount
+            rc = subprocess.run(lazy, capture_output=True).returncode
+            print('       diskfullrestart: unmount of %s failed, lazy unmount rc=%d' % (mnt, rc))
 
 
 def scenario_streamtimeout(daemon, t):

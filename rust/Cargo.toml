@@ -21,7 +21,7 @@ doctest = false
 
 [dependencies]
 par-rs = { git = "https://github.com/Appz4Fun/par-rs", rev = "33372eedb1ee20dfabf504734815c530837c66ae" }
-zipfast = { git = "https://github.com/Appz4Fun/zipfast", rev = "56819cd7fd727bef3cc1397f829a6a7feebda88a", features = ["persistent-partials"] }
+zipfast = { git = "https://github.com/Appz4Fun/zipfast", rev = "d9dca3351b0770ec9a2fe6ee9401ac38acc5f3dd", features = ["persistent-partials"] }
 vidmatch = { git = "https://github.com/Appz4Fun/vidmatch", rev = "636facc1223d2a87e5ca7a43bc1d2e169c39deb6" }
 zipview = { git = "https://github.com/xbmc4lyfe/zipview", rev = "2c3d73a06b29987cea1510e903e437a482076745" }
 # nntp-rs v0.4.4

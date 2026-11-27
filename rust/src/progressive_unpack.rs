@@ -754,6 +754,8 @@ where
             damaged_input: Default::default(),
             unverified_output: Default::default(),
             encrypted_links: Default::default(),
+            hard_link_targets: Default::default(),
+            seven_zip_strict: false,
         },
         first_name,
     );

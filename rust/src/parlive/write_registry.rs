@@ -282,6 +282,13 @@ impl SourceWriteContext {
         self.coordinator.invalidate_sources();
         self.cancel_live_sessions();
     }
+    /// Whether this context writes a dead volume's scratch file (`deadvolume::is_scratch`):
+    /// RustyGet's own file of borrowed bytes, never a file of the download's par2 set, so live
+    /// PAR never reads it and a write into it changes nothing live PAR verified.
+    pub fn names_scratch_file(&self) -> bool {
+        self.identity_path()
+            .is_ok_and(crate::deadvolume::is_scratch)
+    }
     /// Whether a live PAR session reads the download this context writes into.
     pub fn watched_by_live_par(&self) -> bool {
         self.live_jobs()

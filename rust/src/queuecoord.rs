@@ -2199,6 +2199,26 @@ fn backup_still_unclassified(
             && now - parked_at < BACKUP_CLASSIFY_GRACE_SEC)
 }
 
+/// Whether a dead run of a download's own articles may still be saved by borrowing from a
+/// backup not classified yet (the `lending_possible` argument of [`backup_still_unclassified`]
+/// on the dead path): live borrowing is on (see [`live_borrowing`]), direct unpack of the
+/// download runs (`extracting`), the download itself can be borrowed into, and TwinCheck is
+/// checking the pair right now (`labelling`), so a label may follow. Without a running
+/// extraction a dead download has nothing to keep, and without a check under way no label
+/// comes: it fails over at once.
+#[cfg(unix)]
+fn dead_run_may_be_borrowed(
+    live_borrowing: bool,
+    extracting: bool,
+    own_kind: crate::donorkind::DonorKind,
+    labelling: bool,
+) -> bool {
+    live_borrowing
+        && extracting
+        && labelling
+        && own_kind != crate::donorkind::DonorKind::Unborrowable
+}
+
 /// Whether TwinCheck labelled `backup_ptr` (see [`backup_still_unclassified`]).
 #[cfg(unix)]
 fn backup_twincheck_labelled(
@@ -6790,15 +6810,28 @@ impl NzbgetRsQueueCoordinator {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs() as i64);
+            //
+            // While direct unpack runs and live borrowing could keep it, an unlabelled backup
+            // TwinCheck is checking right now waits for its label as well (within the classify
+            // grace): a dead volume fails its first 40 articles in a row within a second at line
+            // speed, while TwinCheck still reads (`container` a second later, which lends), and
+            // failing over then threw the extraction and every downloaded article away to fetch
+            // the same video again from the backup (prybar 4 GiB alt, 6 of 12 runs: 1.1 GB
+            // downloaded twice). A backup no check will label fails over at once as before.
             if !hopeless
-                && crate::dupesearch_coord::intake_pending(backup_nzb.id, &nzb.dupe_key)
                 && backup_still_unclassified(
                     backup_kind,
                     backup_twincheck_labelled(host, backup_nzb.ptr),
                     backup_hi.time,
                     now,
-                    true,
-                    extraction_fed_by_duplicates(opts),
+                    crate::dupesearch_coord::intake_pending(backup_nzb.id, &nzb.dupe_key),
+                    dead_run_may_be_borrowed(
+                        live_borrowing(opts),
+                        nzb.direct_unpack_status == DirectUnpackStatus::Running,
+                        own_kind,
+                        crate::twin::twin_check_running(backup_nzb.id)
+                            || crate::twin::twin_check_running(nzb.id),
+                    ),
                 )
             {
                 return;
@@ -8714,6 +8747,45 @@ mod tests {
         // fleet intake still reading the copy's video holds it all the same
         assert!(!unclassified(DonorKind::Unknown, true, parked, parked + 2, false, true));
         assert!(unclassified(DonorKind::Unknown, true, parked, parked + 2, true, true));
+    }
+
+    #[test]
+    fn dead_run_waits_for_the_label_only_while_its_extraction_can_be_kept() {
+        use crate::donorkind::DonorKind;
+        let parked = 1_000;
+        // prybar 4 GiB alt: a dead volume fails 40 articles in a row a second after direct
+        // unpack starts; TwinCheck labels the backup `container` a second later
+        let wait = |live, extracting, own, labelled, now| {
+            super::backup_still_unclassified(
+                DonorKind::Unknown,
+                labelled,
+                parked,
+                now,
+                false,
+                super::dead_run_may_be_borrowed(live, extracting, own, true),
+            )
+        };
+        // no TwinCheck under way: no label is coming, so nothing to wait for
+        // (functional `deadvolumeunlabelled`)
+        assert!(!super::backup_still_unclassified(
+            DonorKind::Unknown,
+            false,
+            parked,
+            parked + 1,
+            false,
+            super::dead_run_may_be_borrowed(true, true, DonorKind::Unknown, false),
+        ));
+        assert!(wait(true, true, DonorKind::Unknown, false, parked + 1));
+        assert!(wait(true, true, DonorKind::Borrowable, false, parked + 119));
+        // the label decides once it is there (`alt_covers_lost_articles`)
+        assert!(!wait(true, true, DonorKind::Unknown, true, parked + 1));
+        // the grace is bounded
+        assert!(!wait(true, true, DonorKind::Unknown, false, parked + 120));
+        // nothing to keep: no running extraction, no live borrowing, or a download nothing
+        // can be borrowed into fails over at once as before
+        assert!(!wait(true, false, DonorKind::Unknown, false, parked + 1));
+        assert!(!wait(false, true, DonorKind::Unknown, false, parked + 1));
+        assert!(!wait(true, true, DonorKind::Unborrowable, false, parked + 1));
     }
 
     #[test]

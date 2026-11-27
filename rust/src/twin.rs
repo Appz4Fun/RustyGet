@@ -1056,6 +1056,16 @@ struct TwinCoordState {
     sample_attempts: std::collections::BTreeMap<(i32, i32), i32>,
 }
 
+/// True while a TwinCheck job runs for copy `nzb_id`: its label (`twin`, `alt`,
+/// `container`, ...) may follow within seconds.
+pub(crate) fn twin_check_running(nzb_id: i32) -> bool {
+    twin_coord()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .checking
+        .contains(&nzb_id)
+}
+
 /// Counts one sampling attempt of copy `nzb_id` against `primary_id` that
 /// read too little, and returns the attempts so far.
 fn count_sample_attempt(nzb_id: i32, primary_id: i32) -> i32 {

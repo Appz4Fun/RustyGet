@@ -2583,6 +2583,10 @@ struct DirectUnpackHoldState {
     /// `virtuals`, with the bytes not borrowed yet as holes. They stay held until the borrow
     /// completes and `direct_unpack_set_virtual` replaces them.
     offered: std::collections::HashMap<Vec<u8>, crate::deadvolume::VirtualVolume>,
+    /// Direct unpack found damage the download did not report (a stored part that failed its
+    /// own check on an article whose transport check passed): see
+    /// `direct_unpack_declare_damaged`.
+    declared_damage: bool,
 }
 
 /// The names of a RAR set's volumes in order, from its first volume `first` (`count` of them at
@@ -2672,6 +2676,20 @@ impl crate::progressive_unpack::VolumeFeed for DirectUnpackFeed {
         #[cfg(not(unix))]
         let full = path.to_string_lossy().as_bytes().to_vec();
         direct_unpack_rehold(self.nzb_id, &full, holes);
+    }
+
+    fn declare_damaged(&mut self, path: &std::path::Path, holes: Vec<(u64, u64)>) -> bool {
+        direct_unpack_declare_damaged(self.nzb_id, &path_bytes(path), holes)
+    }
+
+    fn late_damage(&mut self, path: &std::path::Path) -> Vec<(u64, u64)> {
+        match path.file_name() {
+            Some(name) => crate::parchecker::streaming_session_take_bad_slices(
+                self.nzb_id,
+                name.as_encoded_bytes(),
+            ),
+            None => Vec::new(),
+        }
     }
 
     fn still_held(&self, path: &std::path::Path) -> bool {
@@ -2839,6 +2857,60 @@ fn direct_unpack_rehold(nzb_id: i32, full_path: &[u8], holes: Vec<(u64, u64)>) -
     }
     st.holes.insert(full_path.to_vec(), holes);
     true
+}
+
+fn path_bytes(path: &std::path::Path) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        path.as_os_str().as_bytes().to_vec()
+    }
+    #[cfg(not(unix))]
+    {
+        path.to_string_lossy().as_bytes().to_vec()
+    }
+}
+
+/// Direct unpack found bytes of volume `full_path` wrong on its own (see
+/// `VolumeFeed::declare_damaged`): holds it with `holes` added to its known lost ranges, also
+/// after the download ended (post-processing then repairs the download first and releases
+/// it, see `prepost`), and marks the job's damage as found by the extraction. False when the
+/// holds were given up: nothing repairs the volume any more.
+pub(crate) fn direct_unpack_declare_damaged(nzb_id: i32, full_path: &[u8], holes: Vec<(u64, u64)>) -> bool {
+    let mut map = direct_unpack_holds();
+    let st = map.entry(nzb_id).or_default();
+    if st.abandoned {
+        return false;
+    }
+    if !st.held.iter().any(|p| p == full_path) {
+        st.held.push(full_path.to_vec());
+    }
+    if !holes.is_empty() {
+        let known = st.holes.entry(full_path.to_vec()).or_default();
+        known.extend(holes);
+        known.sort_unstable();
+        let mut merged: Vec<(u64, u64)> = Vec::with_capacity(known.len());
+        for &(off, len) in known.iter() {
+            match merged.last_mut() {
+                Some((o, l)) if off <= *o + *l => *l = (*l).max(off + len - *o),
+                _ => merged.push((off, len)),
+            }
+        }
+        *known = merged;
+    }
+    st.declared_damage = true;
+    if st.download_finished {
+        st.awaiting_repair = true;
+    }
+    true
+}
+
+/// True when direct unpack of `nzb_id` found damage on its own (`direct_unpack_declare_damaged`):
+/// the download's health does not show it, so only a par-check (or a twin) can repair it.
+pub(crate) fn direct_unpack_declared_damage(nzb_id: i32) -> bool {
+    direct_unpack_holds()
+        .get(&nzb_id)
+        .is_some_and(|st| st.declared_damage)
 }
 
 /// `None` when `full_path` is not on hold; otherwise its recorded lost ranges (empty when they

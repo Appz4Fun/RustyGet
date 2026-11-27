@@ -2349,8 +2349,12 @@ impl NzbgetRsPrePostProcessor {
         if crate::postproc::direct_unpack_awaiting_repair(nzb.id) {
             // Direct unpack paused at a damaged volume and the repair stages are over: let it
             // continue from where it stopped (or give up when the repair failed), then come back.
+            // Damage the extraction found itself (a part that failed its own check on an
+            // article whose transport check passed) leaves the health at 100%: only a par2
+            // repair (or a twin) fixes it, never a download that merely looks whole.
             let repaired = nzb.par_status == NzbParStatus::Success
                 || (nzb.health >= 1000
+                    && !crate::postproc::direct_unpack_declared_damage(nzb.id)
                     && nzb.par_status != NzbParStatus::Failure
                     && nzb.par_status != NzbParStatus::RepairPossible
                     && nzb.par_status != NzbParStatus::Manual);

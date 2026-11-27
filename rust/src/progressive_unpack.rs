@@ -103,6 +103,20 @@ pub trait VolumeFeed: Send + 'static {
     /// handed it damaged and its repair had not happened yet, so `wait_repaired` must wait for
     /// it again. A feed that cannot hold a volume ignores this.
     fn remember_damaged(&mut self, _path: &Path, _holes: Vec<(u64, u64)>) {}
+    /// The extraction found bytes of volume `path` wrong on its own (a stored part or a
+    /// member that failed its archive check, a slice live PAR found bad): `holes` (offset,
+    /// length) are the bytes it knows of, possibly none. Puts the volume on hold until it is
+    /// repaired (par2, or a twin's articles), also after the download ended, so the output is
+    /// refilled from the repaired bytes and never from the damaged file. True when it is held
+    /// now; a feed that cannot hold a volume says false (nothing will repair it here).
+    fn declare_damaged(&mut self, _path: &Path, _holes: Vec<(u64, u64)>) -> bool {
+        false
+    }
+    /// Ranges (offset, length) of complete volume `path` that live PAR found damaged since
+    /// last asked (bad slices of articles that arrived whole). Each is answered once.
+    fn late_damage(&mut self, _path: &Path) -> Vec<(u64, u64)> {
+        Vec::new()
+    }
     /// False once damaged volume `path` was repaired and released. A feed that does not track
     /// holds says true.
     fn still_held(&self, _path: &Path) -> bool {
@@ -724,6 +738,13 @@ where
             replace_placed_links: false,
             keep_broken: false,
             attempt_continued_members: false,
+            salvage_truncated_zip: false,
+            unix_modes: Default::default(),
+            backslashes: Default::default(),
+            unsupported_filters: Default::default(),
+            // Progressive and persistent sessions refuse a damaged header whatever this says
+            // (zipfast #310), and 7z ignores it: RustyGet runs no RarSession, where Salvage applies.
+            damaged_input: Default::default(),
         },
         first_name,
     );

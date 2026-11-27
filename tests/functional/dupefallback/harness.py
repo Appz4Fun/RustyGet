@@ -15271,7 +15271,86 @@ def scenario_dupausedunpack(daemon, t):
         started, stopped, status, unpack, a_now, files))
 
 
+
+def _corrupt_part_release(t, tag, rar5=False):
+    """A stored RAR set (8 x 1 MB volumes) with a par2 set of 20 recovery blocks, posted with
+    one wrong byte in the middle of volume 4: the articles carry the yEnc CRC of the wrong
+    bytes, so the download is whole (health 100%) and only the archive's part check and par2
+    see the damage. Returns the NZB and the payload."""
+    import subprocess as _sp
+    work = t.path('data', tag)
+    os.makedirs(work, exist_ok=True)
+    movie = _payload(8_000_000, 24310)
+    if rar5:
+        scratch = t.path('data', tag + '-rar')
+        os.makedirs(scratch, exist_ok=True)
+        vols = generators.rar5_method_volumes('movie.mkv', movie, 1_000_000, 0, scratch)
+    else:
+        vols = generators.rar3_store_volumes_valid('movie.mkv', movie, 1_000_000)
+    names = []
+    for i, vol in enumerate(vols):
+        name = 'movie.part%02d.rar' % (i + 1)
+        t.write_file(os.path.join('data', tag, name), vol)
+        names.append(name)
+    _sp.run(['par2', 'create', '-q', '-q', '-s65536', '-c20', '-n2', '-a', 'movie', 'movie.par2'] + names,
+            cwd=work, check=True, capture_output=True)
+    bad = bytearray(vols[3])
+    bad[len(bad) // 2] ^= 0x5a
+    t.write_file(os.path.join('data', tag, names[3]), bytes(bad))
+    members = []
+    for name in sorted(n for n in os.listdir(work) if n.endswith('.par2')):
+        members.append(('%s/%s' % (tag, name), name, os.path.getsize(os.path.join(work, name)), 100_000, set()))
+    for name, vol in zip(names, vols):
+        members.append(('%s/%s' % (tag, name), name, len(vol), 100_000, set()))
+    return build_multi_nzb(members), movie
+
+
+def _corrupt_part_run(daemon, t, label, tag, rar5=False):
+    """zipfast #314 + RustyGet: a part that fails its own check (a corrupt article with a valid
+    yEnc CRC) is not extracted again. The volume is held as damaged, par2 repairs it, and only
+    its bytes are read back into the output kept from the first pass; post-processing does not
+    unpack again. Before (prybar's 4 GiB audit, m0-dmg): the persistent session stopped at
+    the part, direct unpack dropped its partial state and re-extracted from volume 1, and
+    post-processing extracted everything a third time (about 3x the set read)."""
+    nzb, movie = _corrupt_part_release(t, tag, rar5)
+    api = daemon.wait_ready()
+    daemon.append(api, 'Corrupt', nzb, False, tag + '-key', 100)
+    h = daemon.wait_history(api, 'Corrupt', timeout=300)
+    intact = _verify_output(t, movie, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
+    log = t.read_file('nzbget.log').decode(errors='replace')
+    declared = len(re.findall(r'failed its own check in movie\.part04\.rar', log))
+    late = len(re.findall(r'live PAR found \d+ bytes of movie\.part04\.rar bad', log))
+    first_reads = len(re.findall(r'Unrar: Extracting from movie\.part01\.rar', log))
+    fallback = len(re.findall(r'progressive direct unpack \(', log))
+    again = len(re.findall(r'unpacking all files again', log))
+    du_ok = _grep_log(t, 'Direct unpack for Corrupt successful')
+    written = sum(int(n) for n in re.findall(r'persistent partial files wrote (\d+) bytes', log))
+    refilled = (sum(int(n) for n in re.findall(r'while extracting \((\d+) bytes\)', log)) +
+                sum(int(n) for n in re.findall(r'(\d+) bytes read back\)', log)))
+    # Each archive byte read once by the extraction, plus at most the repaired part.
+    ok = (h['Status'].startswith('SUCCESS') and intact and du_ok == 1 and declared + late >= 1 and
+          first_reads == 1 and fallback == 0 and again == 0 and
+          0 < written <= len(movie) and 0 < refilled <= 1_000_000)
+    return (label, ok, 'status=%s intact=%s du_ok=%d declared=%d late=%d first_reads=%d fallback=%d '
+            'unpack_again=%d written=%d refilled=%d' % (h['Status'], intact, du_ok, declared, late, first_reads,
+                                                       fallback, again, written, refilled))
+
+
+def scenario_corruptpartdu(daemon, t):
+    """A RAR4 stored set with a corrupt article whose yEnc CRC is valid: see _corrupt_part_run."""
+    return _corrupt_part_run(daemon, t, 'corruptpartdu', 'cpd')
+
+
+def scenario_corruptpartdurar5(daemon, t):
+    """corruptpartdu with a RAR5 stored set (rar -m0 -ma5)."""
+    if not generators.HAVE_RAR:
+        return ('corruptpartdurar5', None, 'SKIP: rar not installed')
+    return _corrupt_part_run(daemon, t, 'corruptpartdurar5', 'cpd5', rar5=True)
+
+
 SCENARIOS = {
+    'corruptpartdu': scenario_corruptpartdu,
+    'corruptpartdurar5': scenario_corruptpartdurar5,
     'dropnzbdir': scenario_dropnzbdir,
     'fleetprimaryease': scenario_fleetprimaryease,
     'dropdune': scenario_dropdune,
@@ -15768,6 +15847,8 @@ SCENARIO_ENV = {
 SCENARIO_ENV_KEYS = sorted({k for env in SCENARIO_ENV.values() for k in env})
 
 SCENARIO_OPTIONS = {
+    'corruptpartdu': WRITER_FED_OPTIONS + ['LiveParRepair=yes', 'DirectWrite=yes'],
+    'corruptpartdurar5': WRITER_FED_OPTIONS + ['LiveParRepair=yes', 'DirectWrite=yes'],
     'fleetprimaryease': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'dropdune': ['NzbDirInterval=1', 'NzbDirFileAge=2', 'DupeArticleFallback=no', 'HealthCheck=dupe'],
     'fleetnzbpassword': ['DupeArticleFallback=no', 'HealthCheck=dupe'],

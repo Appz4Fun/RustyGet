@@ -6513,7 +6513,7 @@ fn a_crash_before_a_grouped_refill_commits_refills_the_hole_again() {
     // The refill was lost with its group: a.bin is refilled again.
     assert!(
         log2.iter()
-            .any(|l| l == "Unrar: repaired a.bin from the repaired volumes (holes refilled)"),
+            .any(|l| l.starts_with("Unrar: repaired a.bin from the repaired volumes (holes refilled")),
         "{log2:?}"
     );
     assert_eq!(std::fs::read(t.out().join("a.bin")).unwrap(), a);
@@ -6961,4 +6961,171 @@ fn a_stand_in_holding_another_part_stops_the_copy_path_and_restarts_a_persistent
         log.iter().any(|l| l.contains("progressive direct unpack") && l.contains("another part of the member")),
         "{log:?}"
     );
+}
+
+/// A download whose volumes all arrived whole, one with a wrong byte its transport check did
+/// not catch. The extraction declares the volume damaged (`declare_damaged`); the repair then
+/// writes the good bytes back. `holdable` false: nothing here can hold a volume.
+struct CorruptPart {
+    original: Vec<u8>,
+    corrupt: PathBuf,
+    holdable: bool,
+    declared: Arc<Mutex<Vec<(PathBuf, Vec<(u64, u64)>)>>>,
+    late: Vec<(PathBuf, (u64, u64))>,
+    repaired: bool,
+    volumes: u64,
+}
+
+impl VolumeFeed for CorruptPart {
+    fn volume(&mut self, path: &Path) -> VolumeView {
+        if path.is_file() {
+            VolumeView::Ready { holes: Vec::new() }
+        } else {
+            VolumeView::Missing
+        }
+    }
+    fn declare_damaged(&mut self, path: &Path, holes: Vec<(u64, u64)>) -> bool {
+        self.declared.lock().unwrap().push((path.to_path_buf(), holes));
+        self.holdable
+    }
+    fn late_damage(&mut self, path: &Path) -> Vec<(u64, u64)> {
+        let (mine, rest): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.late).into_iter().partition(|(p, _)| p == path);
+        self.late = rest;
+        mine.into_iter().map(|(_, r)| r).collect()
+    }
+    fn wait_repaired(&mut self, _c: &mut dyn FnMut() -> bool) -> bool {
+        if !self.holdable {
+            return false;
+        }
+        if !self.repaired {
+            std::fs::write(&self.corrupt, &self.original).unwrap();
+            self.repaired = true;
+        }
+        true
+    }
+    fn expected_volumes(&self) -> u64 {
+        self.volumes
+    }
+    fn still_held(&self, path: &Path) -> bool {
+        path == self.corrupt && !self.repaired
+    }
+    fn repaired(&self, path: &Path) -> bool {
+        self.repaired || !self.declared.lock().unwrap().iter().any(|(p, _)| p == path)
+    }
+}
+
+type CorruptRun = (
+    Result<zipfast::extract::Summary, Error>,
+    Vec<String>,
+    Vec<u8>,
+    TestDir,
+    Vec<(PathBuf, Vec<(u64, u64)>)>,
+    u64,
+);
+
+fn corrupt_part_run(tag: &str, holdable: bool, late: bool) -> CorruptRun {
+    let t = TestDir::new(tag);
+    let data = pattern(600_000);
+    let chunk = 100_000;
+    let vols = rar5_volumes("movie.mkv", &data, chunk);
+    let first = write_set(&t.dl(), &vols);
+    // A wrong byte in the payload of volume 3 (a stored part with its own CRC32).
+    let v3 = t.dl().join(volume_name(2, vols.len()));
+    let p3 = payload_offset(&vols[2], chunk) as u64;
+    let mut bad = vols[2].clone();
+    bad[(p3 + 40_000) as usize] ^= 0x5a;
+    std::fs::write(&v3, &bad).unwrap();
+    let declared = Arc::new(Mutex::new(Vec::new()));
+    let feed = CorruptPart {
+        original: vols[2].clone(),
+        corrupt: v3.clone(),
+        holdable,
+        declared: declared.clone(),
+        // As live PAR reports it: the 16 KiB slice around the wrong byte.
+        late: if late {
+            vec![(v3, (p3 + 32_768, 16_384))]
+        } else {
+            Vec::new()
+        },
+        repaired: false,
+        volumes: vols.len() as u64,
+    };
+    let mut log = Vec::new();
+    let out = t.out();
+    let req = Request {
+        first_volume: &first,
+        dest: &out,
+        password: "",
+        overwrite: Overwrite::Always,
+        on_wait: None,
+    };
+    let r = extract(
+        &req,
+        Box::new(feed),
+        &mut |_, m: &str| log.push(m.to_string()),
+        &mut || false,
+    );
+    let d = declared.lock().unwrap().clone();
+    (r, log, data, t, d, p3)
+}
+
+#[test]
+fn a_part_failing_its_own_check_waits_for_the_repair_and_is_not_extracted_again() {
+    // zipfast #314: a stored part whose bytes are wrong (an article with a good yEnc CRC)
+    // becomes a DeclaredBad hole. Its volume was handed out whole: it is held for the repair
+    // and refilled from the repaired file only, with no fallback re-extraction.
+    let (r, log, data, t, declared, p3) = corrupt_part_run("persist_declbad", true, false);
+    expect_ok(r, &log);
+    assert!(persistent(&log), "{log:?}");
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    assert!(
+        log.iter().any(|l| l.contains("failed its own check in set.part03.rar")),
+        "{log:?}"
+    );
+    // Held with the part's packed span: the refill reads that part and nothing else.
+    assert_eq!(declared.len(), 1, "{declared:?}");
+    assert!(declared[0].0.ends_with("set.part03.rar"));
+    assert_eq!(declared[0].1, vec![(p3, 100_000)]);
+    let first_reads = log
+        .iter()
+        .filter(|l| l.contains("Extracting from set.part01.rar"))
+        .count();
+    assert_eq!(first_reads, 1, "{log:?}");
+    assert!(!t.out().join(persistent::STATE_DIR).exists());
+}
+
+#[test]
+fn a_part_failing_its_own_check_is_never_refilled_from_the_unrepaired_file() {
+    // Nothing can hold the volume (no repair here): the bad bytes are never written back as
+    // good, and the set is not extracted a second time. The job fails as damaged.
+    let (r, log, _data, t, declared, _) =
+        corrupt_part_run("persist_declbad_nohold", false, false);
+    match r {
+        Err(Error::Failed(Failure::Damaged(_))) => {}
+        Ok(_) => panic!("expected a damaged failure, got success\n{log:#?}"),
+        Err(Error::Failed(f)) => panic!("expected a damaged failure, got {f}\n{log:#?}"),
+        Err(Error::Unsupported(u)) => panic!("expected a damaged failure, got {u:?}\n{log:#?}"),
+    }
+    assert!(persistent(&log), "{log:?}");
+    assert_eq!(declared.len(), 1, "{declared:?}");
+    assert!(!t.out().join("movie.mkv").exists());
+}
+
+#[test]
+fn a_slice_live_par_found_bad_is_never_read_and_only_it_is_refilled() {
+    // Live PAR found the slice bad before extraction reached it: it is declared a hole of the
+    // session, so the part never fails its own check, and only the slice is read back.
+    let (r, log, data, t, declared, p3) = corrupt_part_run("persist_latebad", true, true);
+    expect_ok(r, &log);
+    assert!(persistent(&log), "{log:?}");
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    assert!(!log.iter().any(|l| l.contains("failed its own check")), "{log:?}");
+    assert!(
+        log.iter()
+            .any(|l| l.contains("live PAR found 16384 bytes of set.part03.rar bad")),
+        "{log:?}"
+    );
+    assert_eq!(declared.len(), 1, "{declared:?}");
+    assert_eq!(declared[0].1, vec![(p3 + 32_768, 16_384)]);
 }

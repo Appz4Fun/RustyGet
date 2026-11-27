@@ -235,6 +235,11 @@ struct ActiveStreamingSession {
     /// their lost articles, so the repair as the download ends still takes them and
     /// certifies them (see [`streaming_session_download_end_targets`]).
     rebuilt_files: Mutex<HashSet<FileId>>,
+    /// Slices whose own check failed on an article that arrived whole (a transport check that
+    /// passed on wrong bytes): direct unpack takes them (`streaming_session_take_bad_slices`)
+    /// and declares them holes, so the extraction never reads them and the refill after the
+    /// repair reads only these slices. Bounded by `LIVE_STASH_LIMIT`.
+    bad_slices: Mutex<Vec<(FileId, usize)>>,
     // Drop last, after the session, queue and all owned metadata. Grows with
     // the syndrome slots as damage appears (see `grow_for_damage`).
     budget: Mutex<SessionBudgetLease>,
@@ -767,6 +772,7 @@ fn build_streaming_session_with(
         completed_sources: Mutex::new(HashSet::new()),
         rebuilt_recheck: Mutex::new(Vec::new()),
         rebuilt_files: Mutex::new(HashSet::new()),
+        bad_slices: Mutex::new(Vec::new()),
     }))
 }
 
@@ -2265,12 +2271,21 @@ fn drain_live_articles_locked(
                 .as_ref()
                 .is_some_and(|a| renamed_away(&result, a.committed));
             let parked = parked || renamed;
+            // An article that arrived (bytes, or in its file), not one that failed for good:
+            // a slice it turns Damaged failed its own check.
+            let arrived = article
+                .article
+                .as_ref()
+                .is_some_and(|a| a.bytes.is_some() || a.committed);
             drop(article);
             if parked {
                 count += 1;
                 continue;
             }
             let outcome = result?;
+            if arrived {
+                entry.note_bad_slices(&outcome.events);
+            }
             ensure_current_generation(nzb_id, entry)?;
             entry.unpause(outcome.unpause.as_ref());
             entry.note_admission_progress();
@@ -2292,6 +2307,58 @@ fn renamed_away<T>(result: &Result<T, RepairError>, committed: bool) -> bool {
         }
         _ => false,
     }
+}
+
+impl ActiveStreamingSession {
+    /// Keeps the slices `events` turned Damaged (see `bad_slices`).
+    fn note_bad_slices(&self, events: &[SliceEvent]) {
+        let mut bad = self.bad_slices.lock().unwrap_or_else(|e| e.into_inner());
+        for event in events.iter().filter(|e| e.state == SliceState::Damaged) {
+            let key = (event.file_id, event.slice_idx);
+            if bad.len() < LIVE_STASH_LIMIT && !bad.contains(&key) {
+                bad.push(key);
+            }
+        }
+    }
+}
+
+/// Byte ranges (offset, length) of file `name` of job `nzb_id` whose slice failed its own
+/// check on an article that arrived whole and is still damaged now: taken, each once. Direct
+/// unpack declares them holes (see `progressive_unpack::persistent`). Empty without a live
+/// session or such a slice; cheap then (one lock, no name lookup).
+pub(crate) fn streaming_session_take_bad_slices(nzb_id: i32, name: &[u8]) -> Vec<(u64, u64)> {
+    let Some(entry) = active_streaming_session(nzb_id) else {
+        return Vec::new();
+    };
+    if entry.bad_slices.lock().unwrap_or_else(|e| e.into_inner()).is_empty() {
+        return Vec::new();
+    }
+    let Some(id) = entry.session.file_id_by_name(name) else {
+        return Vec::new();
+    };
+    let taken: Vec<usize> = {
+        let mut bad = entry.bad_slices.lock().unwrap_or_else(|e| e.into_inner());
+        let mut taken = Vec::new();
+        bad.retain(|(file, slice)| {
+            if *file == id {
+                taken.push(*slice);
+                false
+            } else {
+                true
+            }
+        });
+        taken
+    };
+    let size = entry.session.slice_size();
+    let mut ranges: Vec<(u64, u64)> = taken
+        .into_iter()
+        .filter(|&slice| {
+            matches!(entry.session.slice_state(&id, slice), Ok(SliceState::Damaged))
+        })
+        .map(|slice| (slice as u64 * size, size))
+        .collect();
+    ranges.sort_unstable();
+    ranges
 }
 
 /// Queue file `identity` of job `nzb_id` is at `path` now (completed, possibly renamed since):
@@ -5982,6 +6049,13 @@ fn collect_extra_files_rec(
 ) {
     let sep = crate::paths::PATH_SEPARATOR;
     for filename in crate::fsops::list_dir_entries(directory) {
+        // Direct unpack's partial outputs and state (extracted bytes, never par2 data): a
+        // scan for misnamed volumes would read every extracted byte once more.
+        if !external_dir
+            && filename == crate::progressive_unpack::PERSISTENT_STATE_DIR.as_bytes()
+        {
+            continue;
+        }
         let full = [directory, &[sep], &filename].concat();
         if crate::fsops::directory_exists(&full, &crate::fsops::posix_stat) {
             collect_extra_files_rec(&full, external_dir, processed_files, is_parred_cb, out);

@@ -1,0 +1,67 @@
+# Instruction-set tiers. The dispatched kernels (nntp-rs yEnc, par-rs GF(2^16),
+# CRC-32 and MD5, zipfast crypto, RustyGet's Latin-1) fall back silently, so a
+# `build` leg on a runner without AVX-512 never runs the AVX-512 kernels. Each
+# job here runs on a self-hosted runner whose labels name its instruction set,
+# asserts the CPU really has it, and runs every kernel cap of the tier.
+# Labels and tests: docs/CPU_TIERS.md, "CI tiers".
+#
+# Not a required check. A tier runs only when its name is in the repository
+# variable RUSTYGET_ISA_TIERS (space separated, e.g. "avx512 avx2 neon apple-m"),
+# so a tier without a registered runner is skipped instead of queueing forever.
+# workflow_dispatch can name tiers itself to try a newly registered runner.
+name: isa
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tiers:
+        description: Tiers to run (overrides RUSTYGET_ISA_TIERS), e.g. "avx512 avx2"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: isa-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  avx512:
+    if: contains(format(' {0} ', inputs.tiers || vars.RUSTYGET_ISA_TIERS), ' avx512 ')
+    uses: ./.github/workflows/isa-tier.yml
+    with:
+      tier: avx512
+      runs-on: '["self-hosted", "Linux", "X64", "avx512"]'
+    secrets:
+      CRATES_READ_TOKEN: ${{ secrets.CRATES_READ_TOKEN }}
+
+  avx2:
+    if: contains(format(' {0} ', inputs.tiers || vars.RUSTYGET_ISA_TIERS), ' avx2 ')
+    uses: ./.github/workflows/isa-tier.yml
+    with:
+      tier: avx2
+      runs-on: '["self-hosted", "Linux", "X64", "avx2"]'
+    secrets:
+      CRATES_READ_TOKEN: ${{ secrets.CRATES_READ_TOKEN }}
+
+  neon:
+    if: contains(format(' {0} ', inputs.tiers || vars.RUSTYGET_ISA_TIERS), ' neon ')
+    uses: ./.github/workflows/isa-tier.yml
+    with:
+      tier: neon
+      runs-on: '["self-hosted", "Linux", "ARM64", "neon"]'
+    secrets:
+      CRATES_READ_TOKEN: ${{ secrets.CRATES_READ_TOKEN }}
+
+  apple-m:
+    if: contains(format(' {0} ', inputs.tiers || vars.RUSTYGET_ISA_TIERS), ' apple-m ')
+    uses: ./.github/workflows/isa-tier.yml
+    with:
+      tier: apple-m
+      runs-on: '["self-hosted", "macOS", "ARM64", "apple-m"]'
+    secrets:
+      CRATES_READ_TOKEN: ${{ secrets.CRATES_READ_TOKEN }}

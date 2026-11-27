@@ -63,6 +63,57 @@ RustyGet does not use.
 - par2 math and archive code belong to par-rs and zipfast; ask those libraries for
   their kernels rather than adding copies here.
 
+## CI tiers
+
+Every dispatched kernel falls back silently: on a CPU without AVX-512 the whole suite
+still passes, on the AVX2 kernels. The `build` workflow's legs ask only for an OS and
+architecture (`ubuntu-24.04`, for example), so they land on whatever CPU is free: an X64
+leg may run on an AVX2-only or an AVX-512 host (it prints which tiers its CPU qualifies
+for), and `build` alone never proves the AVX-512 or the floor kernels. The `isa` workflow (`.github/workflows/isa.yml`)
+runs one job per instruction-set tier on a self-hosted runner whose labels name it:
+
+| Tier | Runner labels | Asserted (fails, never skips) | Caps run | Example host |
+|---|---|---|---|---|
+| `avx512` | `self-hosted, Linux, X64, avx512` | x86-64-v3 + AVX-512 F/BW/CD/DQ/VL, AVX512_VBMI2, GFNI | none, `avx2`, `scalar` | GCE c4d (AMD Zen 5) |
+| `avx2` (floor) | `self-hosted, Linux, X64, avx2` | x86-64-v3, and **no** AVX-512F or GFNI | none, `scalar` | GCE c2d (AMD Zen 3), Coffee Lake |
+| `neon` | `self-hosted, Linux, ARM64, neon` | ASIMD, AES, PMULL, SHA-2, CRC32 | none, `scalar` | GCE n4a (Axion, Neoverse V2) |
+| `apple-m` | `self-hosted, macOS, ARM64, apple-m` | NEON, AES, PMULL, SHA256, CRC32, I8MM, BF16 (the `apple-m4` check) | none, `scalar` | Apple M4/M5 |
+
+`scripts/ci/isa-assert.sh <tier>` is the assertion (from `/proc/cpuinfo` flags, or
+`sysctl hw.optional.arm.*` on macOS); `scripts/ci/isa-tests.sh <tier> [jobs]` is the
+whole job, the same command for a CI runner and a farm host:
+
+1. the assertion;
+2. the full `cargo test --tests` with no cap (every test on the tier's best kernels);
+3. for each cap: `tests/isa_tier.rs` (`--ignored`), which fails unless nntp-rs's yEnc
+   payload kernel and break scan and par-rs's GF(2^16) kernel are the ones the tier and
+   cap should select, then the kernel-reaching test modules (decoder, text, crc,
+   article download, par2, archive, unpack, twin) under that cap. `scalar` also sets
+   `PAR_RS_SIMD=off`;
+4. the tier builds: on `avx512` the `x86-64-v3` and `x86-64-v4` builds start; on `avx2`
+   the `x86-64-v3` build starts and the `x86-64-v4` build refuses with the tier-check
+   message; on `apple-m` the `apple-m4` build starts. On x86 the deb launcher must pick
+   `x86-64-v4` or `default` to match the CPU (and honour `RUSTYGET_CPU_LEVEL`);
+5. the daemon duplicate-recovery smoke with no cap and with `scalar`.
+
+A runner's extras are printed, not required: the c2d floor host has SHA-NI, VAES and
+VPCLMULQDQ, which Coffee Lake lacks, so zipfast's SHA-NI path runs there and its portable
+SHA-256 does not.
+
+`RUSTYGET_SIMD` takes `scalar`, `sse2` (both scalar for yEnc) and `avx2`; par-rs has
+only all-or-nothing `PAR_RS_SIMD=off`; zipfast has no cap. So these levels run under no
+tier through RustyGet's callers (their own libraries' tests call them directly): the
+nntp-rs SSSE3 payload kernel; the par-rs AVX-512BW-without-GFNI, AVX2+GFNI and SSSE3
+GF(2^16) kernels; and zipfast's portable AES, SHA-256, CRC-32 and BLAKE2sp on every tier
+(each tier's CPU has the accelerated path).
+
+The workflow is not a required check. A tier runs only when its name is in the
+repository variable `RUSTYGET_ISA_TIERS` (space separated, e.g. `avx512 avx2 neon
+apple-m`), so a tier with no registered runner is skipped instead of queueing;
+`workflow_dispatch` can name tiers to try a new runner. Runners need `cargo`/`rustup`,
+`just`, `python3`, `par2` and `git`, and either a filled cargo cache for the private git
+dependencies or the optional `CRATES_READ_TOKEN` secret (passed to that step only).
+
 ## Measurements (2026-11-26): nntp-rs v0.4.0 decoder
 
 Same bench and method as below (plan nya-bench-3): `cargo bench --bench yenc_decode`,

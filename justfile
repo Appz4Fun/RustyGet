@@ -168,6 +168,10 @@ clippy:
 nativeness clippy="yes":
     python3 "{{root_dir}}/scripts/nativeness/score.py" {{ if clippy == "yes" { "--run-clippy --compare " + quote(root_dir / "docs/nativeness/baseline.json") } else { "" } }}
 
+# Fuzz one parser (nzb_xml, yenc_decode, nntp_response, par2_packets, rar_headers) with cargo-fuzz and nightly; run it on the build farm, not a laptop
+fuzz target seconds="600" jobs="4":
+    cd "{{root_dir}}/rust/fuzz" && cargo +nightly fuzz run --fuzz-dir . {{target}} corpus/{{target}} -- -max_total_time={{seconds}} -jobs={{jobs}} -workers={{jobs}} -rss_limit_mb=2048 -timeout=20 -max_len=65536
+
 # Format the Rust crate
 fmt:
     cargo fmt --manifest-path "{{root_dir}}/rust/Cargo.toml"

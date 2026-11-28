@@ -1,0 +1,52 @@
+[package]
+name = "nzbget-rs-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+nzbget-rs = { path = "..", features = ["fuzzing"] }
+
+[workspace]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "nzb_xml"
+path = "fuzz_targets/nzb_xml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "yenc_decode"
+path = "fuzz_targets/yenc_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nntp_response"
+path = "fuzz_targets/nntp_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "par2_packets"
+path = "fuzz_targets/par2_packets.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rar_headers"
+path = "fuzz_targets/rar_headers.rs"
+test = false
+doc = false
+bench = false
